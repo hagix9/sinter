@@ -1,0 +1,31 @@
+[package]
+name = "sinter"
+version = "0.1.0"
+edition = "2021"
+description = "Sinter: a lightweight, agentless configuration-management tool"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "sinter"
+path = "src/main.rs"
+
+[lib]
+name = "sinter"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+saphyr-parser = "0.0.12"
+ssh2 = "0.9"
+clap = { version = "4", features = ["derive"] }
+sha2 = "0.10"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+libc = "0.2"
+
+[profile.release]
+opt-level = 2

@@ -1,0 +1,127 @@
+use crate::error::{Result, SinterError};
+use crate::expressions::{EvalVal, ExprError};
+use crate::value::Value;
+
+#[derive(Debug, Clone)]
+pub struct Facts {
+    pub hostname: String,
+    pub os_name: String,
+    pub os_family: String,
+    pub os_version: String,
+    pub arch: String,
+}
+
+impl Facts {
+    pub fn lookup(&self, path: &[String]) -> std::result::Result<EvalVal, ExprError> {
+        let joined = path.join(".");
+        let v = match joined.as_str() {
+            "hostname" => Value::Str(self.hostname.clone()),
+            "os.name" => Value::Str(self.os_name.clone()),
+            "os.family" => Value::Str(self.os_family.clone()),
+            "os.version" => Value::Str(self.os_version.clone()),
+            "arch" => Value::Str(self.arch.clone()),
+            other => {
+                return Err(ExprError(format!("unknown fact: facts.{}", other)));
+            }
+        };
+        Ok(EvalVal::known(v))
+    }
+}
+
+/// Derive the os family from an os-release ID / ID_LIKE.
+pub fn derive_family(id: &str, id_like: &str) -> String {
+    let id = id.to_ascii_lowercase();
+    let id_like = id_like.to_ascii_lowercase();
+    let tokens: Vec<&str> = id_like.split_whitespace().collect();
+    if id == "ubuntu" || id == "debian" || tokens.contains(&"debian") || tokens.contains(&"ubuntu")
+    {
+        "debian".to_string()
+    } else if id == "fedora" || id == "rhel" || id == "centos" || tokens.contains(&"fedora") {
+        "redhat".to_string()
+    } else if id == "arch" || tokens.contains(&"arch") {
+        "arch".to_string()
+    } else {
+        id
+    }
+}
+
+/// Parse /etc/os-release content into (name, version).
+pub fn parse_os_release(content: &str) -> (String, String, String) {
+    let mut name = String::new();
+    let mut id = String::new();
+    let mut id_like = String::new();
+    let mut version = String::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            let v = v.trim().trim_matches('"').to_string();
+            match k.trim() {
+                "NAME" => name = v,
+                "ID" => id = v,
+                "ID_LIKE" => id_like = v,
+                "VERSION_ID" => version = v,
+                _ => {}
+            }
+        }
+    }
+    let _ = id_like;
+    (name, id, version)
+}
+
+impl Facts {
+    pub fn from_observed(hostname: String, os_release: &str, arch: String) -> Result<Facts> {
+        if hostname.is_empty() {
+            return Err(SinterError::connect("could not determine target hostname"));
+        }
+        let (name, id, version) = parse_os_release(os_release);
+        if name.is_empty() && id.is_empty() {
+            return Err(SinterError::connect(
+                "could not determine target operating system from /etc/os-release",
+            ));
+        }
+        let id_like = os_release
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("ID_LIKE="))
+            .unwrap_or("")
+            .trim_matches('"')
+            .to_string();
+        let os_name = if !name.is_empty() { name } else { id.clone() };
+        Ok(Facts {
+            hostname,
+            os_name,
+            os_family: derive_family(&id, &id_like),
+            os_version: version,
+            arch,
+        })
+    }
+}
+
+pub fn normalize_arch(raw: &str) -> String {
+    match raw.trim() {
+        "x86_64" | "amd64" => "x86_64".to_string(),
+        "aarch64" | "arm64" => "aarch64".to_string(),
+        other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn family_ubuntu() {
+        assert_eq!(derive_family("ubuntu", "debian"), "debian");
+    }
+
+    #[test]
+    fn parse_release() {
+        let c = "NAME=\"Ubuntu\"\nID=ubuntu\nVERSION_ID=\"24.04\"\nID_LIKE=debian\n";
+        let (n, id, v) = parse_os_release(c);
+        assert_eq!(n, "Ubuntu");
+        assert_eq!(id, "ubuntu");
+        assert_eq!(v, "24.04");
+    }
+}

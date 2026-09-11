@@ -1,0 +1,515 @@
+mod common;
+
+use common::*;
+use sinter::engine::{Mode, SshSpec};
+use sinter::result::{Change, Execution, Verification};
+
+fn ssh() -> Option<SshSpec> {
+    ssh_spec()
+}
+
+macro_rules! require_ssh {
+    () => {
+        match ssh() {
+            Some(s) => s,
+            None => {
+                skip_or_fail("SINTER_TEST_SSH_HOST not set");
+                return;
+            }
+        }
+    };
+}
+
+/// Create a recipe on the controller whose output path is under the target
+/// user's HOME, so the unprivileged trust boundary is satisfied.
+fn controller_recipe(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+    write_recipe(
+        dir,
+        "r.yaml",
+        &format!("version: 1\nresources:\n{}\n", body),
+    )
+}
+
+#[test]
+fn ssh_known_host_success() {
+    let _s = require_ssh!();
+    let dir = controller_dir("ssh-known");
+    let recipe = controller_recipe(
+        &dir,
+        r#"  - id: who
+    type: command
+    with:
+      program: /usr/bin/id
+      args: ["-u"]
+      register: uid
+  - id: show
+    type: command
+    with:
+      program: /bin/echo
+      args: ["uid={{ registers.uid.stdout }}"]
+    depends_on: [who]"#,
+    );
+    let r = run_recipe_target(&recipe, Mode::Apply, false, ssh());
+    assert_success(&r);
+    assert_eq!(find(&r, "who").execution, Execution::Succeeded);
+}
+
+#[test]
+fn ssh_unknown_host_fails() {
+    let mut s = require_ssh!();
+    // Point at a known_hosts file that has no entry for the host.
+    let dir = trusted_root("ssh-unknown");
+    let empty = dir.join("known_hosts");
+    std::fs::write(&empty, "").unwrap();
+    s.known_hosts = empty;
+    let recipe = controller_recipe(
+        &trusted_root("ssh-unknown-recipe"),
+        r#"  - id: c
+    type: command
+    with:
+      program: /bin/true"#,
+    );
+    let model = sinter::model::load_model(&recipe).unwrap();
+    let opts = sinter::engine::RunOptions {
+        mode: Mode::Plan,
+        sudo: false,
+        target: sinter::engine::TargetSpec { ssh: Some(s) },
+        verbose: false,
+        fault: None,
+    };
+    let res = sinter::engine::Engine::new(model, opts);
+    assert!(res.is_err(), "unknown host key must fail the connection");
+    let err = res.err().unwrap();
+    assert_eq!(err.kind, sinter::error::ErrorKind::Connect);
+}
+
+#[test]
+fn ssh_changed_host_key_fails() {
+    let mut s = require_ssh!();
+    let dir = trusted_root("ssh-changed");
+    let bad = dir.join("known_hosts");
+    // A syntactically valid but wrong key for [host]:port.
+    let bogus = format!(
+        "[{}]:{} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n",
+        s.host, s.port
+    );
+    std::fs::write(&bad, bogus).unwrap();
+    s.known_hosts = bad;
+    let recipe = controller_recipe(
+        &trusted_root("ssh-changed-recipe"),
+        r#"  - id: c
+    type: command
+    with:
+      program: /bin/true"#,
+    );
+    let model = sinter::model::load_model(&recipe).unwrap();
+    let opts = sinter::engine::RunOptions {
+        mode: Mode::Plan,
+        sudo: false,
+        target: sinter::engine::TargetSpec { ssh: Some(s) },
+        verbose: false,
+        fault: None,
+    };
+    let res = sinter::engine::Engine::new(model, opts);
+    assert!(res.is_err(), "changed host key must fail the connection");
+    assert_eq!(res.err().unwrap().kind, sinter::error::ErrorKind::Connect);
+}
+
+#[test]
+fn ssh_argv_exactness_verification_command() {
+    let _s = require_ssh!();
+    let dir = controller_dir("ssh-argv-verify");
+    let target_home = target_user_home().expect("target home must resolve");
+    let out = format!("{}/sinter-argv-{}", target_home, std::process::id());
+    // One program invocation prints every argv element as `[arg]` on its own
+    // line; comparing the whole blob cannot hide an early failure behind a
+    // later success. Includes empty, spaces, both quote types, newline, `$()`,
+    // backticks, semicolon, leading hyphen, glob, and Unicode.
+    let recipe = controller_recipe(
+        &dir,
+        &format!(
+            r#"  - id: emit
+    type: command
+    with:
+      program: /bin/sh
+      args:
+        - "-c"
+        - "for a in \"$@\"; do printf '[%s]\\n' \"$a\"; done"
+        - "argv0"
+        - ""
+        - "a b"
+        - "it's"
+        - 'he said "hi"'
+        - "$(id)"
+        - "`id`"
+        - "a;b"
+        - "-leading"
+        - "a*b"
+        - "line1\nline2"
+        - "unicode: λ"
+      register: r
+  - id: save
+    type: file
+    with:
+      path: {out}
+      content: "{{{{ registers.r.stdout }}}}"
+      mode: "0644"
+    depends_on: [emit]
+"#,
+            out = out
+        ),
+    );
+    let r = run_recipe_target(&recipe, Mode::Apply, false, ssh());
+    assert_success(&r);
+    assert_eq!(find(&r, "emit").execution, Execution::Succeeded);
+    // Exact expected output. If quoting mis-handled any argument, this differs.
+    let expected = "[]\n[a b]\n[it's]\n[he said \"hi\"]\n[$(id)]\n[`id`]\n[a;b]\n[-leading]\n[a*b]\n[line1\nline2]\n[unicode: λ]\n";
+    assert_eq!(target_read_file(&out, false), expected);
+    let _ = target_run("/bin/rm", &["-f", "--", &out], false);
+}
+
+#[test]
+fn ssh_non_utf8_and_signal_and_timeout() {
+    let _s = require_ssh!();
+    let dir = controller_dir("ssh-signals");
+    let recipe = controller_recipe(
+        &dir,
+        r#"  - id: nonutf8
+    type: command
+    with:
+      program: /bin/sh
+      args: ["-c", "printf '\\377\\376'"]
+      register: n
+  - id: signal
+    type: command
+    with:
+      program: /bin/sh
+      args: ["-c", "kill -TERM $$"]"#,
+    );
+    let r = run_recipe_target(&recipe, Mode::Apply, false, ssh());
+    // nonutf8 succeeds (exit 0) but its stdout is not usable; the signal then
+    // fails and stops execution.
+    let n = find(&r, "nonutf8");
+    assert_eq!(n.execution, Execution::Succeeded);
+    let sig = find(&r, "signal");
+    assert_eq!(sig.execution, Execution::Failed);
+    assert!(!n.diff.as_ref().map(|_| true).unwrap_or(false));
+}
+
+#[test]
+fn ssh_timeout_after_dispatch_is_indeterminate_and_not_retried() {
+    let _s = require_ssh!();
+    let dir = controller_dir("ssh-timeout");
+    let recipe = controller_recipe(
+        &dir,
+        r#"  - id: slow
+    type: command
+    with:
+      program: /bin/sleep
+      args: ["30"]
+      timeout_seconds: 1
+  - id: after
+    type: command
+    with:
+      program: /bin/true"#,
+    );
+    let r = run_recipe_target(&recipe, Mode::Apply, false, ssh());
+    let slow = find(&r, "slow");
+    assert_eq!(slow.execution, Execution::Indeterminate);
+    assert_eq!(slow.change, Change::Possible);
+    // no automatic retry: the command appears exactly once
+    let count = r
+        .commands
+        .iter()
+        .filter(|c| c.program.ends_with("sleep"))
+        .count();
+    assert_eq!(count, 1, "indeterminate mutation must not be retried");
+    assert_eq!(
+        find(&r, "after").execution,
+        Execution::NotRun,
+        "fail-fast stops later resources"
+    );
+}
+
+#[test]
+fn ssh_sudo_effective_uid_root() {
+    let _s = require_ssh!();
+    if !target_sudo_available() {
+        skip("target does not provide passwordless sudo -n");
+        return;
+    }
+    let dir = controller_dir("ssh-sudo-uid");
+    let outdir = target_private_dir("ssh-sudo-uid-out", true);
+    let out = format!("{}/uid", outdir);
+    let recipe = controller_recipe(
+        &dir,
+        &format!(
+            r#"  - id: who
+    type: command
+    with:
+      program: /usr/bin/id
+      args: ["-u"]
+      register: uid
+  - id: save
+    type: file
+    with:
+      path: {out}
+      content: "{{{{ registers.uid.stdout }}}}"
+      mode: "0600"
+    depends_on: [who]
+"#,
+            out = out
+        ),
+    );
+    let r = run_recipe_target(&recipe, Mode::Apply, true, ssh());
+    assert_success(&r);
+    assert_eq!(target_read_file(&out, true).trim(), "0");
+    target_cleanup_dir(&outdir, true);
+}
+
+#[test]
+fn ssh_no_sudo_effective_uid_target_user() {
+    let _s = require_ssh!();
+    let dir = controller_dir("ssh-nosudo-uid");
+    // The target-side home is resolved on the target, and the output is written
+    // under it so the unprivileged trust boundary holds.
+    let target_home = target_user_home().expect("target home must resolve");
+    let out = format!("{}/sinter-uid-test-{}", target_home, std::process::id());
+    let recipe = controller_recipe(
+        &dir,
+        &format!(
+            r#"  - id: who
+    type: command
+    with:
+      program: /usr/bin/id
+      args: ["-u"]
+      register: uid
+  - id: save
+    type: file
+    with:
+      path: {out}
+      content: "{{{{ registers.uid.stdout }}}}"
+      mode: "0600"
+    depends_on: [who]
+"#,
+            out = out
+        ),
+    );
+    let r = run_recipe_target(&recipe, Mode::Apply, false, ssh());
+    assert_success(&r);
+    // Read the result ON THE TARGET and compare against the TARGET UID, never
+    // the controller UID.
+    let uid_written = target_read_file(&out, false).trim().to_string();
+    let target_uid = target_uid().expect("target uid must resolve").to_string();
+    assert_eq!(
+        uid_written, target_uid,
+        "non-sudo execution must use the target user's UID"
+    );
+    let _ = target_run("/bin/rm", &["-f", "--", &out], false);
+}
+
+#[test]
+fn ssh_file_created_with_expected_owner() {
+    let _s = require_ssh!();
+    let dir = controller_dir("ssh-owner");
+    let target_home = target_user_home().expect("target home must resolve");
+    let out = format!("{}/sinter-owner-test-{}", target_home, std::process::id());
+    let recipe = controller_recipe(
+        &dir,
+        &format!(
+            r#"  - id: f
+    type: file
+    with:
+      path: {out}
+      content: x
+      mode: "0644"
+"#,
+            out = out
+        ),
+    );
+    let r = run_recipe_target(&recipe, Mode::Apply, false, ssh());
+    assert_success(&r);
+    // Stat ON THE TARGET and compare to the target user's UID.
+    let (_mode, uid, _gid, kind) = target_stat(&out, false);
+    assert_eq!(kind, "regular file");
+    assert_eq!(uid, target_uid().expect("target uid must resolve"));
+    let _ = target_run("/bin/rm", &["-f", "--", &out], false);
+}
+
+#[test]
+fn ssh_special_argv_file_roundtrip() {
+    let _s = require_ssh!();
+    let dir = controller_dir("ssh-roundtrip");
+    let target_home = target_user_home().expect("target home must resolve");
+    let out = format!("{}/sinter-roundtrip-{}", target_home, std::process::id());
+    let recipe = controller_recipe(
+        &dir,
+        &format!(
+            r#"  - id: emit
+    type: command
+    with:
+      program: /usr/bin/printf
+      args:
+        - "%s"
+        - "a b;c$(d)'e\"f"
+      register: r
+  - id: save
+    type: file
+    with:
+      path: {out}
+      content: "{{{{ registers.r.stdout }}}}"
+      mode: "0644"
+    depends_on: [emit]
+"#,
+            out = out
+        ),
+    );
+    let r = run_recipe_target(&recipe, Mode::Apply, false, ssh());
+    assert_success(&r);
+    // Read the file ON THE TARGET.
+    assert_eq!(target_read_file(&out, false), "a b;c$(d)'e\"f");
+    let _ = target_run("/bin/rm", &["-f", "--", &out], false);
+}
+
+fn nosudo_ssh() -> Option<SshSpec> {
+    let mut s = ssh_spec()?;
+    s.user = std::env::var("SINTER_TEST_SSH_NOSUDO_USER")
+        .unwrap_or_else(|_| "sinter-nosudo".to_string());
+    Some(s)
+}
+
+#[test]
+fn ssh_sudo_denied_is_hard_error() {
+    let _s = require_ssh!();
+    let Some(s) = nosudo_ssh() else {
+        skip("no SSH target configured");
+        return;
+    };
+    // Verify ON THE TARGET that this user genuinely lacks passwordless sudo;
+    // otherwise the test premise is false and must not be treated as passing.
+    let probe = spec_run(&s, "/usr/bin/sudo", &["-n", "/usr/bin/id", "-u"], false);
+    match probe {
+        Ok((0, ref out, _)) if out.trim() == "0" => {
+            skip("nosudo user unexpectedly has passwordless sudo; premise invalid");
+            return;
+        }
+        Err(e) => {
+            // The nosudo user is not provisioned or unreachable; the premise
+            // cannot be established. Report truthfully rather than silently pass.
+            skip_or_fail(&format!(
+                "could not probe nosudo user sudo capability: {}",
+                e
+            ));
+            return;
+        }
+        _ => {}
+    }
+    let dir = controller_dir("ssh-sudo-denied");
+    let recipe = controller_recipe(
+        &dir,
+        r#"  - id: who
+    type: command
+    with:
+      program: /usr/bin/id
+      args: ["-u"]"#,
+    );
+    let model = sinter::model::load_model(&recipe).unwrap();
+    let opts = sinter::engine::RunOptions {
+        mode: Mode::Apply,
+        sudo: true,
+        target: sinter::engine::TargetSpec { ssh: Some(s) },
+        verbose: false,
+        fault: None,
+    };
+    let engine = match sinter::engine::Engine::new(model, opts) {
+        // Failure to obtain root privilege is a hard error before any
+        // privileged mutation. This is the expected contract.
+        Err(e) => {
+            assert_eq!(
+                e.kind,
+                sinter::error::ErrorKind::Connect,
+                "sudo denial must be a connect/capability error, got {:?}",
+                e
+            );
+            return;
+        }
+        Ok(engine) => engine,
+    };
+    let res = engine.run();
+    // If construction somehow succeeded, the first privileged operation must
+    // still fail hard; it must never silently fall back to unprivileged.
+    match res {
+        Err(e) => assert_ne!(e.kind, sinter::error::ErrorKind::Schema),
+        Ok(report) => {
+            let who = find(&report, "who");
+            assert_ne!(who.execution, Execution::Succeeded);
+        }
+    }
+}
+
+#[test]
+fn ssh_sudo_privileged_file_replace_read_verify() {
+    let _s = require_ssh!();
+    if !target_sudo_available() {
+        skip("target does not provide passwordless sudo -n");
+        return;
+    }
+    // Destination lives under a root-owned private directory, requiring root
+    // for both read and replace.
+    let outdir = target_private_dir("ssh-priv-file", true);
+    let out = format!("{}/conf", outdir);
+    // Seed initial root-owned content via a target command.
+    let seed = target_run(
+        "/bin/sh",
+        &[
+            "-c",
+            &format!(
+                "printf 'initial root content' > {}",
+                shell_probe_quote(&out)
+            ),
+        ],
+        true,
+    );
+    assert!(seed.is_ok(), "failed to seed privileged file: {:?}", seed);
+
+    let ctrl = controller_dir("ssh-priv-file-recipe");
+    let recipe = controller_recipe(
+        &ctrl,
+        &format!(
+            r#"  - id: f
+    type: file
+    with:
+      path: {out}
+      content: "replaced by root"
+      mode: "0600"
+"#,
+            out = out
+        ),
+    );
+    let r = run_recipe_target(&recipe, Mode::Apply, true, ssh());
+    assert_success(&r);
+    let f = find(&r, "f");
+    assert_eq!(f.verification, Verification::Verified);
+    assert_eq!(target_read_file(&out, true), "replaced by root");
+
+    // Second apply with root observation of the root-owned file: no mutation.
+    let r2 = run_recipe_target(&recipe, Mode::Apply, true, ssh());
+    assert_success(&r2);
+    assert_eq!(find(&r2, "f").change, Change::None);
+    assert_eq!(mutation_command_count(&r2), 0, "{:?}", r2.commands);
+    target_cleanup_dir(&outdir, true);
+}
+
+/// Small local shell-quoting helper for building a target probe command.
+fn shell_probe_quote(s: &str) -> String {
+    let mut out = String::from("'");
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
