@@ -33,6 +33,8 @@ pub struct Stat {
     pub size: u64,
     pub dev: u64,
     pub ino: u64,
+    pub mtime: u64,
+    pub ctime: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -268,7 +270,7 @@ impl TargetFs {
             "/usr/bin/stat",
             &[
                 "-c".to_string(),
-                "%F|%a|%u|%g|%s|%d|%i".to_string(),
+                "%F|%a|%u|%g|%s|%d|%i|%Y|%Z".to_string(),
                 "--".to_string(),
                 path.to_string(),
             ],
@@ -362,9 +364,8 @@ impl TargetFs {
                 path.to_string(),
             ],
         )?;
-        // getfattr exits 0 when attributes exist and 1 when the object has
-        // none. Any other result means inspection could not be performed, and
-        // "could not inspect" must never be treated as "no metadata".
+        // Only a complete successful enumeration is authoritative. Abnormal
+        // or incomplete output must fail closed rather than become "no attrs".
         let code = match out.completion {
             Completion::Exited(c) => c,
             _ => {
@@ -374,7 +375,7 @@ impl TargetFs {
                 })
             }
         };
-        if code != 0 && code != 1 {
+        if code != 0 {
             return Ok(Xattrs {
                 attrs: BTreeMap::new(),
                 inspected: false,
@@ -454,7 +455,13 @@ impl TargetFs {
     pub fn set_metadata(&mut self, path: &str, mode: u32, uid: u32, gid: u32) -> Result<()> {
         self.guard_mut()?;
         self.chown(path, uid, gid)?;
-        self.chmod(path, mode)?;
+        if let Err(e) = self.chmod(path, mode) {
+            return Err(if e.kind == crate::error::ErrorKind::Indeterminate {
+                e
+            } else {
+                e.changed()
+            });
+        }
         Ok(())
     }
 
@@ -560,8 +567,12 @@ impl TargetFs {
             )?;
             Ok(())
         })();
-        let _ = self.run_argv("/bin/rmdir", &[stage_dir]);
-        result
+        let cleanup = self.run_argv("/bin/rmdir", &[stage_dir]);
+        match (result, cleanup) {
+            (Ok(()), Ok(_)) => Ok(()),
+            (Ok(()), Err(e)) => Err(e.changed()),
+            (Err(e), _) => Err(e),
+        }
     }
 
     pub fn rename(&mut self, from: &str, to: &str) -> Result<()> {
@@ -797,6 +808,8 @@ pub fn absent_stat() -> Stat {
         size: 0,
         dev: 0,
         ino: 0,
+        mtime: 0,
+        ctime: 0,
     }
 }
 
@@ -811,7 +824,7 @@ pub fn is_missing_error(stderr: &str) -> bool {
 
 fn parse_stat_line(text: &str) -> std::result::Result<Stat, String> {
     let parts: Vec<&str> = text.trim().split('|').collect();
-    if parts.len() != 7 {
+    if parts.len() != 9 {
         return Err(format!("unexpected stat output: {:?}", text));
     }
     let kind = match parts[0] {
@@ -836,6 +849,12 @@ fn parse_stat_line(text: &str) -> std::result::Result<Stat, String> {
     let ino = parts[6]
         .parse()
         .map_err(|e: std::num::ParseIntError| e.to_string())?;
+    let mtime = parts[7]
+        .parse()
+        .map_err(|e: std::num::ParseIntError| e.to_string())?;
+    let ctime = parts[8]
+        .parse()
+        .map_err(|e: std::num::ParseIntError| e.to_string())?;
     Ok(Stat {
         kind,
         mode,
@@ -844,6 +863,8 @@ fn parse_stat_line(text: &str) -> std::result::Result<Stat, String> {
         size,
         dev,
         ino,
+        mtime,
+        ctime,
     })
 }
 

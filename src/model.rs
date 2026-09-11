@@ -501,15 +501,13 @@ fn validate_declaration_shape(d: &Declaration) -> Result<()> {
         "package" => {
             validate_with_fields(&d.with, PACKAGE_FIELDS, ctx)?;
             require_static_string_field(&d.with, "name", ctx)?;
-            match d.with.get("state").and_then(|v| v.as_str()) {
-                Some("present") | Some("absent") => {}
-                _ => {
-                    return Err(SinterError::schema(format!(
-                        "{}: package state is required and must be present or absent",
-                        ctx
-                    )))
-                }
-            }
+            validate_desired_enum(
+                &d.with,
+                "state",
+                &["present", "absent"],
+                ctx,
+                "package state is required and must be present or absent",
+            )?;
         }
         "service" => {
             validate_with_fields(&d.with, SERVICE_FIELDS, ctx)?;
@@ -522,19 +520,17 @@ fn validate_declaration_shape(d: &Declaration) -> Result<()> {
                     ctx
                 )));
             }
-            if let Some(s) = state {
-                match s.as_str() {
-                    Some("running") | Some("stopped") => {}
-                    _ => {
-                        return Err(SinterError::schema(format!(
-                            "{}: service state must be running or stopped",
-                            ctx
-                        )))
-                    }
-                }
+            if state.is_some() {
+                validate_desired_enum(
+                    &d.with,
+                    "state",
+                    &["running", "stopped"],
+                    ctx,
+                    "service state must be running or stopped",
+                )?;
             }
             if let Some(e) = enabled {
-                if e.as_bool().is_none() {
+                if e.as_bool().is_none() && !matches!(e, Value::Str(_)) {
                     return Err(SinterError::schema(format!(
                         "{}: service enabled must be a boolean",
                         ctx
@@ -572,6 +568,20 @@ fn require_static_string_field(with: &BTreeMap<String, Value>, key: &str, ctx: &
             "{}: missing required field {}",
             ctx, key
         ))),
+    }
+}
+
+fn validate_desired_enum(
+    with: &BTreeMap<String, Value>,
+    key: &str,
+    allowed: &[&str],
+    ctx: &str,
+    message: &str,
+) -> Result<()> {
+    match with.get(key) {
+        Some(Value::Str(s)) if crate::expressions::has_interpolation(s) => Ok(()),
+        Some(Value::Str(s)) if allowed.contains(&s.as_str()) => Ok(()),
+        _ => Err(SinterError::schema(format!("{}: {}", ctx, message))),
     }
 }
 
@@ -980,15 +990,13 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                 validate_with_fields(&r.with, PACKAGE_FIELDS, &resource_ctx)?;
                 let name = static_string(&r.with, "name", &scope, &resource_ctx, true)?;
                 fr.package_name = Some(name);
-                match r.with.get("state").and_then(|v| v.as_str()) {
-                    Some("present") | Some("absent") => {}
-                    _ => {
-                        return Err(SinterError::schema(format!(
-                            "{}: package state is required and must be present or absent",
-                            resource_ctx
-                        )))
-                    }
-                }
+                validate_desired_enum(
+                    &r.with,
+                    "state",
+                    &["present", "absent"],
+                    &resource_ctx,
+                    "package state is required and must be present or absent",
+                )?;
             }
             "service" => {
                 validate_with_fields(&r.with, SERVICE_FIELDS, &resource_ctx)?;
@@ -1002,19 +1010,17 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                         resource_ctx
                     )));
                 }
-                if let Some(s) = state {
-                    match s.as_str() {
-                        Some("running") | Some("stopped") => {}
-                        _ => {
-                            return Err(SinterError::schema(format!(
-                                "{}: service state must be running or stopped",
-                                resource_ctx
-                            )))
-                        }
-                    }
+                if state.is_some() {
+                    validate_desired_enum(
+                        &r.with,
+                        "state",
+                        &["running", "stopped"],
+                        &resource_ctx,
+                        "service state must be running or stopped",
+                    )?;
                 }
                 if let Some(e) = enabled {
-                    if e.as_bool().is_none() {
+                    if e.as_bool().is_none() && !matches!(e, Value::Str(_)) {
                         return Err(SinterError::schema(format!(
                             "{}: service enabled must be a boolean",
                             resource_ctx
@@ -1291,8 +1297,13 @@ fn validate_file_common(
         )));
     }
     if let Some(Value::Str(s)) = with.get("mode") {
-        let _ =
-            parse_mode(s).map_err(|e| SinterError::schema(format!("{}: {}", ctx, e.message)))?;
+        let _ = parse_mode(s).map_err(|e| {
+            if fr.sensitive {
+                SinterError::schema(format!("{}: invalid mode", ctx))
+            } else {
+                SinterError::schema(format!("{}: {}", ctx, e.message))
+            }
+        })?;
     } else if let Some(v) = with.get("mode") {
         if !v.is_null() {
             return Err(SinterError::schema(format!(

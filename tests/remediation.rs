@@ -946,6 +946,47 @@ fn package_absent_is_confirmed_only_on_exit_one() {
     assert_eq!(find(&plan, "p").change, Change::Changed);
 }
 
+#[test]
+fn package_state_may_be_an_interpolated_desired_value() {
+    let dir = trusted_root("h6-package-state-expression");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nvars:\n  state:\n    value: present\nresources:\n  - id: p\n    type: package\n    with:\n      name: sinter-nonexistent-package-xyz\n      state: \"{{ vars.state }}\"\n",
+    );
+    assert!(sinter::model::load_model(&recipe).is_ok());
+}
+
+#[test]
+fn invalid_requested_cwd_does_not_fallback_to_root() {
+    let dir = trusted_root("h3-invalid-cwd");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nresources:\n  - id: cwd\n    type: command\n    with:\n      program: /bin/pwd\n      cwd: /path/that/does/not/exist/sinter\n",
+    );
+    let report = run_recipe(&recipe, Mode::Apply, false);
+    let result = find(&report, "cwd");
+    assert_eq!(result.execution, Execution::Failed);
+    assert_ne!(result.change, Change::Changed);
+}
+
+#[test]
+fn cleanup_failure_after_publication_is_apply_failure_with_change() {
+    let dir = trusted_root("c2-cleanup");
+    let out = dir.join("f");
+    std::fs::write(&out, "old").unwrap();
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!("version: 1\nresources:\n  - id: f\n    type: file\n    with:\n      path: {}\n      content: new\n", out.display()),
+    );
+    let report = run_recipe_fault(&recipe, Mode::Apply, "cleanup_stage");
+    let result = find(&report, "f");
+    assert_eq!(result.execution, Execution::Failed);
+    assert_eq!(result.change, Change::Changed);
+}
+
 // ===========================================================================
 // H7 - useful current -> desired diff
 // ===========================================================================

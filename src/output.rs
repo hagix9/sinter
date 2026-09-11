@@ -47,11 +47,11 @@ fn render_text(
     writeln!(
         out,
         "target facts: hostname={} os={} family={} version={} arch={}",
-        report.facts.hostname,
-        report.facts.os_name,
-        report.facts.os_family,
-        report.facts.os_version,
-        report.facts.arch
+        sanitize_line(&report.facts.hostname),
+        sanitize_line(&report.facts.os_name),
+        sanitize_line(&report.facts.os_family),
+        sanitize_line(&report.facts.os_version),
+        sanitize_line(&report.facts.arch)
     )?;
     writeln!(out)?;
 
@@ -66,7 +66,7 @@ fn render_text(
             out,
             "{}  {} [{}] {}/{} {}",
             status,
-            r.id,
+            sanitize_line(&r.id),
             r.type_,
             if r.unknown { "unknown" } else { "known" },
             r.disposition.label(),
@@ -87,10 +87,10 @@ fn render_text(
                 }
                 DiffBody::Text { removed, added } => {
                     for line in removed {
-                        writeln!(out, "    - {}", line)?;
+                        writeln!(out, "    - {}", sanitize_line(line))?;
                     }
                     for line in added {
-                        writeln!(out, "    + {}", line)?;
+                        writeln!(out, "    + {}", sanitize_line(line))?;
                     }
                 }
             }
@@ -115,13 +115,18 @@ fn render_text(
             } else {
                 h.reason.clone()
             };
+            let service = if h.sensitive {
+                "<redacted>".to_string()
+            } else {
+                sanitize_line(&h.service)
+            };
             writeln!(
                 out,
                 "  {:?}  {} -> {} {} {}",
                 h.state,
                 h.id,
                 h.action,
-                h.service,
+                service,
                 reason.unwrap_or_default()
             )?;
         }
@@ -131,7 +136,12 @@ fn render_text(
         writeln!(
             out,
             "pending handlers (not run): {}",
-            report.handlers_pending.join(", ")
+            report
+                .handlers_pending
+                .iter()
+                .map(|s| sanitize_line(s))
+                .collect::<Vec<_>>()
+                .join(", ")
         )?;
     }
 
@@ -231,7 +241,7 @@ fn render_json(report: &RunReport, mode: &str, out: &mut dyn Write) -> std::io::
             };
             json!({
                 "id": h.id,
-                "service": h.service,
+                "service": if h.sensitive { "<redacted>".to_string() } else { sanitize_line(&h.service) },
                 "action": h.action,
                 "state": format!("{:?}", h.state),
                 "reason": reason,

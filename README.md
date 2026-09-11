@@ -114,7 +114,7 @@ handlers:
 
 ## Reference environment
 
-The mandatory integration target is Ubuntu 24.04 LTS amd64/aarch64 with systemd,
+The mandatory integration target is Ubuntu 24.04 LTS amd64 with systemd,
 apt, OpenSSH server, `/bin/sh`, and passwordless `sudo -n`. The controller
 reference environments are macOS, Ubuntu 24.04 LTS, and other environments where
 the binary builds.

@@ -1,4 +1,4 @@
-use crate::error::{Result, SinterError};
+use crate::error::{MutationState, Result, SinterError};
 use crate::executor::{
     Completion, ExecRequest, Executor, LocalExecutor, Output, SshConfig, SshExecutor,
 };
@@ -678,10 +678,16 @@ fn failed_result_from_error(res: &FrozenResource, e: &SinterError) -> ResourceRe
         } else {
             Execution::Failed
         },
-        change: if indeterminate {
-            Change::Possible
-        } else {
-            Change::None
+        change: match e.mutation {
+            MutationState::None => {
+                if indeterminate {
+                    Change::Possible
+                } else {
+                    Change::None
+                }
+            }
+            MutationState::Changed => Change::Changed,
+            MutationState::Possible => Change::Possible,
         },
         verification: if indeterminate {
             Verification::Unknown

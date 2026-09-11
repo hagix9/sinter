@@ -1,5 +1,5 @@
 use crate::engine::{command_register_map, unknown_result, Engine, Mode};
-use crate::error::{Result, SinterError};
+use crate::error::{MutationState, Result, SinterError};
 use crate::executor::{Completion, ExecRequest, Output};
 use crate::expressions::{eval_boolean, parse_expr, EvalVal, Scope};
 use crate::model::FrozenResource;
@@ -566,11 +566,7 @@ impl Engine {
                     r.reason = Some(reason);
                     Ok(r)
                 }
-                PublishOutcome::Published | PublishOutcome::PublishedWithNote(_) => {
-                    let note = match &outcome {
-                        PublishOutcome::PublishedWithNote(n) => Some(n.clone()),
-                        _ => None,
-                    };
+                PublishOutcome::Published => {
                     // Re-observe and verify. Publication already happened, so a
                     // failure to re-observe must NOT be reported as change:none:
                     // the mutation is known to have occurred.
@@ -592,7 +588,7 @@ impl Engine {
                                 r.reason = v.reason;
                             } else {
                                 r.verification = v.verification;
-                                r.reason = note;
+                                r.reason = None;
                             }
                         }
                         Err(e) if e.kind == crate::error::ErrorKind::Indeterminate => {
@@ -771,7 +767,6 @@ impl Engine {
         // unknown. This must be reported as indeterminate/possible, not as a
         // plain failure with change:none.
         if self.fs.fault() == Some("indeterminate_publish") {
-            let _ = self.cleanup_stage_dir(&stage_dir);
             return Ok(PublishOutcome::Indeterminate(format!(
                 "{}: injected indeterminate publication result",
                 res.id
@@ -804,8 +799,8 @@ impl Engine {
                         res.id, e.message
                     )));
                 }
-                return Ok(PublishOutcome::FailedAfterPublish(format!(
-                    "{}: publication rename failed: {} (staging cleanup {})",
+                return Ok(PublishOutcome::FailedBeforePublish(format!(
+                    "{}: publication rename failed before publication: {} (staging cleanup {})",
                     res.id,
                     e.message,
                     if cleanup_ok { "succeeded" } else { "failed" }
@@ -817,7 +812,7 @@ impl Engine {
         // empty directory is reported but must not change the published result.
         let cleanup_ok = self.cleanup_stage_dir(&stage_dir);
         if !cleanup_ok {
-            return Ok(PublishOutcome::PublishedWithNote(format!(
+            return Ok(PublishOutcome::FailedAfterPublish(format!(
                 "{}: published successfully but staging directory {} could not be removed",
                 res.id, stage_dir
             )));
@@ -833,6 +828,9 @@ impl Engine {
     }
 
     fn cleanup_stage_dir(&mut self, stage_dir: &str) -> bool {
+        if self.fs.fault() == Some("cleanup_stage") {
+            return false;
+        }
         // Remove the staging payload if present, then the directory.
         let payload = format!("{}/payload", stage_dir);
         let _ = self.fs.remove_file(&payload);
@@ -944,8 +942,16 @@ impl Engine {
                         Ok(()) => self.verify_absent(res, &path),
                         Err(e) => {
                             let mut r = changed_result(res);
-                            r.execution = Execution::Failed;
-                            r.change = Change::None;
+                            r.execution = if e.kind == crate::error::ErrorKind::Indeterminate {
+                                Execution::Indeterminate
+                            } else {
+                                Execution::Failed
+                            };
+                            r.change = match e.mutation {
+                                MutationState::None => Change::None,
+                                MutationState::Changed => Change::Changed,
+                                MutationState::Possible => Change::Possible,
+                            };
                             r.reason = Some(format!(
                                 "directory {} is not empty or could not be removed: {}",
                                 path, e.message
@@ -978,11 +984,49 @@ impl Engine {
                     return Ok(r);
                 }
                 self.fs.check_trusted_parents(&path)?;
-                self.fs.mkdir(&path)?;
+                if let Err(e) = self.fs.mkdir(&path) {
+                    let mut r = changed_result(res);
+                    r.execution = if e.kind == crate::error::ErrorKind::Indeterminate {
+                        Execution::Indeterminate
+                    } else {
+                        Execution::Failed
+                    };
+                    r.change = if e.kind == crate::error::ErrorKind::Indeterminate {
+                        Change::Possible
+                    } else {
+                        Change::None
+                    };
+                    r.verification = if r.execution == Execution::Indeterminate {
+                        Verification::Unknown
+                    } else {
+                        Verification::NotPerformed
+                    };
+                    r.reason = Some(e.message);
+                    return Ok(r);
+                }
                 let mode = meta.mode.unwrap_or(0o755);
                 let uid = meta.owner_uid.unwrap_or(self.fs.target_uid);
                 let gid = meta.group_gid.unwrap_or(self.fs.target_gid);
-                self.fs.set_metadata(&path, mode, uid, gid)?;
+                if let Err(e) = self.fs.set_metadata(&path, mode, uid, gid) {
+                    let mut r = changed_result(res);
+                    r.execution = if e.kind == crate::error::ErrorKind::Indeterminate {
+                        Execution::Indeterminate
+                    } else {
+                        Execution::Failed
+                    };
+                    r.change = if e.kind == crate::error::ErrorKind::Indeterminate {
+                        Change::Possible
+                    } else {
+                        Change::Changed
+                    };
+                    r.verification = if r.execution == Execution::Indeterminate {
+                        Verification::Unknown
+                    } else {
+                        Verification::NotPerformed
+                    };
+                    r.reason = Some(e.message);
+                    return Ok(r);
+                }
                 self.verify_directory(res, &path, uid, gid, mode)
             }
             ObjKind::Dir => {
@@ -1009,7 +1053,12 @@ impl Engine {
                                 stat.uid,
                                 stat.gid
                             ),
-                            desired: "directory metadata update".into(),
+                            desired: format!(
+                                "mode={} owner={} group={}",
+                                mode_to_string(mode),
+                                uid,
+                                gid
+                            ),
                         },
                     });
                     return Ok(r);
@@ -1687,6 +1736,12 @@ impl Engine {
         let state = ev_str(&vals, "state")?
             .map(|(s, _)| s)
             .ok_or_else(|| SinterError::schema(format!("{}: package state is required", res.id)))?;
+        if state != "present" && state != "absent" {
+            return Err(SinterError::apply(format!(
+                "{}: package state must resolve to present or absent",
+                res.id
+            )));
+        }
         let observed = self.observe_package(&name)?;
         let want_installed = state == "present";
         let is_installed = matches!(observed, PackageState::Installed);
@@ -1755,8 +1810,34 @@ impl Engine {
             }
         }
 
-        // Re-observe and verify.
-        let after = self.observe_package(&name)?;
+        // Re-observe and verify. A successful apt dispatch is retained even if
+        // the post-mutation observation fails.
+        let after = match self.observe_package(&name) {
+            Ok(after) => after,
+            Err(e) => {
+                let mut r = changed_result(res);
+                r.execution = if e.kind == crate::error::ErrorKind::Indeterminate {
+                    Execution::Indeterminate
+                } else {
+                    Execution::Failed
+                };
+                r.change = if e.kind == crate::error::ErrorKind::Indeterminate {
+                    Change::Possible
+                } else {
+                    Change::Changed
+                };
+                r.verification = if r.execution == Execution::Indeterminate {
+                    Verification::Unknown
+                } else {
+                    Verification::Failed
+                };
+                r.reason = Some(format!(
+                    "package mutation succeeded but re-observation failed: {}",
+                    e.message
+                ));
+                return Ok(r);
+            }
+        };
         let verified = matches!(after, PackageState::Installed) == want_installed;
         let mut r = changed_result(res);
         r.change = Change::Changed;
@@ -1823,6 +1904,14 @@ impl Engine {
         let vals = self.eval_with(res, item)?;
         let want_state = ev_str(&vals, "state")?.map(|(s, _)| s);
         let want_enabled = ev_bool(&vals, "enabled")?;
+        if let Some(state) = &want_state {
+            if state != "running" && state != "stopped" {
+                return Err(SinterError::apply(format!(
+                    "{}: service state must resolve to running or stopped",
+                    res.id
+                )));
+            }
+        }
         let obs = self.observe_service(&name)?;
 
         if obs.load_state == "not-found" {
@@ -1896,7 +1985,8 @@ impl Engine {
             return Ok(r);
         }
 
-        // Apply ordering table.
+        // Apply ordering table. Keep mutation history local to this resource so
+        // a later step cannot erase an earlier successful mutation.
         let runit = |e: &mut Self, args: &[&str]| -> Result<()> {
             let mut req = ExecRequest::new("/usr/bin/systemctl");
             req.args = args.iter().map(|s| s.to_string()).collect();
@@ -1921,6 +2011,7 @@ impl Engine {
 
         let desired_state = want_state.as_deref().unwrap_or("");
         let desired_enabled = want_enabled;
+        let mut mutated = false;
         // Ordering:
         //  running/true  -> enable if needed then start if needed
         //  running/false -> disable if needed then start if needed
@@ -1929,33 +2020,48 @@ impl Engine {
         match (desired_state, desired_enabled) {
             ("running", Some(en)) => {
                 if enabled_needs {
-                    runit(self, &[if en { "enable" } else { "disable" }, &name])?;
+                    if let Err(e) = runit(self, &[if en { "enable" } else { "disable" }, &name]) {
+                        return Ok(service_step_failure(res, e, mutated));
+                    }
+                    mutated = true;
                 }
                 if state_needs == Some(true) {
-                    runit(self, &["start", &name])?;
+                    if let Err(e) = runit(self, &["start", &name]) {
+                        return Ok(service_step_failure(res, e, mutated));
+                    }
                 }
             }
             ("stopped", Some(en)) => {
                 if state_needs == Some(true) {
-                    self.stop_and_reset(&name)?;
+                    if let Err(e) = self.stop_and_reset(&name) {
+                        return Ok(service_step_failure(res, e, true));
+                    }
                 }
                 if enabled_needs {
-                    runit(self, &[if en { "enable" } else { "disable" }, &name])?;
+                    if let Err(e) = runit(self, &[if en { "enable" } else { "disable" }, &name]) {
+                        return Ok(service_step_failure(res, e, mutated));
+                    }
                 }
             }
             ("running", None) => {
                 if state_needs == Some(true) {
-                    runit(self, &["start", &name])?;
+                    if let Err(e) = runit(self, &["start", &name]) {
+                        return Ok(service_step_failure(res, e, mutated));
+                    }
                 }
             }
             ("stopped", None) => {
                 if state_needs == Some(true) {
-                    self.stop_and_reset(&name)?;
+                    if let Err(e) = self.stop_and_reset(&name) {
+                        return Ok(service_step_failure(res, e, true));
+                    }
                 }
             }
             ("", Some(en)) => {
                 if enabled_needs {
-                    runit(self, &[if en { "enable" } else { "disable" }, &name])?;
+                    if let Err(e) = runit(self, &[if en { "enable" } else { "disable" }, &name]) {
+                        return Ok(service_step_failure(res, e, mutated));
+                    }
                 }
             }
             ("", None) => {}
@@ -2012,17 +2118,25 @@ impl Engine {
         let mut req = ExecRequest::new("/usr/bin/systemctl");
         req.args = vec!["reset-failed".to_string(), name.to_string()];
         req.env = baseline_env(self.fs.home_env());
-        let _ = self.fs.exec(&req)?;
+        let reset = self.fs.exec(&req)?;
+        if !reset.is_success() {
+            return Err(match reset.completion {
+                Completion::Indeterminate { reason, .. } => SinterError::indeterminate(reason),
+                _ => {
+                    SinterError::apply(format!("systemctl reset-failed {} failed", name)).changed()
+                }
+            });
+        }
         Ok(())
     }
 
     fn observe_service(&mut self, name: &str) -> Result<ServiceObs> {
         let out = self.fs.systemctl_show(name)?;
+        let text = String::from_utf8_lossy(&out.stdout);
         if !out.is_success() {
             // systemctl returns non-zero for an unknown unit but still prints
             // LoadState=not-found; a non-zero with no recognizable output is an
             // observation failure.
-            let text = String::from_utf8_lossy(&out.stdout);
             if !text.contains("LoadState=") {
                 return Err(SinterError::apply(format!(
                     "service observation failed for {}: systemctl exited {:?} ({})",
@@ -2032,7 +2146,6 @@ impl Engine {
                 )));
             }
         }
-        let text = String::from_utf8_lossy(&out.stdout);
         let mut load_state = String::new();
         let mut active_state = String::new();
         let mut unit_file_state = String::new();
@@ -2046,9 +2159,11 @@ impl Engine {
                 }
             }
         }
-        if load_state.is_empty() {
-            // systemctl absent or unit unknown with no output.
-            load_state = "not-found".to_string();
+        if load_state.is_empty() || active_state.is_empty() || unit_file_state.is_empty() {
+            return Err(SinterError::apply(format!(
+                "service observation for {} was incomplete",
+                name
+            )));
         }
         Ok(ServiceObs {
             load_state,
@@ -2139,7 +2254,6 @@ enum PublishOutcome {
     /// The destination was atomically replaced and verified prerequisites held.
     Published,
     /// Published successfully, but a non-fatal cleanup/note condition applies.
-    PublishedWithNote(String),
     /// Nothing was published; the destination is unchanged.
     FailedBeforePublish(String),
     /// Publication was attempted/dispatched but failed afterwards; the
@@ -2159,8 +2273,41 @@ fn same_object_identity(prev: &Stat, cur: &Stat) -> bool {
     match prev.kind {
         ObjKind::Absent => true,
         ObjKind::Symlink => prev.ino == cur.ino && prev.dev == cur.dev,
-        _ => prev.ino == cur.ino && prev.dev == cur.dev,
+        _ => {
+            prev.ino == cur.ino
+                && prev.dev == cur.dev
+                && prev.kind == cur.kind
+                && prev.mode == cur.mode
+                && prev.uid == cur.uid
+                && prev.gid == cur.gid
+                && prev.size == cur.size
+                && prev.mtime == cur.mtime
+                && prev.ctime == cur.ctime
+        }
     }
+}
+
+fn service_step_failure(res: &FrozenResource, e: SinterError, mutated: bool) -> ResourceResult {
+    let mut r = changed_result(res);
+    r.execution = if e.kind == crate::error::ErrorKind::Indeterminate {
+        Execution::Indeterminate
+    } else {
+        Execution::Failed
+    };
+    r.change = if e.kind == crate::error::ErrorKind::Indeterminate {
+        Change::Possible
+    } else if mutated || e.mutation == MutationState::Changed {
+        Change::Changed
+    } else {
+        Change::None
+    };
+    r.verification = if r.execution == Execution::Indeterminate {
+        Verification::Unknown
+    } else {
+        Verification::NotPerformed
+    };
+    r.reason = Some(e.message);
+    r
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

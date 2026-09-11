@@ -299,6 +299,7 @@ impl LocalExecutor {
     }
 
     fn run(&mut self, req: &ExecRequest) -> Result<Output> {
+        let deadline = Instant::now() + Duration::from_secs(req.timeout_secs.max(1));
         use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
         let (program, args) = self.wrap(req);
@@ -321,10 +322,10 @@ impl LocalExecutor {
         // explicit cwd the controller runs from a root directory it can access.
         if self.sudo {
             cmd.current_dir("/");
-        } else if !cwd.is_empty() && std::path::Path::new(&cwd).is_dir() {
-            cmd.current_dir(&cwd);
         } else {
-            cmd.current_dir("/");
+            // An explicit cwd is part of the command contract. Do not silently
+            // replace an unusable requested directory with a fallback.
+            cmd.current_dir(&cwd);
         }
         cmd.stdin(if req.stdin.is_some() {
             Stdio::piped()
@@ -358,7 +359,6 @@ impl LocalExecutor {
         let err_handle = std::thread::spawn(move || read_capped(stderr_pipe, cap));
 
         // One bounded deadline covers spawn, execution, pipe drain, and wait.
-        let deadline = Instant::now() + Duration::from_secs(req.timeout_secs.max(1));
         let mut timed_out = false;
         let status = loop {
             match child.try_wait() {
@@ -578,6 +578,7 @@ impl SshExecutor {
     }
 
     fn run(&mut self, req: &ExecRequest) -> Result<Output> {
+        let deadline = Instant::now() + Duration::from_secs(req.timeout_secs.max(1));
         let line = build_remote_command(req, self.sudo, &self.home);
         let mut channel = self
             .session
@@ -590,7 +591,6 @@ impl SshExecutor {
             .exec(&line)
             .map_err(|e| SinterError::apply(format!("cannot execute remote command: {}", e)))?;
 
-        let deadline = Instant::now() + Duration::from_secs(req.timeout_secs.max(1));
         let mut out = Vec::new();
         let mut err = Vec::new();
         let mut out_trunc = false;
@@ -644,7 +644,7 @@ impl SshExecutor {
 
                 if !stdout_eof || !stderr_eof {
                     if let Some(data) = stdin.take() {
-                        write_all_nonblocking(&mut channel, &data).map_err(|e| {
+                        write_all_nonblocking(&mut channel, &data, deadline).map_err(|e| {
                             SinterError::indeterminate(format!(
                                 "SSH stdin write failed after dispatch: {}",
                                 e
@@ -818,7 +818,11 @@ fn drain_stream<R: Read>(
     }
 }
 
-fn write_all_nonblocking(channel: &mut ssh2::Channel, data: &[u8]) -> std::io::Result<()> {
+fn write_all_nonblocking(
+    channel: &mut ssh2::Channel,
+    data: &[u8],
+    deadline: Instant,
+) -> std::io::Result<()> {
     let mut off = 0;
     while off < data.len() {
         match channel.write(&data[off..]) {
@@ -830,6 +834,12 @@ fn write_all_nonblocking(channel: &mut ssh2::Channel, data: &[u8]) -> std::io::R
             }
             Ok(n) => off += n,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "SSH operation deadline exceeded",
+                    ));
+                }
                 std::thread::sleep(Duration::from_millis(20));
             }
             Err(e) => return Err(e),
