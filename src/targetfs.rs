@@ -77,8 +77,42 @@ enum AclClass {
     Malformed,
 }
 
+/// Typed cleanup outcome. Cleanup must never overwrite publication truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CleanupState {
+    Ok,
+    Failed,
+    Indeterminate,
+}
+
 fn is_valid_acl_perm(p: &str) -> bool {
-    p.len() == 3 && p.chars().all(|c| matches!(c, 'r' | 'w' | 'x' | '-'))
+    // POSIX ACL permission string is exactly three positional slots:
+    //   position 1: r or -
+    //   position 2: w or -
+    //   position 3: x or -
+    let mut it = p.chars();
+    match (it.next(), it.next(), it.next(), it.next()) {
+        (Some(r), Some(w), Some(x), None) => {
+            matches!(r, 'r' | '-') && matches!(w, 'w' | '-') && matches!(x, 'x' | '-')
+        }
+        _ => false,
+    }
+}
+
+/// Whether a getfattr `-e base64` value can be authoritatively interpreted.
+fn is_valid_xattr_encoded(v: &str) -> bool {
+    if v.is_empty() {
+        return true;
+    }
+    if let Some(rest) = v.strip_prefix("0s") {
+        return rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=');
+    }
+    if let Some(rest) = v.strip_prefix("0x") {
+        return rest.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    false
 }
 
 /// Parse a getfacl `-c -p` capture. Distinguishes a complete ACL (possibly
@@ -269,10 +303,26 @@ impl TargetFs {
     /// environment. Recipe-controlled values must only ever be passed through
     /// this path so they can never become shell syntax in internal operations.
     pub fn run_argv(&mut self, program: &str, args: &[String]) -> Result<Output> {
+        self.run_argv_sensitivity(program, args, false)
+    }
+
+    /// Like `run_argv`, but marks the request sensitive so audit records never
+    /// retain raw argv (DESIGN §31.4).
+    pub fn run_argv_sensitive(&mut self, program: &str, args: &[String]) -> Result<Output> {
+        self.run_argv_sensitivity(program, args, true)
+    }
+
+    fn run_argv_sensitivity(
+        &mut self,
+        program: &str,
+        args: &[String],
+        sensitive: bool,
+    ) -> Result<Output> {
         let mut req = ExecRequest::new(program);
         req.args = args.to_vec();
         req.env = base_env();
         req.env.insert("HOME".to_string(), self.home_env());
+        req.sensitive = sensitive;
         self.ex.run(&req)
     }
 
@@ -291,30 +341,72 @@ impl TargetFs {
 
     /// Show a systemd unit's relevant properties using exact argv.
     pub fn systemctl_show(&mut self, name: &str) -> Result<Output> {
-        self.run_argv(
+        self.systemctl_show_sensitive(name, false)
+    }
+
+    pub fn systemctl_show_sensitive(&mut self, name: &str, sensitive: bool) -> Result<Output> {
+        self.run_argv_sensitivity(
             "/usr/bin/systemctl",
             &[
                 "show".to_string(),
                 name.to_string(),
                 "--property=LoadState,ActiveState,UnitFileState".to_string(),
             ],
+            sensitive,
         )
     }
 
     fn run_argv_ok(&mut self, program: &str, args: &[String]) -> Result<Output> {
-        let out = self.run_argv(program, args)?;
+        self.run_argv_ok_sensitivity(program, args, false, false)
+    }
+
+    /// Mutating helper operations: after dispatch, abnormal completion must not
+    /// be reported as a definite non-mutation.
+    fn run_argv_ok_mutating(&mut self, program: &str, args: &[String]) -> Result<Output> {
+        self.run_argv_ok_sensitivity(program, args, true, false)
+    }
+
+    fn run_argv_ok_mutating_sensitive(
+        &mut self,
+        program: &str,
+        args: &[String],
+        sensitive: bool,
+    ) -> Result<Output> {
+        self.run_argv_ok_sensitivity(program, args, true, sensitive)
+    }
+
+    fn run_argv_ok_sensitivity(
+        &mut self,
+        program: &str,
+        args: &[String],
+        mutating: bool,
+        sensitive: bool,
+    ) -> Result<Output> {
+        let out = self.run_argv_sensitivity(program, args, sensitive)?;
         match out.completion {
             Completion::Exited(0) => Ok(out),
-            Completion::Exited(c) => Err(SinterError::apply(format!(
-                "target operation {} failed (exit {}): {}",
-                program,
-                c,
-                String::from_utf8_lossy(&out.stderr).trim()
-            ))),
-            Completion::Signaled(s) => Err(SinterError::apply(format!(
-                "target operation {} terminated by signal {}",
-                program, s
-            ))),
+            Completion::Exited(c) => {
+                let msg = format!(
+                    "target operation {} failed (exit {}): {}",
+                    if sensitive { "[redacted]" } else { program },
+                    c,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+                // Nonzero exit is a definite command failure. Mutating helpers
+                // that need extra conservatism use `.changed()` at the call site
+                // after a prior successful step.
+                let _ = mutating;
+                Err(SinterError::apply(msg))
+            }
+            Completion::Signaled(s) => {
+                let msg = format!(
+                    "target operation {} terminated by signal {}",
+                    if sensitive { "[redacted]" } else { program },
+                    s
+                );
+                // Dispatched then killed: mutation completion unknown.
+                Err(SinterError::indeterminate(msg))
+            }
             Completion::Indeterminate { reason, .. } => Err(SinterError::indeterminate(reason)),
         }
     }
@@ -497,7 +589,16 @@ impl TargetFs {
                     inspected: false,
                 });
             }
-            attrs.insert(k.trim().to_string(), v.trim().to_string());
+            let value = v.trim();
+            // getfattr -e base64 emits `0s<base64>` (or empty). Reject values
+            // that cannot be authoritatively interpreted (DESIGN §24.4).
+            if !is_valid_xattr_encoded(value) {
+                return Ok(Xattrs {
+                    attrs,
+                    inspected: false,
+                });
+            }
+            attrs.insert(k.trim().to_string(), value.to_string());
         }
 
         // Detect POSIX ACLs honestly. getfattr may not surface
@@ -581,16 +682,24 @@ impl TargetFs {
 
     pub fn chmod(&mut self, path: &str, mode: u32) -> Result<()> {
         self.guard_mut()?;
-        self.run_argv_ok(
+        self.run_argv_ok_mutating(
             "/bin/chmod",
             &[mode_to_string(mode), "--".to_string(), path.to_string()],
         )?;
+        // Controlled injection: real chmod already applied, then completion is
+        // reported as abnormal. Mutation is known.
+        if self.fault() == Some("chmod_success_then_abnormal") {
+            return Err(SinterError::indeterminate(
+                "injected abnormal completion after successful chmod",
+            )
+            .changed());
+        }
         Ok(())
     }
 
     pub fn chown(&mut self, path: &str, uid: u32, gid: u32) -> Result<()> {
         self.guard_mut()?;
-        self.run_argv_ok(
+        self.run_argv_ok_mutating(
             "/bin/chown",
             &[
                 format!("{}:{}", uid, gid),
@@ -598,25 +707,31 @@ impl TargetFs {
                 path.to_string(),
             ],
         )?;
+        if self.fault() == Some("chown_success_then_abnormal") {
+            return Err(SinterError::indeterminate(
+                "injected abnormal completion after successful chown",
+            )
+            .changed());
+        }
         Ok(())
     }
 
     pub fn mkdir(&mut self, path: &str) -> Result<()> {
         self.guard_mut()?;
-        self.run_argv_ok("/bin/mkdir", &["--".to_string(), path.to_string()])?;
+        self.run_argv_ok_mutating("/bin/mkdir", &["--".to_string(), path.to_string()])?;
         Ok(())
     }
 
     pub fn rmdir(&mut self, path: &str) -> Result<()> {
         self.guard_mut()?;
-        self.run_argv_ok("/bin/rmdir", &["--".to_string(), path.to_string()])?;
+        self.run_argv_ok_mutating("/bin/rmdir", &["--".to_string(), path.to_string()])?;
         Ok(())
     }
 
     /// Remove a file only if it is the exact object we created (regular file).
     pub fn remove_file(&mut self, path: &str) -> Result<()> {
         self.guard_mut()?;
-        self.run_argv_ok(
+        self.run_argv_ok_mutating(
             "/bin/rm",
             &["-f".to_string(), "--".to_string(), path.to_string()],
         )?;
@@ -626,7 +741,7 @@ impl TargetFs {
     /// Remove a symlink only, refusing to follow it.
     pub fn remove_symlink(&mut self, path: &str) -> Result<()> {
         self.guard_mut()?;
-        self.run_argv_ok(
+        self.run_argv_ok_mutating(
             "/bin/rm",
             &["-f".to_string(), "--".to_string(), path.to_string()],
         )?;
@@ -640,7 +755,8 @@ impl TargetFs {
                 "symlink target may not contain NUL bytes",
             ));
         }
-        self.run_argv_ok(
+        // Target may be derived from sensitive values; never log raw argv.
+        self.run_argv_ok_mutating_sensitive(
             "/bin/ln",
             &[
                 "-s".to_string(),
@@ -648,6 +764,7 @@ impl TargetFs {
                 target.to_string(),
                 link_path.to_string(),
             ],
+            true,
         )?;
         Ok(())
     }
@@ -668,7 +785,7 @@ impl TargetFs {
         let stage_dir = self.make_staging_dir(&dir)?;
         let tmp = format!("{}/{}", stage_dir, name);
         let result = (|| -> Result<()> {
-            self.run_argv_ok(
+            self.run_argv_ok_mutating_sensitive(
                 "/bin/ln",
                 &[
                     "-s".to_string(),
@@ -676,6 +793,7 @@ impl TargetFs {
                     target.to_string(),
                     tmp.clone(),
                 ],
+                true,
             )?;
             if self.fault() == Some("symlink_drift_before_publish")
                 || self.fault() == Some("symlink_drift_cleanup_fail")
@@ -690,7 +808,7 @@ impl TargetFs {
                     link_path
                 )));
             }
-            self.run_argv_ok(
+            self.run_argv_ok_mutating(
                 "/bin/mv",
                 &[
                     "-T".to_string(),
@@ -709,42 +827,63 @@ impl TargetFs {
             return result;
         }
 
-        // Cleanup is a separate fact. Perform it only after classification.
-        let (payload_ok, dir_ok) = if self.fault() == Some("symlink_cleanup_fail")
+        // Cleanup is a separate fact. Classify rm BEFORE attempting rmdir.
+        let cleanup = if self.fault() == Some("symlink_cleanup_fail")
             || self.fault() == Some("symlink_drift_cleanup_fail")
         {
-            (false, false)
+            CleanupState::Failed
+        } else if self.fault() == Some("symlink_cleanup_rm_indeterminate") {
+            // Simulate rm completion unknown: do not rmdir.
+            CleanupState::Indeterminate
         } else {
             let cleanup_payload = self.run_argv(
                 "/bin/rm",
                 &["-f".to_string(), "--".to_string(), tmp.clone()],
             );
-            let cleanup_dir = self.run_argv("/bin/rmdir", std::slice::from_ref(&stage_dir));
-            (
-                matches!(cleanup_payload, Ok(ref out) if out.is_success()),
-                matches!(cleanup_dir, Ok(ref out) if out.is_success()),
-            )
+            match cleanup_payload {
+                Ok(ref out) if out.is_success() => {
+                    // rm succeeded; only then may rmdir run.
+                    let cleanup_dir = self.run_argv("/bin/rmdir", std::slice::from_ref(&stage_dir));
+                    match cleanup_dir {
+                        Ok(ref out) if out.is_success() => CleanupState::Ok,
+                        Ok(ref out)
+                            if matches!(out.completion, Completion::Indeterminate { .. }) =>
+                        {
+                            CleanupState::Indeterminate
+                        }
+                        _ => CleanupState::Failed,
+                    }
+                }
+                Ok(ref out) if matches!(out.completion, Completion::Indeterminate { .. }) => {
+                    // rm completion unknown: do not rmdir (additional mutation).
+                    CleanupState::Indeterminate
+                }
+                Err(ref e) if e.kind == crate::error::ErrorKind::Indeterminate => {
+                    CleanupState::Indeterminate
+                }
+                _ => CleanupState::Failed,
+            }
         };
 
         match result {
             Ok(()) => {
                 // Destination was published. Cleanup failure is reported after
                 // the known mutation, never as a pre-publication failure.
-                if !payload_ok || !dir_ok {
-                    return Err(SinterError::apply(format!(
-                        "symlink published but staging cleanup failed (payload_ok={} dir_ok={})",
-                        payload_ok, dir_ok
-                    ))
-                    .changed());
+                match cleanup {
+                    CleanupState::Ok => Ok(()),
+                    CleanupState::Indeterminate => Err(SinterError::indeterminate(
+                        "symlink published but staging cleanup completion is unknown",
+                    )
+                    .changed()),
+                    CleanupState::Failed => Err(SinterError::apply(
+                        "symlink published but staging cleanup failed",
+                    )
+                    .changed()),
                 }
-                Ok(())
             }
             Err(e) => {
                 // Pre-publication failure. Preserve the original error kind and
                 // mutation state; cleanup outcome must not rewrite it to changed.
-                if e.kind == crate::error::ErrorKind::Indeterminate {
-                    return Err(e);
-                }
                 Err(e)
             }
         }
@@ -760,7 +899,7 @@ impl TargetFs {
         if self.fault() == Some("rename_indeterminate") {
             return Err(SinterError::indeterminate("injected rename indeterminate"));
         }
-        self.run_argv_ok(
+        self.run_argv_ok_mutating(
             "/bin/mv",
             &[
                 "-T".to_string(),
@@ -770,6 +909,14 @@ impl TargetFs {
                 to.to_string(),
             ],
         )?;
+        // Controlled injection: real rename already published, then completion
+        // is reported as abnormal. Publication is a known mutation.
+        if self.fault() == Some("rename_success_then_abnormal") {
+            return Err(SinterError::indeterminate(
+                "injected abnormal completion after successful rename",
+            )
+            .changed());
+        }
         Ok(())
     }
 
@@ -834,21 +981,36 @@ impl TargetFs {
     }
 
     pub fn resolve_uid(&mut self, spec: &str) -> Result<u32> {
+        self.resolve_uid_sensitive(spec, false)
+    }
+
+    pub fn resolve_uid_sensitive(&mut self, spec: &str, sensitive: bool) -> Result<u32> {
         if let Ok(n) = spec.parse::<u32>() {
             return Ok(n);
         }
-        self.getent_field("/usr/bin/getent", "passwd", spec, 2, "user")
+        self.getent_field("/usr/bin/getent", "passwd", spec, 2, "user", sensitive)
     }
 
     pub fn resolve_gid(&mut self, spec: &str) -> Result<u32> {
+        self.resolve_gid_sensitive(spec, false)
+    }
+
+    pub fn resolve_gid_sensitive(&mut self, spec: &str, sensitive: bool) -> Result<u32> {
         if let Ok(n) = spec.parse::<u32>() {
             return Ok(n);
         }
-        self.getent_field("/usr/bin/getent", "group", spec, 2, "group")
+        self.getent_field("/usr/bin/getent", "group", spec, 2, "group", sensitive)
     }
 
     pub fn primary_gid_of_uid(&mut self, uid: u32) -> Result<u32> {
-        self.getent_field("/usr/bin/getent", "passwd", &uid.to_string(), 3, "uid")
+        self.getent_field(
+            "/usr/bin/getent",
+            "passwd",
+            &uid.to_string(),
+            3,
+            "uid",
+            false,
+        )
     }
 
     fn getent_field(
@@ -858,22 +1020,37 @@ impl TargetFs {
         key: &str,
         field: usize,
         what: &str,
+        sensitive: bool,
     ) -> Result<u32> {
-        let out = self.run_argv(program, &[database.to_string(), key.to_string()])?;
+        let out = self.run_argv_sensitivity(
+            program,
+            &[database.to_string(), key.to_string()],
+            sensitive,
+        )?;
+        let unknown = || {
+            if sensitive {
+                SinterError::apply(format!("unknown {} (value redacted)", what))
+            } else {
+                SinterError::apply(format!("unknown {}: {}", what, key))
+            }
+        };
         match out.completion {
             Completion::Exited(0) => {
                 let text = String::from_utf8_lossy(&out.stdout);
                 let line = text.lines().next().unwrap_or("");
                 let parts: Vec<&str> = line.trim().split(':').collect();
                 if parts.len() > field {
-                    parts[field]
-                        .parse::<u32>()
-                        .map_err(|_| SinterError::apply(format!("unknown {}: {}", what, key)))
+                    parts[field].parse::<u32>().map_err(|_| unknown())
                 } else {
-                    Err(SinterError::apply(format!("unknown {}: {}", what, key)))
+                    Err(unknown())
                 }
             }
-            _ => Err(SinterError::apply(format!("unknown {}: {}", what, key))),
+            Completion::Indeterminate { reason, .. } => Err(SinterError::indeterminate(format!(
+                "account lookup for {} did not complete: {}",
+                if sensitive { "[redacted]" } else { key },
+                reason
+            ))),
+            _ => Err(unknown()),
         }
     }
 
@@ -1165,5 +1342,28 @@ mod tests {
             classify_acl_text("user::rw\ngroup::r--\nother::r--\n"),
             AclClass::Malformed
         ));
+    }
+
+    #[test]
+    fn acl_permission_positions_are_strict() {
+        for ok in ["rwx", "rw-", "r-x", "r--", "-wx", "-w-", "--x", "---"] {
+            assert!(is_valid_acl_perm(ok), "must accept {:?}", ok);
+        }
+        for bad in [
+            "rrr", "www", "xxx", "xrw", "wr-", "xr-", "rw", "rwx-", "", "rwxr",
+        ] {
+            assert!(!is_valid_acl_perm(bad), "must reject {:?}", bad);
+        }
+    }
+
+    #[test]
+    fn xattr_encoded_values_validated() {
+        assert!(is_valid_xattr_encoded(""));
+        assert!(is_valid_xattr_encoded("0sYQ=="));
+        assert!(is_valid_xattr_encoded("0s"));
+        assert!(is_valid_xattr_encoded("0x6162"));
+        assert!(!is_valid_xattr_encoded("garbage"));
+        assert!(!is_valid_xattr_encoded("0s!!!"));
+        assert!(!is_valid_xattr_encoded("0xzz"));
     }
 }

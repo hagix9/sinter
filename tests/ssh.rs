@@ -219,11 +219,10 @@ fn ssh_timeout_after_dispatch_is_indeterminate_and_not_retried() {
     let slow = find(&r, "slow");
     assert_eq!(slow.execution, Execution::Indeterminate);
     assert_eq!(slow.change, Change::Possible);
-    // The operation deadline must cover the whole remote operation, including
-    // teardown. Allow generous slack for connection setup and scheduling.
+    // timeout=1s must return near the deadline, not multi-second overshoot.
     assert!(
-        elapsed < std::time::Duration::from_secs(8),
-        "timeout=1s run() must return well under 8s, took {:?}",
+        elapsed <= std::time::Duration::from_secs(3),
+        "timeout=1s run() must return within 3s, took {:?}",
         elapsed
     );
     // no automatic retry: the command appears exactly once
@@ -237,6 +236,99 @@ fn ssh_timeout_after_dispatch_is_indeterminate_and_not_retried() {
         find(&r, "after").execution,
         Execution::NotRun,
         "fail-fast stops later resources"
+    );
+}
+
+/// SSH must resolve `localhost` (not only IP literals).
+#[test]
+fn ssh_localhost_hostname_connects() {
+    let _s = require_ssh!();
+    let mut s = ssh().unwrap();
+    s.host = "localhost".to_string();
+    let dir = controller_dir("ssh-localhost");
+    let recipe = controller_recipe(
+        &dir,
+        r#"  - id: who
+    type: command
+    with:
+      program: /usr/bin/id
+      args: ["-u"]"#,
+    );
+    let model = sinter::model::load_model(&recipe).unwrap();
+    let opts = sinter::engine::RunOptions {
+        mode: Mode::Apply,
+        sudo: false,
+        target: sinter::engine::TargetSpec { ssh: Some(s) },
+        verbose: false,
+        fault: None,
+    };
+    let engine_result = sinter::engine::Engine::new(model, opts);
+    match engine_result {
+        Err(e) => {
+            // Resolution succeeded: the failure must not be address parsing.
+            assert!(
+                !e.message.contains("invalid SSH address"),
+                "localhost must resolve: {}",
+                e.message
+            );
+            assert!(
+                e.message.contains("host key")
+                    || e.message.contains("known_hosts")
+                    || e.message.contains("handshake")
+                    || e.message.contains("authentication"),
+                "expected host-key/auth outcome after resolution, got: {}",
+                e.message
+            );
+        }
+        Ok(engine) => {
+            let r = engine.run().unwrap();
+            assert_success(&r);
+        }
+    }
+}
+
+/// SSH IP literal still works after hostname fix.
+#[test]
+fn ssh_ip_literal_still_connects() {
+    let _s = require_ssh!();
+    let dir = controller_dir("ssh-ip");
+    let recipe = controller_recipe(
+        &dir,
+        r#"  - id: who
+    type: command
+    with:
+      program: /usr/bin/id
+      args: ["-u"]"#,
+    );
+    let r = run_recipe_target(&recipe, Mode::Apply, false, ssh());
+    assert_success(&r);
+}
+
+/// stdin supplied to a command that consumes it must complete with correct output.
+#[test]
+fn ssh_stdin_supplied_consumed() {
+    let _s = require_ssh!();
+    let Some(mut ex) = executor_for(&require_ssh!(), false) else {
+        skip("could not connect executor");
+        return;
+    };
+    let mut req = sinter::executor::ExecRequest::new("/bin/cat");
+    req.timeout_secs = 5;
+    req.stdin = Some(b"r5-stdin-payload\n".to_vec());
+    req.env.insert(
+        "PATH".to_string(),
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+    );
+    req.env.insert("HOME".to_string(), "/tmp".to_string());
+    let started = std::time::Instant::now();
+    let out = ex.run(&req).expect("ssh cat with stdin must complete");
+    let elapsed = started.elapsed();
+    assert_eq!(out.completion, sinter::executor::Completion::Exited(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "r5-stdin-payload\n");
+    assert!(
+        elapsed <= std::time::Duration::from_secs(3),
+        "stdin cat must finish promptly, took {:?}",
+        elapsed
     );
 }
 
@@ -265,8 +357,35 @@ fn ssh_stdin_none_sends_eof_and_cat_exits_cleanly() {
         cat
     );
     assert!(
-        elapsed < std::time::Duration::from_secs(10),
+        elapsed <= std::time::Duration::from_secs(3),
         "cat-with-EOF must finish promptly, took {:?}",
+        elapsed
+    );
+}
+
+/// Continuous stdout must still honor the operation deadline.
+#[test]
+fn ssh_continuous_stdout_timeout_bounded() {
+    let _s = require_ssh!();
+    let dir = controller_dir("ssh-stdout-loop");
+    let recipe = controller_recipe(
+        &dir,
+        r#"  - id: flood
+    type: command
+    with:
+      program: /bin/sh
+      args: ["-c", "while true; do echo r5-flood; done"]
+      timeout_seconds: 1
+"#,
+    );
+    let started = std::time::Instant::now();
+    let r = run_recipe_target(&recipe, Mode::Apply, false, ssh());
+    let elapsed = started.elapsed();
+    let flood = find(&r, "flood");
+    assert_eq!(flood.execution, Execution::Indeterminate);
+    assert!(
+        elapsed <= std::time::Duration::from_secs(3),
+        "continuous stdout timeout must stay near 1s, took {:?}",
         elapsed
     );
 }

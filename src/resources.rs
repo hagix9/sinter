@@ -341,13 +341,17 @@ impl Engine {
 
         let owner_uid = if let Some((spec, sens)) = &owner {
             let sensitive = *sens || meta_sensitive;
-            Some(self.fs.resolve_uid(spec).map_err(|e| {
-                if sensitive {
-                    redact_msg(&res.id, "unknown user", "resolution failed")
-                } else {
-                    e
-                }
-            })?)
+            Some(
+                self.fs
+                    .resolve_uid_sensitive(spec, sensitive)
+                    .map_err(|e| {
+                        if sensitive {
+                            redact_msg(&res.id, "unknown user", "resolution failed")
+                        } else {
+                            e
+                        }
+                    })?,
+            )
         } else if is_existing {
             None // preserve
         } else {
@@ -356,13 +360,17 @@ impl Engine {
 
         let group_gid = if let Some((spec, sens)) = &group {
             let sensitive = *sens || meta_sensitive;
-            Some(self.fs.resolve_gid(spec).map_err(|e| {
-                if sensitive {
-                    redact_msg(&res.id, "unknown group", "resolution failed")
-                } else {
-                    e
-                }
-            })?)
+            Some(
+                self.fs
+                    .resolve_gid_sensitive(spec, sensitive)
+                    .map_err(|e| {
+                        if sensitive {
+                            redact_msg(&res.id, "unknown group", "resolution failed")
+                        } else {
+                            e
+                        }
+                    })?,
+            )
         } else if is_existing {
             None // preserve
         } else if let Some(uid) = owner_uid {
@@ -674,42 +682,25 @@ impl Engine {
             // Metadata-only change. Ownership is applied before mode so set-ID
             // bits are not transiently held while owned by the wrong principal.
             // Every successful step is recorded so a later failure can never be
-            // reported as change:none.
+            // reported as change:none. Typed error state is preserved.
             let mut mutated = false;
-            let mut failure: Option<String> = None;
+            let mut failure: Option<SinterError> = None;
 
             if stat.uid != enforce_uid || stat.gid != enforce_gid {
                 match self.fs.chown(path, enforce_uid, enforce_gid) {
                     Ok(()) => mutated = true,
-                    Err(e) => failure = Some(e.message),
+                    Err(e) => failure = Some(e),
                 }
             }
             if failure.is_none() && (stat.mode & 0o7777) != enforce_mode {
                 match self.fs.chmod(path, enforce_mode) {
                     Ok(()) => mutated = true,
-                    Err(e) => failure = Some(e.message),
+                    Err(e) => failure = Some(e),
                 }
             }
 
-            if let Some(reason) = failure {
-                let mut r = changed_result_sensitive(res, sensitive);
-                r.execution = Execution::Failed;
-                r.change = if mutated {
-                    Change::Changed
-                } else {
-                    Change::None
-                };
-                r.verification = Verification::NotPerformed;
-                r.reason = Some(format!(
-                    "metadata update failed after {}: {}",
-                    if mutated {
-                        "a partial mutation"
-                    } else {
-                        "no mutation"
-                    },
-                    reason
-                ));
-                return Ok(r);
+            if let Some(e) = failure {
+                return Ok(metadata_failure(res, e, mutated));
             }
 
             // Controlled injection: force a failure between a successful chown
@@ -822,8 +813,15 @@ impl Engine {
         })();
 
         if let Err(e) = prepare {
-            // Nothing has been published; staging cleanup failure must not mask
-            // the primary error but is reported alongside it.
+            // Destination was never published. Staging cleanup is permitted for
+            // unpublished staging, but typed uncertainty must be preserved:
+            // Indeterminate preparation is not a definite ordinary failure.
+            if e.kind == crate::error::ErrorKind::Indeterminate {
+                return Ok(PublishOutcome::Indeterminate(format!(
+                    "{}: staging preparation completion is unknown: {}",
+                    res.id, e.message
+                )));
+            }
             let cleanup_ok = self.cleanup_stage_dir(&stage_dir);
             return Ok(PublishOutcome::FailedBeforePublish(format!(
                 "{}: staging preparation failed: {} (staging cleanup {})",
@@ -871,6 +869,14 @@ impl Engine {
                 // indeterminate rename must not trigger cleanup that could
                 // destroy evidence or rewrite the publication fact.
                 if e.kind == crate::error::ErrorKind::Indeterminate {
+                    // If the rename is already known to have mutated (typed
+                    // mutation state), publication occurred: report after-publish.
+                    if e.mutation == MutationState::Changed {
+                        return Ok(PublishOutcome::FailedAfterPublish(format!(
+                            "{}: publication completed but completion was abnormal: {}",
+                            res.id, e.message
+                        )));
+                    }
                     return Ok(PublishOutcome::Indeterminate(format!(
                         "{}: publication completion is unknown: {}",
                         res.id, e.message
@@ -1208,22 +1214,51 @@ impl Engine {
             },
         };
         let is_existing = existing != ObjKind::Absent;
-        let owner_uid = if let Some((spec, _)) = &owner {
-            Some(self.fs.resolve_uid(spec)?)
+        let meta_sensitive = res.sensitive || res.derived_sensitive;
+        let owner_uid = if let Some((spec, sens)) = &owner {
+            let sensitive = *sens || meta_sensitive;
+            Some(
+                self.fs
+                    .resolve_uid_sensitive(spec, sensitive)
+                    .map_err(|e| {
+                        if sensitive {
+                            redact_msg(&res.id, "unknown user", "resolution failed")
+                        } else {
+                            e
+                        }
+                    })?,
+            )
         } else if is_existing {
             None
         } else {
             Some(self.fs.target_uid)
         };
-        let group_gid = if let Some((spec, _)) = &group {
-            Some(self.fs.resolve_gid(spec)?)
+        let group_gid = if let Some((spec, sens)) = &group {
+            let sensitive = *sens || meta_sensitive;
+            Some(
+                self.fs
+                    .resolve_gid_sensitive(spec, sensitive)
+                    .map_err(|e| {
+                        if sensitive {
+                            redact_msg(&res.id, "unknown group", "resolution failed")
+                        } else {
+                            e
+                        }
+                    })?,
+            )
         } else if is_existing {
             None
         } else if let Some(uid) = owner_uid {
             if uid == self.fs.target_uid {
                 Some(self.fs.target_gid)
             } else {
-                Some(self.fs.primary_gid_of_uid(uid)?)
+                Some(self.fs.primary_gid_of_uid(uid).map_err(|e| {
+                    if meta_sensitive {
+                        redact_msg(&res.id, "unknown primary group", "resolution failed")
+                    } else {
+                        e
+                    }
+                })?)
             }
         } else {
             Some(self.fs.target_gid)
@@ -1354,9 +1389,9 @@ impl Engine {
                 }
                 self.fs.check_trusted_parents(&path)?;
                 self.fs.symlink(&target_val, &path)?;
-                match self.verify_link(res, &path, &target_val) {
+                match self.verify_link(res, &path, &target_val, link_sensitive) {
                     Ok(result) => Ok(result),
-                    Err(e) => Ok(post_mutation_failure(res, e)),
+                    Err(e) => Ok(post_mutation_failure_sensitive(res, e, link_sensitive)),
                 }
             }
             ObjKind::Symlink => {
@@ -1388,9 +1423,9 @@ impl Engine {
                 }
                 self.fs.check_trusted_parents(&path)?;
                 self.fs.symlink_replace(&target_val, &path, &stat)?;
-                match self.verify_link(res, &path, &target_val) {
+                match self.verify_link(res, &path, &target_val, link_sensitive) {
                     Ok(result) => Ok(result),
-                    Err(e) => Ok(post_mutation_failure(res, e)),
+                    Err(e) => Ok(post_mutation_failure_sensitive(res, e, link_sensitive)),
                 }
             }
             other => Err(SinterError::apply(format!(
@@ -1407,22 +1442,28 @@ impl Engine {
         res: &FrozenResource,
         path: &str,
         target: &str,
+        sensitive: bool,
     ) -> Result<ResourceResult> {
         let st = self.fs.inspect(path)?;
         if st.kind != ObjKind::Symlink {
-            let mut r = changed_result(res);
+            let mut r = changed_result_sensitive(res, sensitive);
             r.verification = Verification::Failed;
             r.reason = Some(format!("{} is not a symlink after mutation", path));
             return Ok(r);
         }
         let cur = self.fs.readlink(path)?;
         if cur != target {
-            let mut r = changed_result(res);
+            let mut r = changed_result_sensitive(res, sensitive);
             r.verification = Verification::Failed;
-            r.reason = Some(format!("symlink target mismatch: got {:?}", cur));
+            // Never echo a sensitive desired target in the mismatch reason.
+            r.reason = Some(if sensitive {
+                "symlink target mismatch after mutation".to_string()
+            } else {
+                format!("symlink target mismatch: got {:?}", cur)
+            });
             return Ok(r);
         }
-        let mut r = changed_result(res);
+        let mut r = changed_result_sensitive(res, sensitive);
         r.verification = Verification::Verified;
         Ok(r)
     }
@@ -1453,13 +1494,18 @@ impl Engine {
             .controller_source
             .clone()
             .ok_or_else(|| SinterError::schema(format!("{}: template missing source", res.id)))?;
+        let template_sensitive = res.sensitive || res.derived_sensitive;
         let template_text = std::fs::read_to_string(&source).map_err(|e| {
-            SinterError::apply(format!(
-                "{}: cannot read template {}: {}",
-                res.id,
-                source.display(),
-                e
-            ))
+            if template_sensitive {
+                redact_msg(&res.id, "cannot read template", &format!("{}", e.kind()))
+            } else {
+                SinterError::apply(format!(
+                    "{}: cannot read template {}: {}",
+                    res.id,
+                    source.display(),
+                    e
+                ))
+            }
         })?;
 
         // Template-local vars. Per DESIGN §26.4 these are literal values exposed
@@ -2289,19 +2335,25 @@ impl Engine {
     }
 
     fn observe_service(&mut self, name: &str) -> Result<ServiceObs> {
-        let out = self.fs.systemctl_show(name)?;
+        self.observe_service_sensitive(name, false)
+    }
+
+    fn observe_service_sensitive(&mut self, name: &str, sensitive: bool) -> Result<ServiceObs> {
+        let out = self.fs.systemctl_show_sensitive(name, sensitive)?;
         let text = String::from_utf8_lossy(&out.stdout);
         match out.completion {
             Completion::Indeterminate { reason, .. } => {
                 return Err(SinterError::indeterminate(format!(
                     "service observation for {} did not complete: {}",
-                    name, reason
+                    if sensitive { "[redacted]" } else { name },
+                    reason
                 )));
             }
             Completion::Signaled(s) => {
                 return Err(SinterError::apply(format!(
                     "service observation for {} terminated by signal {}",
-                    name, s
+                    if sensitive { "[redacted]" } else { name },
+                    s
                 )));
             }
             Completion::Exited(_) => {}
@@ -2312,15 +2364,18 @@ impl Engine {
             // observation failure.
             return Err(SinterError::apply(format!(
                 "service observation failed for {}: systemctl exited {:?} ({})",
-                name,
+                if sensitive { "[redacted]" } else { name },
                 out.exit_code(),
                 String::from_utf8_lossy(&out.stderr).trim()
             )));
         }
         if out.stdout_truncated || out.stderr_truncated {
-            return Err(SinterError::indeterminate(format!(
+            // Incomplete capture before any mutating command: this is an
+            // information failure, not mutation uncertainty. Change stays None
+            // when nothing was dispatched.
+            return Err(SinterError::apply(format!(
                 "service observation for {} was truncated or incomplete",
-                name
+                if sensitive { "[redacted]" } else { name }
             )));
         }
         let mut load_state = String::new();
@@ -2342,7 +2397,7 @@ impl Engine {
         {
             return Err(SinterError::apply(format!(
                 "service observation for {} was incomplete",
-                name
+                if sensitive { "[redacted]" } else { name }
             )));
         }
         Ok(ServiceObs {
@@ -2388,7 +2443,8 @@ impl Engine {
         action: &str,
     ) -> Result<HandlerOutcomeState> {
         let name = &h.service;
-        let obs = match self.observe_service(name) {
+        let sensitive = h.sensitive;
+        let obs = match self.observe_service_sensitive(name, sensitive) {
             Ok(obs) => obs,
             Err(e) => {
                 // Observation failure is a handler outcome, not an outer report
@@ -2418,6 +2474,7 @@ impl Engine {
         let mut req = ExecRequest::new("/usr/bin/systemctl");
         req.args = vec![action.to_string(), name.to_string()];
         req.env = baseline_env(self.fs.home_env());
+        req.sensitive = sensitive;
         let out = self.fs.exec(&req)?;
         match out.completion {
             Completion::Indeterminate { .. } => Ok(HandlerOutcomeState::Indeterminate),
@@ -2427,7 +2484,7 @@ impl Engine {
                     return Ok(HandlerOutcomeState::Failed);
                 }
                 // Verification.
-                let after = match self.observe_service(name) {
+                let after = match self.observe_service_sensitive(name, sensitive) {
                     Ok(after) => after,
                     Err(e) => {
                         return Ok(if e.kind == crate::error::ErrorKind::Indeterminate {
@@ -2553,7 +2610,15 @@ fn metadata_failure(res: &FrozenResource, e: SinterError, mutated: bool) -> Reso
 }
 
 fn post_mutation_failure(res: &FrozenResource, e: SinterError) -> ResourceResult {
-    let mut r = changed_result(res);
+    post_mutation_failure_sensitive(res, e, res.sensitive || res.derived_sensitive)
+}
+
+fn post_mutation_failure_sensitive(
+    res: &FrozenResource,
+    e: SinterError,
+    sensitive: bool,
+) -> ResourceResult {
+    let mut r = changed_result_sensitive(res, sensitive);
     let indeterminate = e.kind == crate::error::ErrorKind::Indeterminate;
     r.execution = if indeterminate {
         Execution::Indeterminate

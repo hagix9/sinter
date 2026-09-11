@@ -558,13 +558,8 @@ pub struct SshExecutor {
 impl SshExecutor {
     pub fn connect(cfg: &SshConfig, sudo: bool) -> Result<Self> {
         let setup_deadline = Instant::now() + Duration::from_secs(SSH_SETUP_BUDGET_SECS);
-        let addr = format!("{}:{}", cfg.host, cfg.port);
-        let sock: std::net::SocketAddr = addr
-            .parse()
-            .map_err(|e| SinterError::connect(format!("invalid SSH address {}: {}", addr, e)))?;
+        let tcp = connect_tcp_bounded(&cfg.host, cfg.port, setup_deadline)?;
         let remaining = setup_remaining(setup_deadline)?;
-        let tcp = std::net::TcpStream::connect_timeout(&sock, remaining)
-            .map_err(|e| SinterError::connect(format!("cannot connect to {}: {}", addr, e)))?;
         let sock_timeout = Some(remaining.min(Duration::from_secs(30)));
         tcp.set_read_timeout(sock_timeout).map_err(|e| {
             SinterError::connect(format!("cannot set SSH socket read timeout: {}", e))
@@ -580,9 +575,14 @@ impl SshExecutor {
         let handshake_timeout = setup_remaining(setup_deadline)?;
         session.set_timeout(handshake_timeout.as_millis().clamp(1, u32::MAX as u128) as u32);
         session.handshake().map_err(|e| {
-            SinterError::connect(format!("SSH handshake with {} failed: {}", addr, e))
+            SinterError::connect(format!(
+                "SSH handshake with {}:{} failed: {}",
+                cfg.host, cfg.port, e
+            ))
         })?;
 
+        // Host-key identity is always the originally requested host string,
+        // never a resolved IP (SSH known_hosts semantics).
         verify_host_key(&session, cfg)?;
 
         let auth_timeout = setup_remaining(setup_deadline)?;
@@ -653,10 +653,16 @@ impl SshExecutor {
             .handle_extended_data(ssh2::ExtendedData::Normal)
             .ok();
         if let Err(e) = exec_until(&mut channel, &line, deadline) {
-            // Dispatch may or may not have begun; treat post-channel errors as
-            // indeterminate only when the error says so.
+            // Bound teardown by the residual deadline before any close/Drop
+            // that could re-enter a blocking wait with a stale timeout.
+            let residual = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or(Duration::from_millis(100))
+                .min(Duration::from_millis(500));
+            self.session
+                .set_timeout(residual.as_millis().clamp(1, u32::MAX as u128) as u32);
             let _ = channel.close();
-            self.session.set_blocking(true);
+            drop(channel);
             return Err(e);
         }
 
@@ -734,25 +740,14 @@ impl SshExecutor {
                             progressed = true;
                         }
                         None => {
-                            let _ = channel.flush();
-                            match channel.send_eof() {
-                                Ok(()) => {
-                                    stdin_closed = true;
-                                    progressed = true;
-                                }
-                                Err(e)
-                                    if e.code() == ssh2::ErrorCode::Session(-37)
-                                        && Instant::now() < deadline =>
-                                {
-                                    // EAGAIN; retry next iteration.
-                                }
-                                Err(e) => {
-                                    return Err(SinterError::indeterminate(format!(
-                                        "SSH stdin EOF failed after dispatch: {}",
-                                        e
-                                    )));
-                                }
-                            }
+                            flush_and_eof(&mut channel, deadline).map_err(|e| {
+                                SinterError::indeterminate(format!(
+                                    "SSH stdin EOF failed after dispatch: {}",
+                                    e
+                                ))
+                            })?;
+                            stdin_closed = true;
+                            progressed = true;
                         }
                     }
                 }
@@ -850,6 +845,50 @@ fn setup_remaining(deadline: Instant) -> Result<Duration> {
         .checked_duration_since(Instant::now())
         .filter(|d| !d.is_zero())
         .ok_or_else(|| SinterError::connect("SSH setup budget exceeded before operation completed"))
+}
+
+/// Connect to host:port with a finite remaining setup budget. Supports IPv4
+/// literals, IPv6 literals, `localhost`, and DNS hostnames. Multiple resolved
+/// addresses share ONE budget; the budget is not reset per address.
+fn connect_tcp_bounded(
+    host: &str,
+    port: u16,
+    setup_deadline: Instant,
+) -> Result<std::net::TcpStream> {
+    use std::net::ToSocketAddrs;
+    let addr = format!("{}:{}", host, port);
+    // Fast path: literal socket address (IPv4/IPv6).
+    if let Ok(sock) = addr.parse::<std::net::SocketAddr>() {
+        let remaining = setup_remaining(setup_deadline)?;
+        return std::net::TcpStream::connect_timeout(&sock, remaining)
+            .map_err(|e| SinterError::connect(format!("cannot connect to {}: {}", addr, e)));
+    }
+    // Hostname path: resolve then try each address under the same budget.
+    let addrs: Vec<std::net::SocketAddr> = addr
+        .to_socket_addrs()
+        .map_err(|e| SinterError::connect(format!("cannot resolve SSH address {}: {}", addr, e)))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(SinterError::connect(format!(
+            "SSH address {} resolved to no endpoints",
+            addr
+        )));
+    }
+    let mut last_err: Option<std::io::Error> = None;
+    for sock in addrs {
+        let remaining = setup_remaining(setup_deadline)?;
+        match std::net::TcpStream::connect_timeout(&sock, remaining) {
+            Ok(tcp) => return Ok(tcp),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(SinterError::connect(format!(
+        "cannot connect to {}: {}",
+        addr,
+        last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "all resolved addresses failed".to_string())
+    )))
 }
 
 fn remote_completion_until(
@@ -1056,9 +1095,47 @@ fn write_all_nonblocking(
             Err(e) => return Err(e),
         }
     }
-    let _ = channel.flush();
-    let _ = channel.send_eof();
-    Ok(())
+    flush_and_eof(channel, deadline)
+}
+
+/// Flush pending stdin bytes and send EOF under the operation deadline.
+/// EAGAIN retries; other failures are reported, never silently ignored.
+fn flush_and_eof(channel: &mut ssh2::Channel, deadline: Instant) -> std::io::Result<()> {
+    loop {
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "SSH stdin flush deadline exceeded",
+            ));
+        }
+        match channel.flush() {
+            Ok(()) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    loop {
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "SSH stdin EOF deadline exceeded",
+            ));
+        }
+        match channel.send_eof() {
+            Ok(()) => return Ok(()),
+            Err(e) if e.code() == ssh2::ErrorCode::Session(-37) => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => {
+                return Err(std::io::Error::other(format!(
+                    "SSH stdin EOF failed: {}",
+                    e
+                )))
+            }
+        }
+    }
 }
 
 fn wait_readable(fd: std::os::raw::c_int, timeout: Duration) {
