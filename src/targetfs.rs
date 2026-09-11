@@ -33,8 +33,8 @@ pub struct Stat {
     pub size: u64,
     pub dev: u64,
     pub ino: u64,
-    pub mtime: u64,
-    pub ctime: u64,
+    pub mtime: String,
+    pub ctime: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -270,7 +270,7 @@ impl TargetFs {
             "/usr/bin/stat",
             &[
                 "-c".to_string(),
-                "%F|%a|%u|%g|%s|%d|%i|%Y|%Z".to_string(),
+                "%F|%a|%u|%g|%s|%d|%i|%y|%z".to_string(),
                 "--".to_string(),
                 path.to_string(),
             ],
@@ -381,16 +381,40 @@ impl TargetFs {
                 inspected: false,
             });
         }
-        let text = String::from_utf8_lossy(&out.stdout);
+        if out.stdout_truncated || out.stderr_truncated {
+            return Ok(Xattrs {
+                attrs: BTreeMap::new(),
+                inspected: false,
+            });
+        }
+        let text = match std::str::from_utf8(&out.stdout) {
+            Ok(text) => text,
+            Err(_) => {
+                return Ok(Xattrs {
+                    attrs: BTreeMap::new(),
+                    inspected: false,
+                })
+            }
+        };
         let mut attrs = BTreeMap::new();
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            if let Some((k, v)) = line.split_once('=') {
-                attrs.insert(k.trim().to_string(), v.trim().to_string());
+            let Some((k, v)) = line.split_once('=') else {
+                return Ok(Xattrs {
+                    attrs,
+                    inspected: false,
+                });
+            };
+            if k.trim().is_empty() {
+                return Ok(Xattrs {
+                    attrs,
+                    inspected: false,
+                });
             }
+            attrs.insert(k.trim().to_string(), v.trim().to_string());
         }
 
         // Detect POSIX ACLs honestly. getfattr may not surface
@@ -407,8 +431,13 @@ impl TargetFs {
             );
             match acl {
                 Ok(o) => match o.completion {
-                    Completion::Exited(0) => {
-                        let acl_text = String::from_utf8_lossy(&o.stdout);
+                    Completion::Exited(0) if !o.stdout_truncated && !o.stderr_truncated => {
+                        let Ok(acl_text) = std::str::from_utf8(&o.stdout) else {
+                            return Ok(Xattrs {
+                                attrs,
+                                inspected: false,
+                            });
+                        };
                         // A non-trivial ACL is present if there is any entry
                         // other than owner/group/other base entries.
                         let has_extended = acl_text.lines().any(|l| {
@@ -416,10 +445,11 @@ impl TargetFs {
                             if l.is_empty() || l.starts_with('#') {
                                 return false;
                             }
-                            let before_colon = l.split(':').next().unwrap_or("");
-                            before_colon != "user"
-                                && before_colon != "group"
-                                && before_colon != "other"
+                            let fields: Vec<_> = l.split(':').collect();
+                            !matches!(
+                                fields.as_slice(),
+                                ["user", "", _] | ["group", "", _] | ["other", "", _]
+                            )
                         });
                         if has_extended {
                             attrs
@@ -808,8 +838,8 @@ pub fn absent_stat() -> Stat {
         size: 0,
         dev: 0,
         ino: 0,
-        mtime: 0,
-        ctime: 0,
+        mtime: String::new(),
+        ctime: String::new(),
     }
 }
 
@@ -849,12 +879,8 @@ fn parse_stat_line(text: &str) -> std::result::Result<Stat, String> {
     let ino = parts[6]
         .parse()
         .map_err(|e: std::num::ParseIntError| e.to_string())?;
-    let mtime = parts[7]
-        .parse()
-        .map_err(|e: std::num::ParseIntError| e.to_string())?;
-    let ctime = parts[8]
-        .parse()
-        .map_err(|e: std::num::ParseIntError| e.to_string())?;
+    let mtime = parts[7].to_string();
+    let ctime = parts[8].to_string();
     Ok(Stat {
         kind,
         mode,

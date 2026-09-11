@@ -288,12 +288,16 @@ pub struct LocalExecutor {
 
 impl LocalExecutor {
     pub fn new(sudo: bool) -> Result<Self> {
-        // HOME is intentionally left empty here. It is resolved from the
-        // account database in `target_identity` so the ambient controller
-        // environment can never leak into target execution.
+        // Resolve the default working directory before capability probes run.
+        // The controller environment is never used for target execution.
+        let home = if sudo {
+            "/root".to_string()
+        } else {
+            resolve_local_home(unsafe { libc::getuid() })?
+        };
         Ok(LocalExecutor {
             sudo,
-            home: String::new(),
+            home,
             log: Vec::new(),
         })
     }

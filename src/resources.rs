@@ -1,7 +1,7 @@
 use crate::engine::{command_register_map, unknown_result, Engine, Mode};
 use crate::error::{MutationState, Result, SinterError};
 use crate::executor::{Completion, ExecRequest, Output};
-use crate::expressions::{eval_boolean, parse_expr, EvalVal, Scope};
+use crate::expressions::{eval_boolean, eval_value_interpolated, parse_expr, EvalVal, Scope};
 use crate::model::FrozenResource;
 use crate::paths::{mode_to_string, parent_and_name, parse_mode};
 use crate::result::Diff;
@@ -833,7 +833,15 @@ impl Engine {
         }
         // Remove the staging payload if present, then the directory.
         let payload = format!("{}/payload", stage_dir);
-        let _ = self.fs.remove_file(&payload);
+        match self.fs.inspect(&payload) {
+            Ok(stat) if stat.kind == ObjKind::Absent => {}
+            Ok(_) => {
+                if self.fs.remove_file(&payload).is_err() {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+        }
         self.fs.rmdir(stage_dir).is_ok()
     }
 
@@ -1064,8 +1072,14 @@ impl Engine {
                     return Ok(r);
                 }
                 self.fs.check_trusted_parents(&path)?;
-                self.fs.chmod(&path, mode)?;
-                self.fs.chown(&path, uid, gid)?;
+                let mut mutated = false;
+                if let Err(e) = self.fs.chown(&path, uid, gid) {
+                    return Ok(metadata_failure(res, e, mutated));
+                }
+                mutated = true;
+                if let Err(e) = self.fs.chmod(&path, mode) {
+                    return Ok(metadata_failure(res, e, mutated));
+                }
                 self.verify_directory(res, &path, uid, gid, mode)
             }
             other => Err(SinterError::apply(format!(
@@ -1915,7 +1929,7 @@ impl Engine {
         let obs = self.observe_service(&name)?;
 
         if obs.load_state == "not-found" {
-            if self.opts.mode == Mode::Plan && self.service_has_present_package_dep(res) {
+            if self.opts.mode == Mode::Plan && self.service_has_present_package_dep(res)? {
                 let mut r = unknown_result(res);
                 r.reason = Some("deferred/unknown until dependency apply".into());
                 r.verification = Verification::NotPerformed;
@@ -2034,8 +2048,9 @@ impl Engine {
             ("stopped", Some(en)) => {
                 if state_needs == Some(true) {
                     if let Err(e) = self.stop_and_reset(&name) {
-                        return Ok(service_step_failure(res, e, true));
+                        return Ok(service_step_failure(res, e, mutated));
                     }
+                    mutated = true;
                 }
                 if enabled_needs {
                     if let Err(e) = runit(self, &[if en { "enable" } else { "disable" }, &name]) {
@@ -2053,8 +2068,9 @@ impl Engine {
             ("stopped", None) => {
                 if state_needs == Some(true) {
                     if let Err(e) = self.stop_and_reset(&name) {
-                        return Ok(service_step_failure(res, e, true));
+                        return Ok(service_step_failure(res, e, mutated));
                     }
+                    mutated = true;
                 }
             }
             ("", Some(en)) => {
@@ -2069,7 +2085,10 @@ impl Engine {
         }
 
         // Re-observe and verify every requested dimension.
-        let after = self.observe_service(&name)?;
+        let after = match self.observe_service(&name) {
+            Ok(after) => after,
+            Err(e) => return Ok(service_step_failure(res, e, mutated)),
+        };
         let mut ok = true;
         let mut detail = String::new();
         if let Some(want) = &want_state {
@@ -2137,14 +2156,12 @@ impl Engine {
             // systemctl returns non-zero for an unknown unit but still prints
             // LoadState=not-found; a non-zero with no recognizable output is an
             // observation failure.
-            if !text.contains("LoadState=") {
-                return Err(SinterError::apply(format!(
-                    "service observation failed for {}: systemctl exited {:?} ({})",
-                    name,
-                    out.exit_code(),
-                    String::from_utf8_lossy(&out.stderr).trim()
-                )));
-            }
+            return Err(SinterError::apply(format!(
+                "service observation failed for {}: systemctl exited {:?} ({})",
+                name,
+                out.exit_code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
         }
         let mut load_state = String::new();
         let mut active_state = String::new();
@@ -2159,7 +2176,10 @@ impl Engine {
                 }
             }
         }
-        if load_state.is_empty() || active_state.is_empty() || unit_file_state.is_empty() {
+        if load_state.is_empty()
+            || active_state.is_empty()
+            || (unit_file_state.is_empty() && load_state != "not-found")
+        {
             return Err(SinterError::apply(format!(
                 "service observation for {} was incomplete",
                 name
@@ -2172,19 +2192,28 @@ impl Engine {
         })
     }
 
-    fn service_has_present_package_dep(&self, res: &FrozenResource) -> bool {
+    fn service_has_present_package_dep(&self, res: &FrozenResource) -> Result<bool> {
         for dep in &res.depends_on {
             if let Some(d) = self.model.resources.iter().find(|r| &r.id == dep) {
                 if d.type_ == "package" {
-                    if let Some(Value::Str(s)) = d.with.get("state") {
-                        if s == "present" {
-                            return true;
+                    if let Some(value) = d.with.get("state") {
+                        let evaluated =
+                            eval_value_interpolated(value, &self.scope(None, None, None)).map_err(
+                                |e| {
+                                    SinterError::plan(format!(
+                                        "{}: could not evaluate package dependency state: {}",
+                                        res.id, e
+                                    ))
+                                },
+                            )?;
+                        if matches!(evaluated.val, Some(Value::Str(s)) if s == "present") {
+                            return Ok(true);
                         }
                     }
                 }
             }
         }
-        false
+        Ok(false)
     }
 
     // -----------------------------------------------------------------------
@@ -2300,6 +2329,28 @@ fn service_step_failure(res: &FrozenResource, e: SinterError, mutated: bool) -> 
         Change::Changed
     } else {
         Change::None
+    };
+    r.verification = if r.execution == Execution::Indeterminate {
+        Verification::Unknown
+    } else {
+        Verification::NotPerformed
+    };
+    r.reason = Some(e.message);
+    r
+}
+
+fn metadata_failure(res: &FrozenResource, e: SinterError, mutated: bool) -> ResourceResult {
+    let mut r = changed_result(res);
+    r.execution = if e.kind == crate::error::ErrorKind::Indeterminate {
+        Execution::Indeterminate
+    } else {
+        Execution::Failed
+    };
+    r.change = match e.mutation {
+        MutationState::Changed => Change::Changed,
+        MutationState::Possible => Change::Possible,
+        MutationState::None if mutated => Change::Changed,
+        MutationState::None => Change::None,
     };
     r.verification = if r.execution == Execution::Indeterminate {
         Verification::Unknown

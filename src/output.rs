@@ -70,7 +70,7 @@ fn render_text(
             r.type_,
             if r.unknown { "unknown" } else { "known" },
             r.disposition.label(),
-            reason.unwrap_or_default()
+            sanitize_line(&reason.unwrap_or_default())
         )?;
         if let Some(d) = &r.diff {
             match &d.body {
@@ -124,10 +124,10 @@ fn render_text(
                 out,
                 "  {:?}  {} -> {} {} {}",
                 h.state,
-                h.id,
+                sanitize_line(&h.id),
                 h.action,
                 service,
-                reason.unwrap_or_default()
+                sanitize_line(&reason.unwrap_or_default())
             )?;
         }
     }
