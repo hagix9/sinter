@@ -374,7 +374,7 @@ fn ssh_continuous_stdout_timeout_bounded() {
     type: command
     with:
       program: /bin/sh
-      args: ["-c", "while true; do echo r5-flood; done"]
+      args: ["-c", "while true; do echo r6-flood; done"]
       timeout_seconds: 1
 "#,
     );
@@ -386,6 +386,52 @@ fn ssh_continuous_stdout_timeout_bounded() {
     assert!(
         elapsed <= std::time::Duration::from_secs(3),
         "continuous stdout timeout must stay near 1s, took {:?}",
+        elapsed
+    );
+}
+
+/// Large stdin to /bin/cat must full-duplex (write while reading) and not
+/// deadlock until the timeout. Payload exceeds typical SSH channel windows.
+#[test]
+fn ssh_large_stdin_cat_full_duplex_no_deadlock() {
+    let _s = require_ssh!();
+    let Some(mut ex) = executor_for(&require_ssh!(), false) else {
+        skip("could not connect executor");
+        return;
+    };
+    // 256 KiB is large enough to fill default SSH channel windows while
+    // remaining under the 1 MiB capture cap.
+    let payload_size = 256 * 1024;
+    let mut payload = Vec::with_capacity(payload_size);
+    for i in 0..payload_size {
+        payload.push(b'a' + (i % 26) as u8);
+    }
+    let mut req = sinter::executor::ExecRequest::new("/bin/cat");
+    req.timeout_secs = 10;
+    req.stdin = Some(payload.clone());
+    req.env.insert(
+        "PATH".to_string(),
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+    );
+    req.env.insert("HOME".to_string(), "/tmp".to_string());
+    let started = std::time::Instant::now();
+    let out = ex.run(&req).expect("large stdin cat must complete");
+    let elapsed = started.elapsed();
+    assert_eq!(
+        out.completion,
+        sinter::executor::Completion::Exited(0),
+        "cat must exit 0"
+    );
+    assert_eq!(out.stdout.len(), payload_size, "payload must round-trip");
+    assert_eq!(out.stdout, payload, "payload bytes must match");
+    assert!(
+        !out.stdout_truncated,
+        "256KiB payload must fit under capture cap"
+    );
+    // Must finish well before the 10s timeout under localhost conditions.
+    assert!(
+        elapsed <= std::time::Duration::from_secs(5),
+        "large stdin cat must not approach timeout; took {:?}",
         elapsed
     );
 }

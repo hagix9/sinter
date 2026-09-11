@@ -672,8 +672,12 @@ impl SshExecutor {
         let mut err_trunc = false;
         let mut stdout_eof = false;
         let mut stderr_eof = false;
-        let mut stdin = req.stdin.clone();
-        let mut stdin_closed = false;
+        // Incremental stdin state for full-duplex progress. Writing all stdin
+        // before draining can deadlock once the SSH channel window fills
+        // (e.g. large payload to /bin/cat).
+        let stdin_data = req.stdin.clone();
+        let mut stdin_off = 0usize;
+        let mut stdin_eof_sent = false;
 
         let result: Result<()> = (|| {
             while !(stdout_eof && stderr_eof) {
@@ -684,6 +688,9 @@ impl SshExecutor {
                     )));
                 }
                 let mut progressed = false;
+
+                // Drain stdout/stderr while writing so backpressure cannot stall
+                // a full-duplex command.
                 if !stdout_eof {
                     match drain_stream(
                         &mut channel,
@@ -724,29 +731,57 @@ impl SshExecutor {
                     }
                 }
 
-                // Always terminate stdin exactly once after dispatch, matching
-                // local `/dev/null` semantics so commands waiting on EOF (e.g.
-                // `/bin/cat`) can exit. EOF is also bounded by the deadline.
-                if !stdin_closed {
-                    match stdin.take() {
-                        Some(data) => {
-                            write_all_nonblocking(&mut channel, &data, deadline).map_err(|e| {
-                                SinterError::indeterminate(format!(
-                                    "SSH stdin write failed after dispatch: {}",
-                                    e
-                                ))
-                            })?;
-                            stdin_closed = true;
-                            progressed = true;
+                // Incremental stdin write / EOF under the same deadline.
+                if !stdin_eof_sent {
+                    match stdin_data.as_ref() {
+                        Some(data) if stdin_off < data.len() => {
+                            if Instant::now() >= deadline {
+                                return Err(SinterError::indeterminate(format!(
+                                    "SSH stdin write timed out after {}s",
+                                    req.timeout_secs
+                                )));
+                            }
+                            match channel.write(&data[stdin_off..]) {
+                                Ok(0) => {
+                                    return Err(SinterError::indeterminate(
+                                        "SSH stdin write returned zero bytes after dispatch",
+                                    ))
+                                }
+                                Ok(n) => {
+                                    stdin_off += n;
+                                    progressed = true;
+                                    if stdin_off >= data.len() {
+                                        flush_and_eof(&mut channel, deadline).map_err(|e| {
+                                            SinterError::indeterminate(format!(
+                                                "SSH stdin EOF failed after dispatch: {}",
+                                                e
+                                            ))
+                                        })?;
+                                        stdin_eof_sent = true;
+                                    }
+                                }
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    // Channel window full: drain first, then retry.
+                                }
+                                Err(e) => {
+                                    return Err(SinterError::indeterminate(format!(
+                                        "SSH stdin write failed after dispatch: {}",
+                                        e
+                                    )))
+                                }
+                            }
                         }
-                        None => {
+                        _ => {
+                            // No stdin payload (or already fully written path
+                            // handled above): send EOF so commands like /bin/cat
+                            // can terminate, matching local /dev/null semantics.
                             flush_and_eof(&mut channel, deadline).map_err(|e| {
                                 SinterError::indeterminate(format!(
                                     "SSH stdin EOF failed after dispatch: {}",
                                     e
                                 ))
                             })?;
-                            stdin_closed = true;
+                            stdin_eof_sent = true;
                             progressed = true;
                         }
                     }
@@ -1060,42 +1095,6 @@ fn drain_stream<R: Read>(
             }
         }
     }
-}
-
-fn write_all_nonblocking(
-    channel: &mut ssh2::Channel,
-    data: &[u8],
-    deadline: Instant,
-) -> std::io::Result<()> {
-    let mut off = 0;
-    while off < data.len() {
-        if Instant::now() >= deadline {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "SSH operation deadline exceeded",
-            ));
-        }
-        match channel.write(&data[off..]) {
-            Ok(0) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WriteZero,
-                    "wrote zero bytes",
-                ))
-            }
-            Ok(n) => off += n,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if Instant::now() >= deadline {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "SSH operation deadline exceeded",
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    flush_and_eof(channel, deadline)
 }
 
 /// Flush pending stdin bytes and send EOF under the operation deadline.

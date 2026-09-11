@@ -670,12 +670,10 @@ impl TargetFs {
     pub fn set_metadata(&mut self, path: &str, mode: u32, uid: u32, gid: u32) -> Result<()> {
         self.guard_mut()?;
         self.chown(path, uid, gid)?;
+        // chown already mutated. Any later chmod failure — including
+        // Indeterminate — must preserve the known change.
         if let Err(e) = self.chmod(path, mode) {
-            return Err(if e.kind == crate::error::ErrorKind::Indeterminate {
-                e
-            } else {
-                e.changed()
-            });
+            return Err(e.changed());
         }
         Ok(())
     }

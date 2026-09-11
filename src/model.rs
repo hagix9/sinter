@@ -983,7 +983,10 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                     || value_references_sensitive_var(&r.with["source"], &sensitive_var_names);
                 fr.controller_source = Some(resolve_source(&r.origin, &source).map_err(|e| {
                     if source_sensitive {
-                        SinterError::schema(format!("{}: source validation failed", resource_ctx))
+                        SinterError::schema(format!(
+                            "{}: source validation failed (value redacted)",
+                            resource_ctx
+                        ))
                     } else {
                         e
                     }
@@ -1093,12 +1096,20 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
         if fr.type_ == "template" {
             if let Some(src) = &fr.controller_source {
                 let body = std::fs::read_to_string(src).map_err(|e| {
-                    SinterError::schema(format!(
-                        "{}: cannot read template {}: {}",
-                        resource_ctx,
-                        src.display(),
-                        e
-                    ))
+                    if r.sensitive {
+                        SinterError::schema(format!(
+                            "{}: cannot read template (value redacted): {}",
+                            resource_ctx,
+                            e.kind()
+                        ))
+                    } else {
+                        SinterError::schema(format!(
+                            "{}: cannot read template {}: {}",
+                            resource_ctx,
+                            src.display(),
+                            e
+                        ))
+                    }
                 })?;
                 let mut body_regs: BTreeSet<String> = BTreeSet::new();
                 for tok in extract_interpolation_exprs(&body) {

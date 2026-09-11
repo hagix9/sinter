@@ -1960,3 +1960,217 @@ handlers:
         "sensitive handler systemctl must not appear raw"
     );
 }
+
+// ===========================================================================
+// Sixth remediation pass
+// ===========================================================================
+
+/// systemctl start on a failing unit can transition inactive -> failed while
+/// exiting nonzero. That is a real state change: must not be Change::None.
+#[test]
+fn systemctl_start_nonzero_after_state_transition_is_not_none() {
+    if !sudo_available() || !std::path::Path::new("/run/systemd/system").exists() {
+        skip_or_fail("requires systemd and passwordless sudo");
+        return;
+    }
+    let unit = "sinter-r6-fail-start.service";
+    let unit_path = format!("/etc/systemd/system/{}", unit);
+    let _ = std::process::Command::new("sudo")
+        .args(["-n", "/bin/sh", "-c"])
+        .arg(format!(
+            "printf '%s\\n' '[Unit]' 'Description=sinter r6 fail start' '[Service]' 'Type=oneshot' 'ExecStart=/bin/false' > {unit_path} && systemctl daemon-reload && systemctl reset-failed {unit} >/dev/null 2>&1; systemctl stop {unit} >/dev/null 2>&1; true",
+            unit_path = unit_path,
+            unit = unit
+        ))
+        .status();
+    let before = std::process::Command::new("systemctl")
+        .args(["show", "-p", "ActiveState", "--value", unit])
+        .output()
+        .unwrap();
+    let before = String::from_utf8_lossy(&before.stdout).trim().to_string();
+    assert_ne!(before, "active", "fixture must start from non-active");
+
+    let dir = trusted_root("r6-start-nonzero");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: s\n    type: service\n    with:\n      name: {}\n      state: running\n",
+            unit
+        ),
+    );
+    let r = run_recipe(&recipe, Mode::Apply, true);
+    let s = find(&r, "s");
+    let after = std::process::Command::new("systemctl")
+        .args(["show", "-p", "ActiveState", "--value", unit])
+        .output()
+        .unwrap();
+    let after = String::from_utf8_lossy(&after.stdout).trim().to_string();
+    // The start attempt is expected to fail and typically leaves the unit failed.
+    assert!(
+        s.change != Change::None || after == before,
+        "start nonzero with state transition must not report change=none: {:?} before={} after={}",
+        s,
+        before,
+        after
+    );
+    assert_ne!(
+        s.change,
+        Change::None,
+        "systemctl start nonzero after possible mutation: {:?}",
+        s
+    );
+    // Cleanup
+    let _ = std::process::Command::new("sudo")
+        .args(["-n", "/bin/sh", "-c"])
+        .arg(format!(
+            "systemctl stop {unit} >/dev/null 2>&1; systemctl reset-failed {unit} >/dev/null 2>&1; rm -f {unit_path}; systemctl daemon-reload",
+            unit = unit,
+            unit_path = unit_path
+        ))
+        .status();
+}
+
+/// chown/metadata step succeeds then later step is Indeterminate: known
+/// Changed must not be weakened to Possible.
+#[test]
+fn chmod_success_then_abnormal_preserves_changed_not_possible() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = trusted_root("r6-chmod-keep-changed");
+    let out = dir.join("f");
+    std::fs::write(&out, "x").unwrap();
+    set_mode(&out, 0o600);
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: f\n    type: file\n    with:\n      path: {}\n      mode: \"0644\"\n",
+            out.display()
+        ),
+    );
+    let r = run_recipe_fault(&recipe, Mode::Apply, "chmod_success_then_abnormal");
+    let f = find(&r, "f");
+    let after = std::fs::metadata(&out).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(after, 0o644, "chmod must have applied");
+    assert_eq!(
+        f.change,
+        Change::Changed,
+        "known mutation must remain Changed, not Possible: {:?}",
+        f
+    );
+}
+
+/// Sensitive template resource: freeze-time body read failure must not leak path.
+#[test]
+fn sensitive_template_freeze_read_error_no_leak() {
+    use std::process::Command;
+    let dir = trusted_root("r6-tmpl-freeze");
+    let sentinel = "R6_SECRET_TMPL_FREEZE_3c9d";
+    // Source exists at validate time but is unreadable (mode 000). Load will
+    // succeed resolve_source then fail body read during freeze.
+    let src = dir.join("unreadable.tmpl");
+    std::fs::write(&src, "{{ registers.x.stdout }}").unwrap();
+    set_mode(&src, 0o000);
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: t\n    type: template\n    sensitive: true\n    with:\n      path: {}\n      source: {}\n",
+            dir.join("out").display(),
+            src.display()
+        ),
+    );
+    let outp = Command::new(env!("CARGO_BIN_EXE_sinter"))
+        .args(["validate", recipe.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&outp.stdout),
+        String::from_utf8_lossy(&outp.stderr)
+    );
+    set_mode(&src, 0o644);
+    // Either validation fails on unreadable body (redacted) or succeeds.
+    // The sentinel path fragment must never appear.
+    assert!(
+        !combined.contains(&sentinel.to_string()) && !combined.contains(src.to_str().unwrap()),
+        "sensitive template path leaked: {combined}"
+    );
+}
+
+/// Sensitive service resource: systemctl CommandRecord must not contain the
+/// raw unit name.
+#[test]
+fn sensitive_service_command_record_redacted() {
+    if !sudo_available() || !std::path::Path::new("/run/systemd/system").exists() {
+        skip_or_fail("requires systemd and sudo");
+        return;
+    }
+    let _svc = lock_service();
+    let dir = trusted_root("r6-svc-sens");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        r#"version: 1
+resources:
+  - id: s
+    type: service
+    sensitive: true
+    with:
+      name: ssh
+      enabled: true
+"#,
+    );
+    let model = sinter::model::load_model(&recipe).unwrap();
+    let opts = sinter::engine::RunOptions {
+        mode: Mode::Apply,
+        sudo: true,
+        target: sinter::engine::TargetSpec { ssh: None },
+        verbose: false,
+        fault: None,
+    };
+    let engine = sinter::engine::Engine::new(model, opts).unwrap();
+    let report = engine.run().unwrap();
+    for rec in &report.commands {
+        let joined = format!("{} {:?}", rec.program, rec.args);
+        assert!(
+            rec.sensitive || !joined.contains("ssh"),
+            "sensitive service name in CommandRecord: {joined}"
+        );
+    }
+    let s = find(&report, "s");
+    assert!(s.sensitive, "sensitive service result must stay sensitive");
+}
+
+/// Sensitive service missing-unit plan/apply error must not leak the name.
+#[test]
+fn sensitive_service_missing_unit_error_no_leak() {
+    use std::process::Command;
+    let dir = trusted_root("r6-svc-missing");
+    let sentinel = "R6_SECRET_SVC_UNIT_8e4f";
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: s\n    type: service\n    sensitive: true\n    with:\n      name: {}\n      state: running\n",
+            sentinel
+        ),
+    );
+    let outp = Command::new(env!("CARGO_BIN_EXE_sinter"))
+        .args(["plan", recipe.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&outp.stdout),
+        String::from_utf8_lossy(&outp.stderr)
+    );
+    assert!(
+        outp.status.code().is_some_and(|c| c != 0),
+        "expected plan error: {combined}"
+    );
+    assert!(
+        !combined.contains(sentinel),
+        "sensitive service name leaked: {combined}"
+    );
+}

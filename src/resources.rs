@@ -2081,7 +2081,8 @@ impl Engine {
                 )));
             }
         }
-        let obs = self.observe_service(&name)?;
+        let sensitive = res.sensitive || res.derived_sensitive;
+        let obs = self.observe_service_sensitive(&name, sensitive)?;
 
         if obs.load_state == "not-found" {
             if self.opts.mode == Mode::Plan && self.service_has_present_package_dep(res)? {
@@ -2090,23 +2091,44 @@ impl Engine {
                 r.verification = Verification::NotPerformed;
                 return Ok(r);
             }
-            return Err(if self.opts.mode == Mode::Plan {
-                SinterError::plan(format!("{}: service unit {} was not found", res.id, name))
+            let unit_disp = if sensitive {
+                "[redacted]"
             } else {
-                SinterError::apply(format!("{}: service unit {} was not found", res.id, name))
+                name.as_str()
+            };
+            return Err(if self.opts.mode == Mode::Plan {
+                SinterError::plan(format!(
+                    "{}: service unit {} was not found",
+                    res.id, unit_disp
+                ))
+            } else {
+                SinterError::apply(format!(
+                    "{}: service unit {} was not found",
+                    res.id, unit_disp
+                ))
             });
         }
 
         if want_state.as_deref() == Some("running") && obs.unit_file_state == "masked" {
+            let unit_disp = if sensitive {
+                "[redacted]"
+            } else {
+                name.as_str()
+            };
             return Err(SinterError::apply(format!(
                 "{}: service {} is masked and cannot be started",
-                res.id, name
+                res.id, unit_disp
             )));
         }
         if want_enabled.is_some() && obs.unit_file_state == "static" {
+            let unit_disp = if sensitive {
+                "[redacted]"
+            } else {
+                name.as_str()
+            };
             return Err(SinterError::apply(format!(
                 "{}: service {} is static and cannot be enabled/disabled",
-                res.id, name
+                res.id, unit_disp
             )));
         }
 
@@ -2156,23 +2178,34 @@ impl Engine {
 
         // Apply ordering table. Keep mutation history local to this resource so
         // a later step cannot erase an earlier successful mutation.
+        // systemctl start/stop/enable/disable can change unit state even when
+        // the command exits nonzero (e.g. start transitions inactive -> failed).
         let runit = |e: &mut Self, args: &[&str]| -> Result<()> {
             let mut req = ExecRequest::new("/usr/bin/systemctl");
             req.args = args.iter().map(|s| s.to_string()).collect();
             req.env = baseline_env(e.fs.home_env());
+            req.sensitive = sensitive;
             let out = e.fs.exec(&req)?;
+            let action = if sensitive {
+                "[redacted]".to_string()
+            } else {
+                args.join(" ")
+            };
             match out.completion {
                 Completion::Exited(0) => Ok(()),
-                Completion::Exited(c) => Err(SinterError::apply(format!(
-                    "systemctl {} failed with exit code {}: {}",
-                    args.join(" "),
-                    c,
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ))),
-                Completion::Signaled(s) => Err(SinterError::apply(format!(
+                Completion::Exited(c) => {
+                    // Nonzero does not prove the unit state was untouched.
+                    Err(SinterError::apply(format!(
+                        "systemctl {} failed with exit code {}: {}",
+                        action,
+                        c,
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ))
+                    .possible())
+                }
+                Completion::Signaled(s) => Err(SinterError::indeterminate(format!(
                     "systemctl {} terminated by signal {}",
-                    args.join(" "),
-                    s
+                    action, s
                 ))),
                 Completion::Indeterminate { reason, .. } => Err(SinterError::indeterminate(reason)),
             }
@@ -2190,27 +2223,27 @@ impl Engine {
             ("running", Some(en)) => {
                 if enabled_needs {
                     if let Err(e) = runit(self, &[if en { "enable" } else { "disable" }, &name]) {
-                        return Ok(service_step_failure(res, e, mutated));
+                        return Ok(service_step_failure(res, e, mutated, sensitive));
                     }
                     mutated = true;
                 }
                 if state_needs == Some(true) {
                     if let Err(e) = runit(self, &["start", &name]) {
-                        return Ok(service_step_failure(res, e, mutated));
+                        return Ok(service_step_failure(res, e, mutated, sensitive));
                     }
                     mutated = true;
                 }
             }
             ("stopped", Some(en)) => {
                 if state_needs == Some(true) {
-                    if let Err(e) = self.stop_and_reset(&name) {
-                        return Ok(service_step_failure(res, e, mutated));
+                    if let Err(e) = self.stop_and_reset(&name, sensitive) {
+                        return Ok(service_step_failure(res, e, mutated, sensitive));
                     }
                     mutated = true;
                 }
                 if enabled_needs {
                     if let Err(e) = runit(self, &[if en { "enable" } else { "disable" }, &name]) {
-                        return Ok(service_step_failure(res, e, mutated));
+                        return Ok(service_step_failure(res, e, mutated, sensitive));
                     }
                     mutated = true;
                 }
@@ -2218,15 +2251,15 @@ impl Engine {
             ("running", None) => {
                 if state_needs == Some(true) {
                     if let Err(e) = runit(self, &["start", &name]) {
-                        return Ok(service_step_failure(res, e, mutated));
+                        return Ok(service_step_failure(res, e, mutated, sensitive));
                     }
                     mutated = true;
                 }
             }
             ("stopped", None) => {
                 if state_needs == Some(true) {
-                    if let Err(e) = self.stop_and_reset(&name) {
-                        return Ok(service_step_failure(res, e, mutated));
+                    if let Err(e) = self.stop_and_reset(&name, sensitive) {
+                        return Ok(service_step_failure(res, e, mutated, sensitive));
                     }
                     mutated = true;
                 }
@@ -2234,7 +2267,7 @@ impl Engine {
             ("", Some(en)) => {
                 if enabled_needs {
                     if let Err(e) = runit(self, &[if en { "enable" } else { "disable" }, &name]) {
-                        return Ok(service_step_failure(res, e, mutated));
+                        return Ok(service_step_failure(res, e, mutated, sensitive));
                     }
                     mutated = true;
                 }
@@ -2250,13 +2283,14 @@ impl Engine {
                 res,
                 SinterError::apply("injected service re-observation failure after mutation"),
                 mutated,
+                sensitive,
             ));
         }
 
         // Re-observe and verify every requested dimension.
-        let after = match self.observe_service(&name) {
+        let after = match self.observe_service_sensitive(&name, sensitive) {
             Ok(after) => after,
-            Err(e) => return Ok(service_step_failure(res, e, mutated)),
+            Err(e) => return Ok(service_step_failure(res, e, mutated, sensitive)),
         };
         let mut ok = true;
         let mut detail = String::new();
@@ -2291,24 +2325,25 @@ impl Engine {
         Ok(r)
     }
 
-    fn stop_and_reset(&mut self, name: &str) -> Result<()> {
+    fn stop_and_reset(&mut self, name: &str, sensitive: bool) -> Result<()> {
         let mut req = ExecRequest::new("/usr/bin/systemctl");
         req.args = vec!["stop".to_string(), name.to_string()];
         req.env = baseline_env(self.fs.home_env());
+        req.sensitive = sensitive;
         let out = self.fs.exec(&req)?;
+        let unit_disp = if sensitive { "[redacted]" } else { name };
         match out.completion {
             Completion::Exited(0) => {}
             Completion::Exited(_) | Completion::Signaled(_) => {
-                return Err(SinterError::apply(format!(
-                    "systemctl stop {} failed",
-                    name
-                )));
+                // stop nonzero/signal may still have changed unit state.
+                return Err(
+                    SinterError::apply(format!("systemctl stop {} failed", unit_disp)).possible(),
+                );
             }
             Completion::Indeterminate { reason, .. } => {
-                // Stop completion unknown: mutation may have occurred.
                 return Err(SinterError::indeterminate(format!(
                     "systemctl stop {} did not complete: {}",
-                    name, reason
+                    unit_disp, reason
                 )));
             }
         }
@@ -2316,26 +2351,20 @@ impl Engine {
         let mut req = ExecRequest::new("/usr/bin/systemctl");
         req.args = vec!["reset-failed".to_string(), name.to_string()];
         req.env = baseline_env(self.fs.home_env());
+        req.sensitive = sensitive;
         let reset = self.fs.exec(&req)?;
         match reset.completion {
             Completion::Exited(0) => Ok(()),
-            Completion::Indeterminate { reason, .. } => {
-                // Stop already succeeded (mutation known). Reset completion is
-                // unknown; preserve indeterminate with known mutation.
-                Err(SinterError::indeterminate(format!(
-                    "systemctl reset-failed {} did not complete after stop: {}",
-                    name, reason
-                ))
-                .changed())
-            }
-            _ => {
-                Err(SinterError::apply(format!("systemctl reset-failed {} failed", name)).changed())
-            }
+            Completion::Indeterminate { reason, .. } => Err(SinterError::indeterminate(format!(
+                "systemctl reset-failed {} did not complete after stop: {}",
+                unit_disp, reason
+            ))
+            .changed()),
+            _ => Err(
+                SinterError::apply(format!("systemctl reset-failed {} failed", unit_disp))
+                    .changed(),
+            ),
         }
-    }
-
-    fn observe_service(&mut self, name: &str) -> Result<ServiceObs> {
-        self.observe_service_sensitive(name, false)
     }
 
     fn observe_service_sensitive(&mut self, name: &str, sensitive: bool) -> Result<ServiceObs> {
@@ -2561,8 +2590,13 @@ fn same_object_identity(prev: &Stat, cur: &Stat) -> bool {
     }
 }
 
-fn service_step_failure(res: &FrozenResource, e: SinterError, mutated: bool) -> ResourceResult {
-    let mut r = changed_result(res);
+fn service_step_failure(
+    res: &FrozenResource,
+    e: SinterError,
+    mutated: bool,
+    sensitive: bool,
+) -> ResourceResult {
+    let mut r = changed_result_sensitive(res, sensitive || res.sensitive || res.derived_sensitive);
     let indeterminate = e.kind == crate::error::ErrorKind::Indeterminate;
     r.execution = if indeterminate {
         Execution::Indeterminate
@@ -2594,11 +2628,14 @@ fn metadata_failure(res: &FrozenResource, e: SinterError, mutated: bool) -> Reso
     } else {
         Execution::Failed
     };
-    r.change = match e.mutation {
-        MutationState::Changed => Change::Changed,
-        MutationState::Possible => Change::Possible,
-        MutationState::None if mutated => Change::Changed,
-        MutationState::None => Change::None,
+    // Strongest known mutation truth wins. A prior successful step must not be
+    // weakened to Possible by a later Indeterminate error.
+    r.change = if mutated || e.mutation == MutationState::Changed {
+        Change::Changed
+    } else if e.mutation == MutationState::Possible {
+        Change::Possible
+    } else {
+        Change::None
     };
     r.verification = if r.execution == Execution::Indeterminate {
         Verification::Unknown
