@@ -2174,3 +2174,83 @@ fn sensitive_service_missing_unit_error_no_leak() {
         "sensitive service name leaked: {combined}"
     );
 }
+
+/// A service whose state field derives from a sensitive variable must keep
+/// ResourceResult.sensitive=true on the successful changed-result path, and
+/// must not put the raw sentinel into CommandRecord.
+#[test]
+fn derived_sensitive_service_success_keeps_sensitive_flag() {
+    if !sudo_available() || !std::path::Path::new("/run/systemd/system").exists() {
+        skip_or_fail("requires systemd and sudo");
+        return;
+    }
+    let unit = "sinter-r7-derived.service";
+    let unit_path = format!("/etc/systemd/system/{}", unit);
+    let _ = std::process::Command::new("sudo")
+        .args(["-n", "/bin/sh", "-c"])
+        .arg(format!(
+            "printf '%s\\n' '[Unit]' 'Description=sinter r7 derived sens' '[Service]' 'Type=oneshot' 'ExecStart=/bin/true' 'RemainAfterExit=yes' > {unit_path} && systemctl daemon-reload && systemctl stop {unit} >/dev/null 2>&1; systemctl reset-failed {unit} >/dev/null 2>&1; true",
+            unit_path = unit_path,
+            unit = unit
+        ))
+        .status();
+    let dir = trusted_root("r7-svc-derived");
+    let sentinel = "R7_SVC_STATE_SENTINEL_9k2m";
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        r#"version: 1
+vars:
+  st:
+    value: "running"
+    sensitive: true
+resources:
+  - id: s
+    type: service
+    with:
+      name: sinter-r7-derived.service
+      state: "{{ vars.st }}"
+"#,
+    );
+    let model = sinter::model::load_model(&recipe).unwrap();
+    let opts = sinter::engine::RunOptions {
+        mode: Mode::Apply,
+        sudo: true,
+        target: sinter::engine::TargetSpec { ssh: None },
+        verbose: false,
+        fault: None,
+    };
+    let engine = sinter::engine::Engine::new(model, opts).unwrap();
+    let report = engine.run().unwrap();
+    let s = find(&report, "s");
+    assert_eq!(
+        s.change,
+        Change::Changed,
+        "test must reach the changed-result path: {:?}",
+        s
+    );
+    assert!(
+        s.sensitive,
+        "derived-sensitive service result must stay sensitive: {:?}",
+        s
+    );
+    for rec in &report.commands {
+        let joined = format!("{} {:?}", rec.program, rec.args);
+        assert!(
+            !joined.contains(sentinel),
+            "sentinel leaked into CommandRecord: {joined}"
+        );
+        assert!(
+            rec.sensitive || !joined.contains("sinter-r7-derived"),
+            "sensitive service systemctl must not appear raw: {joined}"
+        );
+    }
+    let _ = std::process::Command::new("sudo")
+        .args(["-n", "/bin/sh", "-c"])
+        .arg(format!(
+            "systemctl stop {unit} >/dev/null 2>&1; systemctl reset-failed {unit} >/dev/null 2>&1; rm -f {unit_path}; systemctl daemon-reload",
+            unit = unit,
+            unit_path = unit_path
+        ))
+        .status();
+}

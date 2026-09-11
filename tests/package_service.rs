@@ -240,3 +240,108 @@ resources:
         ))
         .status();
 }
+
+/// apt install succeeds, then post-mutation observation is Indeterminate.
+/// Known mutation must remain Change::Changed, never weakened to Possible.
+#[test]
+fn package_install_success_then_reobserve_indeterminate_keeps_changed() {
+    if !apt_available() {
+        skip_or_fail("requires apt and sudo");
+        return;
+    }
+    let dir = trusted_root("r7-pkg-indet");
+    let pkg = std::env::var("SINTER_TEST_PACKAGE").unwrap_or_else(|_| "cowsay".to_string());
+    // Ensure package is absent so the mutation path is reached.
+    let _ = std::process::Command::new("sudo")
+        .args(["-n", "apt-get", "remove", "-y", &pkg])
+        .status();
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: p\n    type: package\n    with:\n      name: {}\n      state: present\n",
+            pkg
+        ),
+    );
+    let r = run_recipe_fault_sudo(
+        &recipe,
+        Mode::Apply,
+        "package_reobserve_indeterminate",
+        true,
+    );
+    let p = find(&r, "p");
+    // Prove apt mutation was actually dispatched after initial observation.
+    assert!(
+        r.commands.iter().any(|c| c.program.ends_with("apt-get")),
+        "test must reach the apt mutation path: {:?}",
+        r.commands
+    );
+    // Prove the injected post-mutation observation fault fired.
+    assert!(
+        p.reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("injected package re-observation indeterminate"),
+        "injected fault must fire: {:?}",
+        p.reason
+    );
+    assert_eq!(
+        p.change,
+        Change::Changed,
+        "known apt mutation must remain Changed: {:?}",
+        p
+    );
+    assert_eq!(p.execution, Execution::Indeterminate);
+    // Cleanup
+    let _ = std::process::Command::new("sudo")
+        .args(["-n", "apt-get", "remove", "-y", &pkg])
+        .status();
+}
+
+/// apt install succeeds, then post-mutation observation fails ordinarily.
+/// Known mutation must remain Change::Changed.
+#[test]
+fn package_install_success_then_reobserve_fail_keeps_changed() {
+    if !apt_available() {
+        skip_or_fail("requires apt and sudo");
+        return;
+    }
+    let dir = trusted_root("r7-pkg-reobs-fail");
+    let pkg = std::env::var("SINTER_TEST_PACKAGE").unwrap_or_else(|_| "cowsay".to_string());
+    let _ = std::process::Command::new("sudo")
+        .args(["-n", "apt-get", "remove", "-y", &pkg])
+        .status();
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: p\n    type: package\n    with:\n      name: {}\n      state: present\n",
+            pkg
+        ),
+    );
+    let r = run_recipe_fault_sudo(&recipe, Mode::Apply, "package_reobserve_fail", true);
+    let p = find(&r, "p");
+    assert!(
+        r.commands.iter().any(|c| c.program.ends_with("apt-get")),
+        "test must reach the apt mutation path: {:?}",
+        r.commands
+    );
+    assert!(
+        p.reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("injected package re-observation failure"),
+        "injected fault must fire: {:?}",
+        p.reason
+    );
+    assert_eq!(
+        p.change,
+        Change::Changed,
+        "known apt mutation must remain Changed: {:?}",
+        p
+    );
+    assert_eq!(p.execution, Execution::Failed);
+    let _ = std::process::Command::new("sudo")
+        .args(["-n", "apt-get", "remove", "-y", &pkg])
+        .status();
+}

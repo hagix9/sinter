@@ -1980,20 +1980,33 @@ impl Engine {
         }
 
         // Re-observe and verify. A successful apt dispatch is retained even if
-        // the post-mutation observation fails.
+        // the post-mutation observation fails. The mutation is already known:
+        // later uncertainty must never weaken Changed to Possible/None.
+        if self.fs.fault() == Some("package_reobserve_indeterminate") {
+            let mut r = changed_result(res);
+            r.change = Change::Changed;
+            r.execution = Execution::Indeterminate;
+            r.verification = Verification::Unknown;
+            r.reason = Some("injected package re-observation indeterminate after mutation".into());
+            return Ok(r);
+        }
+        if self.fs.fault() == Some("package_reobserve_fail") {
+            let mut r = changed_result(res);
+            r.change = Change::Changed;
+            r.execution = Execution::Failed;
+            r.verification = Verification::Failed;
+            r.reason = Some("injected package re-observation failure after mutation".into());
+            return Ok(r);
+        }
         let after = match self.observe_package(&name) {
             Ok(after) => after,
             Err(e) => {
                 let mut r = changed_result(res);
+                r.change = Change::Changed;
                 r.execution = if e.kind == crate::error::ErrorKind::Indeterminate {
                     Execution::Indeterminate
                 } else {
                     Execution::Failed
-                };
-                r.change = if e.kind == crate::error::ErrorKind::Indeterminate {
-                    Change::Possible
-                } else {
-                    Change::Changed
                 };
                 r.verification = if r.execution == Execution::Indeterminate {
                     Verification::Unknown
@@ -2028,6 +2041,12 @@ impl Engine {
         if self.fs.fault() == Some("dpkg_observe_fail") {
             return Err(SinterError::apply(format!(
                 "package observation failed for {}: injected dpkg-query failure",
+                name
+            )));
+        }
+        if self.fs.fault() == Some("dpkg_observe_indeterminate") {
+            return Err(SinterError::indeterminate(format!(
+                "package observation for {}: injected indeterminate dpkg-query completion",
                 name
             )));
         }
@@ -2313,7 +2332,7 @@ impl Engine {
                 detail = format!("service enabled state is {}", after.unit_file_state);
             }
         }
-        let mut r = changed_result(res);
+        let mut r = changed_result_sensitive(res, sensitive);
         r.change = Change::Changed;
         if ok {
             r.verification = Verification::Verified;
