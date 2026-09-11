@@ -67,6 +67,89 @@ impl Xattrs {
     }
 }
 
+/// Classification of a getfacl capture under DESIGN §24.4.
+enum AclClass {
+    /// All three base entries are present and well-formed.
+    Complete { extended: bool },
+    /// Required base entries are missing (including empty output).
+    Incomplete,
+    /// A base entry is present but malformed (e.g. `user::garbage`).
+    Malformed,
+}
+
+fn is_valid_acl_perm(p: &str) -> bool {
+    p.len() == 3 && p.chars().all(|c| matches!(c, 'r' | 'w' | 'x' | '-'))
+}
+
+/// Parse a getfacl `-c -p` capture. Distinguishes a complete ACL (possibly
+/// without extended entries) from empty/incomplete/malformed output.
+fn classify_acl_text(text: &str) -> AclClass {
+    let mut has_user = false;
+    let mut has_group = false;
+    let mut has_other = false;
+    let mut extended = false;
+    let mut saw_any = false;
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        saw_any = true;
+        let fields: Vec<&str> = line.split(':').collect();
+        match fields.as_slice() {
+            ["user", "", perm] => {
+                if !is_valid_acl_perm(perm) {
+                    return AclClass::Malformed;
+                }
+                has_user = true;
+            }
+            ["group", "", perm] => {
+                if !is_valid_acl_perm(perm) {
+                    return AclClass::Malformed;
+                }
+                has_group = true;
+            }
+            ["other", "", perm] => {
+                if !is_valid_acl_perm(perm) {
+                    return AclClass::Malformed;
+                }
+                has_other = true;
+            }
+            ["user", name, perm] => {
+                if name.is_empty() || perm.is_empty() {
+                    return AclClass::Malformed;
+                }
+                extended = true;
+            }
+            ["group", name, perm] => {
+                if name.is_empty() || perm.is_empty() {
+                    return AclClass::Malformed;
+                }
+                extended = true;
+            }
+            ["mask", "", perm] => {
+                if !is_valid_acl_perm(perm) {
+                    return AclClass::Malformed;
+                }
+                extended = true;
+            }
+            ["default", rest @ ..] => {
+                if rest.is_empty() {
+                    return AclClass::Malformed;
+                }
+                extended = true;
+            }
+            _ => return AclClass::Malformed,
+        }
+    }
+
+    if !saw_any || !(has_user && has_group && has_other) {
+        return AclClass::Incomplete;
+    }
+    AclClass::Complete { extended }
+}
+
 pub struct TargetFs {
     pub ex: Executor,
     pub sudo: bool,
@@ -438,23 +521,24 @@ impl TargetFs {
                                 inspected: false,
                             });
                         };
-                        // A non-trivial ACL is present if there is any entry
-                        // other than owner/group/other base entries.
-                        let has_extended = acl_text.lines().any(|l| {
-                            let l = l.trim();
-                            if l.is_empty() || l.starts_with('#') {
-                                return false;
+                        // A successful getfacl capture must include the three
+                        // well-formed base entries. Empty, incomplete, or
+                        // malformed base entries mean the observation is not
+                        // authoritative (DESIGN §24.4).
+                        match classify_acl_text(acl_text) {
+                            AclClass::Complete { extended } => {
+                                if extended {
+                                    attrs
+                                        .entry("system.posix_acl_access".to_string())
+                                        .or_insert_with(|| "present".to_string());
+                                }
                             }
-                            let fields: Vec<_> = l.split(':').collect();
-                            !matches!(
-                                fields.as_slice(),
-                                ["user", "", _] | ["group", "", _] | ["other", "", _]
-                            )
-                        });
-                        if has_extended {
-                            attrs
-                                .entry("system.posix_acl_access".to_string())
-                                .or_insert_with(|| "present".to_string());
+                            AclClass::Incomplete | AclClass::Malformed => {
+                                return Ok(Xattrs {
+                                    attrs,
+                                    inspected: false,
+                                });
+                            }
                         }
                     }
                     _ => {
@@ -570,6 +654,9 @@ impl TargetFs {
 
     /// Atomically replace a symlink using a private staging directory so the
     /// staging name cannot be predicted or pre-created by another user.
+    ///
+    /// Publication state and cleanup state are separate facts. Cleanup must
+    /// never rewrite whether the destination was published.
     pub fn symlink_replace(
         &mut self,
         target: &str,
@@ -590,7 +677,9 @@ impl TargetFs {
                     tmp.clone(),
                 ],
             )?;
-            if self.fault() == Some("symlink_drift_before_publish") {
+            if self.fault() == Some("symlink_drift_before_publish")
+                || self.fault() == Some("symlink_drift_cleanup_fail")
+            {
                 self.remove_symlink(link_path)?;
                 self.symlink("/sinter-injected-drift", link_path)?;
             }
@@ -613,30 +702,64 @@ impl TargetFs {
             )?;
             Ok(())
         })();
-        let indeterminate =
-            matches!(result, Err(ref e) if e.kind == crate::error::ErrorKind::Indeterminate);
-        if indeterminate {
+
+        // Publication completion unknown: do not clean staging (could destroy
+        // evidence) and preserve indeterminate semantics exactly.
+        if matches!(result, Err(ref e) if e.kind == crate::error::ErrorKind::Indeterminate) {
             return result;
         }
-        let cleanup_payload = self.run_argv("/bin/rm", &["-f".to_string(), "--".to_string(), tmp]);
-        if !matches!(cleanup_payload, Ok(ref out) if out.is_success()) {
-            return Err(SinterError::apply("symlink staging payload cleanup failed").changed());
-        }
-        let cleanup = self.run_argv("/bin/rmdir", &[stage_dir]);
-        match (result, cleanup) {
-            (Ok(()), Ok(out)) if out.is_success() => Ok(()),
-            (Ok(()), Ok(out)) => Err(SinterError::apply(format!(
-                "symlink staging cleanup failed: {:?}",
-                out.completion
-            ))
-            .changed()),
-            (Ok(()), Err(e)) => Err(e.changed()),
-            (Err(e), _) => Err(e),
+
+        // Cleanup is a separate fact. Perform it only after classification.
+        let (payload_ok, dir_ok) = if self.fault() == Some("symlink_cleanup_fail")
+            || self.fault() == Some("symlink_drift_cleanup_fail")
+        {
+            (false, false)
+        } else {
+            let cleanup_payload = self.run_argv(
+                "/bin/rm",
+                &["-f".to_string(), "--".to_string(), tmp.clone()],
+            );
+            let cleanup_dir = self.run_argv("/bin/rmdir", std::slice::from_ref(&stage_dir));
+            (
+                matches!(cleanup_payload, Ok(ref out) if out.is_success()),
+                matches!(cleanup_dir, Ok(ref out) if out.is_success()),
+            )
+        };
+
+        match result {
+            Ok(()) => {
+                // Destination was published. Cleanup failure is reported after
+                // the known mutation, never as a pre-publication failure.
+                if !payload_ok || !dir_ok {
+                    return Err(SinterError::apply(format!(
+                        "symlink published but staging cleanup failed (payload_ok={} dir_ok={})",
+                        payload_ok, dir_ok
+                    ))
+                    .changed());
+                }
+                Ok(())
+            }
+            Err(e) => {
+                // Pre-publication failure. Preserve the original error kind and
+                // mutation state; cleanup outcome must not rewrite it to changed.
+                if e.kind == crate::error::ErrorKind::Indeterminate {
+                    return Err(e);
+                }
+                Err(e)
+            }
         }
     }
 
     pub fn rename(&mut self, from: &str, to: &str) -> Result<()> {
         self.guard_mut()?;
+        // Controlled failure-injection inside the real rename operation so the
+        // publish error path that classifies rename outcomes is exercised.
+        if self.fault() == Some("rename_fail") {
+            return Err(SinterError::apply("injected rename failure"));
+        }
+        if self.fault() == Some("rename_indeterminate") {
+            return Err(SinterError::indeterminate("injected rename indeterminate"));
+        }
         self.run_argv_ok(
             "/bin/mv",
             &[
@@ -995,5 +1118,52 @@ mod tests {
         assert_eq!(b64_encode(b"foo"), "Zm9v");
         assert_eq!(b64_encode(b"hello\n"), "aGVsbG8K");
         assert_eq!(b64_encode(&[0, 255, 1]), "AP8B");
+    }
+
+    #[test]
+    fn acl_complete_without_extended() {
+        let text = "user::rw-\ngroup::r--\nother::r--\n";
+        match classify_acl_text(text) {
+            AclClass::Complete { extended } => assert!(!extended),
+            _ => panic!("expected complete, got incomplete/malformed"),
+        }
+    }
+
+    #[test]
+    fn acl_complete_with_extended() {
+        let text = "user::rw-\nuser:alice:r--\ngroup::r--\nmask::r--\nother::r--\n";
+        match classify_acl_text(text) {
+            AclClass::Complete { extended } => assert!(extended),
+            _ => panic!("expected complete extended"),
+        }
+    }
+
+    #[test]
+    fn acl_empty_is_incomplete() {
+        assert!(matches!(classify_acl_text(""), AclClass::Incomplete));
+        assert!(matches!(
+            classify_acl_text("\n# comment only\n"),
+            AclClass::Incomplete
+        ));
+    }
+
+    #[test]
+    fn acl_missing_base_entry_is_incomplete() {
+        assert!(matches!(
+            classify_acl_text("user::rw-\ngroup::r--\n"),
+            AclClass::Incomplete
+        ));
+    }
+
+    #[test]
+    fn acl_malformed_base_entry_is_malformed() {
+        assert!(matches!(
+            classify_acl_text("user::garbage\ngroup::r--\nother::r--\n"),
+            AclClass::Malformed
+        ));
+        assert!(matches!(
+            classify_acl_text("user::rw\ngroup::r--\nother::r--\n"),
+            AclClass::Malformed
+        ));
     }
 }

@@ -303,7 +303,31 @@ impl Engine {
                     let _ = hstop_reason.take();
                     continue;
                 }
-                let hr = self.run_handler(&h)?;
+                let action = match h.action {
+                    crate::ir::HandlerAction::Restart => "restart",
+                    crate::ir::HandlerAction::Reload => "reload",
+                };
+                // Outer errors must not discard already-processed resources or
+                // pending handler information. Convert them into a handler
+                // outcome and continue building the report.
+                let hr = match self.run_handler(&h) {
+                    Ok(hr) => hr,
+                    Err(e) => {
+                        let state = if e.kind == crate::error::ErrorKind::Indeterminate {
+                            HandlerOutcomeState::Indeterminate
+                        } else {
+                            HandlerOutcomeState::Failed
+                        };
+                        HandlerResult {
+                            id: h.id.clone(),
+                            service: h.service.clone(),
+                            action: action.to_string(),
+                            state,
+                            reason: Some(e.message.clone()),
+                            sensitive: h.sensitive,
+                        }
+                    }
+                };
                 let stop = matches!(
                     hr.state,
                     HandlerOutcomeState::Failed | HandlerOutcomeState::Indeterminate

@@ -295,9 +295,80 @@ resources:
 fn service_failed_unit_is_not_clean_stopped() {
     // A failed unit must not be reported as a satisfied 'stopped' request, and
     // a request to stop it must actually clear the failed state.
-    let dir = trusted_root("service-failed");
-    // Create a failing transient-ish unit is not permitted; instead assert that
-    // a missing unit with stopped requested fails rather than claims success.
+    if !sudo_available() || !std::path::Path::new("/run/systemd/system").exists() {
+        skip_or_fail("requires systemd and passwordless sudo to create a genuine failed unit");
+        return;
+    }
+    let unit = "sinter-r4-failed-unit.service";
+    let unit_path = format!("/etc/systemd/system/{}", unit);
+    // Create a real failing oneshot unit and put it into ActiveState=failed.
+    let setup = std::process::Command::new("sudo")
+        .args(["-n", "/bin/sh", "-c"])
+        .arg(format!(
+            "printf '%s\\n' '[Unit]' 'Description=sinter r4 failed unit' '[Service]' 'Type=oneshot' 'ExecStart=/bin/false' 'RemainAfterExit=yes' > {unit_path} && systemctl daemon-reload && systemctl reset-failed {unit} >/dev/null 2>&1; systemctl start {unit} >/dev/null 2>&1; true",
+            unit_path = unit_path,
+            unit = unit
+        ))
+        .status();
+    assert!(setup.map(|s| s.success()).unwrap_or(false), "setup failed");
+    let active = std::process::Command::new("systemctl")
+        .args(["show", "-p", "ActiveState", "--value", unit])
+        .output()
+        .unwrap();
+    let active = String::from_utf8_lossy(&active.stdout).trim().to_string();
+    assert_eq!(
+        active, "failed",
+        "fixture must be a genuine failed unit, got {:?}",
+        active
+    );
+
+    let dir = trusted_root("service-failed-genuine");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: s\n    type: service\n    with:\n      name: {}\n      state: stopped\n",
+            unit
+        ),
+    );
+    let r = run_recipe(&recipe, Mode::Apply, true);
+    let s = find(&r, "s");
+    // Either the stop/reset path clears failed and verifies inactive-not-failed,
+    // or verification fails. It must never claim verified while still failed.
+    if s.verification == Verification::Verified {
+        let after = std::process::Command::new("systemctl")
+            .args(["show", "-p", "ActiveState", "--value", unit])
+            .output()
+            .unwrap();
+        let after = String::from_utf8_lossy(&after.stdout).trim().to_string();
+        assert_ne!(
+            after, "failed",
+            "verified stopped must not leave ActiveState=failed"
+        );
+    } else {
+        assert_eq!(s.execution, Execution::Failed);
+        assert_ne!(s.verification, Verification::Verified);
+    }
+
+    // Cleanup
+    let _ = std::process::Command::new("sudo")
+        .args(["-n", "/bin/sh", "-c"])
+        .arg(format!(
+            "systemctl stop {unit} >/dev/null 2>&1; systemctl reset-failed {unit} >/dev/null 2>&1; rm -f {unit_path}; systemctl daemon-reload",
+            unit = unit,
+            unit_path = unit_path
+        ))
+        .status();
+}
+
+#[test]
+fn service_mutation_then_reobserve_failure_keeps_changed() {
+    if !sudo_available() || !std::path::Path::new("/run/systemd/system").exists() {
+        skip_or_fail("requires systemd and passwordless sudo");
+        return;
+    }
+    let _svc = lock_service();
+    let dir = trusted_root("svc-reobserve");
     let recipe = write_recipe(
         &dir,
         "r.yaml",
@@ -306,13 +377,37 @@ resources:
   - id: s
     type: service
     with:
-      name: sinter-definitely-not-a-unit
-      state: stopped
+      name: ssh
+      enabled: false
 "#,
     );
-    let r = run_recipe(&recipe, Mode::Apply, false);
-    assert_eq!(find(&r, "s").execution, Execution::Failed);
-    assert_ne!(find(&r, "s").verification, Verification::Verified);
+    // Capture enabled state before.
+    let before = std::process::Command::new("systemctl")
+        .args(["is-enabled", "ssh"])
+        .output()
+        .unwrap();
+    let before = String::from_utf8_lossy(&before.stdout).trim().to_string();
+    let r = run_recipe_fault_sudo(&recipe, Mode::Apply, "service_reobserve_fail", true);
+    let s = find(&r, "s");
+    // If a mutation was dispatched (enabled state needed changing), change must
+    // be reported. The fault fires after mutation decisions; if already in the
+    // desired enabled state the resource is unchanged and the fault never runs.
+    if before == "enabled" {
+        assert_eq!(
+            s.change,
+            Change::Changed,
+            "enable/disable mutation then reobserve failure must keep changed: {:?}",
+            s
+        );
+        assert_eq!(s.execution, Execution::Failed);
+    }
+    // Restore
+    let _ = std::process::Command::new("sudo")
+        .args(["-n", "systemctl", "enable", "ssh"])
+        .status();
+    let _ = std::process::Command::new("sudo")
+        .args(["-n", "systemctl", "start", "ssh"])
+        .status();
 }
 
 #[test]

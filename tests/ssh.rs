@@ -213,10 +213,19 @@ fn ssh_timeout_after_dispatch_is_indeterminate_and_not_retried() {
     with:
       program: /bin/true"#,
     );
+    let started = std::time::Instant::now();
     let r = run_recipe_target(&recipe, Mode::Apply, false, ssh());
+    let elapsed = started.elapsed();
     let slow = find(&r, "slow");
     assert_eq!(slow.execution, Execution::Indeterminate);
     assert_eq!(slow.change, Change::Possible);
+    // The operation deadline must cover the whole remote operation, including
+    // teardown. Allow generous slack for connection setup and scheduling.
+    assert!(
+        elapsed < std::time::Duration::from_secs(8),
+        "timeout=1s run() must return well under 8s, took {:?}",
+        elapsed
+    );
     // no automatic retry: the command appears exactly once
     let count = r
         .commands
@@ -228,6 +237,68 @@ fn ssh_timeout_after_dispatch_is_indeterminate_and_not_retried() {
         find(&r, "after").execution,
         Execution::NotRun,
         "fail-fast stops later resources"
+    );
+}
+
+/// SSH must send stdin EOF even when stdin is unspecified, so `/bin/cat`
+/// terminates just like local `/dev/null` semantics.
+#[test]
+fn ssh_stdin_none_sends_eof_and_cat_exits_cleanly() {
+    let _s = require_ssh!();
+    let dir = controller_dir("ssh-stdin-eof");
+    let recipe = controller_recipe(
+        &dir,
+        r#"  - id: cat
+    type: command
+    with:
+      program: /bin/cat
+      timeout_seconds: 5"#,
+    );
+    let started = std::time::Instant::now();
+    let r = run_recipe_target(&recipe, Mode::Apply, false, ssh());
+    let elapsed = started.elapsed();
+    let cat = find(&r, "cat");
+    assert_eq!(
+        cat.execution,
+        Execution::Succeeded,
+        "cat with no stdin must exit cleanly via EOF: {:?}",
+        cat
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "cat-with-EOF must finish promptly, took {:?}",
+        elapsed
+    );
+}
+
+/// Direct executor probe: same /bin/cat command must exit 0 over SSH with no
+/// stdin, matching local semantics (not exit 6 / indeterminate).
+#[test]
+fn ssh_direct_cat_stdin_none_exit_zero() {
+    let _s = require_ssh!();
+    let Some(mut ex) = executor_for(&require_ssh!(), false) else {
+        skip("could not connect executor");
+        return;
+    };
+    let mut req = sinter::executor::ExecRequest::new("/bin/cat");
+    req.timeout_secs = 5;
+    req.env.insert(
+        "PATH".to_string(),
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+    );
+    req.env.insert("HOME".to_string(), "/tmp".to_string());
+    let started = std::time::Instant::now();
+    let out = ex.run(&req).expect("ssh cat must complete");
+    let elapsed = started.elapsed();
+    assert_eq!(
+        out.completion,
+        sinter::executor::Completion::Exited(0),
+        "SSH cat with no stdin must exit 0"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(8),
+        "cat EOF path must be bounded, took {:?}",
+        elapsed
     );
 }
 

@@ -15,6 +15,9 @@ pub struct ExecRequest {
     pub env: BTreeMap<String, String>,
     pub stdin: Option<Vec<u8>>,
     pub timeout_secs: u64,
+    /// When true, the command line (program/args/cwd/env values) may contain
+    /// sensitive material. Internal audit records must never store the raw form.
+    pub sensitive: bool,
 }
 
 impl ExecRequest {
@@ -26,6 +29,7 @@ impl ExecRequest {
             env: BTreeMap::new(),
             stdin: None,
             timeout_secs: 300,
+            sensitive: false,
         }
     }
 
@@ -62,6 +66,11 @@ impl ExecRequest {
 
     pub fn timeout(mut self, secs: u64) -> Self {
         self.timeout_secs = secs;
+        self
+    }
+
+    pub fn sensitive(mut self, sensitive: bool) -> Self {
+        self.sensitive = sensitive;
         self
     }
 }
@@ -123,6 +132,9 @@ pub struct CommandRecord {
     pub program: String,
     pub args: Vec<String>,
     pub sudo: bool,
+    /// True when the recorded invocation may carry sensitive values. The stored
+    /// program/args are then a redacted placeholder, never the raw command line.
+    pub sensitive: bool,
 }
 
 pub struct SshConfig {
@@ -170,10 +182,22 @@ impl Executor {
 
     fn record(&mut self, req: &ExecRequest) {
         let sudo = self.is_sudo();
-        let rec = CommandRecord {
-            program: req.program.clone(),
-            args: req.args.clone(),
-            sudo,
+        // DESIGN §31.4: no logger may receive raw sensitive values. When the
+        // request is sensitive, store only a non-reconstructable placeholder.
+        let rec = if req.sensitive {
+            CommandRecord {
+                program: "[redacted]".to_string(),
+                args: vec!["[redacted]".to_string()],
+                sudo,
+                sensitive: true,
+            }
+        } else {
+            CommandRecord {
+                program: req.program.clone(),
+                args: req.args.clone(),
+                sudo,
+                sensitive: false,
+            }
         };
         match self {
             Executor::Local(l) => l.log.push(rec),
@@ -500,7 +524,13 @@ fn read_capped<R: Read + Send + 'static>(pipe: Option<R>, cap: usize) -> (Vec<u8
                         truncated = true;
                     }
                 }
-                Err(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    // A read error is not a clean EOF: the capture is incomplete
+                    // and must fail closed rather than be treated as complete.
+                    truncated = true;
+                    break;
+                }
             }
         }
     }
@@ -511,6 +541,13 @@ fn read_capped<R: Read + Send + 'static>(pipe: Option<R>, cap: usize) -> (Vec<u8
 // SSH execution
 // ---------------------------------------------------------------------------
 
+/// Finite setup budget covering TCP connect, handshake, auth, and HOME
+/// resolution. DESIGN §22 requires every remote operation to be bounded; setup
+/// is a separate finite budget from the per-command operation deadline.
+const SSH_SETUP_BUDGET_SECS: u64 = 60;
+/// Maximum captured bytes for HOME detection output.
+const DETECT_HOME_MAX: usize = 4096;
+
 pub struct SshExecutor {
     pub sudo: bool,
     session: ssh2::Session,
@@ -520,21 +557,36 @@ pub struct SshExecutor {
 
 impl SshExecutor {
     pub fn connect(cfg: &SshConfig, sudo: bool) -> Result<Self> {
+        let setup_deadline = Instant::now() + Duration::from_secs(SSH_SETUP_BUDGET_SECS);
         let addr = format!("{}:{}", cfg.host, cfg.port);
-        let tcp = std::net::TcpStream::connect(&addr)
+        let sock: std::net::SocketAddr = addr
+            .parse()
+            .map_err(|e| SinterError::connect(format!("invalid SSH address {}: {}", addr, e)))?;
+        let remaining = setup_remaining(setup_deadline)?;
+        let tcp = std::net::TcpStream::connect_timeout(&sock, remaining)
             .map_err(|e| SinterError::connect(format!("cannot connect to {}: {}", addr, e)))?;
-        tcp.set_read_timeout(Some(Duration::from_secs(600))).ok();
-        tcp.set_write_timeout(Some(Duration::from_secs(600))).ok();
+        let sock_timeout = Some(remaining.min(Duration::from_secs(30)));
+        tcp.set_read_timeout(sock_timeout).map_err(|e| {
+            SinterError::connect(format!("cannot set SSH socket read timeout: {}", e))
+        })?;
+        tcp.set_write_timeout(sock_timeout).map_err(|e| {
+            SinterError::connect(format!("cannot set SSH socket write timeout: {}", e))
+        })?;
         let mut session = ssh2::Session::new()
             .map_err(|e| SinterError::connect(format!("cannot create SSH session: {}", e)))?;
         session.set_tcp_stream(tcp);
+        // Configure the libssh2 timeout before any blocking handshake call so
+        // the handshake itself cannot hang past the setup budget.
+        let handshake_timeout = setup_remaining(setup_deadline)?;
+        session.set_timeout(handshake_timeout.as_millis().clamp(1, u32::MAX as u128) as u32);
         session.handshake().map_err(|e| {
             SinterError::connect(format!("SSH handshake with {} failed: {}", addr, e))
         })?;
 
         verify_host_key(&session, cfg)?;
 
-        session.set_timeout(300_000);
+        let auth_timeout = setup_remaining(setup_deadline)?;
+        session.set_timeout(auth_timeout.as_millis().clamp(1, u32::MAX as u128) as u32);
         let mut authed = false;
         if session.userauth_agent(&cfg.user).is_ok() && session.authenticated() {
             authed = true;
@@ -549,6 +601,8 @@ impl SshExecutor {
                 }
             }
             for id in &identities {
+                let auth_timeout = setup_remaining(setup_deadline)?;
+                session.set_timeout(auth_timeout.as_millis().clamp(1, u32::MAX as u128) as u32);
                 if id.exists()
                     && session
                         .userauth_pubkey_file(&cfg.user, None, id, None)
@@ -570,7 +624,7 @@ impl SshExecutor {
         let home = if sudo {
             "/root".to_string()
         } else {
-            detect_home(&session, &cfg.user)?
+            detect_home(&session, &cfg.user, setup_deadline)?
         };
 
         Ok(SshExecutor {
@@ -585,11 +639,26 @@ impl SshExecutor {
         let deadline = Instant::now() + Duration::from_secs(req.timeout_secs.max(1));
         let line = build_remote_command(req, self.sudo, &self.home);
         self.session.set_blocking(false);
-        let mut channel = channel_session_until(&mut self.session, deadline)?;
+        let mut channel = match channel_session_until(&mut self.session, deadline) {
+            Ok(ch) => ch,
+            Err(e) => {
+                // Channel open failed before exec dispatch. The remote command
+                // was never started: this is a definite non-mutation, not
+                // indeterminate completion.
+                self.session.set_blocking(true);
+                return Err(e);
+            }
+        };
         channel
             .handle_extended_data(ssh2::ExtendedData::Normal)
             .ok();
-        exec_until(&mut channel, &line, deadline)?;
+        if let Err(e) = exec_until(&mut channel, &line, deadline) {
+            // Dispatch may or may not have begun; treat post-channel errors as
+            // indeterminate only when the error says so.
+            let _ = channel.close();
+            self.session.set_blocking(true);
+            return Err(e);
+        }
 
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -598,12 +667,25 @@ impl SshExecutor {
         let mut stdout_eof = false;
         let mut stderr_eof = false;
         let mut stdin = req.stdin.clone();
+        let mut stdin_closed = false;
 
         let result: Result<()> = (|| {
             while !(stdout_eof && stderr_eof) {
+                if Instant::now() >= deadline {
+                    return Err(SinterError::indeterminate(format!(
+                        "remote command timed out after {}s after dispatch",
+                        req.timeout_secs
+                    )));
+                }
                 let mut progressed = false;
                 if !stdout_eof {
-                    match drain_stream(&mut channel, &mut out, &mut out_trunc, MAX_CAPTURE) {
+                    match drain_stream(
+                        &mut channel,
+                        &mut out,
+                        &mut out_trunc,
+                        MAX_CAPTURE,
+                        deadline,
+                    ) {
                         Ok(0) => {
                             stdout_eof = true;
                             progressed = true;
@@ -611,10 +693,6 @@ impl SshExecutor {
                         Ok(_) => progressed = true,
                         Err(StreamErr::WouldBlock) => {}
                         Err(StreamErr::Other(e)) => {
-                            // A read failure after the remote process was
-                            // dispatched may mean the connection dropped before
-                            // completion: completion is indeterminate, never a
-                            // clean failure.
                             return Err(SinterError::indeterminate(format!(
                                 "SSH stdout read failed after dispatch: {}",
                                 e
@@ -624,7 +702,7 @@ impl SshExecutor {
                 }
                 if !stderr_eof {
                     let mut st = channel.stderr();
-                    match drain_stream(&mut st, &mut err, &mut err_trunc, MAX_CAPTURE) {
+                    match drain_stream(&mut st, &mut err, &mut err_trunc, MAX_CAPTURE, deadline) {
                         Ok(0) => {
                             stderr_eof = true;
                             progressed = true;
@@ -640,14 +718,42 @@ impl SshExecutor {
                     }
                 }
 
-                if !stdout_eof || !stderr_eof {
-                    if let Some(data) = stdin.take() {
-                        write_all_nonblocking(&mut channel, &data, deadline).map_err(|e| {
-                            SinterError::indeterminate(format!(
-                                "SSH stdin write failed after dispatch: {}",
-                                e
-                            ))
-                        })?;
+                // Always terminate stdin exactly once after dispatch, matching
+                // local `/dev/null` semantics so commands waiting on EOF (e.g.
+                // `/bin/cat`) can exit. EOF is also bounded by the deadline.
+                if !stdin_closed {
+                    match stdin.take() {
+                        Some(data) => {
+                            write_all_nonblocking(&mut channel, &data, deadline).map_err(|e| {
+                                SinterError::indeterminate(format!(
+                                    "SSH stdin write failed after dispatch: {}",
+                                    e
+                                ))
+                            })?;
+                            stdin_closed = true;
+                            progressed = true;
+                        }
+                        None => {
+                            let _ = channel.flush();
+                            match channel.send_eof() {
+                                Ok(()) => {
+                                    stdin_closed = true;
+                                    progressed = true;
+                                }
+                                Err(e)
+                                    if e.code() == ssh2::ErrorCode::Session(-37)
+                                        && Instant::now() < deadline =>
+                                {
+                                    // EAGAIN; retry next iteration.
+                                }
+                                Err(e) => {
+                                    return Err(SinterError::indeterminate(format!(
+                                        "SSH stdin EOF failed after dispatch: {}",
+                                        e
+                                    )));
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -670,7 +776,8 @@ impl SshExecutor {
         if let Err(e) = result {
             if e.kind == crate::error::ErrorKind::Indeterminate {
                 let _ = channel.close();
-                self.session.set_blocking(true);
+                // Keep non-blocking so Channel Drop cannot re-enter an
+                // unbounded blocking wait past the operation deadline.
                 return Ok(Output {
                     completion: Completion::Indeterminate {
                         started: true,
@@ -688,8 +795,6 @@ impl SshExecutor {
         }
 
         // Bound channel close and exit-status collection by the same deadline.
-        // A blocking `wait_close` could otherwise hang indefinitely if the
-        // remote side keeps the channel open.
         self.session.set_blocking(false);
         let mut close_confirmed = false;
         while Instant::now() < deadline {
@@ -699,7 +804,6 @@ impl SshExecutor {
                     break;
                 }
                 Err(e) if e.code() == ssh2::ErrorCode::Session(-37) => {
-                    // LIBSSH2_ERROR_EAGAIN: not ready yet; keep waiting.
                     wait_readable_until(self.session.as_raw_fd(), deadline);
                 }
                 Err(_) => break,
@@ -720,7 +824,16 @@ impl SshExecutor {
             let c = remote_completion_until(&mut channel, self.session.as_raw_fd(), deadline);
             (c, None)
         };
+        // Restore a short residual timeout for Drop/teardown rather than an
+        // unbounded blocking wait that could outlive the operation deadline.
+        let residual = deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::from_millis(100))
+            .min(Duration::from_millis(500));
+        self.session
+            .set_timeout(residual.as_millis().clamp(1, u32::MAX as u128) as u32);
         self.session.set_blocking(true);
+        drop(channel);
 
         Ok(Output {
             completion,
@@ -730,6 +843,13 @@ impl SshExecutor {
             stderr_truncated: err_trunc,
         })
     }
+}
+
+fn setup_remaining(deadline: Instant) -> Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|d| !d.is_zero())
+        .ok_or_else(|| SinterError::connect("SSH setup budget exceeded before operation completed"))
 }
 
 fn remote_completion_until(
@@ -786,27 +906,73 @@ fn exit_status_until(
     }
 }
 
-fn detect_home(session: &ssh2::Session, user: &str) -> Result<String> {
+fn detect_home(session: &ssh2::Session, user: &str, setup_deadline: Instant) -> Result<String> {
     // Resolve via the account database without relying on inherited HOME.
+    // Bounded by the remaining setup budget and a finite capture size.
+    let remaining = setup_remaining(setup_deadline)?;
+    session.set_timeout(remaining.as_millis().clamp(1, u32::MAX as u128) as u32);
     let mut ch = session
         .channel_session()
         .map_err(|e| SinterError::connect(format!("cannot open SSH channel: {}", e)))?;
     let cmd = format!("getent passwd {}", shell_quote(user));
     ch.exec(&cmd)
         .map_err(|e| SinterError::connect(format!("cannot query account database: {}", e)))?;
-    let mut s = String::new();
-    let _ = ch.read_to_string(&mut s);
-    let _ = ch.wait_close();
-    if ch.exit_status().map(|c| c == 0).unwrap_or(false) {
-        let fields: Vec<&str> = s.trim().split(':').collect();
-        if fields.len() >= 6 && !fields[5].is_empty() {
-            return Ok(fields[5].to_string());
+    let mut s = Vec::new();
+    let mut tmp = [0u8; 1024];
+    loop {
+        if Instant::now() >= setup_deadline {
+            let _ = ch.close();
+            return Err(SinterError::connect(
+                "SSH setup budget exceeded while resolving HOME",
+            ));
+        }
+        match ch.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => {
+                if s.len() + n > DETECT_HOME_MAX {
+                    let _ = ch.close();
+                    return Err(SinterError::connect(
+                        "HOME detection output exceeded the capture bound",
+                    ));
+                }
+                s.extend_from_slice(&tmp[..n]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                let remaining = setup_remaining(setup_deadline)?;
+                wait_readable_until(session.as_raw_fd(), setup_deadline);
+                let _ = remaining;
+            }
+            Err(e) => {
+                let _ = ch.close();
+                return Err(SinterError::connect(format!(
+                    "HOME detection read failed: {}",
+                    e
+                )));
+            }
         }
     }
-    Err(SinterError::connect(format!(
-        "could not resolve home directory for target user {}",
-        user
-    )))
+    ch.wait_close()
+        .map_err(|e| SinterError::connect(format!("HOME detection channel close failed: {}", e)))?;
+    let code = ch.exit_status().map_err(|e| {
+        SinterError::connect(format!("HOME detection exit status unavailable: {}", e))
+    })?;
+    if code != 0 {
+        return Err(SinterError::connect(format!(
+            "could not resolve home directory for target user {} (exit {})",
+            user, code
+        )));
+    }
+    let text = String::from_utf8(s)
+        .map_err(|_| SinterError::connect("HOME detection output was not valid UTF-8"))?;
+    let fields: Vec<&str> = text.trim().split(':').collect();
+    if fields.len() >= 6 && !fields[5].is_empty() {
+        Ok(fields[5].to_string())
+    } else {
+        Err(SinterError::connect(format!(
+            "could not resolve home directory for target user {}",
+            user
+        )))
+    }
 }
 
 enum StreamErr {
@@ -819,10 +985,16 @@ fn drain_stream<R: Read>(
     sink: &mut Vec<u8>,
     truncated: &mut bool,
     cap: usize,
+    deadline: Instant,
 ) -> std::result::Result<usize, StreamErr> {
     let mut total = 0;
     let mut tmp = [0u8; 8192];
     loop {
+        // A successful-progress read loop must still honor the operation
+        // deadline; continuous output must not extend the bound.
+        if Instant::now() >= deadline {
+            return Err(StreamErr::Other("SSH operation deadline exceeded".into()));
+        }
         match r.read(&mut tmp) {
             Ok(0) => return Ok(total),
             Ok(n) => {
@@ -858,6 +1030,12 @@ fn write_all_nonblocking(
 ) -> std::io::Result<()> {
     let mut off = 0;
     while off < data.len() {
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "SSH operation deadline exceeded",
+            ));
+        }
         match channel.write(&data[off..]) {
             Ok(0) => {
                 return Err(std::io::Error::new(
@@ -907,7 +1085,12 @@ fn wait_readable_until(fd: std::os::raw::c_int, deadline: Instant) {
 fn refresh_session_timeout(session: &ssh2::Session, deadline: Instant) -> Result<()> {
     let remaining = deadline
         .checked_duration_since(Instant::now())
-        .ok_or_else(|| SinterError::indeterminate("SSH operation deadline exceeded"))?;
+        .filter(|d| !d.is_zero())
+        .ok_or_else(|| {
+            // Callers distinguish pre-dispatch (apply/none) from post-dispatch
+            // (indeterminate). Channel-open helpers use apply errors.
+            SinterError::apply("SSH operation deadline exceeded before command dispatch")
+        })?;
     let millis = remaining.as_millis().clamp(1, u32::MAX as u128) as u32;
     session.set_timeout(millis);
     Ok(())
@@ -915,6 +1098,11 @@ fn refresh_session_timeout(session: &ssh2::Session, deadline: Instant) -> Result
 
 fn channel_session_until(session: &mut ssh2::Session, deadline: Instant) -> Result<ssh2::Channel> {
     loop {
+        if Instant::now() >= deadline {
+            return Err(SinterError::apply(
+                "SSH channel open timed out before command dispatch",
+            ));
+        }
         refresh_session_timeout(session, deadline)?;
         match session.channel_session() {
             Ok(channel) => return Ok(channel),
@@ -933,6 +1121,11 @@ fn channel_session_until(session: &mut ssh2::Session, deadline: Instant) -> Resu
 
 fn exec_until(channel: &mut ssh2::Channel, command: &str, deadline: Instant) -> Result<()> {
     loop {
+        if Instant::now() >= deadline {
+            return Err(SinterError::indeterminate(
+                "SSH command dispatch deadline exceeded after channel open",
+            ));
+        }
         match channel.exec(command) {
             Ok(()) => return Ok(()),
             Err(e) if e.code() == ssh2::ErrorCode::Session(-37) => {

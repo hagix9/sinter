@@ -170,3 +170,73 @@ resources:
         assert_success(&rr);
     }
 }
+
+/// Controlled fixture: a unit that is initially not-found appears after an
+/// earlier resource, and the dependent service must re-observe the fresh state
+/// rather than fail on the stale missing-unit observation.
+#[test]
+fn previously_absent_unit_appears_and_service_verifies() {
+    if !sudo_available() || !std::path::Path::new("/run/systemd/system").exists() {
+        skip_or_fail("requires systemd and passwordless sudo");
+        return;
+    }
+    let unit = "sinter-r4-new-unit.service";
+    let unit_path = format!("/etc/systemd/system/{}", unit);
+    // Ensure the unit is currently absent.
+    let _ = std::process::Command::new("sudo")
+        .args(["-n", "/bin/sh", "-c"])
+        .arg(format!(
+            "systemctl stop {unit} >/dev/null 2>&1; systemctl disable {unit} >/dev/null 2>&1; systemctl reset-failed {unit} >/dev/null 2>&1; rm -f {unit_path}; systemctl daemon-reload",
+            unit = unit
+        ))
+        .status();
+    let _svc = lock_service();
+    let dir = trusted_root("absent-unit-appears");
+    // Unit body is written by the test, then a command resource "installs" it
+    // (controlled fixture standing in for a package that ships a new unit).
+    let body = dir.join("unit");
+    std::fs::write(
+        &body,
+        "[Unit]\nDescription=sinter r4 new unit\n[Service]\nType=oneshot\nExecStart=/bin/true\nRemainAfterExit=yes\n[Install]\nWantedBy=multi-user.target\n",
+    )
+    .unwrap();
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            r#"version: 1
+resources:
+  - id: install
+    type: command
+    with:
+      program: /bin/sh
+      args:
+        - -c
+        - "cp {src} {dst} && systemctl daemon-reload"
+  - id: svc
+    type: service
+    with:
+      name: {unit}
+      state: running
+    depends_on: [install]
+"#,
+            src = body.display(),
+            dst = unit_path,
+            unit = unit
+        ),
+    );
+    let r = run_recipe(&recipe, Mode::Apply, true);
+    assert_success(&r);
+    let svc = find(&r, "svc");
+    assert_eq!(svc.execution, Execution::Succeeded);
+    assert_eq!(svc.verification, Verification::Verified);
+    // Cleanup
+    let _ = std::process::Command::new("sudo")
+        .args(["-n", "/bin/sh", "-c"])
+        .arg(format!(
+            "systemctl stop {unit} >/dev/null 2>&1; systemctl disable {unit} >/dev/null 2>&1; rm -f {unit_path}; systemctl daemon-reload",
+            unit = unit,
+            unit_path = unit_path
+        ))
+        .status();
+}

@@ -126,6 +126,11 @@ fn derived_sensitivity(base: bool, vals: &BTreeMap<String, EvalVal>) -> bool {
     base || vals.values().any(|v| v.sensitive)
 }
 
+/// Redact a diagnostic that would otherwise embed a sensitive raw value.
+fn redact_msg(id: &str, what: &str, detail: &str) -> SinterError {
+    SinterError::apply(format!("{}: {} (value redacted): {}", id, what, detail))
+}
+
 impl Engine {
     // -----------------------------------------------------------------------
     // file
@@ -209,7 +214,27 @@ impl Engine {
     }
 
     fn verify_absent(&mut self, res: &FrozenResource, path: &str) -> Result<ResourceResult> {
-        let st = self.fs.inspect(path)?;
+        let st = match self.fs.inspect(path) {
+            Ok(st) => st,
+            Err(e) => {
+                // The removal already succeeded. A later observation failure
+                // must never erase the known mutation.
+                let mut r = changed_result(res);
+                r.change = Change::Changed;
+                if e.kind == crate::error::ErrorKind::Indeterminate {
+                    r.execution = Execution::Indeterminate;
+                    r.verification = Verification::Unknown;
+                } else {
+                    r.execution = Execution::Failed;
+                    r.verification = Verification::Failed;
+                }
+                r.reason = Some(format!(
+                    "removal of {} succeeded but re-observation failed: {}",
+                    path, e.message
+                ));
+                return Ok(r);
+            }
+        };
         if st.kind == ObjKind::Absent {
             let mut r = changed_result(res);
             r.verification = Verification::Verified;
@@ -235,19 +260,30 @@ impl Engine {
                 bytes: Some(c.into_bytes()),
                 sensitive: sens,
             }),
-            (None, Some((s, _))) => {
+            (None, Some((s, sens))) => {
+                let sensitive = sens || res.sensitive || res.derived_sensitive;
                 let resolved = if std::path::Path::new(&s).is_absolute() {
                     std::path::PathBuf::from(&s)
                 } else {
-                    crate::model::resolve_source_pub(&res.origin, &s)?
+                    crate::model::resolve_source_pub(&res.origin, &s).map_err(|e| {
+                        if sensitive {
+                            redact_msg(&res.id, "cannot resolve source", "not found or unreadable")
+                        } else {
+                            e
+                        }
+                    })?
                 };
                 let bytes = std::fs::read(&resolved).map_err(|e| {
-                    SinterError::apply(format!(
-                        "{}: cannot read source {}: {}",
-                        res.id,
-                        resolved.display(),
-                        e
-                    ))
+                    if sensitive {
+                        redact_msg(&res.id, "cannot read source", &format!("{}", e.kind()))
+                    } else {
+                        SinterError::apply(format!(
+                            "{}: cannot read source {}: {}",
+                            res.id,
+                            resolved.display(),
+                            e
+                        ))
+                    }
                 })?;
                 Ok(ContentSpec {
                     bytes: Some(bytes),
@@ -301,24 +337,45 @@ impl Engine {
         let manage_owner = owner.is_some();
         let manage_group = group.is_some();
         let manage_mode = mode.is_some();
+        let meta_sensitive = content_sensitive || res.sensitive || res.derived_sensitive;
 
-        let owner_uid = if let Some((spec, _)) = &owner {
-            Some(self.fs.resolve_uid(spec)?)
+        let owner_uid = if let Some((spec, sens)) = &owner {
+            let sensitive = *sens || meta_sensitive;
+            Some(self.fs.resolve_uid(spec).map_err(|e| {
+                if sensitive {
+                    redact_msg(&res.id, "unknown user", "resolution failed")
+                } else {
+                    e
+                }
+            })?)
         } else if is_existing {
             None // preserve
         } else {
             Some(self.fs.target_uid)
         };
 
-        let group_gid = if let Some((spec, _)) = &group {
-            Some(self.fs.resolve_gid(spec)?)
+        let group_gid = if let Some((spec, sens)) = &group {
+            let sensitive = *sens || meta_sensitive;
+            Some(self.fs.resolve_gid(spec).map_err(|e| {
+                if sensitive {
+                    redact_msg(&res.id, "unknown group", "resolution failed")
+                } else {
+                    e
+                }
+            })?)
         } else if is_existing {
             None // preserve
         } else if let Some(uid) = owner_uid {
             if uid == self.fs.target_uid {
                 Some(self.fs.target_gid)
             } else {
-                Some(self.fs.primary_gid_of_uid(uid)?)
+                Some(self.fs.primary_gid_of_uid(uid).map_err(|e| {
+                    if meta_sensitive {
+                        redact_msg(&res.id, "unknown primary group", "resolution failed")
+                    } else {
+                        e
+                    }
+                })?)
             }
         } else {
             Some(self.fs.target_gid)
@@ -592,8 +649,9 @@ impl Engine {
                             }
                         }
                         Err(e) if e.kind == crate::error::ErrorKind::Indeterminate => {
+                            // Publication is a known mutation; verification is
+                            // unknown. Change stays Changed.
                             r.execution = Execution::Indeterminate;
-                            r.change = Change::Possible;
                             r.verification = Verification::Unknown;
                             r.reason = Some(format!(
                                 "publication succeeded but re-observation was indeterminate: {}",
@@ -665,7 +723,7 @@ impl Engine {
                 return Ok(r);
             }
 
-            let v = self.verify_file(
+            let v = match self.verify_file(
                 res,
                 path,
                 None,
@@ -673,7 +731,27 @@ impl Engine {
                 enforce_gid,
                 enforce_mode,
                 sensitive,
-            )?;
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    // Metadata mutation already completed. Verification failure
+                    // must not erase the known change.
+                    let mut r = changed_result_sensitive(res, sensitive);
+                    r.change = Change::Changed;
+                    if e.kind == crate::error::ErrorKind::Indeterminate {
+                        r.execution = Execution::Indeterminate;
+                        r.verification = Verification::Unknown;
+                    } else {
+                        r.execution = Execution::Failed;
+                        r.verification = Verification::Failed;
+                    }
+                    r.reason = Some(format!(
+                        "metadata mutation succeeded but re-observation failed: {}",
+                        e.message
+                    ));
+                    return Ok(r);
+                }
+            };
             let mut r = changed_result_sensitive(res, sensitive);
             r.verification = v.verification;
             if v.verification == Verification::Failed {
@@ -684,6 +762,8 @@ impl Engine {
                     Change::None
                 };
                 r.reason = v.reason;
+            } else if mutated {
+                r.change = Change::Changed;
             }
             Ok(r)
         }
@@ -787,18 +867,18 @@ impl Engine {
         match self.fs.rename(&staging, path) {
             Ok(()) => {}
             Err(e) => {
-                let cleanup_ok = self.cleanup_stage_dir(&stage_dir);
-                // A rename that returned an error did not necessarily leave the
-                // destination untouched. If the failure is indeterminate, the
-                // outcome is indeterminate; otherwise the destination is
-                // unchanged only when we positively know the rename did not
-                // take effect, so we conservatively classify possible change.
+                // Classify publication completion BEFORE any cleanup. An
+                // indeterminate rename must not trigger cleanup that could
+                // destroy evidence or rewrite the publication fact.
                 if e.kind == crate::error::ErrorKind::Indeterminate {
                     return Ok(PublishOutcome::Indeterminate(format!(
                         "{}: publication completion is unknown: {}",
                         res.id, e.message
                     )));
                 }
+                let cleanup_ok = self.cleanup_stage_dir(&stage_dir);
+                // A definite rename failure left the destination unchanged
+                // (the atomic replace did not take effect).
                 return Ok(PublishOutcome::FailedBeforePublish(format!(
                     "{}: publication rename failed before publication: {} (staging cleanup {})",
                     res.id,
@@ -1243,58 +1323,72 @@ impl Engine {
             };
         }
 
-        let target = target
-            .ok_or_else(|| {
-                SinterError::schema(format!("{}: link target is required when present", res.id))
-            })?
-            .0;
-        if target.contains('\0') {
+        let (target_val, target_sens) = target.ok_or_else(|| {
+            SinterError::schema(format!("{}: link target is required when present", res.id))
+        })?;
+        if target_val.contains('\0') {
             return Err(SinterError::schema(format!(
                 "{}: link target may not contain NUL",
                 res.id
             )));
         }
+        // DESIGN §31: derived/desired values from sensitive inputs stay sensitive.
+        let link_sensitive = target_sens || res.sensitive || res.derived_sensitive;
 
         match stat.kind {
             ObjKind::Absent => {
                 if self.opts.mode == Mode::Plan {
-                    let mut r = changed_result(res);
+                    let mut r = changed_result_sensitive(res, link_sensitive);
+                    let desired = if link_sensitive {
+                        "symlink -> [redacted]".to_string()
+                    } else {
+                        format!("symlink -> {}", target_val)
+                    };
                     r.diff = Some(Diff {
                         body: DiffBody::Summary {
                             current: "absent".to_string(),
-                            desired: format!("symlink -> {}", target),
+                            desired,
                         },
                     });
                     return Ok(r);
                 }
                 self.fs.check_trusted_parents(&path)?;
-                self.fs.symlink(&target, &path)?;
-                match self.verify_link(res, &path, &target) {
+                self.fs.symlink(&target_val, &path)?;
+                match self.verify_link(res, &path, &target_val) {
                     Ok(result) => Ok(result),
                     Err(e) => Ok(post_mutation_failure(res, e)),
                 }
             }
             ObjKind::Symlink => {
                 let cur = self.fs.readlink(&path)?;
-                if cur == target {
+                if cur == target_val {
                     return Ok(unchanged_result(
                         res,
                         "symlink already points to desired target",
                     ));
                 }
                 if self.opts.mode == Mode::Plan {
-                    let mut r = changed_result(res);
+                    let mut r = changed_result_sensitive(res, link_sensitive);
+                    let desired = if link_sensitive {
+                        "symlink -> [redacted]".to_string()
+                    } else {
+                        format!("symlink -> {}", target_val)
+                    };
+                    let current = if link_sensitive {
+                        // Current target is not the secret, but keep presentation
+                        // conservative when the desired side is sensitive.
+                        format!("symlink -> {}", cur)
+                    } else {
+                        format!("symlink -> {}", cur)
+                    };
                     r.diff = Some(Diff {
-                        body: DiffBody::Summary {
-                            current: format!("symlink -> {}", cur),
-                            desired: format!("symlink -> {}", target),
-                        },
+                        body: DiffBody::Summary { current, desired },
                     });
                     return Ok(r);
                 }
                 self.fs.check_trusted_parents(&path)?;
-                self.fs.symlink_replace(&target, &path, &stat)?;
-                match self.verify_link(res, &path, &target) {
+                self.fs.symlink_replace(&target_val, &path, &stat)?;
+                match self.verify_link(res, &path, &target_val) {
                     Ok(result) => Ok(result),
                     Err(e) => Ok(post_mutation_failure(res, e)),
                 }
@@ -1516,6 +1610,9 @@ impl Engine {
         req.cwd = cwd.clone();
         req.env = env.0.clone();
         req.timeout_secs = timeout;
+        // DESIGN §31.3/31.4: if any evaluated command input is sensitive the
+        // whole command is sensitive, including internal audit records.
+        req.sensitive = command_sensitive;
         // Add the fixed baseline environment.
         req.env.insert(
             "PATH".to_string(),
@@ -1526,7 +1623,7 @@ impl Engine {
         req.env.insert("HOME".to_string(), self.fs.home_env());
 
         let out = self.fs.exec(&req)?;
-        let _ = args_sens;
+        let _ = (args_sens, cwd_sens);
         let _ = cwd_sens;
         match out.completion {
             Completion::Indeterminate { ref reason, .. } => {
@@ -2055,6 +2152,7 @@ impl Engine {
                     if let Err(e) = runit(self, &["start", &name]) {
                         return Ok(service_step_failure(res, e, mutated));
                     }
+                    mutated = true;
                 }
             }
             ("stopped", Some(en)) => {
@@ -2068,6 +2166,7 @@ impl Engine {
                     if let Err(e) = runit(self, &[if en { "enable" } else { "disable" }, &name]) {
                         return Ok(service_step_failure(res, e, mutated));
                     }
+                    mutated = true;
                 }
             }
             ("running", None) => {
@@ -2075,6 +2174,7 @@ impl Engine {
                     if let Err(e) = runit(self, &["start", &name]) {
                         return Ok(service_step_failure(res, e, mutated));
                     }
+                    mutated = true;
                 }
             }
             ("stopped", None) => {
@@ -2090,10 +2190,21 @@ impl Engine {
                     if let Err(e) = runit(self, &[if en { "enable" } else { "disable" }, &name]) {
                         return Ok(service_step_failure(res, e, mutated));
                     }
+                    mutated = true;
                 }
             }
             ("", None) => {}
             _ => {}
+        }
+
+        // Controlled injection: successful service mutation followed by a
+        // re-observation failure. Mutation truth must be preserved.
+        if self.fs.fault() == Some("service_reobserve_fail") {
+            return Ok(service_step_failure(
+                res,
+                SinterError::apply("injected service re-observation failure after mutation"),
+                mutated,
+            ));
         }
 
         // Re-observe and verify every requested dimension.
@@ -2139,31 +2250,62 @@ impl Engine {
         req.args = vec!["stop".to_string(), name.to_string()];
         req.env = baseline_env(self.fs.home_env());
         let out = self.fs.exec(&req)?;
-        if !out.is_success() {
-            return Err(SinterError::apply(format!(
-                "systemctl stop {} failed",
-                name
-            )));
+        match out.completion {
+            Completion::Exited(0) => {}
+            Completion::Exited(_) | Completion::Signaled(_) => {
+                return Err(SinterError::apply(format!(
+                    "systemctl stop {} failed",
+                    name
+                )));
+            }
+            Completion::Indeterminate { reason, .. } => {
+                // Stop completion unknown: mutation may have occurred.
+                return Err(SinterError::indeterminate(format!(
+                    "systemctl stop {} did not complete: {}",
+                    name, reason
+                )));
+            }
         }
         // Clear a failed state so that "stopped" is clean, not failed.
         let mut req = ExecRequest::new("/usr/bin/systemctl");
         req.args = vec!["reset-failed".to_string(), name.to_string()];
         req.env = baseline_env(self.fs.home_env());
         let reset = self.fs.exec(&req)?;
-        if !reset.is_success() {
-            return Err(match reset.completion {
-                Completion::Indeterminate { reason, .. } => SinterError::indeterminate(reason),
-                _ => {
-                    SinterError::apply(format!("systemctl reset-failed {} failed", name)).changed()
-                }
-            });
+        match reset.completion {
+            Completion::Exited(0) => Ok(()),
+            Completion::Indeterminate { reason, .. } => {
+                // Stop already succeeded (mutation known). Reset completion is
+                // unknown; preserve indeterminate with known mutation.
+                Err(SinterError::indeterminate(format!(
+                    "systemctl reset-failed {} did not complete after stop: {}",
+                    name, reason
+                ))
+                .changed())
+            }
+            _ => {
+                Err(SinterError::apply(format!("systemctl reset-failed {} failed", name)).changed())
+            }
         }
-        Ok(())
     }
 
     fn observe_service(&mut self, name: &str) -> Result<ServiceObs> {
         let out = self.fs.systemctl_show(name)?;
         let text = String::from_utf8_lossy(&out.stdout);
+        match out.completion {
+            Completion::Indeterminate { reason, .. } => {
+                return Err(SinterError::indeterminate(format!(
+                    "service observation for {} did not complete: {}",
+                    name, reason
+                )));
+            }
+            Completion::Signaled(s) => {
+                return Err(SinterError::apply(format!(
+                    "service observation for {} terminated by signal {}",
+                    name, s
+                )));
+            }
+            Completion::Exited(_) => {}
+        }
         if !out.is_success() {
             // systemctl returns non-zero for an unknown unit but still prints
             // LoadState=not-found; a non-zero with no recognizable output is an
@@ -2173,6 +2315,12 @@ impl Engine {
                 name,
                 out.exit_code(),
                 String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        if out.stdout_truncated || out.stderr_truncated {
+            return Err(SinterError::indeterminate(format!(
+                "service observation for {} was truncated or incomplete",
+                name
             )));
         }
         let mut load_state = String::new();
@@ -2209,15 +2357,18 @@ impl Engine {
             if let Some(d) = self.model.resources.iter().find(|r| &r.id == dep) {
                 if d.type_ == "package" {
                     if let Some(value) = d.with.get("state") {
+                        // Evaluate the producer in its own loop-item context.
+                        // Re-evaluating without that context loses `item` and
+                        // can invent a plan error for a valid defer.
+                        let item = d.loop_item.as_ref().map(|v| EvalVal::known(v.clone()));
                         let evaluated =
-                            eval_value_interpolated(value, &self.scope(None, None, None)).map_err(
-                                |e| {
+                            eval_value_interpolated(value, &self.scope(item.as_ref(), None, None))
+                                .map_err(|e| {
                                     SinterError::plan(format!(
                                         "{}: could not evaluate package dependency state: {}",
                                         res.id, e
                                     ))
-                                },
-                            )?;
+                                })?;
                         if matches!(evaluated.val, Some(Value::Str(s)) if s == "present") {
                             return Ok(true);
                         }
@@ -2237,7 +2388,18 @@ impl Engine {
         action: &str,
     ) -> Result<HandlerOutcomeState> {
         let name = &h.service;
-        let obs = self.observe_service(name)?;
+        let obs = match self.observe_service(name) {
+            Ok(obs) => obs,
+            Err(e) => {
+                // Observation failure is a handler outcome, not an outer report
+                // abort. Preserve indeterminate when observation is unknown.
+                return Ok(if e.kind == crate::error::ErrorKind::Indeterminate {
+                    HandlerOutcomeState::Indeterminate
+                } else {
+                    HandlerOutcomeState::Failed
+                });
+            }
+        };
         if obs.load_state == "not-found" {
             return Ok(HandlerOutcomeState::Failed);
         }
@@ -2247,6 +2409,11 @@ impl Engine {
         // Controlled injection for the handler-indeterminate aggregate contract.
         if self.fs.fault() == Some("handler_indeterminate") {
             return Ok(HandlerOutcomeState::Indeterminate);
+        }
+        // Controlled injection for an outer handler error after prior report
+        // state exists (resources already processed, handlers pending).
+        if self.fs.fault() == Some("handler_outer_error") {
+            return Err(SinterError::apply("injected handler outer error"));
         }
         let mut req = ExecRequest::new("/usr/bin/systemctl");
         req.args = vec![action.to_string(), name.to_string()];
@@ -2260,7 +2427,16 @@ impl Engine {
                     return Ok(HandlerOutcomeState::Failed);
                 }
                 // Verification.
-                let after = self.observe_service(name)?;
+                let after = match self.observe_service(name) {
+                    Ok(after) => after,
+                    Err(e) => {
+                        return Ok(if e.kind == crate::error::ErrorKind::Indeterminate {
+                            HandlerOutcomeState::Indeterminate
+                        } else {
+                            HandlerOutcomeState::Failed
+                        })
+                    }
+                };
                 match action {
                     "restart" => {
                         if after.active_state == "active" {
@@ -2330,19 +2506,22 @@ fn same_object_identity(prev: &Stat, cur: &Stat) -> bool {
 
 fn service_step_failure(res: &FrozenResource, e: SinterError, mutated: bool) -> ResourceResult {
     let mut r = changed_result(res);
-    r.execution = if e.kind == crate::error::ErrorKind::Indeterminate {
+    let indeterminate = e.kind == crate::error::ErrorKind::Indeterminate;
+    r.execution = if indeterminate {
         Execution::Indeterminate
     } else {
         Execution::Failed
     };
-    r.change = if e.kind == crate::error::ErrorKind::Indeterminate {
-        Change::Possible
-    } else if mutated || e.mutation == MutationState::Changed {
+    // Once a mutation is known to have occurred, later uncertainty must not
+    // erase that fact. Possible is only for "may have mutated".
+    r.change = if mutated || e.mutation == MutationState::Changed {
         Change::Changed
+    } else if indeterminate || e.mutation == MutationState::Possible {
+        Change::Possible
     } else {
         Change::None
     };
-    r.verification = if r.execution == Execution::Indeterminate {
+    r.verification = if indeterminate {
         Verification::Unknown
     } else {
         Verification::NotPerformed
@@ -2375,16 +2554,16 @@ fn metadata_failure(res: &FrozenResource, e: SinterError, mutated: bool) -> Reso
 
 fn post_mutation_failure(res: &FrozenResource, e: SinterError) -> ResourceResult {
     let mut r = changed_result(res);
-    r.execution = if e.kind == crate::error::ErrorKind::Indeterminate {
+    let indeterminate = e.kind == crate::error::ErrorKind::Indeterminate;
+    r.execution = if indeterminate {
         Execution::Indeterminate
     } else {
         Execution::Failed
     };
-    r.change = match e.mutation {
-        MutationState::None | MutationState::Changed => Change::Changed,
-        MutationState::Possible => Change::Possible,
-    };
-    r.verification = if r.execution == Execution::Indeterminate {
+    // This helper is only used after a mutation that definitely completed.
+    // Later uncertainty must not erase that fact.
+    r.change = Change::Changed;
+    r.verification = if indeterminate {
         Verification::Unknown
     } else {
         Verification::NotPerformed

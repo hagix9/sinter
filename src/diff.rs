@@ -91,7 +91,8 @@ pub fn line_diff(current: &str, desired: &str) -> (Vec<String>, Vec<String>) {
 }
 
 /// Escape terminal control characters so displayed content cannot alter the
-/// terminal state.
+/// terminal state. Covers C0, DEL, and C1 (including U+009B CSI) without
+/// corrupting ordinary printable Unicode.
 pub fn sanitize_line(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -101,6 +102,11 @@ pub fn sanitize_line(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             c if (c as u32) < 0x20 || c as u32 == 0x7f => {
                 out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            // C1 controls: 0x80..=0x9F. U+009B is CSI and must never reach a
+            // terminal raw. Escape as Unicode so ordinary CJK/Latin stays intact.
+            c if (0x80..=0x9f).contains(&(c as u32)) => {
+                out.push_str(&format!("\\u{{{:02x}}}", c as u32));
             }
             c => out.push(c),
         }
@@ -139,5 +145,17 @@ mod tests {
     #[test]
     fn controls_escaped() {
         assert_eq!(sanitize_line("a\u{1b}[31m"), "a\\x1b[31m");
+    }
+
+    #[test]
+    fn c1_csi_escaped() {
+        // U+009B is the single-byte CSI equivalent of ESC [.
+        assert_eq!(sanitize_line("a\u{9b}31m"), "a\\u{9b}31m");
+        assert_eq!(sanitize_line("\u{80}\u{9f}"), "\\u{80}\\u{9f}");
+    }
+
+    #[test]
+    fn ordinary_unicode_not_corrupted() {
+        assert_eq!(sanitize_line("日本語 café"), "日本語 café");
     }
 }
