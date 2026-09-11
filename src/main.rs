@@ -1,4 +1,5 @@
 use clap::{Args, Parser, Subcommand};
+use sinter::diff::sanitize_line;
 use sinter::engine::{Engine, Mode, RunOptions, SshSpec, TargetSpec};
 use sinter::error::{ErrorKind, SinterError};
 use sinter::model::load_model;
@@ -69,7 +70,7 @@ fn main() -> ExitCode {
     match run(cli) {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
-            eprintln!("sinter: {}", e.message);
+            eprintln!("sinter: {}", sanitize_line(&e.message));
             ExitCode::from(e.kind.exit_code() as u8)
         }
     }

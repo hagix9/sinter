@@ -128,6 +128,7 @@ struct Declaration {
     /// Number of concrete resource instances this declaration produced.
     instances: usize,
     register_refs: BTreeSet<String>,
+    sensitive: bool,
 }
 
 impl LoadState {
@@ -230,6 +231,7 @@ fn expand_resource(canon: &Path, decl: &ResourceDecl, state: &mut LoadState) -> 
                 is_loop: false,
                 instances: 1,
                 register_refs,
+                sensitive: decl.sensitive,
             });
         }
         Some(items) => {
@@ -256,6 +258,7 @@ fn expand_resource(canon: &Path, decl: &ResourceDecl, state: &mut LoadState) -> 
                 is_loop: true,
                 instances: items.len(),
                 register_refs,
+                sensitive: decl.sensitive,
             });
         }
     }
@@ -265,7 +268,11 @@ fn expand_resource(canon: &Path, decl: &ResourceDecl, state: &mut LoadState) -> 
 /// Validate resource declarations as written, independent of static loop
 /// expansion. This guarantees that a declaration is rejected for an invalid
 /// shape or reference even when its loop expands to zero instances.
-fn validate_declarations(declarations: &[Declaration], _handlers: &[FrozenHandler]) -> Result<()> {
+fn validate_declarations(
+    declarations: &[Declaration],
+    _handlers: &[FrozenHandler],
+    sensitive_var_names: &BTreeSet<String>,
+) -> Result<()> {
     // Register producers: declared by non-loop command resources.
     let mut register_producers: BTreeSet<String> = BTreeSet::new();
     let mut hidden_loop_register = false;
@@ -353,7 +360,7 @@ fn validate_declarations(declarations: &[Declaration], _handlers: &[FrozenHandle
     // Shape validation per declaration type. This uses the literal IR values
     // only; facts/registers are rejected as static identifiers by construction.
     for d in declarations {
-        validate_declaration_shape(d)?;
+        validate_declaration_shape(d, sensitive_var_names)?;
     }
 
     // Register reference validation must not be skipped for empty loops.
@@ -387,20 +394,37 @@ fn validate_declarations(declarations: &[Declaration], _handlers: &[FrozenHandle
 /// Validate a single declaration's field types and static identifiers without
 /// evaluating loops. Mirrors the per-instance validation so the same errors are
 /// reported whether or not the loop is empty.
-fn validate_declaration_shape(d: &Declaration) -> Result<()> {
+fn validate_declaration_shape(
+    d: &Declaration,
+    sensitive_var_names: &BTreeSet<String>,
+) -> Result<()> {
     let ctx = &d.id;
     match d.type_.as_str() {
         "file" => {
             validate_with_fields(&d.with, FILE_FIELDS, ctx)?;
             require_static_string_field(&d.with, "path", ctx)?;
             require_optional_static_string(&d.with, "source", ctx)?;
-            require_optional_mode(&d.with, ctx)?;
+            require_optional_mode(
+                &d.with,
+                ctx,
+                d.sensitive
+                    || d.with
+                        .get("mode")
+                        .is_some_and(|v| value_references_sensitive_var(v, sensitive_var_names)),
+            )?;
             require_content_type(&d.with, ctx)?;
         }
         "directory" => {
             validate_with_fields(&d.with, DIR_FIELDS, ctx)?;
             require_static_string_field(&d.with, "path", ctx)?;
-            require_optional_mode(&d.with, ctx)?;
+            require_optional_mode(
+                &d.with,
+                ctx,
+                d.sensitive
+                    || d.with
+                        .get("mode")
+                        .is_some_and(|v| value_references_sensitive_var(v, sensitive_var_names)),
+            )?;
         }
         "link" => {
             validate_with_fields(&d.with, LINK_FIELDS, ctx)?;
@@ -411,7 +435,14 @@ fn validate_declaration_shape(d: &Declaration) -> Result<()> {
             validate_with_fields(&d.with, TEMPLATE_FIELDS, ctx)?;
             require_static_string_field(&d.with, "path", ctx)?;
             require_static_string_field(&d.with, "source", ctx)?;
-            require_optional_mode(&d.with, ctx)?;
+            require_optional_mode(
+                &d.with,
+                ctx,
+                d.sensitive
+                    || d.with
+                        .get("mode")
+                        .is_some_and(|v| value_references_sensitive_var(v, sensitive_var_names)),
+            )?;
             if d.with.contains_key("content") {
                 return Err(SinterError::schema(format!(
                     "{}: template does not support content; use source",
@@ -721,12 +752,16 @@ fn collect_dynamic_refs(
     }
 }
 
-fn require_optional_mode(with: &BTreeMap<String, Value>, ctx: &str) -> Result<()> {
+fn require_optional_mode(with: &BTreeMap<String, Value>, ctx: &str, sensitive: bool) -> Result<()> {
     match with.get("mode") {
         None | Some(Value::Null) => Ok(()),
-        Some(Value::Str(s)) => crate::paths::parse_mode(s)
-            .map(|_| ())
-            .map_err(|e| SinterError::schema(format!("{}: {}", ctx, e.message))),
+        Some(Value::Str(s)) => crate::paths::parse_mode(s).map(|_| ()).map_err(|e| {
+            if sensitive {
+                SinterError::schema(format!("{}: invalid mode", ctx))
+            } else {
+                SinterError::schema(format!("{}: {}", ctx, e.message))
+            }
+        }),
         Some(_) => Err(SinterError::schema(format!(
             "{}: mode must be a quoted four-digit octal string",
             ctx
@@ -746,10 +781,6 @@ fn require_content_type(with: &BTreeMap<String, Value>, ctx: &str) -> Result<()>
 }
 
 fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
-    // Declaration-level validation runs first and independently of loop
-    // expansion, so invalid declarations cannot be erased by an empty loop.
-    validate_declarations(&state.declarations, &state.handlers)?;
-
     // Duplicate resource and handler ID detection.
     let mut resource_ids: BTreeSet<String> = BTreeSet::new();
     for r in &state.resources {
@@ -806,6 +837,7 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
             },
         );
     }
+    validate_declarations(&state.declarations, &state.handlers, &sensitive_var_names)?;
 
     // Register producer map + validation of loop+register.
     let mut register_producers: BTreeMap<String, String> = BTreeMap::new();
@@ -947,7 +979,15 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                     .map_err(|e| SinterError::schema(format!("{}: {}", resource_ctx, e.message)))?;
                 fr.path = Some(path);
                 let source = static_string(&r.with, "source", &scope, &resource_ctx, true)?;
-                fr.controller_source = Some(resolve_source(&r.origin, &source)?);
+                let source_sensitive = r.sensitive
+                    || value_references_sensitive_var(&r.with["source"], &sensitive_var_names);
+                fr.controller_source = Some(resolve_source(&r.origin, &source).map_err(|e| {
+                    if source_sensitive {
+                        SinterError::schema(format!("{}: source validation failed", resource_ctx))
+                    } else {
+                        e
+                    }
+                })?);
                 if r.with.contains_key("content") {
                     return Err(SinterError::schema(format!(
                         "{}: template does not support content; use source",

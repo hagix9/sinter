@@ -347,6 +347,101 @@ fn sensitive_variable_used_in_early_error_is_redacted() {
     );
 }
 
+#[test]
+fn sensitive_invalid_mode_reaches_validation_without_leaking_value() {
+    use std::process::Command;
+    let dir = trusted_root("c3-invalid-mode");
+    let sentinel = "THIRD_PASS_PRIVATE_MODE_9d7f";
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nvars:\n  mode:\n    value: \"{sentinel}\"\n    sensitive: true\nresources:\n  - id: f\n    sensitive: true\n    type: file\n    with:\n      path: /tmp/sinter-sensitive-mode\n      mode: \"{{{{ vars.mode }}}}\"\n"
+        ),
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_sinter"))
+        .args(["validate", recipe.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "validation path was not reached: {combined}"
+    );
+    assert!(
+        combined.contains("invalid mode"),
+        "wrong validation error: {combined}"
+    );
+    assert!(
+        !combined.contains(sentinel),
+        "sensitive mode leaked: {combined}"
+    );
+}
+
+#[test]
+fn sensitive_invalid_source_reaches_validation_without_leaking_value() {
+    use std::process::Command;
+    let dir = trusted_root("c3-invalid-source");
+    let sentinel = "THIRD_PASS_PRIVATE_SOURCE_4a2c";
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nvars:\n  source:\n    value: \"{sentinel}/missing.tmpl\"\n    sensitive: true\nresources:\n  - id: t\n    type: template\n    with:\n      path: /tmp/sinter-sensitive-source\n      source: \"{{{{ vars.source }}}}\"\n"
+        ),
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_sinter"))
+        .args(["validate", recipe.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "validation path was not reached: {combined}"
+    );
+    assert!(
+        combined.contains("source"),
+        "wrong validation error: {combined}"
+    );
+    assert!(
+        !combined.contains(sentinel),
+        "sensitive source leaked: {combined}"
+    );
+}
+
+#[test]
+fn symlink_drift_before_publication_is_rejected_without_desired_overwrite() {
+    let dir = trusted_root("c2-symlink-drift");
+    let link = dir.join("link");
+    std::os::unix::fs::symlink("/sinter-original", &link).unwrap();
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: link\n    type: link\n    with:\n      path: {}\n      target: /sinter-desired\n",
+            link.display()
+        ),
+    );
+    let report = run_recipe_fault(&recipe, Mode::Apply, "symlink_drift_before_publish");
+    let result = find(&report, "link");
+    assert_eq!(result.execution, Execution::Failed);
+    assert_eq!(result.change, Change::None);
+    assert_eq!(
+        std::fs::read_link(&link).unwrap().to_string_lossy(),
+        "/sinter-injected-drift"
+    );
+}
+
 // ===========================================================================
 // C5 - filesystem publication safety
 // ===========================================================================

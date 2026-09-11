@@ -1035,7 +1035,10 @@ impl Engine {
                     r.reason = Some(e.message);
                     return Ok(r);
                 }
-                self.verify_directory(res, &path, uid, gid, mode)
+                match self.verify_directory(res, &path, uid, gid, mode) {
+                    Ok(result) => Ok(result),
+                    Err(e) => Ok(post_mutation_failure(res, e)),
+                }
             }
             ObjKind::Dir => {
                 let meta = self.dir_meta(res, &vals, ObjKind::Dir)?;
@@ -1080,7 +1083,10 @@ impl Engine {
                 if let Err(e) = self.fs.chmod(&path, mode) {
                     return Ok(metadata_failure(res, e, mutated));
                 }
-                self.verify_directory(res, &path, uid, gid, mode)
+                match self.verify_directory(res, &path, uid, gid, mode) {
+                    Ok(result) => Ok(result),
+                    Err(e) => Ok(post_mutation_failure(res, e)),
+                }
             }
             other => Err(SinterError::apply(format!(
                 "{}: {} exists as {}; refusing to manage as directory",
@@ -1263,7 +1269,10 @@ impl Engine {
                 }
                 self.fs.check_trusted_parents(&path)?;
                 self.fs.symlink(&target, &path)?;
-                self.verify_link(res, &path, &target)
+                match self.verify_link(res, &path, &target) {
+                    Ok(result) => Ok(result),
+                    Err(e) => Ok(post_mutation_failure(res, e)),
+                }
             }
             ObjKind::Symlink => {
                 let cur = self.fs.readlink(&path)?;
@@ -1284,8 +1293,11 @@ impl Engine {
                     return Ok(r);
                 }
                 self.fs.check_trusted_parents(&path)?;
-                self.fs.symlink_replace(&target, &path)?;
-                self.verify_link(res, &path, &target)
+                self.fs.symlink_replace(&target, &path, &stat)?;
+                match self.verify_link(res, &path, &target) {
+                    Ok(result) => Ok(result),
+                    Err(e) => Ok(post_mutation_failure(res, e)),
+                }
             }
             other => Err(SinterError::apply(format!(
                 "{}: {} is {}; refusing to replace as symlink",
@@ -2351,6 +2363,26 @@ fn metadata_failure(res: &FrozenResource, e: SinterError, mutated: bool) -> Reso
         MutationState::Possible => Change::Possible,
         MutationState::None if mutated => Change::Changed,
         MutationState::None => Change::None,
+    };
+    r.verification = if r.execution == Execution::Indeterminate {
+        Verification::Unknown
+    } else {
+        Verification::NotPerformed
+    };
+    r.reason = Some(e.message);
+    r
+}
+
+fn post_mutation_failure(res: &FrozenResource, e: SinterError) -> ResourceResult {
+    let mut r = changed_result(res);
+    r.execution = if e.kind == crate::error::ErrorKind::Indeterminate {
+        Execution::Indeterminate
+    } else {
+        Execution::Failed
+    };
+    r.change = match e.mutation {
+        MutationState::None | MutationState::Changed => Change::Changed,
+        MutationState::Possible => Change::Possible,
     };
     r.verification = if r.execution == Execution::Indeterminate {
         Verification::Unknown

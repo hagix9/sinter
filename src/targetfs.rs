@@ -570,7 +570,12 @@ impl TargetFs {
 
     /// Atomically replace a symlink using a private staging directory so the
     /// staging name cannot be predicted or pre-created by another user.
-    pub fn symlink_replace(&mut self, target: &str, link_path: &str) -> Result<()> {
+    pub fn symlink_replace(
+        &mut self,
+        target: &str,
+        link_path: &str,
+        observed: &Stat,
+    ) -> Result<()> {
         self.guard_mut()?;
         let (dir, name) = parent_and_name(link_path);
         let stage_dir = self.make_staging_dir(&dir)?;
@@ -585,6 +590,17 @@ impl TargetFs {
                     tmp.clone(),
                 ],
             )?;
+            if self.fault() == Some("symlink_drift_before_publish") {
+                self.remove_symlink(link_path)?;
+                self.symlink("/sinter-injected-drift", link_path)?;
+            }
+            let current = self.inspect(link_path)?;
+            if !same_identity(observed, &current) {
+                return Err(SinterError::apply(format!(
+                    "target drift detected at {} before symlink publication",
+                    link_path
+                )));
+            }
             self.run_argv_ok(
                 "/bin/mv",
                 &[
@@ -597,9 +613,23 @@ impl TargetFs {
             )?;
             Ok(())
         })();
+        let indeterminate =
+            matches!(result, Err(ref e) if e.kind == crate::error::ErrorKind::Indeterminate);
+        if indeterminate {
+            return result;
+        }
+        let cleanup_payload = self.run_argv("/bin/rm", &["-f".to_string(), "--".to_string(), tmp]);
+        if !matches!(cleanup_payload, Ok(ref out) if out.is_success()) {
+            return Err(SinterError::apply("symlink staging payload cleanup failed").changed());
+        }
         let cleanup = self.run_argv("/bin/rmdir", &[stage_dir]);
         match (result, cleanup) {
-            (Ok(()), Ok(_)) => Ok(()),
+            (Ok(()), Ok(out)) if out.is_success() => Ok(()),
+            (Ok(()), Ok(out)) => Err(SinterError::apply(format!(
+                "symlink staging cleanup failed: {:?}",
+                out.completion
+            ))
+            .changed()),
             (Ok(()), Err(e)) => Err(e.changed()),
             (Err(e), _) => Err(e),
         }
@@ -841,6 +871,14 @@ pub fn absent_stat() -> Stat {
         mtime: String::new(),
         ctime: String::new(),
     }
+}
+
+fn same_identity(previous: &Stat, current: &Stat) -> bool {
+    previous.kind == current.kind
+        && previous.dev == current.dev
+        && previous.ino == current.ino
+        && previous.mtime == current.mtime
+        && previous.ctime == current.ctime
 }
 
 /// Whether a stat/stderr message positively indicates the object is missing.

@@ -584,16 +584,12 @@ impl SshExecutor {
     fn run(&mut self, req: &ExecRequest) -> Result<Output> {
         let deadline = Instant::now() + Duration::from_secs(req.timeout_secs.max(1));
         let line = build_remote_command(req, self.sudo, &self.home);
-        let mut channel = self
-            .session
-            .channel_session()
-            .map_err(|e| SinterError::apply(format!("cannot open SSH channel: {}", e)))?;
+        self.session.set_blocking(false);
+        let mut channel = channel_session_until(&mut self.session, deadline)?;
         channel
             .handle_extended_data(ssh2::ExtendedData::Normal)
             .ok();
-        channel
-            .exec(&line)
-            .map_err(|e| SinterError::apply(format!("cannot execute remote command: {}", e)))?;
+        exec_until(&mut channel, &line, deadline)?;
 
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -602,8 +598,6 @@ impl SshExecutor {
         let mut stdout_eof = false;
         let mut stderr_eof = false;
         let mut stdin = req.stdin.clone();
-
-        self.session.set_blocking(false);
 
         let result: Result<()> = (|| {
             while !(stdout_eof && stderr_eof) {
@@ -667,7 +661,7 @@ impl SshExecutor {
                     )));
                 }
                 if !progressed {
-                    wait_readable(self.session.as_raw_fd(), Duration::from_millis(200));
+                    wait_readable_until(self.session.as_raw_fd(), deadline);
                 }
             }
             Ok(())
@@ -706,13 +700,11 @@ impl SshExecutor {
                 }
                 Err(e) if e.code() == ssh2::ErrorCode::Session(-37) => {
                     // LIBSSH2_ERROR_EAGAIN: not ready yet; keep waiting.
-                    wait_readable(self.session.as_raw_fd(), Duration::from_millis(50));
+                    wait_readable_until(self.session.as_raw_fd(), deadline);
                 }
                 Err(_) => break,
             }
         }
-        self.session.set_blocking(true);
-
         let (completion, _close_note) = if !close_confirmed {
             (
                 Completion::Indeterminate {
@@ -725,27 +717,10 @@ impl SshExecutor {
                 Some("close unconfirmed".to_string()),
             )
         } else {
-            let c = match channel.exit_signal() {
-                Ok(sig) => match sig.exit_signal.as_deref().and_then(parse_signal) {
-                    Some(n) => Completion::Signaled(n),
-                    None => match channel.exit_status() {
-                        Ok(code) => Completion::Exited(code),
-                        Err(e) => Completion::Indeterminate {
-                            started: true,
-                            reason: format!("remote exit status unavailable: {}", e),
-                        },
-                    },
-                },
-                Err(_) => match channel.exit_status() {
-                    Ok(code) => Completion::Exited(code),
-                    Err(e) => Completion::Indeterminate {
-                        started: true,
-                        reason: format!("remote exit status unavailable: {}", e),
-                    },
-                },
-            };
+            let c = remote_completion_until(&mut channel, self.session.as_raw_fd(), deadline);
             (c, None)
         };
+        self.session.set_blocking(true);
 
         Ok(Output {
             completion,
@@ -754,6 +729,60 @@ impl SshExecutor {
             stdout_truncated: out_trunc,
             stderr_truncated: err_trunc,
         })
+    }
+}
+
+fn remote_completion_until(
+    channel: &mut ssh2::Channel,
+    fd: std::os::raw::c_int,
+    deadline: Instant,
+) -> Completion {
+    loop {
+        if Instant::now() >= deadline {
+            return Completion::Indeterminate {
+                started: true,
+                reason: "SSH exit-status collection deadline exceeded".to_string(),
+            };
+        }
+        match channel.exit_signal() {
+            Ok(sig) => {
+                if let Some(signal) = sig.exit_signal.as_deref().and_then(parse_signal) {
+                    return Completion::Signaled(signal);
+                }
+                return exit_status_until(channel, fd, deadline);
+            }
+            Err(e) if e.code() == ssh2::ErrorCode::Session(-37) => {
+                wait_readable_until(fd, deadline);
+            }
+            Err(_) => return exit_status_until(channel, fd, deadline),
+        }
+    }
+}
+
+fn exit_status_until(
+    channel: &mut ssh2::Channel,
+    fd: std::os::raw::c_int,
+    deadline: Instant,
+) -> Completion {
+    loop {
+        match channel.exit_status() {
+            Ok(code) => return Completion::Exited(code),
+            Err(e) if e.code() == ssh2::ErrorCode::Session(-37) => {
+                if Instant::now() >= deadline {
+                    return Completion::Indeterminate {
+                        started: true,
+                        reason: "SSH exit-status collection deadline exceeded".to_string(),
+                    };
+                }
+                wait_readable_until(fd, deadline);
+            }
+            Err(e) => {
+                return Completion::Indeterminate {
+                    started: true,
+                    reason: format!("remote exit status unavailable: {}", e),
+                }
+            }
+        }
     }
 }
 
@@ -863,6 +892,64 @@ fn wait_readable(fd: std::os::raw::c_int, timeout: Duration) {
     let ms = timeout.as_millis() as i32;
     unsafe {
         libc::poll(&mut pfd, 1, ms);
+    }
+}
+
+fn wait_readable_until(fd: std::os::raw::c_int, deadline: Instant) {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .unwrap_or_default();
+    if !remaining.is_zero() {
+        wait_readable(fd, remaining.min(Duration::from_millis(200)));
+    }
+}
+
+fn refresh_session_timeout(session: &ssh2::Session, deadline: Instant) -> Result<()> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| SinterError::indeterminate("SSH operation deadline exceeded"))?;
+    let millis = remaining.as_millis().clamp(1, u32::MAX as u128) as u32;
+    session.set_timeout(millis);
+    Ok(())
+}
+
+fn channel_session_until(session: &mut ssh2::Session, deadline: Instant) -> Result<ssh2::Channel> {
+    loop {
+        refresh_session_timeout(session, deadline)?;
+        match session.channel_session() {
+            Ok(channel) => return Ok(channel),
+            Err(e) if e.code() == ssh2::ErrorCode::Session(-37) => {
+                wait_readable_until(session.as_raw_fd(), deadline);
+            }
+            Err(e) => {
+                return Err(SinterError::apply(format!(
+                    "cannot open SSH channel: {}",
+                    e
+                )))
+            }
+        }
+    }
+}
+
+fn exec_until(channel: &mut ssh2::Channel, command: &str, deadline: Instant) -> Result<()> {
+    loop {
+        match channel.exec(command) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.code() == ssh2::ErrorCode::Session(-37) => {
+                if deadline <= Instant::now() {
+                    return Err(SinterError::indeterminate(
+                        "SSH command dispatch deadline exceeded",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(e) => {
+                return Err(SinterError::indeterminate(format!(
+                    "SSH command dispatch failed after connection: {}",
+                    e
+                )))
+            }
+        }
     }
 }
 
