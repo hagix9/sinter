@@ -2402,12 +2402,28 @@ impl Engine {
                 )));
             }
         }
+        // Stop succeeded: the unit was mutated. Every later failure path must
+        // preserve that known change (DESIGN §15/§30).
+        if self.fs.fault() == Some("reset_failed_api_err") {
+            // Simulate executor/API failure before a CommandResult exists.
+            return Err(SinterError::apply(format!(
+                "reset-failed execution API failed after successful stop of {}",
+                unit_disp
+            ))
+            .changed());
+        }
         // Clear a failed state so that "stopped" is clean, not failed.
         let mut req = ExecRequest::new("/usr/bin/systemctl");
         req.args = vec!["reset-failed".to_string(), name.to_string()];
         req.env = baseline_env(self.fs.home_env());
         req.sensitive = sensitive;
-        let reset = self.fs.exec(&req)?;
+        let reset = match self.fs.exec(&req) {
+            Ok(out) => out,
+            Err(e) => {
+                // API-level failure before CommandResult: stop already mutated.
+                return Err(e.changed());
+            }
+        };
         match reset.completion {
             Completion::Exited(0) => Ok(()),
             Completion::Indeterminate { reason, .. } => Err(SinterError::indeterminate(format!(

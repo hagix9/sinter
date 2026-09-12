@@ -2623,3 +2623,72 @@ fn mkdir_success_then_metadata_indeterminate_fault_reached() {
     );
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// stop succeeds (real state change) then reset-failed execution API fails
+/// before a CommandResult exists. Known mutation must remain Changed.
+#[test]
+fn stop_success_then_reset_failed_api_err_keeps_changed() {
+    if !sudo_available() || !std::path::Path::new("/run/systemd/system").exists() {
+        skip_or_fail("requires systemd and sudo");
+        return;
+    }
+    let unit = "sinter-r10-stop-reset.service";
+    let unit_path = format!("/etc/systemd/system/{}", unit);
+    let _ = std::process::Command::new("sudo")
+        .args(["-n", "/bin/sh", "-c"])
+        .arg(format!(
+            "printf '%s\\n' '[Unit]' 'Description=sinter r10 stop reset' '[Service]' 'Type=oneshot' 'ExecStart=/bin/true' 'RemainAfterExit=yes' > {unit_path} && systemctl daemon-reload && systemctl reset-failed {unit} >/dev/null 2>&1; systemctl start {unit} >/dev/null 2>&1; true",
+            unit_path = unit_path,
+            unit = unit
+        ))
+        .status();
+    let before = std::process::Command::new("systemctl")
+        .args(["show", "-p", "ActiveState", "--value", unit])
+        .output()
+        .unwrap();
+    let before = String::from_utf8_lossy(&before.stdout).trim().to_string();
+    assert_eq!(before, "active", "fixture must start active: {before}");
+
+    let dir = trusted_root("r10-stop-reset");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: s\n    type: service\n    with:\n      name: {}\n      state: stopped\n",
+            unit
+        ),
+    );
+    let r = run_recipe_fault_sudo(&recipe, Mode::Apply, "reset_failed_api_err", true);
+    let s = find(&r, "s");
+    assert!(
+        s.reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("reset-failed execution API failed after successful stop"),
+        "injected API fault must be reached: {:?}",
+        s.reason
+    );
+    let after = std::process::Command::new("systemctl")
+        .args(["show", "-p", "ActiveState", "--value", unit])
+        .output()
+        .unwrap();
+    let after = String::from_utf8_lossy(&after.stdout).trim().to_string();
+    assert_eq!(
+        after, "inactive",
+        "stop must have mutated the unit externally"
+    );
+    assert_eq!(
+        s.change,
+        Change::Changed,
+        "known stop mutation must survive reset-failed API Err: {:?}",
+        s
+    );
+    let _ = std::process::Command::new("sudo")
+        .args(["-n", "/bin/sh", "-c"])
+        .arg(format!(
+            "systemctl stop {unit} >/dev/null 2>&1; systemctl reset-failed {unit} >/dev/null 2>&1; rm -f {unit_path}; systemctl daemon-reload",
+            unit = unit,
+            unit_path = unit_path
+        ))
+        .status();
+}

@@ -1277,27 +1277,72 @@ fn verify_host_key(session: &ssh2::Session, cfg: &SshConfig) -> Result<()> {
     let (key, _key_type) = session
         .host_key()
         .ok_or_else(|| SinterError::connect("server did not present a host key"))?;
-    let r1 = known.check_port(&cfg.host, cfg.port, key);
-    let r2 = known.check(&cfg.host, key);
 
-    // Only an explicit successful Match may authorize the connection. Mismatch,
-    // NotFound, and API Failure all fail closed; there is no insecure fallback.
-    let matched = matches!(r1, ssh2::CheckResult::Match) || matches!(r2, ssh2::CheckResult::Match);
-    if matched {
-        return Ok(());
+    // OpenSSH identity: default port uses `host`; non-default port uses
+    // `[host]:port`. libssh2's check/check_port returns Match if ANY entry
+    // has a matching key, ignoring conflicting entries for the same identity.
+    // Implement identity-scoped matching so a conflicting explicit identity
+    // entry cannot be bypassed by a different host form (Astra defect).
+    let identity = if cfg.port == 22 {
+        cfg.host.clone()
+    } else {
+        format!("[{}]:{}", cfg.host, cfg.port)
+    };
+    let presented = crate::targetfs::b64_encode(key);
+    let entries = known
+        .iter()
+        .map_err(|e| SinterError::connect(format!("cannot enumerate known hosts: {}", e)))?;
+
+    let mut saw_identity = false;
+    let mut identity_match = false;
+    for h in &entries {
+        let Some(name) = h.name() else { continue };
+        if name != identity {
+            continue;
+        }
+        saw_identity = true;
+        if h.key() == presented {
+            identity_match = true;
+            break;
+        }
     }
-    if matches!(r1, ssh2::CheckResult::Mismatch) || matches!(r2, ssh2::CheckResult::Mismatch) {
+    if saw_identity {
+        if identity_match {
+            return Ok(());
+        }
         return Err(SinterError::connect(format!(
             "SSH host key mismatch for {} (possible man-in-the-middle)",
-            cfg.host
+            identity
         )));
     }
-    if matches!(r1, ssh2::CheckResult::Failure) || matches!(r2, ssh2::CheckResult::Failure) {
-        return Err(SinterError::connect(format!(
-            "SSH host key verification failed for {} (known_hosts check could not be completed)",
-            cfg.host
-        )));
+
+    // No explicit identity entry. For non-default ports, fall back to the
+    // portless `host` identity (environments that enroll only `host`).
+    if cfg.port != 22 {
+        let mut saw_host = false;
+        let mut host_match = false;
+        for h in &entries {
+            let Some(name) = h.name() else { continue };
+            if name != cfg.host {
+                continue;
+            }
+            saw_host = true;
+            if h.key() == presented {
+                host_match = true;
+                break;
+            }
+        }
+        if saw_host {
+            if host_match {
+                return Ok(());
+            }
+            return Err(SinterError::connect(format!(
+                "SSH host key mismatch for {} (possible man-in-the-middle)",
+                cfg.host
+            )));
+        }
     }
+
     Err(SinterError::connect(format!(
         "SSH host key for {} is not present in {}; enrollment is not automatic",
         cfg.host,

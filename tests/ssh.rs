@@ -115,6 +115,176 @@ fn ssh_changed_host_key_fails() {
     assert_eq!(res.err().unwrap().kind, sinter::error::ErrorKind::Connect);
 }
 
+/// Non-default/qualified port identity: an explicit `[host]:port` Mismatch must
+/// reject even when a portless host entry matches (Astra-reproduced defect).
+#[test]
+fn ssh_host_port_mismatch_rejects_despite_portless_match() {
+    let _s = require_ssh!();
+    let port = if std::net::TcpStream::connect(("127.0.0.1", 2222u16)).is_ok() {
+        2222u16
+    } else {
+        ssh().unwrap().port
+    };
+    let mut s = ssh().unwrap();
+    s.port = port;
+    let dir = trusted_root("ssh-hostport-mismatch");
+    let kh = dir.join("known_hosts");
+    // Collect the real host key via ssh-keyscan so the portless entry matches.
+    let scan = std::process::Command::new("ssh-keyscan")
+        .args(["-p", &port.to_string(), &s.host])
+        .output()
+        .expect("ssh-keyscan must run");
+    let real = String::from_utf8_lossy(&scan.stdout);
+    assert!(
+        real.contains(&s.host),
+        "ssh-keyscan must produce a real host key: {real}"
+    );
+    // Rewrite keyscan lines into a true portless `host keytype key` form.
+    let portless: String = real
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            let mut parts = l.splitn(3, ' ');
+            let _h = parts.next().unwrap_or("");
+            let ktype = parts.next().unwrap_or("");
+            let key = parts.next().unwrap_or("");
+            format!("{} {} {}", s.host, ktype, key)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let bogus = format!(
+        "[{}]:{} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n",
+        s.host, s.port
+    );
+    let mut body = bogus;
+    body.push_str(&portless);
+    std::fs::write(&kh, body).unwrap();
+    s.known_hosts = kh;
+    let recipe = controller_recipe(
+        &trusted_root("ssh-hostport-mismatch-recipe"),
+        r#"  - id: c
+    type: command
+    with:
+      program: /bin/true"#,
+    );
+    let model = sinter::model::load_model(&recipe).unwrap();
+    let opts = sinter::engine::RunOptions {
+        mode: Mode::Plan,
+        sudo: false,
+        target: sinter::engine::TargetSpec { ssh: Some(s) },
+        verbose: false,
+        fault: None,
+    };
+    let res = sinter::engine::Engine::new(model, opts);
+    assert!(
+        res.is_err(),
+        "host+port mismatch must reject despite portless match"
+    );
+    let e = res.err().unwrap();
+    assert_eq!(e.kind, sinter::error::ErrorKind::Connect);
+    assert!(
+        e.message.contains("host key mismatch"),
+        "expected mismatch error, got: {}",
+        e.message
+    );
+}
+
+/// Explicit host+port with a matching key must accept.
+#[test]
+fn ssh_host_port_match_accepts() {
+    let _s = require_ssh!();
+    let port = if std::net::TcpStream::connect(("127.0.0.1", 2222u16)).is_ok() {
+        2222u16
+    } else {
+        ssh().unwrap().port
+    };
+    let mut s = ssh().unwrap();
+    s.port = port;
+    let dir = trusted_root("ssh-hostport-match");
+    let kh = dir.join("known_hosts");
+    let scan = std::process::Command::new("ssh-keyscan")
+        .args(["-p", &port.to_string(), &s.host])
+        .output()
+        .expect("ssh-keyscan must run");
+    let real = String::from_utf8_lossy(&scan.stdout);
+    // Only the host+port form.
+    let qualified: String = real
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            let mut parts = l.splitn(3, ' ');
+            let _h = parts.next().unwrap_or("");
+            let ktype = parts.next().unwrap_or("");
+            let key = parts.next().unwrap_or("");
+            format!("[{}]:{} {} {}", s.host, s.port, ktype, key)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&kh, &qualified).unwrap();
+    s.known_hosts = kh;
+    let recipe = controller_recipe(
+        &trusted_root("ssh-hostport-match-recipe"),
+        r#"  - id: c
+    type: command
+    with:
+      program: /bin/true"#,
+    );
+    let model = sinter::model::load_model(&recipe).unwrap();
+    let opts = sinter::engine::RunOptions {
+        mode: Mode::Plan,
+        sudo: false,
+        target: sinter::engine::TargetSpec { ssh: Some(s) },
+        verbose: false,
+        fault: None,
+    };
+    let res = sinter::engine::Engine::new(model, opts);
+    assert!(
+        res.is_ok(),
+        "matching host+port must accept: {:?}",
+        res.err()
+    );
+}
+
+/// Only a matching portless entry (no host+port entry) may still authorize
+/// via the documented fallback identity.
+#[test]
+fn ssh_portless_only_match_accepts() {
+    let _s = require_ssh!();
+    let mut s = ssh().unwrap();
+    let dir = trusted_root("ssh-portless-only");
+    let kh = dir.join("known_hosts");
+    let scan = std::process::Command::new("ssh-keyscan")
+        .args(["-p", &s.port.to_string(), &s.host])
+        .output()
+        .expect("ssh-keyscan must run");
+    let real = String::from_utf8_lossy(&scan.stdout);
+    std::fs::write(&kh, real.as_bytes()).unwrap();
+    s.known_hosts = kh;
+    let recipe = controller_recipe(
+        &trusted_root("ssh-portless-only-recipe"),
+        r#"  - id: c
+    type: command
+    with:
+      program: /bin/true"#,
+    );
+    let model = sinter::model::load_model(&recipe).unwrap();
+    let opts = sinter::engine::RunOptions {
+        mode: Mode::Plan,
+        sudo: false,
+        target: sinter::engine::TargetSpec { ssh: Some(s) },
+        verbose: false,
+        fault: None,
+    };
+    let res = sinter::engine::Engine::new(model, opts);
+    assert!(
+        res.is_ok(),
+        "portless-only match must accept via fallback: {:?}",
+        res.err()
+    );
+}
+
 #[test]
 fn ssh_argv_exactness_verification_command() {
     let _s = require_ssh!();
