@@ -1905,7 +1905,19 @@ impl Engine {
                 res.id
             )));
         }
-        let observed = self.observe_package(&name)?;
+        let sensitive = res.sensitive || res.derived_sensitive;
+        let observed = match self.observe_package_sensitive(&name, sensitive) {
+            Ok(s) => s,
+            Err(e) => {
+                // Initial observation is information uncertainty. No mutating
+                // command has been dispatched, so Change must stay None.
+                return Err(if e.kind == crate::error::ErrorKind::Indeterminate {
+                    SinterError::apply(e.message)
+                } else {
+                    e
+                });
+            }
+        };
         let want_installed = state == "present";
         let is_installed = matches!(observed, PackageState::Installed);
 
@@ -1914,7 +1926,7 @@ impl Engine {
         }
 
         if self.opts.mode == Mode::Plan {
-            let mut r = changed_result(res);
+            let mut r = changed_result_sensitive(res, sensitive);
             r.diff = Some(Diff {
                 body: DiffBody::Summary {
                     current: if is_installed { "installed" } else { "absent" }.into(),
@@ -1931,16 +1943,23 @@ impl Engine {
 
         let mut req = ExecRequest::new("/usr/bin/apt-get");
         req.env = baseline_env(self.fs.home_env());
+        req.sensitive = sensitive;
         if want_installed {
             req.args = vec!["-y".to_string(), "install".to_string(), name.clone()];
         } else {
             req.args = vec!["-y".to_string(), "remove".to_string(), name.clone()];
         }
         req.timeout_secs = 300;
+        let action = if want_installed { "install" } else { "remove" };
+        let pkg_disp = if sensitive {
+            "[redacted]"
+        } else {
+            name.as_str()
+        };
         let out = self.fs.exec(&req)?;
         match out.completion {
             Completion::Indeterminate { reason, .. } => {
-                let mut r = changed_result(res);
+                let mut r = changed_result_sensitive(res, sensitive);
                 r.execution = Execution::Indeterminate;
                 r.change = Change::Possible;
                 r.verification = Verification::Unknown;
@@ -1948,7 +1967,7 @@ impl Engine {
                 return Ok(r);
             }
             Completion::Signaled(s) => {
-                let mut r = changed_result(res);
+                let mut r = changed_result_sensitive(res, sensitive);
                 r.execution = Execution::Failed;
                 r.change = Change::Possible;
                 r.verification = Verification::Unknown;
@@ -1957,16 +1976,20 @@ impl Engine {
             }
             Completion::Exited(code) => {
                 if code != 0 {
-                    let mut r = changed_result(res);
+                    let mut r = changed_result_sensitive(res, sensitive);
                     r.execution = Execution::Failed;
                     r.change = Change::Possible;
                     r.verification = Verification::Unknown;
+                    // apt stderr can echo the package name; never include it
+                    // for a sensitive resource (DESIGN §31).
+                    let stderr_note = if sensitive {
+                        String::new()
+                    } else {
+                        format!(": {}", String::from_utf8_lossy(&out.stderr).trim())
+                    };
                     r.reason = Some(format!(
-                        "apt-get {} {} failed with exit code {}: {}",
-                        if want_installed { "install" } else { "remove" },
-                        name,
-                        code,
-                        String::from_utf8_lossy(&out.stderr).trim()
+                        "apt-get {} {} failed with exit code {}{}",
+                        action, pkg_disp, code, stderr_note
                     ));
                     return Ok(r);
                 }
@@ -1977,7 +2000,7 @@ impl Engine {
         // the post-mutation observation fails. The mutation is already known:
         // later uncertainty must never weaken Changed to Possible/None.
         if self.fs.fault() == Some("package_reobserve_indeterminate") {
-            let mut r = changed_result(res);
+            let mut r = changed_result_sensitive(res, sensitive);
             r.change = Change::Changed;
             r.execution = Execution::Indeterminate;
             r.verification = Verification::Unknown;
@@ -1985,17 +2008,17 @@ impl Engine {
             return Ok(r);
         }
         if self.fs.fault() == Some("package_reobserve_fail") {
-            let mut r = changed_result(res);
+            let mut r = changed_result_sensitive(res, sensitive);
             r.change = Change::Changed;
             r.execution = Execution::Failed;
             r.verification = Verification::Failed;
             r.reason = Some("injected package re-observation failure after mutation".into());
             return Ok(r);
         }
-        let after = match self.observe_package(&name) {
+        let after = match self.observe_package_sensitive(&name, sensitive) {
             Ok(after) => after,
             Err(e) => {
-                let mut r = changed_result(res);
+                let mut r = changed_result_sensitive(res, sensitive);
                 r.change = Change::Changed;
                 r.execution = if e.kind == crate::error::ErrorKind::Indeterminate {
                     Execution::Indeterminate
@@ -2015,7 +2038,7 @@ impl Engine {
             }
         };
         let verified = matches!(after, PackageState::Installed) == want_installed;
-        let mut r = changed_result(res);
+        let mut r = changed_result_sensitive(res, sensitive);
         r.change = Change::Changed;
         if verified {
             r.verification = Verification::Verified;
@@ -2027,24 +2050,25 @@ impl Engine {
         Ok(r)
     }
 
-    fn observe_package(&mut self, name: &str) -> Result<PackageState> {
+    fn observe_package_sensitive(&mut self, name: &str, sensitive: bool) -> Result<PackageState> {
         // argv-only: the package name never becomes shell syntax. dpkg-query
         // prints the status on stdout and uses its exit status to signal
         // absence, so we must distinguish exit 1 (confirmed absent) from any
         // other failure (inspection failed).
+        let name_disp = if sensitive { "[redacted]" } else { name };
         if self.fs.fault() == Some("dpkg_observe_fail") {
             return Err(SinterError::apply(format!(
                 "package observation failed for {}: injected dpkg-query failure",
-                name
+                name_disp
             )));
         }
         if self.fs.fault() == Some("dpkg_observe_indeterminate") {
             return Err(SinterError::indeterminate(format!(
                 "package observation for {}: injected indeterminate dpkg-query completion",
-                name
+                name_disp
             )));
         }
-        let out = self.fs.dpkg_query(name)?;
+        let out = self.fs.dpkg_query_sensitive(name, sensitive)?;
         match out.completion {
             Completion::Exited(0) => {
                 let status = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -2054,19 +2078,26 @@ impl Engine {
                 // Confirmed absent: dpkg-query found no matching package.
                 Ok(PackageState::Absent)
             }
-            Completion::Exited(c) => Err(SinterError::apply(format!(
-                "package observation failed for {}: dpkg-query exited {} ({})",
-                name,
-                c,
-                String::from_utf8_lossy(&out.stderr).trim()
-            ))),
+            Completion::Exited(c) => Err(SinterError::apply(if sensitive {
+                format!(
+                    "package observation failed for {}: dpkg-query exited {}",
+                    name_disp, c
+                )
+            } else {
+                format!(
+                    "package observation failed for {}: dpkg-query exited {} ({})",
+                    name_disp,
+                    c,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )
+            })),
             Completion::Signaled(s) => Err(SinterError::apply(format!(
                 "package observation for {} terminated by signal {}",
-                name, s
+                name_disp, s
             ))),
             Completion::Indeterminate { reason, .. } => Err(SinterError::indeterminate(format!(
                 "package observation for {} did not complete: {}",
-                name, reason
+                name_disp, reason
             ))),
         }
     }
@@ -2095,7 +2126,18 @@ impl Engine {
             }
         }
         let sensitive = res.sensitive || res.derived_sensitive;
-        let obs = self.observe_service_sensitive(&name, sensitive)?;
+        let obs = match self.observe_service_sensitive(&name, sensitive) {
+            Ok(obs) => obs,
+            Err(e) => {
+                // Initial observation is information uncertainty. No mutating
+                // command has been dispatched, so Change must stay None.
+                return Err(if e.kind == crate::error::ErrorKind::Indeterminate {
+                    SinterError::apply(e.message)
+                } else {
+                    e
+                });
+            }
+        };
 
         if obs.load_state == "not-found" {
             if self.opts.mode == Mode::Plan && self.service_has_present_package_dep(res)? {

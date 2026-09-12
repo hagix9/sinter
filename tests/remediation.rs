@@ -2446,3 +2446,180 @@ fn mkdir_success_then_metadata_indeterminate_keeps_changed() {
     );
     let _ = std::fs::remove_dir_all(&out);
 }
+
+// ===========================================================================
+// Ninth remediation — derived-sensitive template + package + observation
+// ===========================================================================
+
+/// Template that becomes derived-sensitive via a sensitive owner var must not
+/// leak body-derived references during validation.
+#[test]
+fn derived_sensitive_template_body_reference_no_leak() {
+    use std::process::Command;
+    let dir = trusted_root("r9-tmpl-derived-ref");
+    let sentinel = "R9_DERIVED_REF_sent1";
+    let src = dir.join("d.tmpl");
+    std::fs::write(&src, format!("v {{{{ {sentinel} }}}} e\n")).unwrap();
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nvars:\n  owner:\n    value: \"nobody\"\n    sensitive: true\nresources:\n  - id: t\n    type: template\n    with:\n      path: {}\n      source: {}\n      owner: \"{{{{ vars.owner }}}}\"\n",
+            dir.join("out").display(),
+            src.display()
+        ),
+    );
+    let outp = Command::new(env!("CARGO_BIN_EXE_sinter"))
+        .args(["validate", recipe.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&outp.stdout),
+        String::from_utf8_lossy(&outp.stderr)
+    );
+    assert_eq!(
+        outp.status.code(),
+        Some(2),
+        "expected validation failure: {combined}"
+    );
+    assert!(
+        combined.contains("invalid template interpolation"),
+        "must reach template validation: {combined}"
+    );
+    assert!(
+        !combined.contains(sentinel),
+        "derived-sensitive template leaked reference: {combined}"
+    );
+    assert!(
+        combined.contains("redacted"),
+        "expected redaction marker: {combined}"
+    );
+}
+
+/// Derived-sensitive template with invalid numeric body must not leak the number.
+#[test]
+fn derived_sensitive_template_body_number_no_leak() {
+    use std::process::Command;
+    let dir = trusted_root("r9-tmpl-derived-num");
+    let sentinel = "776655443322110099";
+    let src = dir.join("dn.tmpl");
+    std::fs::write(&src, format!("x {{{{ {sentinel}.1.2 }}}} y\n")).unwrap();
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nvars:\n  owner:\n    value: \"nobody\"\n    sensitive: true\nresources:\n  - id: t\n    type: template\n    with:\n      path: {}\n      source: {}\n      owner: \"{{{{ vars.owner }}}}\"\n",
+            dir.join("out").display(),
+            src.display()
+        ),
+    );
+    let outp = Command::new(env!("CARGO_BIN_EXE_sinter"))
+        .args(["validate", recipe.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&outp.stdout),
+        String::from_utf8_lossy(&outp.stderr)
+    );
+    assert_eq!(outp.status.code(), Some(2));
+    assert!(
+        combined.contains("invalid template interpolation"),
+        "must reach template validation: {combined}"
+    );
+    assert!(
+        !combined.contains(sentinel),
+        "derived-sensitive template leaked number: {combined}"
+    );
+}
+
+/// Sensitive package name must not appear in CommandRecord or apt diagnostics.
+#[test]
+fn sensitive_package_name_not_in_command_log_or_reason() {
+    let dir = trusted_root("r9-pkg-sens");
+    let sentinel = "R9_PKG_LOG_SENT_c5d6";
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: p\n    type: package\n    sensitive: true\n    with:\n      name: {}\n      state: present\n",
+            sentinel
+        ),
+    );
+    let r = run_recipe(&recipe, Mode::Apply, true);
+    for rec in &r.commands {
+        let joined = format!("{} {:?}", rec.program, rec.args);
+        assert!(
+            !joined.contains(sentinel),
+            "sensitive package name in CommandRecord: {joined}"
+        );
+    }
+    let p = find(&r, "p");
+    assert!(p.sensitive, "sensitive package result must stay sensitive");
+    if let Some(reason) = &p.reason {
+        assert!(
+            !reason.contains(sentinel),
+            "sensitive package name in reason: {reason}"
+        );
+    }
+}
+
+/// Initial package observation Indeterminate must not report Possible mutation
+/// when no mutating command was dispatched.
+#[test]
+fn package_initial_observation_indeterminate_is_not_possible_change() {
+    let dir = trusted_root("r9-pkg-obs-indet");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nresources:\n  - id: p\n    type: package\n    with:\n      name: bash\n      state: present\n",
+    );
+    let r = run_recipe_fault(&recipe, Mode::Apply, "dpkg_observe_indeterminate");
+    let p = find(&r, "p");
+    assert_eq!(
+        p.change,
+        Change::None,
+        "observation-only uncertainty must not claim mutation: {:?}",
+        p
+    );
+    assert!(
+        !r.commands.iter().any(|c| c.program.contains("apt-get")),
+        "no mutating command may have been dispatched: {:?}",
+        r.commands
+    );
+}
+
+/// mkdir success then metadata Indeterminate: prove the injected fault fired
+/// (reason marker) and directory exists with Change::Changed.
+#[test]
+fn mkdir_success_then_metadata_indeterminate_fault_reached() {
+    let dir = trusted_root("r9-mkdir-fault");
+    let out = dir.join("newdir");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: d\n    type: directory\n    with:\n      path: {}\n      mode: \"0755\"\n",
+            out.display()
+        ),
+    );
+    let r = run_recipe_fault(&recipe, Mode::Apply, "chown_success_then_abnormal");
+    let d = find(&r, "d");
+    assert!(
+        d.reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("injected abnormal completion after successful chown"),
+        "injected metadata fault must fire: {:?}",
+        d.reason
+    );
+    assert!(out.is_dir(), "mkdir must have created the directory");
+    assert_eq!(
+        d.change,
+        Change::Changed,
+        "known directory creation must remain Changed: {:?}",
+        d
+    );
+    let _ = std::fs::remove_dir_all(&out);
+}

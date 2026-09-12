@@ -1091,12 +1091,24 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
             }
         }
 
+        // Conservative static sensitivity used for early diagnostics. Computed
+        // BEFORE template body validation so body-derived values are redacted
+        // whenever sensitivity is explicit OR inherited from a sensitive
+        // variable in a `with` field (DESIGN §31).
+        let mut derived_from_with = r.sensitive;
+        for v in r.with.values() {
+            if value_references_sensitive_var(v, &sensitive_var_names) {
+                derived_from_with = true;
+            }
+        }
+        let template_sensitive = r.sensitive || derived_from_with;
+
         // Template bodies can reference registers; those references require the
         // same direct-dependency validation as `with`/`when` interpolations.
         if fr.type_ == "template" {
             if let Some(src) = &fr.controller_source {
                 let body = std::fs::read_to_string(src).map_err(|e| {
-                    if r.sensitive {
+                    if template_sensitive {
                         SinterError::schema(format!(
                             "{}: cannot read template (value redacted): {}",
                             resource_ctx,
@@ -1115,8 +1127,9 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                 for tok in extract_interpolation_exprs(&body) {
                     let expr = parse_expr(&tok).map_err(|e| {
                         // DESIGN §31: body-derived fragments (including numeric
-                        // literals) are sensitive when the resource is sensitive.
-                        if r.sensitive {
+                        // literals) are sensitive when the resource is sensitive
+                        // explicitly or through derived sensitivity.
+                        if template_sensitive {
                             SinterError::schema(format!(
                                 "{}: invalid template interpolation (value redacted): {}",
                                 resource_ctx,
@@ -1134,7 +1147,7 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                 }
                 for reg in &body_regs {
                     let producer = register_producers.get(reg).ok_or_else(|| {
-                        if r.sensitive {
+                        if template_sensitive {
                             SinterError::schema(format!(
                                 "{}: template references unknown register (value redacted)",
                                 resource_ctx
@@ -1147,7 +1160,7 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                         }
                     })?;
                     if !r.depends_on.contains(producer) {
-                        return Err(if r.sensitive {
+                        return Err(if template_sensitive {
                             SinterError::schema(format!(
                                 "{}: template register must be listed directly in depends_on (value redacted)",
                                 resource_ctx
@@ -1163,15 +1176,10 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
             }
         }
 
-        // Conservative static sensitivity: explicit flag, any sensitive
+        // Full conservative static sensitivity: explicit flag, any sensitive
         // variable referenced by interpolated fields, or a sensitive variable in
-        // a template body. This lets early diagnostics redact before runtime.
-        let mut derived = r.sensitive;
-        for v in r.with.values() {
-            if value_references_sensitive_var(v, &sensitive_var_names) {
-                derived = true;
-            }
-        }
+        // a template body.
+        let mut derived = derived_from_with;
         if let Some(src) = &fr.controller_source {
             if let Ok(body) = std::fs::read_to_string(src) {
                 for tok in extract_interpolation_exprs(&body) {

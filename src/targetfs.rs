@@ -328,7 +328,11 @@ impl TargetFs {
 
     /// Query dpkg for a package's status using exact argv.
     pub fn dpkg_query(&mut self, name: &str) -> Result<Output> {
-        self.run_argv(
+        self.dpkg_query_sensitive(name, false)
+    }
+
+    pub fn dpkg_query_sensitive(&mut self, name: &str, sensitive: bool) -> Result<Output> {
+        self.run_argv_sensitivity(
             "/usr/bin/dpkg-query",
             &[
                 "-W".to_string(),
@@ -336,6 +340,7 @@ impl TargetFs {
                 "--".to_string(),
                 name.to_string(),
             ],
+            sensitive,
         )
     }
 
