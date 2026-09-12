@@ -1278,11 +1278,10 @@ fn verify_host_key(session: &ssh2::Session, cfg: &SshConfig) -> Result<()> {
         .host_key()
         .ok_or_else(|| SinterError::connect("server did not present a host key"))?;
 
-    // OpenSSH identity: default port uses `host`; non-default port uses
-    // `[host]:port`. libssh2's check/check_port returns Match if ANY entry
-    // has a matching key, ignoring conflicting entries for the same identity.
-    // Implement identity-scoped matching so a conflicting explicit identity
-    // entry cannot be bypassed by a different host form (Astra defect).
+    // OpenSSH identity (DESIGN §19): default port uses `host`; non-default
+    // port uses `[host]:port` only. A portless host entry must not authorize
+    // a non-default-port connection. Identity-scoped matching prevents a
+    // conflicting explicit entry from being bypassed by another host form.
     let identity = if cfg.port == 22 {
         cfg.host.clone()
     } else {
@@ -1316,36 +1315,12 @@ fn verify_host_key(session: &ssh2::Session, cfg: &SshConfig) -> Result<()> {
         )));
     }
 
-    // No explicit identity entry. For non-default ports, fall back to the
-    // portless `host` identity (environments that enroll only `host`).
-    if cfg.port != 22 {
-        let mut saw_host = false;
-        let mut host_match = false;
-        for h in &entries {
-            let Some(name) = h.name() else { continue };
-            if name != cfg.host {
-                continue;
-            }
-            saw_host = true;
-            if h.key() == presented {
-                host_match = true;
-                break;
-            }
-        }
-        if saw_host {
-            if host_match {
-                return Ok(());
-            }
-            return Err(SinterError::connect(format!(
-                "SSH host key mismatch for {} (possible man-in-the-middle)",
-                cfg.host
-            )));
-        }
-    }
-
+    // No entry for the required identity. For non-default ports a portless
+    // `host` entry is a different identity and must not authorize the
+    // connection (DESIGN §19).
     Err(SinterError::connect(format!(
         "SSH host key for {} is not present in {}; enrollment is not automatic",
-        cfg.host,
+        identity,
         cfg.known_hosts.display()
     )))
 }

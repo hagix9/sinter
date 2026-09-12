@@ -1055,6 +1055,16 @@ Unknown host key => connection failure.
 Changed host key => connection failure.
 No insecure fallback exists.
 
+Host-key identity is selected by the connection port:
+
+Default port 22 uses the portless `host` known_hosts identity.
+
+A non-default port requires the explicit `[host]:port` known_hosts identity.
+
+A portless `host` entry must not authorize a connection to a non-default port.
+
+An explicit matching-identity mismatch must never be bypassed by another host form.
+
 20. Remote argv contract
 
 command represents program + argv, not a shell command string.

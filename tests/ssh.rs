@@ -247,20 +247,41 @@ fn ssh_host_port_match_accepts() {
     );
 }
 
-/// Only a matching portless entry (no host+port entry) may still authorize
-/// via the documented fallback identity.
+/// A matching portless `host` entry must NOT authorize a non-default-port
+/// connection (DESIGN §19). Prefer the secondary sshd on 2222.
 #[test]
-fn ssh_portless_only_match_accepts() {
+fn ssh_portless_only_non_default_port_rejects() {
     let _s = require_ssh!();
+    let port = if std::net::TcpStream::connect(("127.0.0.1", 2222u16)).is_ok() {
+        2222u16
+    } else {
+        skip("requires secondary sshd on non-default port 2222");
+        return;
+    };
     let mut s = ssh().unwrap();
+    s.port = port;
     let dir = trusted_root("ssh-portless-only");
     let kh = dir.join("known_hosts");
     let scan = std::process::Command::new("ssh-keyscan")
-        .args(["-p", &s.port.to_string(), &s.host])
+        .args(["-p", &port.to_string(), &s.host])
         .output()
         .expect("ssh-keyscan must run");
     let real = String::from_utf8_lossy(&scan.stdout);
-    std::fs::write(&kh, real.as_bytes()).unwrap();
+    // Rewrite keyscan lines into a true portless `host keytype key` form.
+    let portless: String = real
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            let mut parts = l.splitn(3, ' ');
+            let _h = parts.next().unwrap_or("");
+            let ktype = parts.next().unwrap_or("");
+            let key = parts.next().unwrap_or("");
+            format!("{} {} {}", s.host, ktype, key)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&kh, &portless).unwrap();
     s.known_hosts = kh;
     let recipe = controller_recipe(
         &trusted_root("ssh-portless-only-recipe"),
@@ -279,8 +300,53 @@ fn ssh_portless_only_match_accepts() {
     };
     let res = sinter::engine::Engine::new(model, opts);
     assert!(
+        res.is_err(),
+        "portless host entry must not authorize non-default port"
+    );
+    let e = res.err().unwrap();
+    assert_eq!(e.kind, sinter::error::ErrorKind::Connect);
+    assert!(
+        e.message.contains("not present") || e.message.contains("host key"),
+        "expected enrollment/mismatch error, got: {}",
+        e.message
+    );
+}
+
+/// Port 22 + matching portless host entry must ACCEPT (normal default-port
+/// identity).
+#[test]
+fn ssh_default_port_portless_match_accepts() {
+    let _s = require_ssh!();
+    let mut s = ssh().unwrap();
+    assert_eq!(s.port, 22, "this test covers the default port identity");
+    let dir = trusted_root("ssh-default-portless");
+    let kh = dir.join("known_hosts");
+    let scan = std::process::Command::new("ssh-keyscan")
+        .args(["-p", &s.port.to_string(), &s.host])
+        .output()
+        .expect("ssh-keyscan must run");
+    let real = String::from_utf8_lossy(&scan.stdout);
+    std::fs::write(&kh, real.as_bytes()).unwrap();
+    s.known_hosts = kh;
+    let recipe = controller_recipe(
+        &trusted_root("ssh-default-portless-recipe"),
+        r#"  - id: c
+    type: command
+    with:
+      program: /bin/true"#,
+    );
+    let model = sinter::model::load_model(&recipe).unwrap();
+    let opts = sinter::engine::RunOptions {
+        mode: Mode::Plan,
+        sudo: false,
+        target: sinter::engine::TargetSpec { ssh: Some(s) },
+        verbose: false,
+        fault: None,
+    };
+    let res = sinter::engine::Engine::new(model, opts);
+    assert!(
         res.is_ok(),
-        "portless-only match must accept via fallback: {:?}",
+        "default port + matching portless host must accept: {:?}",
         res.err()
     );
 }
