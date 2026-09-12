@@ -2692,3 +2692,108 @@ fn stop_success_then_reset_failed_api_err_keeps_changed() {
         ))
         .status();
 }
+
+/// Real Ubuntu setgid directory: chmod 0700 on 2755 leaves 2700, so requested
+/// metadata cannot be achieved. Verification must fail the resource, fail-fast
+/// must stop the marker command, and Change must remain Changed.
+#[test]
+fn directory_setgid_metadata_mismatch_fails_and_fails_fast() {
+    if !sudo_available() || !std::path::Path::new("/run/systemd/system").exists() {
+        skip_or_fail("requires sudo and systemd host");
+        return;
+    }
+    // Root-owned trusted parent under /root (sudo trusted principal is root).
+    let base = "/root/.sinter-tests/r14-setgid";
+    let dir = format!("{}/dir", base);
+    let marker = format!("{}/marker", base);
+    let _ = std::process::Command::new("sudo")
+        .args(["-n", "/bin/sh", "-c"])
+        .arg(format!(
+            "rm -rf {base} && mkdir -p {dir} && chown -R root:root /root/.sinter-tests {base} && chmod 0700 /root/.sinter-tests {base} && chmod 2755 {dir}",
+            base = base,
+            dir = dir
+        ))
+        .status();
+    let before = std::process::Command::new("sudo")
+        .args(["-n", "stat", "-c", "%a", &dir])
+        .output()
+        .unwrap();
+    let before = String::from_utf8_lossy(&before.stdout).trim().to_string();
+    assert_eq!(before, "2755", "fixture must start as 2755: {before}");
+
+    let recipe_dir = trusted_root("r14-setgid-recipe");
+    let recipe = write_recipe(
+        &recipe_dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: d\n    type: directory\n    with:\n      path: {}\n      mode: \"0700\"\n  - id: marker\n    type: command\n    with:\n      program: /bin/touch\n      args: [\"{}\"]\n",
+            dir, marker
+        ),
+    );
+    let model = sinter::model::load_model(&recipe).unwrap();
+    let opts = sinter::engine::RunOptions {
+        mode: Mode::Apply,
+        sudo: true,
+        target: sinter::engine::TargetSpec { ssh: None },
+        verbose: false,
+        fault: None,
+    };
+    let engine = sinter::engine::Engine::new(model, opts).unwrap();
+    let report = engine.run().unwrap();
+
+    let d = find(&report, "d");
+    // Prove the intended mismatch condition was reached.
+    assert_eq!(
+        d.verification,
+        Verification::Failed,
+        "setgid must cause metadata verification mismatch: {:?}",
+        d
+    );
+    assert!(
+        d.reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("metadata mismatch"),
+        "expected metadata mismatch reason: {:?}",
+        d.reason
+    );
+    // Mutation occurred (chmod ran); Change must remain Changed.
+    assert_eq!(
+        d.change,
+        Change::Changed,
+        "chmod already mutated the directory: {:?}",
+        d
+    );
+    // The resource must be considered failed so Engine fail-fast applies.
+    assert!(
+        d.is_failure(),
+        "verification failure must promote to execution failure: {:?}",
+        d
+    );
+    // Later marker must not execute.
+    let marker_res = find(&report, "marker");
+    assert_eq!(
+        marker_res.disposition,
+        Disposition::BlockedByFailFast,
+        "marker must be blocked by fail-fast: {:?}",
+        marker_res
+    );
+    let marker_exists = std::process::Command::new("sudo")
+        .args(["-n", "test", "-f", &marker])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(!marker_exists, "marker file must not exist");
+    // Invocation must be unsuccessful.
+    assert_eq!(
+        report.status,
+        AggregateStatus::ApplyFailed,
+        "invocation must fail: {:?}",
+        report.status
+    );
+
+    // Cleanup
+    let _ = std::process::Command::new("sudo")
+        .args(["-n", "rm", "-rf", base])
+        .status();
+}

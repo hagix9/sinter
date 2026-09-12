@@ -1107,7 +1107,17 @@ impl Engine {
                     return Ok(metadata_failure(res, e, true));
                 }
                 match self.verify_directory(res, &path, uid, gid, mode) {
-                    Ok(result) => Ok(result),
+                    Ok(v) => {
+                        // A required verification mismatch is a failed resource
+                        // (DESIGN §17/§30). Mutation already occurred.
+                        if v.verification == Verification::Failed {
+                            let mut r = v;
+                            r.execution = Execution::Failed;
+                            Ok(r)
+                        } else {
+                            Ok(v)
+                        }
+                    }
                     Err(e) => Ok(post_mutation_failure(res, e)),
                 }
             }
@@ -1155,7 +1165,17 @@ impl Engine {
                     return Ok(metadata_failure(res, e, mutated));
                 }
                 match self.verify_directory(res, &path, uid, gid, mode) {
-                    Ok(result) => Ok(result),
+                    Ok(v) => {
+                        // A required verification mismatch is a failed resource
+                        // (DESIGN §17/§30). Mutation already occurred.
+                        if v.verification == Verification::Failed {
+                            let mut r = v;
+                            r.execution = Execution::Failed;
+                            Ok(r)
+                        } else {
+                            Ok(v)
+                        }
+                    }
                     Err(e) => Ok(post_mutation_failure(res, e)),
                 }
             }
