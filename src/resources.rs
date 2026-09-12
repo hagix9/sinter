@@ -1102,24 +1102,9 @@ impl Engine {
                 let uid = meta.owner_uid.unwrap_or(self.fs.target_uid);
                 let gid = meta.group_gid.unwrap_or(self.fs.target_gid);
                 if let Err(e) = self.fs.set_metadata(&path, mode, uid, gid) {
-                    let mut r = changed_result(res);
-                    r.execution = if e.kind == crate::error::ErrorKind::Indeterminate {
-                        Execution::Indeterminate
-                    } else {
-                        Execution::Failed
-                    };
-                    r.change = if e.kind == crate::error::ErrorKind::Indeterminate {
-                        Change::Possible
-                    } else {
-                        Change::Changed
-                    };
-                    r.verification = if r.execution == Execution::Indeterminate {
-                        Verification::Unknown
-                    } else {
-                        Verification::NotPerformed
-                    };
-                    r.reason = Some(e.message);
-                    return Ok(r);
+                    // mkdir already succeeded. Later metadata uncertainty must
+                    // not erase the known directory creation.
+                    return Ok(metadata_failure(res, e, true));
                 }
                 match self.verify_directory(res, &path, uid, gid, mode) {
                     Ok(result) => Ok(result),
@@ -1534,10 +1519,19 @@ impl Engine {
                     }
                 },
                 Err(e) => {
+                    // DESIGN §31: fragments from a sensitive template body must
+                    // not appear raw in diagnostics.
+                    if res.sensitive || res.derived_sensitive {
+                        return Err(SinterError::apply(format!(
+                            "{}: template rendering error (value redacted): {}",
+                            res.id,
+                            e.category()
+                        )));
+                    }
                     return Err(SinterError::apply(format!(
                         "{}: template rendering error: {}",
                         res.id, e
-                    )))
+                    )));
                 }
             }
         };

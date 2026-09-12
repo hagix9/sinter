@@ -2254,3 +2254,195 @@ resources:
         ))
         .status();
 }
+
+// ===========================================================================
+// Eighth remediation — sensitive template body validation diagnostics
+// ===========================================================================
+
+/// Sensitive template body with an invalid numeric literal must not leak the
+/// raw number through validation diagnostics.
+#[test]
+fn sensitive_template_body_invalid_number_no_leak() {
+    use std::process::Command;
+    let dir = trusted_root("r8-tmpl-num");
+    let sentinel = "9876543210987654321";
+    let src = dir.join("num.tmpl");
+    std::fs::write(&src, format!("prefix {{{{ {sentinel}.43.21 }}}} suffix\n")).unwrap();
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: t\n    type: template\n    sensitive: true\n    with:\n      path: {}\n      source: {}\n",
+            dir.join("out").display(),
+            src.display()
+        ),
+    );
+    let outp = Command::new(env!("CARGO_BIN_EXE_sinter"))
+        .args(["validate", recipe.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&outp.stdout),
+        String::from_utf8_lossy(&outp.stderr)
+    );
+    assert_eq!(
+        outp.status.code(),
+        Some(2),
+        "expected schema validation failure: {combined}"
+    );
+    assert!(
+        combined.contains("invalid template interpolation"),
+        "must reach template interpolation validation: {combined}"
+    );
+    assert!(
+        !combined.contains(sentinel),
+        "numeric sentinel leaked from sensitive template body: {combined}"
+    );
+    assert!(
+        combined.contains("redacted"),
+        "expected redaction marker: {combined}"
+    );
+}
+
+/// Sensitive template body with an invalid unqualified reference must not leak
+/// the raw text sentinel.
+#[test]
+fn sensitive_template_body_invalid_reference_no_leak() {
+    use std::process::Command;
+    let dir = trusted_root("r8-tmpl-bare");
+    let sentinel = "R8_TEXT_SENTINEL_m4n5";
+    let src = dir.join("bare.tmpl");
+    std::fs::write(&src, format!("value {{{{ {sentinel} }}}} end\n")).unwrap();
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: t\n    type: template\n    sensitive: true\n    with:\n      path: {}\n      source: {}\n",
+            dir.join("out").display(),
+            src.display()
+        ),
+    );
+    let outp = Command::new(env!("CARGO_BIN_EXE_sinter"))
+        .args(["validate", recipe.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&outp.stdout),
+        String::from_utf8_lossy(&outp.stderr)
+    );
+    assert_eq!(
+        outp.status.code(),
+        Some(2),
+        "expected schema validation failure: {combined}"
+    );
+    assert!(
+        combined.contains("invalid template interpolation"),
+        "must reach template interpolation validation: {combined}"
+    );
+    assert!(
+        !combined.contains(sentinel),
+        "text sentinel leaked from sensitive template body: {combined}"
+    );
+}
+
+/// Sensitive template with a valid body that fails at runtime rendering must
+/// not leak body-derived content in the apply diagnostic.
+#[test]
+fn sensitive_template_runtime_render_error_no_leak() {
+    use std::process::Command;
+    let dir = trusted_root("r8-tmpl-runtime");
+    let sentinel = "R8_RUNTIME_SENTINEL_p6q7";
+    let src = dir.join("rt.tmpl");
+    std::fs::write(&src, format!("id={{{{ vars.{sentinel} }}}}\n")).unwrap();
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: t\n    type: template\n    sensitive: true\n    with:\n      path: {}\n      source: {}\n",
+            dir.join("out").display(),
+            src.display()
+        ),
+    );
+    let outp = Command::new(env!("CARGO_BIN_EXE_sinter"))
+        .args(["apply", recipe.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&outp.stdout),
+        String::from_utf8_lossy(&outp.stderr)
+    );
+    assert!(
+        outp.status.code().is_some_and(|c| c != 0),
+        "expected apply failure: {combined}"
+    );
+    assert!(
+        !combined.contains(sentinel),
+        "runtime sentinel leaked from sensitive template: {combined}"
+    );
+}
+
+/// Non-sensitive template validation still reports the useful diagnostic.
+#[test]
+fn nonsensitive_template_still_reports_validation_detail() {
+    use std::process::Command;
+    let dir = trusted_root("r8-tmpl-public");
+    let detail = "111222333444555666";
+    let src = dir.join("pub.tmpl");
+    std::fs::write(&src, format!("x {{{{ {detail}.1.2 }}}} y\n")).unwrap();
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: t\n    type: template\n    with:\n      path: {}\n      source: {}\n",
+            dir.join("out").display(),
+            src.display()
+        ),
+    );
+    let outp = Command::new(env!("CARGO_BIN_EXE_sinter"))
+        .args(["validate", recipe.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&outp.stdout),
+        String::from_utf8_lossy(&outp.stderr)
+    );
+    assert_eq!(outp.status.code(), Some(2));
+    assert!(
+        combined.contains(detail),
+        "non-sensitive template must retain useful detail: {combined}"
+    );
+}
+
+/// mkdir success followed by metadata Indeterminate must not erase the known
+/// directory creation.
+#[test]
+fn mkdir_success_then_metadata_indeterminate_keeps_changed() {
+    let dir = trusted_root("r8-mkdir-meta");
+    let out = dir.join("newdir");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: d\n    type: directory\n    with:\n      path: {}\n      mode: \"0755\"\n",
+            out.display()
+        ),
+    );
+    let r = run_recipe_fault(&recipe, Mode::Apply, "chown_success_then_abnormal");
+    let d = find(&r, "d");
+    assert!(
+        out.is_dir(),
+        "mkdir must have created the directory: {:?}",
+        out
+    );
+    assert_eq!(
+        d.change,
+        Change::Changed,
+        "known directory creation must remain Changed: {:?}",
+        d
+    );
+    let _ = std::fs::remove_dir_all(&out);
+}

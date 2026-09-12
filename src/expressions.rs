@@ -38,6 +38,41 @@ impl EvalVal {
 #[derive(Debug, Clone)]
 pub struct ExprError(pub String);
 
+impl ExprError {
+    /// A safe structural category for this error, with no body-derived values.
+    /// Used when the originating resource/data is sensitive (DESIGN §31).
+    pub fn category(&self) -> &'static str {
+        let m = self.0.as_str();
+        if m.contains("invalid number literal") || m.contains("invalid integer literal") {
+            "invalid numeric literal"
+        } else if m.contains("unterminated string") {
+            "unterminated string"
+        } else if m.contains("bare names are not allowed") {
+            "unqualified reference"
+        } else if m.contains("unexpected character") {
+            "unexpected character"
+        } else if m.contains("unexpected token") {
+            "unexpected token"
+        } else if m.contains("undefined variable") {
+            "undefined variable"
+        } else if m.contains("undefined register") {
+            "undefined register"
+        } else if m.contains("unknown command result field") {
+            "unknown result field"
+        } else if m.contains("not available in this context") {
+            "value not available in this context"
+        } else if m.contains("trailing tokens") {
+            "trailing tokens"
+        } else if m.contains("expected") {
+            "parse error"
+        } else if m.contains("type") {
+            "type error"
+        } else {
+            "expression error"
+        }
+    }
+}
+
 impl std::fmt::Display for ExprError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
@@ -1208,5 +1243,15 @@ mod tests {
         };
         let v = eval_interpolated("pw={{ vars.secret }}", &s).unwrap();
         assert!(v.sensitive);
+    }
+
+    #[test]
+    fn error_category_redacts_raw_values() {
+        let e = parse_expr("987654321098765.43.21").unwrap_err();
+        assert_eq!(e.category(), "invalid numeric literal");
+        assert!(!e.category().contains("987654"));
+        let e = parse_expr("R8_TEXT_SENTINEL_m4n5").unwrap_err();
+        assert_eq!(e.category(), "unqualified reference");
+        assert!(!e.category().contains("R8_TEXT"));
     }
 }

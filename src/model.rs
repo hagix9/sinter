@@ -1114,26 +1114,50 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                 let mut body_regs: BTreeSet<String> = BTreeSet::new();
                 for tok in extract_interpolation_exprs(&body) {
                     let expr = parse_expr(&tok).map_err(|e| {
-                        SinterError::schema(format!(
-                            "{}: invalid template interpolation: {}",
-                            resource_ctx, e
-                        ))
+                        // DESIGN §31: body-derived fragments (including numeric
+                        // literals) are sensitive when the resource is sensitive.
+                        if r.sensitive {
+                            SinterError::schema(format!(
+                                "{}: invalid template interpolation (value redacted): {}",
+                                resource_ctx,
+                                e.category()
+                            ))
+                        } else {
+                            SinterError::schema(format!(
+                                "{}: invalid template interpolation: {}",
+                                resource_ctx, e
+                            ))
+                        }
                     })?;
                     let mut names = BTreeSet::new();
                     collect_register_refs(&expr, &mut body_regs, &mut names);
                 }
                 for reg in &body_regs {
                     let producer = register_producers.get(reg).ok_or_else(|| {
-                        SinterError::schema(format!(
-                            "{}: template references unknown register {}",
-                            resource_ctx, reg
-                        ))
+                        if r.sensitive {
+                            SinterError::schema(format!(
+                                "{}: template references unknown register (value redacted)",
+                                resource_ctx
+                            ))
+                        } else {
+                            SinterError::schema(format!(
+                                "{}: template references unknown register {}",
+                                resource_ctx, reg
+                            ))
+                        }
                     })?;
                     if !r.depends_on.contains(producer) {
-                        return Err(SinterError::schema(format!(
-                            "{}: template register {} must be listed directly in depends_on",
-                            resource_ctx, reg
-                        )));
+                        return Err(if r.sensitive {
+                            SinterError::schema(format!(
+                                "{}: template register must be listed directly in depends_on (value redacted)",
+                                resource_ctx
+                            ))
+                        } else {
+                            SinterError::schema(format!(
+                                "{}: template register {} must be listed directly in depends_on",
+                                resource_ctx, reg
+                            ))
+                        });
                     }
                 }
             }

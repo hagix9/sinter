@@ -152,7 +152,23 @@ resources:
         let r = run_recipe(&recipe, Mode::Apply, true);
         assert_success(&r);
         assert_eq!(find(&r, "s").verification, Verification::Verified);
-        // restore to running
+        // Restore to running/enabled. ssh is socket-activated: `enable` alone
+        // can leave the unit inactive, so first request a clean stop then
+        // running so the product is allowed to issue start.
+        let restore_stop = write_recipe(
+            &dir,
+            "r1.yaml",
+            r#"version: 1
+resources:
+  - id: s
+    type: service
+    with:
+      name: ssh
+      state: stopped
+      enabled: true
+"#,
+        );
+        let _ = run_recipe(&restore_stop, Mode::Apply, true);
         let restore = write_recipe(
             &dir,
             "r2.yaml",
