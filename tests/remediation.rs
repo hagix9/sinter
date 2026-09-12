@@ -2797,3 +2797,67 @@ fn directory_setgid_metadata_mismatch_fails_and_fails_fast() {
         .args(["-n", "rm", "-rf", base])
         .status();
 }
+
+/// Link mutation succeeds then verification reports Failed: the resource must
+/// be considered failed, fail-fast must block later work, and Change remains
+/// Changed (same architectural invariant as the directory setgid fix).
+#[test]
+fn link_verification_failure_promotes_to_failed_and_fails_fast() {
+    let dir = trusted_root("r15-link-verify");
+    let link = dir.join("lnk");
+    let marker = dir.join("marker");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: l\n    type: link\n    with:\n      path: {}\n      target: /tmp/r15-link-target\n  - id: marker\n    type: command\n    with:\n      program: /bin/touch\n      args: [\"{}\"]\n",
+            link.display(),
+            marker.display()
+        ),
+    );
+    let r = run_recipe_fault(&recipe, Mode::Apply, "link_verify_fail");
+    let l = find(&r, "l");
+    // Prove the injected verification failure was reached.
+    assert!(
+        l.reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("injected link verification failure"),
+        "injected fault must fire: {:?}",
+        l.reason
+    );
+    assert_eq!(
+        l.verification,
+        Verification::Failed,
+        "verification must be Failed: {:?}",
+        l
+    );
+    // Mutation already succeeded (symlink created).
+    assert_eq!(
+        l.change,
+        Change::Changed,
+        "link mutation must remain Changed: {:?}",
+        l
+    );
+    assert!(
+        l.is_failure(),
+        "verification failure must promote to execution failure: {:?}",
+        l
+    );
+    // Fail-fast: marker must not execute.
+    let m = find(&r, "marker");
+    assert_eq!(
+        m.disposition,
+        Disposition::BlockedByFailFast,
+        "marker must be blocked: {:?}",
+        m
+    );
+    assert!(!marker.exists(), "marker file must not exist");
+    assert_eq!(
+        r.status,
+        AggregateStatus::ApplyFailed,
+        "invocation must fail: {:?}",
+        r.status
+    );
+    let _ = std::fs::remove_file(&link);
+}

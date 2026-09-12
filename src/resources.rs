@@ -1395,7 +1395,17 @@ impl Engine {
                 self.fs.check_trusted_parents(&path)?;
                 self.fs.symlink(&target_val, &path)?;
                 match self.verify_link(res, &path, &target_val, link_sensitive) {
-                    Ok(result) => Ok(result),
+                    Ok(v) => {
+                        // Required verification mismatch is a failed resource
+                        // (DESIGN §17/§30). Mutation already occurred.
+                        if v.verification == Verification::Failed {
+                            let mut r = v;
+                            r.execution = Execution::Failed;
+                            Ok(r)
+                        } else {
+                            Ok(v)
+                        }
+                    }
                     Err(e) => Ok(post_mutation_failure_sensitive(res, e, link_sensitive)),
                 }
             }
@@ -1429,7 +1439,17 @@ impl Engine {
                 self.fs.check_trusted_parents(&path)?;
                 self.fs.symlink_replace(&target_val, &path, &stat)?;
                 match self.verify_link(res, &path, &target_val, link_sensitive) {
-                    Ok(result) => Ok(result),
+                    Ok(v) => {
+                        // Required verification mismatch is a failed resource
+                        // (DESIGN §17/§30). Mutation already occurred.
+                        if v.verification == Verification::Failed {
+                            let mut r = v;
+                            r.execution = Execution::Failed;
+                            Ok(r)
+                        } else {
+                            Ok(v)
+                        }
+                    }
                     Err(e) => Ok(post_mutation_failure_sensitive(res, e, link_sensitive)),
                 }
             }
@@ -1449,6 +1469,14 @@ impl Engine {
         target: &str,
         sensitive: bool,
     ) -> Result<ResourceResult> {
+        // Deterministic verification-failure injection (same class as
+        // file `reobserve_fail`) used to prove the public result path.
+        if self.fs.fault() == Some("link_verify_fail") {
+            let mut r = changed_result_sensitive(res, sensitive);
+            r.verification = Verification::Failed;
+            r.reason = Some("injected link verification failure after mutation".into());
+            return Ok(r);
+        }
         let st = self.fs.inspect(path)?;
         if st.kind != ObjKind::Symlink {
             let mut r = changed_result_sensitive(res, sensitive);
