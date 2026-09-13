@@ -1,16 +1,68 @@
 # Sinter
 
-Sinter is a lightweight, agentless configuration-management tool inspired by
-Itamae. It describes and applies operating-system configuration from a single
-Rust binary without requiring an agent, Ruby, Python, or a Sinter runtime on the
-managed host.
+**English** | [日本語](README.ja.md)
 
-Guiding phrase: **Small enough to understand, strong enough to trust.**
+**Small enough to understand, strong enough to trust.**
+
+Sinter is a lightweight, agentless configuration-management tool inspired by Itamae.
+It describes and applies operating-system configuration from a single Rust binary
+without requiring an agent, Ruby, Python, or a Sinter runtime on the managed host.
+
+## Why Sinter?
+
+- **Agentless, single-binary controller**
+  Managed hosts do not need a Sinter agent or runtime, nor a Ruby or Python runtime.
+
+- **`plan` means observation only**
+  `sinter plan` observes target state without uploading staging data, changing
+  permissions or ownership, installing or removing packages, changing services,
+  or executing command resources.
+
+- **`apply` re-observes before mutation**
+  A previous plan is never treated as authoritative current state. Stateful
+  resources are observed again immediately before Sinter decides whether to mutate them.
+
+- **Fail closed rather than guessing**
+  Unsafe parent paths, unexpected symlinks, unknown or changed SSH host keys,
+  failed verification, and indeterminate state do not silently continue as success.
+
+- **Truthful result reporting**
+  Sinter keeps execution, change, verification, and disposition distinct where
+  necessary, preserving states such as changed, failed, indeterminate, possible,
+  verified, and blocked instead of flattening everything into a boolean result.
+
+- **Strict SSH identity checking**
+  The selected `known_hosts` file is authoritative. Sinter does not automatically
+  enroll unknown hosts or fall back to insecure verification. Non-default SSH ports
+  require an explicit `[host]:port` identity.
+
+- **Idempotent by design**
+  When a stateful resource already matches the desired state, applying the same
+  recipe again performs zero mutations for that resource.
+
+## Quick example
+
+```yaml
+version: 1
+
+resources:
+  - id: tree
+    type: package
+    with:
+      name: tree
+      state: present
+```
+
+```sh
+sinter validate recipe.yaml
+sinter plan --host server.example.com recipe.yaml
+sinter apply --host server.example.com --sudo recipe.yaml
+```
 
 This repository implements **Sinter v0.1** as specified by `GOALS.md` and
 `DESIGN.md`, which are the authoritative specification. The implementation does
-not add features beyond v0.1 scope (no roles, plugins, inventory, orchestration,
-or embedded scripting).
+not add features beyond v0.1 scope: no roles, plugins, inventory, orchestration,
+or embedded scripting.
 
 ## Build
 
@@ -23,8 +75,8 @@ cargo build --release
 
 ```sh
 sinter validate recipe.yaml
-sinter plan   recipe.yaml --host host.example
-sinter apply  recipe.yaml --host host.example
+sinter plan --host host.example recipe.yaml
+sinter apply --host host.example recipe.yaml
 ```
 
 - `validate` checks recipe structure and semantics without connecting to a target.
@@ -119,6 +171,8 @@ apt, OpenSSH server, `/bin/sh`, and passwordless `sudo -n`. The controller
 reference environments are macOS, Ubuntu 24.04 LTS, and other environments where
 the binary builds.
 
+RHEL-family distributions are outside the v0.1 support scope.
+
 ## Testing
 
 The test suite is split into unit tests (in `src/`) and integration/acceptance
@@ -161,7 +215,7 @@ operations.
 
 ## Repository layout
 
-```
+```text
 src/
   value.rs         common semantic value model
   yaml.rs          YAML frontend (rejects aliases/anchors/merge/dupes/non-finite)
@@ -182,3 +236,12 @@ src/
   main.rs          CLI
 tests/             acceptance and integration test suites
 ```
+
+## License
+
+Sinter is licensed under either of:
+
+- Apache License, Version 2.0 (`LICENSE-APACHE`)
+- MIT License (`LICENSE-MIT`)
+
+at your option.
