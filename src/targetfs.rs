@@ -190,6 +190,10 @@ pub struct TargetFs {
     pub target_uid: u32,
     pub target_gid: u32,
     pub home: String,
+    /// Package backend selected from the detected platform. `None` means the
+    /// platform has no supported package manager; package resources must fail
+    /// explicitly rather than guessing a backend.
+    pub pkg_backend: Option<crate::platform::PackageBackend>,
     has_getfattr: bool,
     has_getfacl: bool,
     allow_mutation: bool,
@@ -215,6 +219,7 @@ impl TargetFs {
         target_uid: u32,
         target_gid: u32,
         home: String,
+        pkg_backend: Option<crate::platform::PackageBackend>,
         has_getfattr: bool,
         has_getfacl: bool,
         allow_mutation: bool,
@@ -226,6 +231,7 @@ impl TargetFs {
             target_uid,
             target_gid,
             home,
+            pkg_backend,
             has_getfattr,
             has_getfacl,
             allow_mutation,
@@ -284,6 +290,7 @@ impl TargetFs {
             target_uid,
             target_gid,
             home,
+            pkg_backend: None,
             has_getfattr,
             has_getfacl,
             allow_mutation: true,
@@ -340,6 +347,33 @@ impl TargetFs {
                 "--".to_string(),
                 name.to_string(),
             ],
+            sensitive,
+        )
+    }
+
+    /// Query the detected platform's package database for a package using
+    /// exact argv. The backend was selected from /etc/os-release metadata at
+    /// capability-detection time; `None` (unsupported platform) is an explicit
+    /// error, never a silent fallback (DESIGN §27).
+    pub fn package_query_sensitive(&mut self, name: &str, sensitive: bool) -> Result<Output> {
+        match self.pkg_backend {
+            Some(crate::platform::PackageBackend::Apt) => {
+                self.dpkg_query_sensitive(name, sensitive)
+            }
+            Some(crate::platform::PackageBackend::Dnf) => self.rpm_query_sensitive(name, sensitive),
+            None => Err(SinterError::apply(
+                "package resources require a supported target platform",
+            )),
+        }
+    }
+
+    /// Query rpm for a package's presence using exact argv. `rpm -q` exits 0
+    /// when installed and 1 otherwise; callers must distinguish confirmed
+    /// "not installed" from a broken query (see PackageBackend::classify_observation).
+    pub fn rpm_query_sensitive(&mut self, name: &str, sensitive: bool) -> Result<Output> {
+        self.run_argv_sensitivity(
+            "/usr/bin/rpm",
+            &["-q".to_string(), "--".to_string(), name.to_string()],
             sensitive,
         )
     }

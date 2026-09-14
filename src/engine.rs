@@ -41,6 +41,10 @@ pub struct RunOptions {
     pub verbose: bool,
     /// Test-only controlled failure-injection point around publication.
     pub fault: Option<String>,
+    /// Test-only scripted target used instead of a real connection. The CLI
+    /// never sets this; it exists so platform-detection and package/service
+    /// behavior can be tested deterministically without a target host.
+    pub fake_target: Option<crate::executor::FakeTarget>,
 }
 
 pub struct RunReport {
@@ -77,6 +81,36 @@ impl Engine {
         let has_getfattr = command_present(&mut ex, "/usr/bin/getfattr")?;
         let has_getfacl = command_present(&mut ex, "/usr/bin/getfacl")?;
         let (facts, target_uid, target_gid, home) = gather_target_info(&mut ex, opts.sudo)?;
+        // Platform capability detection (DESIGN §8 phase F): the package
+        // backend is selected from the detected OS identity, never guessed.
+        // A recipe containing package resources on a platform without a
+        // supported package manager is a hard capability error before any
+        // resource runs; a recipe without package resources is unaffected.
+        let needs_pkg = model.resources.iter().any(|r| r.type_ == "package");
+        let pkg_backend = match crate::platform::PackageBackend::for_os_family(&facts.os_family) {
+            Some(b) => {
+                if needs_pkg {
+                    for tool in [b.query_program(), b.manager_program()] {
+                        if !command_present(&mut ex, tool)? {
+                            return Err(SinterError::connect(format!(
+                                "target {} (family {}) has no usable {} for package resources",
+                                facts.os_name, facts.os_family, tool
+                            )));
+                        }
+                    }
+                }
+                Some(b)
+            }
+            None => {
+                if needs_pkg {
+                    return Err(SinterError::connect(format!(
+                        "target operating system '{}' (family '{}') has no supported package manager",
+                        facts.os_name, facts.os_family
+                    )));
+                }
+                None
+            }
+        };
         let mut vars = BTreeMap::new();
         for (name, v) in &model.vars {
             vars.insert(
@@ -96,6 +130,7 @@ impl Engine {
                 target_uid,
                 target_gid,
                 home,
+                pkg_backend,
                 has_getfattr,
                 has_getfacl,
                 opts.mode == Mode::Apply,
@@ -569,6 +604,11 @@ pub(crate) fn unknown_result(res: &FrozenResource) -> ResourceResult {
 }
 
 fn build_executor(opts: &RunOptions) -> Result<Executor> {
+    if let Some(fake) = &opts.fake_target {
+        return Ok(Executor::Fake(Box::new(
+            crate::executor::FakeExecutor::new(fake.clone(), opts.sudo),
+        )));
+    }
     match &opts.target.ssh {
         None => Ok(Executor::Local(LocalExecutor::new(opts.sudo)?)),
         Some(s) => {
@@ -592,6 +632,7 @@ fn connect_and_prepare(mut ex: Executor, _sudo: bool) -> Result<Executor> {
     let home = match &ex {
         Executor::Local(l) => l.home.clone(),
         Executor::Ssh(s) => s.home.clone(),
+        Executor::Fake(f) => f.home.clone(),
     };
     req.env = crate::resources::baseline_env(home);
     let out = ex.run(&req)?;
@@ -680,6 +721,7 @@ fn command_present(ex: &mut Executor, path: &str) -> Result<bool> {
     req.env = crate::resources::baseline_env(match ex {
         Executor::Local(l) => l.home.clone(),
         Executor::Ssh(s) => s.home.clone(),
+        Executor::Fake(f) => f.home.clone(),
     });
     match ex.run(&req)?.completion {
         Completion::Exited(0) => Ok(true),

@@ -148,6 +148,12 @@ pub struct SshConfig {
 pub enum Executor {
     Local(LocalExecutor),
     Ssh(SshExecutor),
+    /// Deterministic in-process scripted target used by tests only. It is
+    /// constructed exclusively through `RunOptions::fake_target`; the CLI
+    /// never builds it. Everything above the transport boundary (engine,
+    /// model, targetfs, result classification, command recording) still runs
+    /// production code.
+    Fake(Box<FakeExecutor>),
 }
 
 impl Executor {
@@ -155,6 +161,7 @@ impl Executor {
         match self {
             Executor::Local(l) => l.sudo,
             Executor::Ssh(s) => s.sudo,
+            Executor::Fake(f) => f.sudo,
         }
     }
 
@@ -167,6 +174,7 @@ impl Executor {
         match self {
             Executor::Local(l) => l.run(req),
             Executor::Ssh(s) => s.run(req),
+            Executor::Fake(f) => Ok(f.run(req)),
         }
     }
 
@@ -177,6 +185,7 @@ impl Executor {
         match self {
             Executor::Local(l) => l.log.clone(),
             Executor::Ssh(s) => s.log.clone(),
+            Executor::Fake(f) => f.log.clone(),
         }
     }
 
@@ -202,6 +211,7 @@ impl Executor {
         match self {
             Executor::Local(l) => l.log.push(rec),
             Executor::Ssh(s) => s.log.push(rec),
+            Executor::Fake(f) => f.log.push(rec),
         }
     }
 
@@ -242,6 +252,7 @@ impl Executor {
                 l.home = home.clone();
                 Ok((uid, gid, home))
             }
+            Executor::Fake(f) => Ok((f.target.uid, f.target.gid, f.target.home.clone())),
             Executor::Ssh(s) => {
                 let uid = run_simple(s, "/usr/bin/id", &["-u"])?
                     .trim()
@@ -1368,6 +1379,365 @@ pub fn shell_quote(s: &str) -> String {
     }
     out.push('\'');
     out
+}
+
+// ---------------------------------------------------------------------------
+// Scripted fake target (test support only)
+// ---------------------------------------------------------------------------
+
+/// A scripted in-process target used by tests. Selected through
+/// `RunOptions::fake_target`; the CLI never constructs it.
+///
+/// The fake sits below the real execution boundary: platform detection,
+/// backend selection, resource logic, result classification, sensitivity
+/// redaction, and command recording all run production code. It answers only
+/// the fixed command vocabulary the engine needs; filesystem helpers are not
+/// modeled and fail honestly rather than fabricating state.
+#[derive(Debug, Clone)]
+pub struct FakeTarget {
+    /// Content served for `/bin/cat /etc/os-release`.
+    pub os_release: String,
+    pub hostname: String,
+    pub arch: String,
+    pub uid: u32,
+    pub gid: u32,
+    pub home: String,
+    /// Executables reported present by `test -x` capability probes.
+    pub executables: std::collections::BTreeSet<String>,
+    /// Installed package set as reported by `rpm -q`/`dpkg-query`; mutated
+    /// by `dnf`/`apt-get` install/remove operations.
+    pub packages: std::collections::BTreeSet<String>,
+    /// unit name -> (LoadState, ActiveState, UnitFileState)
+    pub services: BTreeMap<String, (String, String, String)>,
+    /// Forced dnf/apt-get completion, overriding the state transition.
+    pub manager_completion: Option<Completion>,
+    /// Forced package-query completion.
+    pub query_completion: Option<Completion>,
+}
+
+impl FakeTarget {
+    /// A Rocky Linux 9 x86_64 target: dnf backend, rpm query, systemd.
+    pub fn rocky9() -> Self {
+        FakeTarget {
+            os_release: "NAME=\"Rocky Linux\"\nVERSION=\"9.4 (Blue Onyx)\"\nID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"9.4\"\nPLATFORM_ID=\"platform:el9\"\n".to_string(),
+            hostname: "rocky9.test".to_string(),
+            arch: "x86_64".to_string(),
+            uid: 1000,
+            gid: 1000,
+            home: "/home/fake".to_string(),
+            executables: ["/usr/bin/dnf", "/usr/bin/rpm", "/usr/bin/systemctl"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            packages: std::collections::BTreeSet::new(),
+            services: BTreeMap::new(),
+            manager_completion: None,
+            query_completion: None,
+        }
+    }
+
+    /// An Ubuntu 24.04 amd64 target: apt backend, dpkg-query, systemd.
+    pub fn ubuntu2404() -> Self {
+        FakeTarget {
+            os_release: "NAME=\"Ubuntu\"\nVERSION=\"24.04 LTS\"\nID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"24.04\"\n".to_string(),
+            hostname: "ubuntu2404.test".to_string(),
+            arch: "x86_64".to_string(),
+            uid: 1000,
+            gid: 1000,
+            home: "/home/fake".to_string(),
+            executables: ["/usr/bin/apt-get", "/usr/bin/dpkg-query", "/usr/bin/systemctl"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            packages: std::collections::BTreeSet::new(),
+            services: BTreeMap::new(),
+            manager_completion: None,
+            query_completion: None,
+        }
+    }
+
+    /// A target whose /etc/os-release declares an unsupported OS.
+    pub fn unsupported() -> Self {
+        FakeTarget {
+            os_release: "NAME=\"Mystery Linux\"\nID=mysteryos\nVERSION_ID=\"1\"\n".to_string(),
+            hostname: "mystery.test".to_string(),
+            arch: "x86_64".to_string(),
+            uid: 1000,
+            gid: 1000,
+            home: "/home/fake".to_string(),
+            executables: std::collections::BTreeSet::new(),
+            packages: std::collections::BTreeSet::new(),
+            services: BTreeMap::new(),
+            manager_completion: None,
+            query_completion: None,
+        }
+    }
+
+    pub fn with_package(mut self, name: &str) -> Self {
+        self.packages.insert(name.to_string());
+        self
+    }
+
+    /// Declare a systemd unit. `state` is (LoadState, ActiveState, UnitFileState).
+    pub fn with_service(mut self, name: &str, state: (&str, &str, &str)) -> Self {
+        self.services.insert(
+            name.to_string(),
+            (
+                state.0.to_string(),
+                state.1.to_string(),
+                state.2.to_string(),
+            ),
+        );
+        self
+    }
+}
+
+pub struct FakeExecutor {
+    pub log: Vec<CommandRecord>,
+    pub sudo: bool,
+    pub home: String,
+    target: FakeTarget,
+}
+
+impl FakeExecutor {
+    pub fn new(target: FakeTarget, sudo: bool) -> Self {
+        let home = target.home.clone();
+        FakeExecutor {
+            log: Vec::new(),
+            sudo,
+            home,
+            target,
+        }
+    }
+
+    fn exited(code: i32, stdout: String, stderr: String) -> Output {
+        Output {
+            completion: Completion::Exited(code),
+            stdout: stdout.into_bytes(),
+            stderr: stderr.into_bytes(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }
+    }
+
+    fn run(&mut self, req: &ExecRequest) -> Output {
+        let prog = req
+            .program
+            .rsplit('/')
+            .next()
+            .unwrap_or(&req.program)
+            .to_string();
+        match prog.as_str() {
+            "test" => self.run_test(&req.args),
+            "hostname" => Self::exited(0, format!("{}\n", self.target.hostname), String::new()),
+            "cat" => self.run_cat(&req.args),
+            "uname" => Self::exited(0, format!("{}\n", self.target.arch), String::new()),
+            "id" => self.run_id(&req.args),
+            "getent" => self.run_getent(&req.args),
+            "rpm" => self.run_rpm(&req.args),
+            "dpkg-query" => self.run_dpkg_query(&req.args),
+            "dnf" | "apt-get" => self.run_manager(&prog, &req.args),
+            "systemctl" => self.run_systemctl(&req.args),
+            // User command resources and anything else: a definite success so
+            // engine-level sequencing/fail-fast behavior can be observed.
+            _ => Self::exited(0, String::new(), String::new()),
+        }
+    }
+
+    fn run_test(&self, args: &[String]) -> Output {
+        match args.first().map(|s| s.as_str()) {
+            Some("-r") => {
+                let exists = args.iter().any(|a| a == "/etc/os-release");
+                Self::exited(if exists { 0 } else { 1 }, String::new(), String::new())
+            }
+            Some("-x") => {
+                let present = args
+                    .last()
+                    .map(|p| self.target.executables.contains(p))
+                    .unwrap_or(false);
+                Self::exited(if present { 0 } else { 1 }, String::new(), String::new())
+            }
+            _ => Self::exited(1, String::new(), "fake test: unsupported args".to_string()),
+        }
+    }
+
+    fn run_cat(&self, args: &[String]) -> Output {
+        if args.iter().any(|a| a == "/etc/os-release") {
+            Self::exited(0, self.target.os_release.clone(), String::new())
+        } else {
+            Self::exited(
+                1,
+                String::new(),
+                "fake target has no modeled filesystem".to_string(),
+            )
+        }
+    }
+
+    fn run_id(&self, args: &[String]) -> Output {
+        match args.first().map(|s| s.as_str()) {
+            Some("-u") => {
+                let uid = if self.sudo { 0 } else { self.target.uid };
+                Self::exited(0, format!("{}\n", uid), String::new())
+            }
+            Some("-g") => {
+                let gid = if self.sudo { 0 } else { self.target.gid };
+                Self::exited(0, format!("{}\n", gid), String::new())
+            }
+            _ => Self::exited(1, String::new(), "fake id: unsupported args".to_string()),
+        }
+    }
+
+    fn run_getent(&self, args: &[String]) -> Output {
+        let db = args.first().map(|s| s.as_str()).unwrap_or("");
+        let key = args.get(1).map(|s| s.as_str()).unwrap_or("");
+        match db {
+            "passwd" => {
+                let (uid, gid, home) = if self.sudo {
+                    (0, 0, "/root")
+                } else {
+                    (self.target.uid, self.target.gid, self.target.home.as_str())
+                };
+                if key == "root" || key == "0" {
+                    return Self::exited(
+                        0,
+                        "root:x:0:0:root:/root:/bin/sh\n".to_string(),
+                        String::new(),
+                    );
+                }
+                if key == uid.to_string() || key == "fakeuser" {
+                    return Self::exited(
+                        0,
+                        format!("fakeuser:x:{}:{}:fake:{}:/bin/sh\n", uid, gid, home),
+                        String::new(),
+                    );
+                }
+                Self::exited(2, String::new(), String::new())
+            }
+            "group" => {
+                let gid = if self.sudo { 0 } else { self.target.gid };
+                if key == "root" || key == "0" {
+                    return Self::exited(0, "root:x:0:\n".to_string(), String::new());
+                }
+                if key == gid.to_string() || key == "fakegroup" {
+                    return Self::exited(0, format!("fakegroup:x:{}:\n", gid), String::new());
+                }
+                Self::exited(2, String::new(), String::new())
+            }
+            _ => Self::exited(2, String::new(), String::new()),
+        }
+    }
+
+    fn run_rpm(&mut self, args: &[String]) -> Output {
+        if let Some(c) = &self.target.query_completion {
+            return Output {
+                completion: c.clone(),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+            };
+        }
+        // rpm -q -- <name>
+        let name = args.last().cloned().unwrap_or_default();
+        if self.target.packages.contains(&name) {
+            Self::exited(0, format!("{}-1.0-1.el9.x86_64\n", name), String::new())
+        } else {
+            Self::exited(
+                1,
+                String::new(),
+                format!("package {} is not installed\n", name),
+            )
+        }
+    }
+
+    fn run_dpkg_query(&mut self, args: &[String]) -> Output {
+        if let Some(c) = &self.target.query_completion {
+            return Output {
+                completion: c.clone(),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+            };
+        }
+        let name = args.last().cloned().unwrap_or_default();
+        if self.target.packages.contains(&name) {
+            Self::exited(0, "install ok installed".to_string(), String::new())
+        } else {
+            Self::exited(1, String::new(), "no packages found".to_string())
+        }
+    }
+
+    fn run_manager(&mut self, prog: &str, args: &[String]) -> Output {
+        if let Some(c) = &self.target.manager_completion {
+            return Output {
+                completion: c.clone(),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+            };
+        }
+        let name = args.last().cloned().unwrap_or_default();
+        if args.iter().any(|a| a == "install") {
+            self.target.packages.insert(name);
+        } else if args.iter().any(|a| a == "remove") {
+            self.target.packages.remove(&name);
+        } else {
+            return Self::exited(
+                1,
+                String::new(),
+                format!("fake {}: unsupported operation", prog),
+            );
+        }
+        Self::exited(0, String::new(), String::new())
+    }
+
+    fn run_systemctl(&mut self, args: &[String]) -> Output {
+        let verb = args.first().map(|s| s.as_str()).unwrap_or("");
+        if verb == "show" {
+            let name = args.get(1).cloned().unwrap_or_default();
+            return match self.target.services.get(&name) {
+                Some((load, active, unitfile)) => Self::exited(
+                    0,
+                    format!(
+                        "LoadState={}\nActiveState={}\nUnitFileState={}\n",
+                        load, active, unitfile
+                    ),
+                    String::new(),
+                ),
+                None => Self::exited(
+                    0,
+                    "LoadState=not-found\nActiveState=inactive\nUnitFileState=\n".to_string(),
+                    String::new(),
+                ),
+            };
+        }
+        let name = args.get(1).cloned().unwrap_or_default();
+        let Some(entry) = self.target.services.get_mut(&name) else {
+            return Self::exited(1, String::new(), format!("Unit {} not found", name));
+        };
+        match verb {
+            "start" | "restart" => entry.1 = "active".to_string(),
+            "stop" => entry.1 = "inactive".to_string(),
+            "reset-failed" => {
+                if entry.1 == "failed" {
+                    entry.1 = "inactive".to_string();
+                }
+            }
+            "enable" => entry.2 = "enabled".to_string(),
+            "disable" => entry.2 = "disabled".to_string(),
+            "reload" => {}
+            _ => {
+                return Self::exited(
+                    1,
+                    String::new(),
+                    format!("fake systemctl: unsupported verb {}", verb),
+                )
+            }
+        }
+        Self::exited(0, String::new(), String::new())
+    }
 }
 
 #[cfg(test)]

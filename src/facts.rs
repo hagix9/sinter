@@ -36,7 +36,13 @@ pub fn derive_family(id: &str, id_like: &str) -> String {
     if id == "ubuntu" || id == "debian" || tokens.contains(&"debian") || tokens.contains(&"ubuntu")
     {
         "debian".to_string()
-    } else if id == "fedora" || id == "rhel" || id == "centos" || tokens.contains(&"fedora") {
+    } else if matches!(
+        id.as_str(),
+        "fedora" | "rhel" | "centos" | "rocky" | "almalinux" | "ol"
+    ) || tokens.contains(&"fedora")
+        || tokens.contains(&"rhel")
+        || tokens.contains(&"centos")
+    {
         "redhat".to_string()
     } else if id == "arch" || tokens.contains(&"arch") {
         "arch".to_string()
@@ -114,6 +120,25 @@ mod tests {
     #[test]
     fn family_ubuntu() {
         assert_eq!(derive_family("ubuntu", "debian"), "debian");
+    }
+
+    #[test]
+    fn family_rhel_relatives() {
+        // Rocky Linux 9: ID="rocky", ID_LIKE="rhel centos fedora"
+        assert_eq!(derive_family("rocky", "rhel centos fedora"), "redhat");
+        // RHEL-family detection must not depend on the exact ID spelling.
+        assert_eq!(derive_family("rhel", "rhel fedora"), "redhat");
+        assert_eq!(derive_family("centos", "rhel fedora"), "redhat");
+        assert_eq!(derive_family("almalinux", "rhel centos fedora"), "redhat");
+        // A derivative declaring only ID_LIKE=rhel still resolves.
+        assert_eq!(derive_family("someel", "rhel"), "redhat");
+        assert_eq!(derive_family("fedora", ""), "redhat");
+    }
+
+    #[test]
+    fn family_unknown_does_not_match() {
+        assert_eq!(derive_family("opensuse-leap", "suse"), "opensuse-leap");
+        assert_eq!(derive_family("alpine", ""), "alpine");
     }
 
     #[test]

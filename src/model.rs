@@ -532,6 +532,13 @@ fn validate_declaration_shape(
         "package" => {
             validate_with_fields(&d.with, PACKAGE_FIELDS, ctx)?;
             require_static_string_field(&d.with, "name", ctx)?;
+            if let Some(Value::Str(s)) = d.with.get("name") {
+                // Literal names are validated here; interpolated names are
+                // resolved and validated again at freeze time.
+                if !crate::expressions::has_interpolation(s) {
+                    validate_package_name(s, ctx)?;
+                }
+            }
             validate_desired_enum(
                 &d.with,
                 "state",
@@ -600,6 +607,29 @@ fn require_static_string_field(with: &BTreeMap<String, Value>, key: &str, ctx: &
             ctx, key
         ))),
     }
+}
+
+/// Validate a resolved package name. Names are passed verbatim as argv to
+/// the platform package manager. Exact argv means no shell injection is
+/// possible, but a name that begins with '-' is still option injection and
+/// rpm treats '*', '?', and '[' as glob metacharacters. The accepted charset
+/// is a conservative superset of real Debian/RPM package names.
+fn validate_package_name(name: &str, ctx: &str) -> Result<()> {
+    let valid = name
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_alphanumeric())
+        .unwrap_or(false)
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-' | '~'));
+    if !valid {
+        return Err(SinterError::schema(format!(
+            "{}: invalid package name {:?}",
+            ctx, name
+        )));
+    }
+    Ok(())
 }
 
 fn validate_desired_enum(
@@ -1032,6 +1062,7 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
             "package" => {
                 validate_with_fields(&r.with, PACKAGE_FIELDS, &resource_ctx)?;
                 let name = static_string(&r.with, "name", &scope, &resource_ctx, true)?;
+                validate_package_name(&name, &resource_ctx)?;
                 fr.package_name = Some(name);
                 validate_desired_enum(
                     &r.with,

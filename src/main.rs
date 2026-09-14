@@ -183,6 +183,7 @@ fn build_opts(a: &TargetArgs, mode: Mode) -> Result<RunOptions, SinterError> {
         target,
         verbose: a.verbose,
         fault: None,
+        fake_target: None,
     })
 }
 

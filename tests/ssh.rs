@@ -76,6 +76,7 @@ fn ssh_unknown_host_fails() {
         target: sinter::engine::TargetSpec { ssh: Some(s) },
         verbose: false,
         fault: None,
+        fake_target: None,
     };
     let res = sinter::engine::Engine::new(model, opts);
     assert!(res.is_err(), "unknown host key must fail the connection");
@@ -109,6 +110,7 @@ fn ssh_changed_host_key_fails() {
         target: sinter::engine::TargetSpec { ssh: Some(s) },
         verbose: false,
         fault: None,
+        fake_target: None,
     };
     let res = sinter::engine::Engine::new(model, opts);
     assert!(res.is_err(), "changed host key must fail the connection");
@@ -175,6 +177,7 @@ fn ssh_host_port_mismatch_rejects_despite_portless_match() {
         target: sinter::engine::TargetSpec { ssh: Some(s) },
         verbose: false,
         fault: None,
+        fake_target: None,
     };
     let res = sinter::engine::Engine::new(model, opts);
     assert!(
@@ -238,6 +241,7 @@ fn ssh_host_port_match_accepts() {
         target: sinter::engine::TargetSpec { ssh: Some(s) },
         verbose: false,
         fault: None,
+        fake_target: None,
     };
     let res = sinter::engine::Engine::new(model, opts);
     assert!(
@@ -297,6 +301,7 @@ fn ssh_portless_only_non_default_port_rejects() {
         target: sinter::engine::TargetSpec { ssh: Some(s) },
         verbose: false,
         fault: None,
+        fake_target: None,
     };
     let res = sinter::engine::Engine::new(model, opts);
     assert!(
@@ -342,6 +347,7 @@ fn ssh_default_port_portless_match_accepts() {
         target: sinter::engine::TargetSpec { ssh: Some(s) },
         verbose: false,
         fault: None,
+        fake_target: None,
     };
     let res = sinter::engine::Engine::new(model, opts);
     assert!(
@@ -519,6 +525,7 @@ fn ssh_localhost_hostname_connects() {
         target: sinter::engine::TargetSpec { ssh: Some(s) },
         verbose: false,
         fault: None,
+        fake_target: None,
     };
     let engine_result = sinter::engine::Engine::new(model, opts);
     match engine_result {
@@ -955,6 +962,7 @@ fn ssh_sudo_denied_is_hard_error() {
         target: sinter::engine::TargetSpec { ssh: Some(s) },
         verbose: false,
         fault: None,
+        fake_target: None,
     };
     let engine = match sinter::engine::Engine::new(model, opts) {
         // Failure to obtain root privilege is a hard error before any

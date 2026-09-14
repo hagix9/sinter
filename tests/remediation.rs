@@ -968,6 +968,7 @@ fn ssh_host_key_failure_fails_closed() {
         target: sinter::engine::TargetSpec { ssh: Some(s) },
         verbose: false,
         fault: None,
+        fake_target: None,
     };
     let res = sinter::engine::Engine::new(model, opts);
     assert!(
@@ -1696,6 +1697,7 @@ fn sensitive_directory_owner_no_leak_in_output_or_log() {
         target: sinter::engine::TargetSpec { ssh: None },
         verbose: false,
         fault: None,
+        fake_target: None,
     };
     let engine = sinter::engine::Engine::new(model, opts).unwrap();
     let report = engine.run().unwrap();
@@ -1941,6 +1943,7 @@ handlers:
         target: sinter::engine::TargetSpec { ssh: None },
         verbose: false,
         fault: None,
+        fake_target: None,
     };
     let engine = sinter::engine::Engine::new(model, opts).unwrap();
     let report = engine.run().unwrap();
@@ -2128,6 +2131,7 @@ resources:
         target: sinter::engine::TargetSpec { ssh: None },
         verbose: false,
         fault: None,
+        fake_target: None,
     };
     let engine = sinter::engine::Engine::new(model, opts).unwrap();
     let report = engine.run().unwrap();
@@ -2219,6 +2223,7 @@ resources:
         target: sinter::engine::TargetSpec { ssh: None },
         verbose: false,
         fault: None,
+        fake_target: None,
     };
     let engine = sinter::engine::Engine::new(model, opts).unwrap();
     let report = engine.run().unwrap();
@@ -2737,6 +2742,7 @@ fn directory_setgid_metadata_mismatch_fails_and_fails_fast() {
         target: sinter::engine::TargetSpec { ssh: None },
         verbose: false,
         fault: None,
+        fake_target: None,
     };
     let engine = sinter::engine::Engine::new(model, opts).unwrap();
     let report = engine.run().unwrap();

@@ -65,6 +65,7 @@ pub fn run_recipe_target(
         target: TargetSpec { ssh },
         verbose: false,
         fault: None,
+        fake_target: None,
     };
     let engine = Engine::new(model, opts).unwrap();
     engine.run().unwrap()
@@ -87,6 +88,7 @@ pub fn run_recipe_fault_sudo(
         target: TargetSpec { ssh: None },
         verbose: false,
         fault: Some(fault.to_string()),
+        fake_target: None,
     };
     let engine = Engine::new(model, opts).unwrap();
     engine.run().unwrap()
@@ -105,9 +107,63 @@ pub fn try_run_recipe_target(
         target: TargetSpec { ssh },
         verbose: false,
         fault: None,
+        fake_target: None,
     };
     let engine = Engine::new(model, opts)?;
     engine.run()
+}
+
+/// Run a recipe against a scripted in-process target (platform-detection and
+/// package/service behavior tests that must not depend on a real host).
+/// Everything above the command transport runs production code.
+pub fn run_recipe_fake(
+    recipe: &Path,
+    mode: Mode,
+    sudo: bool,
+    fake: sinter::executor::FakeTarget,
+) -> sinter::engine::RunReport {
+    try_run_recipe_fake(recipe, mode, sudo, fake)
+        .unwrap_or_else(|e| panic!("fake run failed: {}", e.message))
+}
+
+pub fn try_run_recipe_fake(
+    recipe: &Path,
+    mode: Mode,
+    sudo: bool,
+    fake: sinter::executor::FakeTarget,
+) -> Result<sinter::engine::RunReport, sinter::error::SinterError> {
+    let model = load_model(recipe)?;
+    let opts = RunOptions {
+        mode,
+        sudo,
+        target: TargetSpec { ssh: None },
+        verbose: false,
+        fault: None,
+        fake_target: Some(fake),
+    };
+    let engine = Engine::new(model, opts)?;
+    engine.run()
+}
+
+/// A fake-target run with a resource-layer fault injection.
+pub fn run_recipe_fake_fault(
+    recipe: &Path,
+    mode: Mode,
+    sudo: bool,
+    fake: sinter::executor::FakeTarget,
+    fault: &str,
+) -> sinter::engine::RunReport {
+    let model = load_model(recipe).unwrap();
+    let opts = RunOptions {
+        mode,
+        sudo,
+        target: TargetSpec { ssh: None },
+        verbose: false,
+        fault: Some(fault.to_string()),
+        fake_target: Some(fake),
+    };
+    let engine = Engine::new(model, opts).unwrap();
+    engine.run().unwrap()
 }
 
 pub fn find<'a>(
@@ -148,7 +204,7 @@ pub fn is_mutation_command(program: &str, args: &[String]) -> bool {
                     || a.contains("base64 -d")
             })
         }
-        "apt-get" => args
+        "apt-get" | "dnf" | "yum" => args
             .iter()
             .any(|a| a == "install" || a == "remove" || a == "purge"),
         "systemctl" => args.iter().any(|a| {

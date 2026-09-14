@@ -9,6 +9,7 @@ pub mod ir;
 pub mod model;
 pub mod output;
 pub mod paths;
+pub mod platform;
 pub mod resources;
 pub mod result;
 pub mod targetfs;

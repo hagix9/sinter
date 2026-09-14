@@ -1954,7 +1954,16 @@ impl Engine {
             )));
         }
         let sensitive = res.sensitive || res.derived_sensitive;
-        let observed = match self.observe_package_sensitive(&name, sensitive) {
+        // The backend was selected from detected /etc/os-release identity at
+        // capability detection (DESIGN §8 phase F, §27). A package resource
+        // with no supported backend is a capability error, not a guess.
+        let backend = self.fs.pkg_backend.ok_or_else(|| {
+            SinterError::apply(format!(
+                "{}: package resources require a supported target platform",
+                res.id
+            ))
+        })?;
+        let observed = match self.observe_package_sensitive(backend, &name, sensitive) {
             Ok(s) => s,
             Err(e) => {
                 // Initial observation is information uncertainty. No mutating
@@ -1989,14 +1998,10 @@ impl Engine {
             return Ok(r);
         }
 
-        let mut req = ExecRequest::new("/usr/bin/apt-get");
+        let mut req = ExecRequest::new(backend.manager_program());
         req.env = baseline_env(self.fs.home_env());
         req.sensitive = sensitive;
-        if want_installed {
-            req.args = vec!["-y".to_string(), "install".to_string(), name.clone()];
-        } else {
-            req.args = vec!["-y".to_string(), "remove".to_string(), name.clone()];
-        }
+        req.args = backend.mutate_args(want_installed, &name);
         req.timeout_secs = 300;
         let action = if want_installed { "install" } else { "remove" };
         let pkg_disp = if sensitive {
@@ -2011,7 +2016,11 @@ impl Engine {
                 r.execution = Execution::Indeterminate;
                 r.change = Change::Possible;
                 r.verification = Verification::Unknown;
-                r.reason = Some(format!("apt operation did not complete: {}", reason));
+                r.reason = Some(format!(
+                    "{} operation did not complete: {}",
+                    backend.label(),
+                    reason
+                ));
                 return Ok(r);
             }
             Completion::Signaled(s) => {
@@ -2019,7 +2028,11 @@ impl Engine {
                 r.execution = Execution::Failed;
                 r.change = Change::Possible;
                 r.verification = Verification::Unknown;
-                r.reason = Some(format!("apt operation terminated by signal {}", s));
+                r.reason = Some(format!(
+                    "{} operation terminated by signal {}",
+                    backend.label(),
+                    s
+                ));
                 return Ok(r);
             }
             Completion::Exited(code) => {
@@ -2028,25 +2041,30 @@ impl Engine {
                     r.execution = Execution::Failed;
                     r.change = Change::Possible;
                     r.verification = Verification::Unknown;
-                    // apt stderr can echo the package name; never include it
-                    // for a sensitive resource (DESIGN §31).
+                    // Package-manager stderr can echo the package name; never
+                    // include it for a sensitive resource (DESIGN §31).
                     let stderr_note = if sensitive {
                         String::new()
                     } else {
                         format!(": {}", String::from_utf8_lossy(&out.stderr).trim())
                     };
                     r.reason = Some(format!(
-                        "apt-get {} {} failed with exit code {}{}",
-                        action, pkg_disp, code, stderr_note
+                        "{} {} {} failed with exit code {}{}",
+                        backend.manager_program(),
+                        action,
+                        pkg_disp,
+                        code,
+                        stderr_note
                     ));
                     return Ok(r);
                 }
             }
         }
 
-        // Re-observe and verify. A successful apt dispatch is retained even if
-        // the post-mutation observation fails. The mutation is already known:
-        // later uncertainty must never weaken Changed to Possible/None.
+        // Re-observe and verify. A successful package-manager dispatch is
+        // retained even if the post-mutation observation fails. The mutation
+        // is already known: later uncertainty must never weaken Changed to
+        // Possible/None.
         if self.fs.fault() == Some("package_reobserve_indeterminate") {
             let mut r = changed_result_sensitive(res, sensitive);
             r.change = Change::Changed;
@@ -2063,7 +2081,7 @@ impl Engine {
             r.reason = Some("injected package re-observation failure after mutation".into());
             return Ok(r);
         }
-        let after = match self.observe_package_sensitive(&name, sensitive) {
+        let after = match self.observe_package_sensitive(backend, &name, sensitive) {
             Ok(after) => after,
             Err(e) => {
                 let mut r = changed_result_sensitive(res, sensitive);
@@ -2098,56 +2116,31 @@ impl Engine {
         Ok(r)
     }
 
-    fn observe_package_sensitive(&mut self, name: &str, sensitive: bool) -> Result<PackageState> {
-        // argv-only: the package name never becomes shell syntax. dpkg-query
-        // prints the status on stdout and uses its exit status to signal
-        // absence, so we must distinguish exit 1 (confirmed absent) from any
-        // other failure (inspection failed).
+    fn observe_package_sensitive(
+        &mut self,
+        backend: crate::platform::PackageBackend,
+        name: &str,
+        sensitive: bool,
+    ) -> Result<PackageState> {
+        // argv-only: the package name never becomes shell syntax. Each backend
+        // distinguishes a confirmed "absent" query answer from any other
+        // failure (inspection failed); nothing uninspectable is treated as
+        // absent (DESIGN §27).
         let name_disp = if sensitive { "[redacted]" } else { name };
         if self.fs.fault() == Some("dpkg_observe_fail") {
             return Err(SinterError::apply(format!(
-                "package observation failed for {}: injected dpkg-query failure",
+                "package observation failed for {}: injected query failure",
                 name_disp
             )));
         }
         if self.fs.fault() == Some("dpkg_observe_indeterminate") {
             return Err(SinterError::indeterminate(format!(
-                "package observation for {}: injected indeterminate dpkg-query completion",
+                "package observation for {}: injected indeterminate query completion",
                 name_disp
             )));
         }
-        let out = self.fs.dpkg_query_sensitive(name, sensitive)?;
-        match out.completion {
-            Completion::Exited(0) => {
-                let status = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                classify_dpkg_status(&status)
-            }
-            Completion::Exited(1) => {
-                // Confirmed absent: dpkg-query found no matching package.
-                Ok(PackageState::Absent)
-            }
-            Completion::Exited(c) => Err(SinterError::apply(if sensitive {
-                format!(
-                    "package observation failed for {}: dpkg-query exited {}",
-                    name_disp, c
-                )
-            } else {
-                format!(
-                    "package observation failed for {}: dpkg-query exited {} ({})",
-                    name_disp,
-                    c,
-                    String::from_utf8_lossy(&out.stderr).trim()
-                )
-            })),
-            Completion::Signaled(s) => Err(SinterError::apply(format!(
-                "package observation for {} terminated by signal {}",
-                name_disp, s
-            ))),
-            Completion::Indeterminate { reason, .. } => Err(SinterError::indeterminate(format!(
-                "package observation for {} did not complete: {}",
-                name_disp, reason
-            ))),
-        }
+        let out = self.fs.package_query_sensitive(name, sensitive)?;
+        backend.classify_observation(&out, name, name_disp, sensitive)
     }
 
     // -----------------------------------------------------------------------
