@@ -390,6 +390,92 @@ fn package_name_rejects_option_injection() {
 }
 
 #[test]
+fn sensitive_invalid_package_name_is_redacted() {
+    // Audit P1-01: a rejected sensitive package name must never appear raw
+    // in validation diagnostics.
+    let dir = trusted_root("plat-pkg-sens-badlit");
+    let secret = "P2_SECRET_f71e9;invalid";
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: p\n    type: package\n    sensitive: true\n    with:\n      name: {:?}\n      state: present\n",
+            secret
+        ),
+    );
+    let err = sinter::model::load_model(&recipe).unwrap_err();
+    assert!(
+        !err.message.contains(secret),
+        "sensitive package name leaked: {}",
+        err.message
+    );
+    assert!(err.message.contains("redacted"), "err: {}", err.message);
+}
+
+#[test]
+fn sensitive_derived_invalid_package_name_is_redacted() {
+    // Audit P1-01: an invalid evaluated name on a sensitive resource is
+    // redacted at freeze-time validation too.
+    let dir = trusted_root("plat-pkg-sens-badeval");
+    let secret = "EVAL_SECRET_a1b2;oops";
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nvars:\n  n:\n    value: {:?}\nresources:\n  - id: p\n    type: package\n    sensitive: true\n    with:\n      name: \"prefix-{{{{ vars.n }}}}\"\n      state: present\n",
+            secret
+        ),
+    );
+    let err = sinter::model::load_model(&recipe).unwrap_err();
+    assert!(
+        !err.message.contains(secret),
+        "sensitive-derived package name leaked: {}",
+        err.message
+    );
+    assert!(err.message.contains("redacted"), "err: {}", err.message);
+}
+
+#[test]
+fn sensitive_var_package_name_is_redacted() {
+    // A name built from a sensitive variable is rejected without echoing
+    // either the resolved value or the variable's secret.
+    let dir = trusted_root("plat-pkg-sens-var");
+    let secret = "VARSECRET_9z;bad";
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nvars:\n  pkg:\n    value: {:?}\n    sensitive: true\nresources:\n  - id: p\n    type: package\n    with:\n      name: \"{{{{ vars.pkg }}}}\"\n      state: present\n",
+            secret
+        ),
+    );
+    let err = sinter::model::load_model(&recipe).unwrap_err();
+    assert!(
+        !err.message.contains(secret),
+        "sensitive var package name leaked: {}",
+        err.message
+    );
+}
+
+#[test]
+fn nonsensitive_invalid_package_name_stays_descriptive() {
+    // The non-sensitive error must remain useful: it still names the value.
+    let dir = trusted_root("plat-pkg-badlit");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nresources:\n  - id: p\n    type: package\n    with:\n      name: \"pkg;bad\"\n      state: present\n",
+    );
+    let err = sinter::model::load_model(&recipe).unwrap_err();
+    assert!(
+        err.message.contains("pkg;bad"),
+        "non-sensitive error lost the value: {}",
+        err.message
+    );
+    assert!(!err.message.contains("redacted"));
+}
+
+#[test]
 fn apt_backend_mutation_args_unchanged() {
     // The v0.1 apt argv contract must be preserved exactly.
     let dir = trusted_root("plat-apt-argv");

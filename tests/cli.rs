@@ -211,3 +211,46 @@ fn apply_indeterminate_exits_six() {
         .unwrap();
     assert_eq!(out.status.code(), Some(6), "{:?}", out);
 }
+
+#[test]
+fn sensitive_invalid_package_name_never_leaks_to_stderr() {
+    // Audit P1-01: a rejected sensitive package name must not appear raw in
+    // stderr, in text or JSON output mode.
+    let dir = trusted_root("cli-sens-pkgname");
+    let secret = "P2_SECRET_f71e9;invalid";
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: p\n    type: package\n    sensitive: true\n    with:\n      name: {:?}\n      state: present\n",
+            secret
+        ),
+    );
+    for args in [
+        vec!["validate"],
+        vec!["validate", "--format", "json"],
+        vec!["plan", "--format", "json"],
+    ] {
+        let mut full: Vec<&str> = args.clone();
+        full.push(recipe.to_str().unwrap());
+        let out = Command::new(bin()).args(&full).output().unwrap();
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_ne!(out.status.code(), Some(0), "{:?}", args);
+        assert!(
+            !combined.contains(secret),
+            "secret leaked in {:?}: {}",
+            args,
+            combined
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("redacted"),
+            "stderr missing redaction marker in {:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}

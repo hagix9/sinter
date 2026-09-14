@@ -534,9 +534,15 @@ fn validate_declaration_shape(
             require_static_string_field(&d.with, "name", ctx)?;
             if let Some(Value::Str(s)) = d.with.get("name") {
                 // Literal names are validated here; interpolated names are
-                // resolved and validated again at freeze time.
+                // resolved and validated again at freeze time. A rejected
+                // name never appears raw when the resource is sensitive or
+                // the name derives from a sensitive variable.
                 if !crate::expressions::has_interpolation(s) {
-                    validate_package_name(s, ctx)?;
+                    let name_sensitive = d.sensitive
+                        || d.with.get("name").is_some_and(|v| {
+                            value_references_sensitive_var(v, sensitive_var_names)
+                        });
+                    validate_package_name(s, ctx, name_sensitive)?;
                 }
             }
             validate_desired_enum(
@@ -613,8 +619,10 @@ fn require_static_string_field(with: &BTreeMap<String, Value>, key: &str, ctx: &
 /// the platform package manager. Exact argv means no shell injection is
 /// possible, but a name that begins with '-' is still option injection and
 /// rpm treats '*', '?', and '[' as glob metacharacters. The accepted charset
-/// is a conservative superset of real Debian/RPM package names.
-fn validate_package_name(name: &str, ctx: &str) -> Result<()> {
+/// is a conservative superset of real Debian/RPM package names. When the
+/// resource (or the name itself) is sensitive the rejected value is never
+/// echoed into diagnostics.
+fn validate_package_name(name: &str, ctx: &str, sensitive: bool) -> Result<()> {
     let valid = name
         .chars()
         .next()
@@ -624,10 +632,11 @@ fn validate_package_name(name: &str, ctx: &str) -> Result<()> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-' | '~'));
     if !valid {
-        return Err(SinterError::schema(format!(
-            "{}: invalid package name {:?}",
-            ctx, name
-        )));
+        return Err(SinterError::schema(if sensitive {
+            format!("{}: invalid package name (value redacted)", ctx)
+        } else {
+            format!("{}: invalid package name {:?}", ctx, name)
+        }));
     }
     Ok(())
 }
@@ -1061,8 +1070,23 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
             }
             "package" => {
                 validate_with_fields(&r.with, PACKAGE_FIELDS, &resource_ctx)?;
-                let name = static_string(&r.with, "name", &scope, &resource_ctx, true)?;
-                validate_package_name(&name, &resource_ctx)?;
+                let name_sensitive = r.sensitive
+                    || r.with
+                        .get("name")
+                        .is_some_and(|v| value_references_sensitive_var(v, &sensitive_var_names));
+                let name = static_string(&r.with, "name", &scope, &resource_ctx, true).map_err(
+                    |e| {
+                        if name_sensitive {
+                            SinterError::schema(format!(
+                                "{}: package name is not a statically-known string (value redacted)",
+                                resource_ctx
+                            ))
+                        } else {
+                            e
+                        }
+                    },
+                )?;
+                validate_package_name(&name, &resource_ctx, name_sensitive)?;
                 fr.package_name = Some(name);
                 validate_desired_enum(
                     &r.with,
