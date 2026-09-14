@@ -53,16 +53,19 @@ impl PackageBackend {
 
     /// Exact argv (excluding the program) for an install/remove mutation.
     ///
-    /// DESIGN §27: no version pinning, no explicit repository metadata
-    /// refresh. For dnf, `metadata_expire=-1` prevents an implicit metadata
-    /// refresh so behavior matches the apt contract of using the existing
-    /// cache only.
+    /// DESIGN §27: no version pinning, and automatic repository metadata
+    /// refresh is never performed. For dnf, `-C` (`--cacheonly`) is the
+    /// dnf-native guarantee: it runs entirely from the existing cache and
+    /// refuses to retrieve metadata even when it is missing or expired,
+    /// matching the apt contract of using the existing cache only. An
+    /// unusable cache therefore fails clearly instead of triggering a
+    /// silent network refresh.
     pub fn mutate_args(&self, want_installed: bool, name: &str) -> Vec<String> {
         let action = if want_installed { "install" } else { "remove" };
         match self {
             Self::Apt => vec!["-y".to_string(), action.to_string(), name.to_string()],
             Self::Dnf => vec![
-                "--setopt=metadata_expire=-1".to_string(),
+                "-C".to_string(),
                 "-y".to_string(),
                 action.to_string(),
                 name.to_string(),
@@ -209,13 +212,15 @@ mod tests {
 
     #[test]
     fn dnf_mutation_args_are_exact() {
+        // `-C` (--cacheonly) is the DESIGN §27 guarantee: dnf runs from the
+        // existing metadata cache only and must never retrieve metadata.
         assert_eq!(
             PackageBackend::Dnf.mutate_args(true, "httpd"),
-            vec!["--setopt=metadata_expire=-1", "-y", "install", "httpd"]
+            vec!["-C", "-y", "install", "httpd"]
         );
         assert_eq!(
             PackageBackend::Dnf.mutate_args(false, "httpd"),
-            vec!["--setopt=metadata_expire=-1", "-y", "remove", "httpd"]
+            vec!["-C", "-y", "remove", "httpd"]
         );
         // apt argv is unchanged from v0.1.
         assert_eq!(

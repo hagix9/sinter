@@ -126,10 +126,7 @@ fn dnf_observes_absent_and_installs() {
     assert_eq!(p.verification, Verification::Verified);
     let dnf = commands_with(&r, "/usr/bin/dnf");
     assert_eq!(dnf.len(), 1);
-    assert_eq!(
-        dnf[0].args,
-        vec!["--setopt=metadata_expire=-1", "-y", "install", "nano"]
-    );
+    assert_eq!(dnf[0].args, vec!["-C", "-y", "install", "nano"]);
     // Observation used rpm -q, never dpkg-query.
     assert!(commands_with(&r, "/usr/bin/dpkg-query").is_empty());
 }
@@ -168,10 +165,7 @@ fn dnf_removes_installed_package() {
     assert_eq!(p.verification, Verification::Verified);
     let dnf = commands_with(&r, "/usr/bin/dnf");
     assert_eq!(dnf.len(), 1);
-    assert_eq!(
-        dnf[0].args,
-        vec!["--setopt=metadata_expire=-1", "-y", "remove", "nano"]
-    );
+    assert_eq!(dnf[0].args, vec!["-C", "-y", "remove", "nano"]);
 }
 
 #[test]
