@@ -47,8 +47,19 @@ pub struct Xattrs {
 impl Xattrs {
     /// Return the first access/label-affecting attribute that makes replacement
     /// unsafe under DESIGN §24.4.
+    ///
+    /// `security.selinux` is deliberately NOT unsafe: a MAC label can only
+    /// restrict access (never grant discretionary write, so it is irrelevant
+    /// to the parent trust boundary), and the captured label is restored on
+    /// the staged file before atomic publication via `preserved_attrs`.
+    /// Every other `security.*`/`trusted.*` attribute and all POSIX/NFSv4
+    /// ACL attributes remain disqualifying because they cannot be safely
+    /// preserved through replacement.
     pub fn unsafe_attr(&self) -> Option<String> {
         for name in self.attrs.keys() {
+            if name == "security.selinux" {
+                continue;
+            }
             if name.starts_with("security.")
                 || name.starts_with("trusted.")
                 || name.starts_with("system.posix_acl")
@@ -64,6 +75,16 @@ impl Xattrs {
 
     pub fn user_attrs(&self) -> impl Iterator<Item = (&String, &String)> {
         self.attrs.iter().filter(|(k, _)| k.starts_with("user."))
+    }
+
+    /// Attributes carried over to the replacement object before publication:
+    /// all `user.*` attributes plus the `security.selinux` label. Other
+    /// security/ACL attributes are never copied — they are disqualifying via
+    /// `unsafe_attr` instead.
+    pub fn preserved_attrs(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.attrs
+            .iter()
+            .filter(|(k, _)| k.starts_with("user.") || k.as_str() == "security.selinux")
     }
 }
 
@@ -1004,14 +1025,15 @@ impl TargetFs {
         Ok(())
     }
 
-    /// Copy `user.*` xattrs from `from` onto `to`. Security/label attributes are
-    /// deliberately not copied here (unsupported metadata triggers refusal).
+    /// Copy preservable xattrs (`user.*` and `security.selinux`) from `from`
+    /// onto `to`. Other security/ACL attributes are deliberately not copied —
+    /// they are disqualifying via `unsafe_attr` instead.
     pub fn copy_user_xattrs(&mut self, from: &str, to: &str) -> Result<()> {
         if !self.has_getfattr {
             return Ok(());
         }
         let x = self.xattrs(from)?;
-        for (name, value) in x.user_attrs() {
+        for (name, value) in x.preserved_attrs() {
             self.set_xattr(name, value, to)?;
         }
         Ok(())
@@ -1390,6 +1412,49 @@ mod tests {
             "rrr", "www", "xxx", "xrw", "wr-", "xr-", "rw", "rwx-", "", "rwxr",
         ] {
             assert!(!is_valid_acl_perm(bad), "must reject {:?}", bad);
+        }
+    }
+
+    #[test]
+    fn selinux_label_is_preservable_not_unsafe() {
+        // SELinux-enforcing RHEL-family targets label every object; a MAC
+        // label cannot grant discretionary write and is restored on the
+        // staged file before publication, so it must not disqualify.
+        let mut attrs = BTreeMap::new();
+        attrs.insert(
+            "security.selinux".to_string(),
+            "0sdW5jb25maW5lZF91Om9iamVjdF9yOnVzZXJfaG9tZV90OnMw".to_string(),
+        );
+        let x = Xattrs {
+            attrs,
+            inspected: true,
+        };
+        assert_eq!(x.unsafe_attr(), None);
+        assert_eq!(
+            x.preserved_attrs()
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>(),
+            vec!["security.selinux"]
+        );
+    }
+
+    #[test]
+    fn other_security_attrs_still_unsafe() {
+        for name in [
+            "security.capability",
+            "security.ima",
+            "security.evm",
+            "trusted.overlay.opaque",
+            "system.posix_acl_access",
+        ] {
+            let mut attrs = BTreeMap::new();
+            attrs.insert(name.to_string(), "0sYQ==".to_string());
+            let x = Xattrs {
+                attrs,
+                inspected: true,
+            };
+            assert_eq!(x.unsafe_attr().as_deref(), Some(name));
+            assert_eq!(x.preserved_attrs().count(), 0);
         }
     }
 

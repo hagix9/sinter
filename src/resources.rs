@@ -806,7 +806,7 @@ impl Engine {
         let prepare: Result<()> = (|| -> Result<()> {
             self.fs.write_bytes(&staging, bytes)?;
             self.fs.set_metadata(&staging, mode, uid, gid)?;
-            for (name, value) in xattrs.user_attrs() {
+            for (name, value) in xattrs.preserved_attrs() {
                 self.fs.set_xattr(name, value, &staging)?;
             }
             Ok(())
