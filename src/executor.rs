@@ -1413,6 +1413,10 @@ pub struct FakeTarget {
     pub manager_completion: Option<Completion>,
     /// Forced package-query completion.
     pub query_completion: Option<Completion>,
+    /// Ordered complete package-query results (stdout, stderr, truncation
+    /// flags included). Each query pops the front entry; when the queue is
+    /// empty the configured `query_completion` or the package state applies.
+    pub query_results: std::collections::VecDeque<Output>,
 }
 
 impl FakeTarget {
@@ -1433,6 +1437,7 @@ impl FakeTarget {
             services: BTreeMap::new(),
             manager_completion: None,
             query_completion: None,
+            query_results: std::collections::VecDeque::new(),
         }
     }
 
@@ -1453,6 +1458,7 @@ impl FakeTarget {
             services: BTreeMap::new(),
             manager_completion: None,
             query_completion: None,
+            query_results: std::collections::VecDeque::new(),
         }
     }
 
@@ -1470,11 +1476,27 @@ impl FakeTarget {
             services: BTreeMap::new(),
             manager_completion: None,
             query_completion: None,
+            query_results: std::collections::VecDeque::new(),
         }
     }
 
     pub fn with_package(mut self, name: &str) -> Self {
         self.packages.insert(name.to_string());
+        self
+    }
+
+    /// Declare an executable present on the target (used by `test -x`
+    /// capability probes and by command-resource dispatch: only declared
+    /// programs may run).
+    pub fn with_executable(mut self, path: &str) -> Self {
+        self.executables.insert(path.to_string());
+        self
+    }
+
+    /// Queue complete package-query results consumed in order by
+    /// `rpm -q`/`dpkg-query` invocations.
+    pub fn with_query_results(mut self, results: Vec<Output>) -> Self {
+        self.query_results = results.into();
         self
     }
 
@@ -1538,9 +1560,22 @@ impl FakeExecutor {
             "dpkg-query" => self.run_dpkg_query(&req.args),
             "dnf" | "apt-get" => self.run_manager(&prog, &req.args),
             "systemctl" => self.run_systemctl(&req.args),
-            // User command resources and anything else: a definite success so
-            // engine-level sequencing/fail-fast behavior can be observed.
-            _ => Self::exited(0, String::new(), String::new()),
+            // Anything else (e.g. user command resources): an unmodeled
+            // operation is only a definite success when the program was
+            // explicitly declared present on the target; otherwise it fails
+            // deterministically so a missing model can never masquerade as
+            // a successful observation.
+            _ => {
+                if self.target.executables.contains(&req.program) {
+                    Self::exited(0, String::new(), String::new())
+                } else {
+                    Self::exited(
+                        127,
+                        String::new(),
+                        format!("fake target: unmodeled program {}", req.program),
+                    )
+                }
+            }
         }
     }
 
@@ -1627,15 +1662,22 @@ impl FakeExecutor {
         }
     }
 
+    fn next_query_result(&mut self) -> Option<Output> {
+        if let Some(o) = self.target.query_results.pop_front() {
+            return Some(o);
+        }
+        self.target.query_completion.as_ref().map(|c| Output {
+            completion: c.clone(),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        })
+    }
+
     fn run_rpm(&mut self, args: &[String]) -> Output {
-        if let Some(c) = &self.target.query_completion {
-            return Output {
-                completion: c.clone(),
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                stdout_truncated: false,
-                stderr_truncated: false,
-            };
+        if let Some(o) = self.next_query_result() {
+            return o;
         }
         // rpm -q -- <name>
         let name = args.last().cloned().unwrap_or_default();
@@ -1651,14 +1693,8 @@ impl FakeExecutor {
     }
 
     fn run_dpkg_query(&mut self, args: &[String]) -> Output {
-        if let Some(c) = &self.target.query_completion {
-            return Output {
-                completion: c.clone(),
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-                stdout_truncated: false,
-                stderr_truncated: false,
-            };
+        if let Some(o) = self.next_query_result() {
+            return o;
         }
         let name = args.last().cloned().unwrap_or_default();
         if self.target.packages.contains(&name) {

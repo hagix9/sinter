@@ -130,15 +130,27 @@ impl PackageBackend {
     }
 }
 
-/// Whether an `rpm -q` exit-1 result positively reports the package as not
-/// installed. rpm prints "package <name> is not installed"; the baseline
-/// environment fixes LC_ALL=C.UTF-8 so the marker is locale-stable. Any
-/// other exit-1 output is an inspection failure, not absence.
+/// Whether an `rpm -q` exit-1 result positively and unambiguously reports
+/// the package as not installed. rpm prints exactly
+/// "package <name> is not installed"; the baseline environment fixes
+/// LC_ALL=C.UTF-8 so the marker is locale-stable.
+///
+/// Fail closed (DESIGN §27: observation failure is never absence): the
+/// marker must be the complete output on one stream with the other stream
+/// empty. Mixed diagnostics (e.g. an rpmdb error alongside the marker),
+/// substring matches inside unrelated output, truncation, or malformed
+/// bytes all make the observation uninterpretable and are classified as
+/// errors by the caller, never as `Absent`.
 fn rpm_reports_absent(out: &Output, name: &str) -> bool {
+    if out.stdout_truncated || out.stderr_truncated {
+        return false;
+    }
     let marker = format!("package {} is not installed", name);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    stdout.contains(&marker) || stderr.contains(&marker)
+    let so = stdout.trim();
+    let se = stderr.trim();
+    (so == marker && se.is_empty()) || (se == marker && so.is_empty())
 }
 
 fn observation_error(
@@ -268,8 +280,9 @@ mod tests {
 
     #[test]
     fn rpm_absent_marker_checks_both_streams() {
-        // rpm writes the marker to stderr, but accept either stream so a
-        // harmless redirection difference cannot manufacture fake "absent".
+        // rpm writes the marker to stdout on el9, but accept either stream
+        // so a harmless redirection difference cannot manufacture fake
+        // "absent" — provided it is the complete output on that stream.
         let out = exited(1, "package nano is not installed\n", "");
         assert!(rpm_reports_absent(&out, "nano"));
         let out = exited(1, "", "package nano is not installed\n");
@@ -277,6 +290,60 @@ mod tests {
         // A different package's marker does not prove this one absent.
         let out = exited(1, "", "package other is not installed\n");
         assert!(!rpm_reports_absent(&out, "nano"));
+    }
+
+    #[test]
+    fn rpm_absent_classification_fails_closed_on_any_ambiguity() {
+        // Marker plus an rpmdb/database error is an observation failure,
+        // never absence (audit P1-02).
+        let mixed = exited(
+            1,
+            "package nano is not installed\n",
+            "error: cannot open Packages database in /var/lib/rpm\n",
+        );
+        assert!(PackageBackend::Dnf
+            .classify_observation(&mixed, "nano", "nano", false)
+            .is_err());
+        let mixed_rev = exited(
+            1,
+            "error: cannot open Packages database in /var/lib/rpm\n",
+            "package nano is not installed\n",
+        );
+        assert!(PackageBackend::Dnf
+            .classify_observation(&mixed_rev, "nano", "nano", false)
+            .is_err());
+        // Marker only as a substring of unrelated output is not absence.
+        let substr = exited(1, "", "warning: package nano is not installed anyway\n");
+        assert!(PackageBackend::Dnf
+            .classify_observation(&substr, "nano", "nano", false)
+            .is_err());
+        // Additional diagnostics on the same stream invalidate the result.
+        let extra_line = exited(1, "", "package nano is not installed\nextra noise\n");
+        assert!(PackageBackend::Dnf
+            .classify_observation(&extra_line, "nano", "nano", false)
+            .is_err());
+        // Truncated output cannot prove the marker is the complete result.
+        let mut trunc_out = exited(1, "package nano is not installed\n", "");
+        trunc_out.stdout_truncated = true;
+        assert!(PackageBackend::Dnf
+            .classify_observation(&trunc_out, "nano", "nano", false)
+            .is_err());
+        let mut trunc_err = exited(1, "", "package nano is not installed\n");
+        trunc_err.stderr_truncated = true;
+        assert!(PackageBackend::Dnf
+            .classify_observation(&trunc_err, "nano", "nano", false)
+            .is_err());
+        // Malformed bytes cannot establish a clean absent result.
+        let bad = Output {
+            completion: Completion::Exited(1),
+            stdout: vec![0xff, 0xfe],
+            stderr: b"package nano is not installed\n".to_vec(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        };
+        assert!(PackageBackend::Dnf
+            .classify_observation(&bad, "nano", "nano", false)
+            .is_err());
     }
 
     #[test]

@@ -88,7 +88,15 @@ fn unsupported_os_without_package_resources_still_runs() {
         "r.yaml",
         "version: 1\nresources:\n  - id: c\n    type: command\n    with:\n      program: /bin/true\n",
     );
-    let r = run_recipe_fake(&recipe, Mode::Apply, false, FakeTarget::unsupported());
+    // The command program must be declared executable on the target; an
+    // undeclared program would fail deterministically rather than fake
+    // success (audit P1-05).
+    let r = run_recipe_fake(
+        &recipe,
+        Mode::Apply,
+        false,
+        FakeTarget::unsupported().with_executable("/bin/true"),
+    );
     assert_success(&r);
 }
 
@@ -370,6 +378,99 @@ fn rocky_service_already_running_is_unchanged() {
     assert!(ctl
         .iter()
         .all(|c| c.args.first().map(|a| a.as_str()) == Some("show")));
+}
+
+#[test]
+fn rpm_marker_plus_db_error_is_observation_failure() {
+    // Audit P1-02: "package X is not installed" accompanied by an rpmdb
+    // error is an observation failure, never absence — and no mutation may
+    // be dispatched on an uninterpretable observation.
+    let dir = trusted_root("plat-rpm-mixed");
+    let recipe = pkg_recipe(&dir, "nano", "absent");
+    let t = FakeTarget::rocky9()
+        .with_package("nano")
+        .with_query_results(vec![sinter::executor::Output {
+            completion: Completion::Exited(1),
+            stdout: b"package nano is not installed\n".to_vec(),
+            stderr: b"error: cannot open Packages database in /var/lib/rpm\n".to_vec(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }]);
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = find(&r, "p");
+    assert_eq!(p.execution, Execution::Failed);
+    assert_eq!(p.change, Change::None);
+    assert!(commands_with(&r, "/usr/bin/dnf").is_empty());
+    assert_eq!(r.status, AggregateStatus::ApplyFailed);
+}
+
+#[test]
+fn rpm_substring_marker_is_not_absent() {
+    // The marker embedded in unrelated output must not classify as absent.
+    let dir = trusted_root("plat-rpm-substr");
+    let recipe = pkg_recipe(&dir, "nano", "absent");
+    let t = FakeTarget::rocky9().with_query_results(vec![sinter::executor::Output {
+        completion: Completion::Exited(1),
+        stdout: Vec::new(),
+        stderr: b"note: package nano is not installed in the build root\n".to_vec(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+    }]);
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = find(&r, "p");
+    assert_eq!(p.execution, Execution::Failed);
+    assert!(commands_with(&r, "/usr/bin/dnf").is_empty());
+}
+
+#[test]
+fn rpm_reobserve_db_error_after_mutation_keeps_changed() {
+    // Audit P1-02: a mutation followed by an uninterpretable re-observation
+    // must preserve Change::Changed and fail verification — mutation truth
+    // is never weakened to None and verification never falsely succeeds.
+    let dir = trusted_root("plat-rpm-reobs");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let t = FakeTarget::rocky9().with_query_results(vec![
+        // Initial observation: clean, unambiguous absent.
+        sinter::executor::Output {
+            completion: Completion::Exited(1),
+            stdout: Vec::new(),
+            stderr: b"package nano is not installed\n".to_vec(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        },
+        // Re-observation: marker text plus an rpmdb error is not a valid
+        // absent answer.
+        sinter::executor::Output {
+            completion: Completion::Exited(1),
+            stdout: b"package nano is not installed\n".to_vec(),
+            stderr: b"error: cannot open Packages database in /var/lib/rpm\n".to_vec(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        },
+    ]);
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = find(&r, "p");
+    assert_eq!(p.change, Change::Changed);
+    assert_eq!(p.execution, Execution::Failed);
+    assert_eq!(p.verification, Verification::Failed);
+    assert_eq!(r.status, AggregateStatus::ApplyFailed);
+    // The dnf mutation really was dispatched.
+    assert_eq!(commands_with(&r, "/usr/bin/dnf").len(), 1);
+}
+
+#[test]
+fn fake_target_unmodeled_command_fails_deterministically() {
+    // Audit P1-05: an unmodeled program must not silently succeed.
+    let dir = trusted_root("plat-fake-unmodeled");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nresources:\n  - id: c\n    type: command\n    with:\n      program: /bin/definitely-not-modeled\n",
+    );
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, FakeTarget::rocky9());
+    let c = find(&r, "c");
+    assert_eq!(c.execution, Execution::Failed);
+    assert_eq!(r.status, AggregateStatus::ApplyFailed);
 }
 
 #[test]
