@@ -54,22 +54,49 @@ impl PackageBackend {
     /// Exact argv (excluding the program) for an install/remove mutation.
     ///
     /// DESIGN §27: no version pinning, and automatic repository metadata
-    /// refresh is never performed. For dnf, `-C` (`--cacheonly`) is the
-    /// dnf-native guarantee: it runs entirely from the existing cache and
-    /// refuses to retrieve metadata even when it is missing or expired,
-    /// matching the apt contract of using the existing cache only. An
-    /// unusable cache therefore fails clearly instead of triggering a
-    /// silent network refresh.
+    /// refresh is never performed. For dnf this contract is enforced in two
+    /// steps because dnf has no single flag for "cached metadata only, but
+    /// package payloads may still download" (the apt-get contract):
+    /// `metadata_expire=-1` prevents any refresh of *present* metadata, and
+    /// [`Self::metadata_probe_args`] proves beforehand that a usable cache
+    /// exists at all — dnf fetches metadata when none is cached even with
+    /// `metadata_expire=-1`. `-C` (`--cacheonly`) alone is too strong: it
+    /// also blocks package payload downloads, breaking installs on hosts
+    /// that do not retain downloaded packages (the default `keepcache=0`).
     pub fn mutate_args(&self, want_installed: bool, name: &str) -> Vec<String> {
         let action = if want_installed { "install" } else { "remove" };
         match self {
             Self::Apt => vec!["-y".to_string(), action.to_string(), name.to_string()],
             Self::Dnf => vec![
-                "-C".to_string(),
+                "--setopt=metadata_expire=-1".to_string(),
                 "-y".to_string(),
                 action.to_string(),
                 name.to_string(),
             ],
+        }
+    }
+
+    /// Optional pre-mutation probe argv (excluding the program) that must
+    /// succeed before [`Self::mutate_args`] may run.
+    ///
+    /// For dnf, `dnf -C repoquery` runs entirely from the existing metadata
+    /// cache and fails clearly when any enabled repository lacks usable
+    /// cached metadata ("Cache-only enabled but no cache for ..."), so a
+    /// missing or unusable cache stops the mutation instead of triggering a
+    /// silent metadata retrieval (DESIGN §27). Once the probe succeeds,
+    /// `metadata_expire=-1` guarantees the mutation itself never refreshes
+    /// the present metadata. Apt needs no probe: `apt-get install` never
+    /// refreshes package lists on its own.
+    pub fn metadata_probe_args(&self, name: &str) -> Option<Vec<String>> {
+        match self {
+            Self::Apt => None,
+            Self::Dnf => Some(vec![
+                "-C".to_string(),
+                "repoquery".to_string(),
+                "--queryformat".to_string(),
+                "%{name}".to_string(),
+                name.to_string(),
+            ]),
         }
     }
 
@@ -212,21 +239,39 @@ mod tests {
 
     #[test]
     fn dnf_mutation_args_are_exact() {
-        // `-C` (--cacheonly) is the DESIGN §27 guarantee: dnf runs from the
-        // existing metadata cache only and must never retrieve metadata.
+        // `metadata_expire=-1` treats present metadata as never stale; the
+        // metadata_probe_args probe proves the cache exists, so the mutation
+        // itself can never retrieve metadata (DESIGN §27).
         assert_eq!(
             PackageBackend::Dnf.mutate_args(true, "httpd"),
-            vec!["-C", "-y", "install", "httpd"]
+            vec!["--setopt=metadata_expire=-1", "-y", "install", "httpd"]
         );
         assert_eq!(
             PackageBackend::Dnf.mutate_args(false, "httpd"),
-            vec!["-C", "-y", "remove", "httpd"]
+            vec!["--setopt=metadata_expire=-1", "-y", "remove", "httpd"]
         );
         // apt argv is unchanged from v0.1.
         assert_eq!(
             PackageBackend::Apt.mutate_args(true, "nano"),
             vec!["-y", "install", "nano"]
         );
+    }
+
+    #[test]
+    fn dnf_metadata_probe_args_are_exact() {
+        // The cache-usability probe runs entirely from the existing cache
+        // (`-C`) so it can never retrieve metadata itself.
+        assert_eq!(
+            PackageBackend::Dnf.metadata_probe_args("httpd"),
+            Some(vec![
+                "-C".to_string(),
+                "repoquery".to_string(),
+                "--queryformat".to_string(),
+                "%{name}".to_string(),
+                "httpd".to_string()
+            ])
+        );
+        assert_eq!(PackageBackend::Apt.metadata_probe_args("nano"), None);
     }
 
     #[test]

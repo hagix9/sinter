@@ -125,8 +125,16 @@ fn dnf_observes_absent_and_installs() {
     assert_eq!(p.change, Change::Changed);
     assert_eq!(p.verification, Verification::Verified);
     let dnf = commands_with(&r, "/usr/bin/dnf");
-    assert_eq!(dnf.len(), 1);
-    assert_eq!(dnf[0].args, vec!["-C", "-y", "install", "nano"]);
+    // DESIGN §27: cache-usability probe runs first, then the mutation.
+    assert_eq!(dnf.len(), 2);
+    assert_eq!(
+        dnf[0].args,
+        vec!["-C", "repoquery", "--queryformat", "%{name}", "nano"]
+    );
+    assert_eq!(
+        dnf[1].args,
+        vec!["--setopt=metadata_expire=-1", "-y", "install", "nano"]
+    );
     // Observation used rpm -q, never dpkg-query.
     assert!(commands_with(&r, "/usr/bin/dpkg-query").is_empty());
 }
@@ -164,8 +172,15 @@ fn dnf_removes_installed_package() {
     assert_eq!(p.change, Change::Changed);
     assert_eq!(p.verification, Verification::Verified);
     let dnf = commands_with(&r, "/usr/bin/dnf");
-    assert_eq!(dnf.len(), 1);
-    assert_eq!(dnf[0].args, vec!["-C", "-y", "remove", "nano"]);
+    assert_eq!(dnf.len(), 2);
+    assert_eq!(
+        dnf[0].args,
+        vec!["-C", "repoquery", "--queryformat", "%{name}", "nano"]
+    );
+    assert_eq!(
+        dnf[1].args,
+        vec!["--setopt=metadata_expire=-1", "-y", "remove", "nano"]
+    );
 }
 
 #[test]
@@ -178,6 +193,35 @@ fn dnf_absent_already_absent_is_unchanged() {
     assert_eq!(p.change, Change::None);
     assert!(commands_with(&r, "/usr/bin/dnf").is_empty());
     assert_eq!(mutation_command_count(&r), 0);
+}
+
+#[test]
+fn dnf_unusable_metadata_cache_fails_closed() {
+    // DESIGN §27: when the metadata-cache probe fails, the mutation is never
+    // attempted — dnf must not fall back to retrieving metadata. Nothing was
+    // mutated, so the truth is Failed/None, not Possible.
+    let dir = trusted_root("plat-dnf-nocache");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nresources:\n  - id: p\n    type: package\n    with:\n      name: nano\n      state: present\n  - id: marker\n    type: command\n    with:\n      program: /bin/touch\n      args: [/tmp/plat-dnf-nocache-marker]\n",
+    );
+    let mut t = FakeTarget::rocky9();
+    t.probe_completion = Some(Completion::Exited(1));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = find(&r, "p");
+    assert_eq!(p.execution, Execution::Failed);
+    assert_eq!(p.change, Change::None);
+    assert_eq!(p.verification, Verification::NotPerformed);
+    let reason = p.reason.as_deref().unwrap_or("");
+    assert!(reason.contains("metadata cache unusable"), "{}", reason);
+    // Only the probe ran; no install/remove was dispatched.
+    let dnf = commands_with(&r, "/usr/bin/dnf");
+    assert_eq!(dnf.len(), 1);
+    assert!(dnf[0].args.iter().any(|a| a == "repoquery"));
+    let marker = find(&r, "marker");
+    assert_eq!(marker.disposition, Disposition::BlockedByFailFast);
+    assert_eq!(r.status, AggregateStatus::ApplyFailed);
 }
 
 #[test]
@@ -287,8 +331,11 @@ fn dnf_sudo_path_records_sudo() {
     let r = run_recipe_fake(&recipe, Mode::Apply, true, FakeTarget::rocky9());
     assert_success(&r);
     let dnf = commands_with(&r, "/usr/bin/dnf");
-    assert_eq!(dnf.len(), 1);
-    assert!(dnf[0].sudo, "dnf mutation must run under sudo identity");
+    assert_eq!(dnf.len(), 2);
+    assert!(
+        dnf.iter().all(|c| c.sudo),
+        "dnf probe and mutation must run under sudo identity"
+    );
 }
 
 #[test]
@@ -449,7 +496,8 @@ fn rpm_reobserve_db_error_after_mutation_keeps_changed() {
     assert_eq!(p.verification, Verification::Failed);
     assert_eq!(r.status, AggregateStatus::ApplyFailed);
     // The dnf mutation really was dispatched.
-    assert_eq!(commands_with(&r, "/usr/bin/dnf").len(), 1);
+    let dnf = commands_with(&r, "/usr/bin/dnf");
+    assert!(dnf.iter().any(|c| c.args.iter().any(|a| a == "install")));
 }
 
 #[test]

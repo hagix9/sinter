@@ -1409,8 +1409,12 @@ pub struct FakeTarget {
     pub packages: std::collections::BTreeSet<String>,
     /// unit name -> (LoadState, ActiveState, UnitFileState)
     pub services: BTreeMap<String, (String, String, String)>,
-    /// Forced dnf/apt-get completion, overriding the state transition.
+    /// Forced dnf/apt-get mutation completion, overriding the state
+    /// transition. Does not apply to the dnf metadata-cache probe.
     pub manager_completion: Option<Completion>,
+    /// Forced completion for the `dnf -C repoquery` metadata-cache probe;
+    /// `None` models a usable cache (DESIGN §27 fail-closed path tests).
+    pub probe_completion: Option<Completion>,
     /// Forced package-query completion.
     pub query_completion: Option<Completion>,
     /// Ordered complete package-query results (stdout, stderr, truncation
@@ -1436,6 +1440,7 @@ impl FakeTarget {
             packages: std::collections::BTreeSet::new(),
             services: BTreeMap::new(),
             manager_completion: None,
+            probe_completion: None,
             query_completion: None,
             query_results: std::collections::VecDeque::new(),
         }
@@ -1457,6 +1462,7 @@ impl FakeTarget {
             packages: std::collections::BTreeSet::new(),
             services: BTreeMap::new(),
             manager_completion: None,
+            probe_completion: None,
             query_completion: None,
             query_results: std::collections::VecDeque::new(),
         }
@@ -1475,6 +1481,7 @@ impl FakeTarget {
             packages: std::collections::BTreeSet::new(),
             services: BTreeMap::new(),
             manager_completion: None,
+            probe_completion: None,
             query_completion: None,
             query_results: std::collections::VecDeque::new(),
         }
@@ -1705,6 +1712,21 @@ impl FakeExecutor {
     }
 
     fn run_manager(&mut self, prog: &str, args: &[String]) -> Output {
+        let name = args.last().cloned().unwrap_or_default();
+        if prog == "dnf" && args.iter().any(|a| a == "repoquery") {
+            // DESIGN §27 metadata-cache probe: models a usable cache unless
+            // the test forces a completion for the fail-closed path.
+            if let Some(c) = &self.target.probe_completion {
+                return Output {
+                    completion: c.clone(),
+                    stdout: Vec::new(),
+                    stderr: b"Cache-only enabled but no cache for 'baseos'\n".to_vec(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                };
+            }
+            return Self::exited(0, format!("{}\n", name), String::new());
+        }
         if let Some(c) = &self.target.manager_completion {
             return Output {
                 completion: c.clone(),
@@ -1714,7 +1736,6 @@ impl FakeExecutor {
                 stderr_truncated: false,
             };
         }
-        let name = args.last().cloned().unwrap_or_default();
         if args.iter().any(|a| a == "install") {
             self.target.packages.insert(name);
         } else if args.iter().any(|a| a == "remove") {

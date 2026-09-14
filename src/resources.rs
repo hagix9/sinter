@@ -1998,6 +1998,52 @@ impl Engine {
             return Ok(r);
         }
 
+        // DESIGN §27: some backends require a metadata-cache usability probe
+        // before mutating (dnf fetches metadata when none is cached even with
+        // metadata_expire=-1). The probe is read-only; a failure means the
+        // mutation is never attempted and nothing was changed.
+        if let Some(args) = backend.metadata_probe_args(&name) {
+            let mut probe = ExecRequest::new(backend.manager_program());
+            probe.env = baseline_env(self.fs.home_env());
+            probe.sensitive = sensitive;
+            probe.args = args;
+            probe.timeout_secs = 120;
+            let out = self.fs.exec(&probe)?;
+            match out.completion {
+                Completion::Exited(0) => {}
+                other => {
+                    let mut r = changed_result_sensitive(res, sensitive);
+                    r.change = Change::None;
+                    r.verification = Verification::NotPerformed;
+                    let detail = match &other {
+                        Completion::Indeterminate { reason, .. } => {
+                            r.execution = Execution::Indeterminate;
+                            format!("could not be determined: {}", reason)
+                        }
+                        Completion::Signaled(s) => {
+                            r.execution = Execution::Failed;
+                            format!("terminated by signal {}", s)
+                        }
+                        Completion::Exited(c) => {
+                            r.execution = Execution::Failed;
+                            let stderr_note = if sensitive {
+                                String::new()
+                            } else {
+                                format!(": {}", String::from_utf8_lossy(&out.stderr).trim())
+                            };
+                            format!("probe exited {}{}", c, stderr_note)
+                        }
+                    };
+                    r.reason = Some(format!(
+                        "{} metadata cache unusable; refusing to refresh repository metadata ({})",
+                        backend.manager_program(),
+                        detail
+                    ));
+                    return Ok(r);
+                }
+            }
+        }
+
         let mut req = ExecRequest::new(backend.manager_program());
         req.env = baseline_env(self.fs.home_env());
         req.sensitive = sensitive;
