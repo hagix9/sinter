@@ -54,50 +54,117 @@ impl PackageBackend {
     /// Exact argv (excluding the program) for an install/remove mutation.
     ///
     /// DESIGN §27: no version pinning, and automatic repository metadata
-    /// refresh is never performed. For dnf this contract is enforced in two
-    /// steps because dnf has no single flag for "cached metadata only, but
-    /// package payloads may still download" (the apt-get contract):
-    /// `metadata_expire=-1` prevents any refresh of *present* metadata, and
-    /// [`Self::metadata_probe_args`] proves beforehand that a usable cache
-    /// exists at all — dnf fetches metadata when none is cached even with
-    /// `metadata_expire=-1`. `-C` (`--cacheonly`) alone is too strong: it
-    /// also blocks package payload downloads, breaking installs on hosts
-    /// that do not retain downloaded packages (the default `keepcache=0`).
-    pub fn mutate_args(&self, want_installed: bool, name: &str) -> Vec<String> {
-        let action = if want_installed { "install" } else { "remove" };
+    /// refresh is never performed. dnf has no flag combination for "cached
+    /// metadata only, but package payloads may still download" (the
+    /// apt-get contract):
+    ///
+    /// - `-C` (`--cacheonly`) alone is too strong: it also blocks package
+    ///   payload downloads, breaking installs on hosts that do not retain
+    ///   downloaded packages (the default `keepcache=0`).
+    /// - `metadata_expire=-1` prevents refresh of *present* metadata, but
+    ///   dnf still fetches when a repository's metadata is absent, and
+    ///   librepo re-resolves mirror lists over the network whenever a
+    ///   package payload must be downloaded — even when a cached mirror
+    ///   list exists.
+    ///
+    /// So an install mutation runs strictly cache-only (`-C`) against a
+    /// private snapshot of the metadata cache (`dnf_snapshot`): every
+    /// enabled repository's repodata and resolved mirror list is verified
+    /// usable offline in the snapshot, and every payload the transaction
+    /// needs is prefetched into the snapshot's package directories
+    /// beforehand (payload downloads are allowed; metadata downloads are
+    /// not). `-C` then makes a metadata fetch impossible by construction.
+    /// `*.skip_if_unavailable=0` turns any unusable repository into a hard
+    /// error rather than a silent skip. Removal needs no repository at
+    /// all: `--disablerepo=*` makes a fetch impossible by construction.
+    ///
+    /// `dnf_snapshot` is the verified private cachedir path; it is
+    /// mandatory for dnf installs.
+    pub fn mutate_args(
+        &self,
+        want_installed: bool,
+        name: &str,
+        dnf_snapshot: Option<&str>,
+    ) -> Vec<String> {
         match self {
-            Self::Apt => vec!["-y".to_string(), action.to_string(), name.to_string()],
-            Self::Dnf => vec![
-                "--setopt=metadata_expire=-1".to_string(),
-                "-y".to_string(),
-                action.to_string(),
-                name.to_string(),
-            ],
+            Self::Apt => {
+                let action = if want_installed { "install" } else { "remove" };
+                vec!["-y".to_string(), action.to_string(), name.to_string()]
+            }
+            Self::Dnf => {
+                if want_installed {
+                    let snap =
+                        dnf_snapshot.expect("dnf install requires a verified metadata snapshot");
+                    vec![
+                        "-C".to_string(),
+                        format!("--setopt=cachedir={}", snap),
+                        "--setopt=*.skip_if_unavailable=0".to_string(),
+                        "-y".to_string(),
+                        "install".to_string(),
+                        name.to_string(),
+                    ]
+                } else {
+                    vec![
+                        "--disablerepo=*".to_string(),
+                        "-y".to_string(),
+                        "remove".to_string(),
+                        name.to_string(),
+                    ]
+                }
+            }
         }
     }
 
-    /// Optional pre-mutation probe argv (excluding the program) that must
-    /// succeed before [`Self::mutate_args`] may run.
-    ///
-    /// For dnf, `dnf -C repoquery` runs entirely from the existing metadata
-    /// cache and fails clearly when any enabled repository lacks usable
-    /// cached metadata ("Cache-only enabled but no cache for ..."), so a
-    /// missing or unusable cache stops the mutation instead of triggering a
-    /// silent metadata retrieval (DESIGN §27). Once the probe succeeds,
-    /// `metadata_expire=-1` guarantees the mutation itself never refreshes
-    /// the present metadata. Apt needs no probe: `apt-get install` never
-    /// refreshes package lists on its own.
-    pub fn metadata_probe_args(&self, name: &str) -> Option<Vec<String>> {
-        match self {
-            Self::Apt => None,
-            Self::Dnf => Some(vec![
-                "-C".to_string(),
-                "repoquery".to_string(),
-                "--queryformat".to_string(),
-                "%{name}".to_string(),
-                name.to_string(),
-            ]),
-        }
+    /// argv that loads every enabled repository's metadata strictly from a
+    /// private snapshot cachedir. Exits non-zero when any enabled
+    /// repository's repodata is missing or unusable offline — proving the
+    /// snapshot is complete enough that the subsequent install mutation
+    /// can never fetch repository metadata (DESIGN §27).
+    pub fn dnf_snapshot_check_args(snap: &str, name: &str) -> Vec<String> {
+        vec![
+            "-C".to_string(),
+            format!("--setopt=cachedir={}", snap),
+            "--setopt=*.skip_if_unavailable=0".to_string(),
+            "repoquery".to_string(),
+            "--queryformat".to_string(),
+            "%{name}".to_string(),
+            name.to_string(),
+        ]
+    }
+
+    /// argv for the cache-only dry-run install whose transaction table is
+    /// the exact payload set the real mutation needs. `--assumeno` aborts
+    /// after resolution (exit 1, "Operation aborted") without touching the
+    /// rpmdb or the network.
+    pub fn dnf_dry_run_args(snap: &str, name: &str) -> Vec<String> {
+        vec![
+            "-C".to_string(),
+            format!("--setopt=cachedir={}", snap),
+            "--setopt=*.skip_if_unavailable=0".to_string(),
+            "install".to_string(),
+            "--assumeno".to_string(),
+            name.to_string(),
+        ]
+    }
+
+    /// argv resolving full payload URLs for package names strictly from
+    /// the snapshot's cached metadata and mirror lists (no network).
+    pub fn dnf_payload_location_args(snap: &str, names: &[String]) -> Vec<String> {
+        let mut v = vec![
+            "-C".to_string(),
+            format!("--setopt=cachedir={}", snap),
+            "--setopt=*.skip_if_unavailable=0".to_string(),
+            "repoquery".to_string(),
+            "--location".to_string(),
+        ];
+        v.extend(names.iter().cloned());
+        v
+    }
+
+    /// argv listing enabled repositories verbosely (id plus mirror
+    /// resolution configuration).
+    pub fn dnf_repolist_args() -> Vec<String> {
+        vec!["-C".to_string(), "repolist".to_string(), "-v".to_string()]
     }
 
     /// Classify a completed package-database query into a clean state.
@@ -240,39 +307,61 @@ mod tests {
 
     #[test]
     fn dnf_mutation_args_are_exact() {
-        // `metadata_expire=-1` treats present metadata as never stale; the
-        // metadata_probe_args probe proves the cache exists, so the mutation
-        // itself can never retrieve metadata (DESIGN §27).
+        // Install runs strictly cache-only against a verified private
+        // metadata snapshot whose payloads were prefetched: the mutation
+        // has no path to the network for repository metadata at all.
         assert_eq!(
-            PackageBackend::Dnf.mutate_args(true, "httpd"),
-            vec!["--setopt=metadata_expire=-1", "-y", "install", "httpd"]
+            PackageBackend::Dnf.mutate_args(true, "httpd", Some("/var/tmp/snap")),
+            vec![
+                "-C",
+                "--setopt=cachedir=/var/tmp/snap",
+                "--setopt=*.skip_if_unavailable=0",
+                "-y",
+                "install",
+                "httpd"
+            ]
         );
+        // Remove consults no repository at all, so a metadata fetch is
+        // impossible by construction.
         assert_eq!(
-            PackageBackend::Dnf.mutate_args(false, "httpd"),
-            vec!["--setopt=metadata_expire=-1", "-y", "remove", "httpd"]
+            PackageBackend::Dnf.mutate_args(false, "httpd", None),
+            vec!["--disablerepo=*", "-y", "remove", "httpd"]
         );
         // apt argv is unchanged from v0.1.
         assert_eq!(
-            PackageBackend::Apt.mutate_args(true, "nano"),
+            PackageBackend::Apt.mutate_args(true, "nano", None),
             vec!["-y", "install", "nano"]
         );
     }
 
     #[test]
-    fn dnf_metadata_probe_args_are_exact() {
-        // The cache-usability probe runs entirely from the existing cache
-        // (`-C`) so it can never retrieve metadata itself.
+    #[should_panic(expected = "verified metadata snapshot")]
+    fn dnf_install_without_snapshot_is_rejected() {
+        let _ = PackageBackend::Dnf.mutate_args(true, "httpd", None);
+    }
+
+    #[test]
+    fn dnf_snapshot_check_args_are_exact() {
+        // The snapshot-usability check runs entirely from the snapshot
+        // cache (`-C`) so it can never retrieve metadata itself; forced
+        // skip_if_unavailable=0 turns a missing repo into an error, never
+        // a silent skip.
         assert_eq!(
-            PackageBackend::Dnf.metadata_probe_args("httpd"),
-            Some(vec![
+            PackageBackend::dnf_snapshot_check_args("/var/tmp/snap", "httpd"),
+            vec![
                 "-C".to_string(),
+                "--setopt=cachedir=/var/tmp/snap".to_string(),
+                "--setopt=*.skip_if_unavailable=0".to_string(),
                 "repoquery".to_string(),
                 "--queryformat".to_string(),
                 "%{name}".to_string(),
                 "httpd".to_string()
-            ])
+            ]
         );
-        assert_eq!(PackageBackend::Apt.metadata_probe_args("nano"), None);
+        assert_eq!(
+            PackageBackend::dnf_repolist_args(),
+            vec!["-C".to_string(), "repolist".to_string(), "-v".to_string()]
+        );
     }
 
     #[test]

@@ -125,16 +125,69 @@ fn dnf_observes_absent_and_installs() {
     assert_eq!(p.change, Change::Changed);
     assert_eq!(p.verification, Verification::Verified);
     let dnf = commands_with(&r, "/usr/bin/dnf");
-    // DESIGN §27: cache-usability probe runs first, then the mutation.
-    assert_eq!(dnf.len(), 2);
+    // DESIGN §27: snapshot completeness check, repository enumeration,
+    // transaction dry-run, payload URL resolution, then the strictly
+    // cache-only install mutation against the snapshot.
+    assert_eq!(dnf.len(), 5);
     assert_eq!(
         dnf[0].args,
-        vec!["-C", "repoquery", "--queryformat", "%{name}", "nano"]
+        vec![
+            "-C",
+            "--setopt=cachedir=/var/tmp/sinter-dnf.fakesnap",
+            "--setopt=*.skip_if_unavailable=0",
+            "repoquery",
+            "--queryformat",
+            "%{name}",
+            "nano"
+        ]
+    );
+    assert_eq!(dnf[1].args, vec!["-C", "repolist", "-v"]);
+    assert_eq!(
+        dnf[2].args,
+        vec![
+            "-C",
+            "--setopt=cachedir=/var/tmp/sinter-dnf.fakesnap",
+            "--setopt=*.skip_if_unavailable=0",
+            "install",
+            "--assumeno",
+            "nano"
+        ]
     );
     assert_eq!(
-        dnf[1].args,
-        vec!["--setopt=metadata_expire=-1", "-y", "install", "nano"]
+        dnf[3].args,
+        vec![
+            "-C",
+            "--setopt=cachedir=/var/tmp/sinter-dnf.fakesnap",
+            "--setopt=*.skip_if_unavailable=0",
+            "repoquery",
+            "--location",
+            "nano"
+        ]
     );
+    // The mutation is cache-only against the snapshot: it cannot fetch
+    // repository metadata — the payload was prefetched into it.
+    assert_eq!(
+        dnf[4].args,
+        vec![
+            "-C",
+            "--setopt=cachedir=/var/tmp/sinter-dnf.fakesnap",
+            "--setopt=*.skip_if_unavailable=0",
+            "-y",
+            "install",
+            "nano"
+        ]
+    );
+    // Every dnf invocation is cache-only or repo-disabled: no process can
+    // fetch repository metadata.
+    assert!(dnf.iter().all(|c| c.args.iter().any(|a| a == "-C")));
+    // Snapshot lifecycle: created, populated, listed, payload prefetched
+    // into the repo package dir, removed.
+    assert_eq!(commands_with(&r, "/usr/bin/mktemp").len(), 1);
+    assert_eq!(commands_with(&r, "/usr/bin/cp").len(), 1);
+    assert_eq!(commands_with(&r, "/usr/bin/find").len(), 1);
+    assert_eq!(commands_with(&r, "/usr/bin/mkdir").len(), 1);
+    assert_eq!(commands_with(&r, "/usr/bin/curl").len(), 1);
+    assert_eq!(commands_with(&r, "/usr/bin/rm").len(), 1);
     // Observation used rpm -q, never dpkg-query.
     assert!(commands_with(&r, "/usr/bin/dpkg-query").is_empty());
 }
@@ -171,16 +224,11 @@ fn dnf_removes_installed_package() {
     let p = find(&r, "p");
     assert_eq!(p.change, Change::Changed);
     assert_eq!(p.verification, Verification::Verified);
+    // Removal consults no repository at all: a single mutation with every
+    // repo disabled makes a metadata fetch impossible by construction.
     let dnf = commands_with(&r, "/usr/bin/dnf");
-    assert_eq!(dnf.len(), 2);
-    assert_eq!(
-        dnf[0].args,
-        vec!["-C", "repoquery", "--queryformat", "%{name}", "nano"]
-    );
-    assert_eq!(
-        dnf[1].args,
-        vec!["--setopt=metadata_expire=-1", "-y", "remove", "nano"]
-    );
+    assert_eq!(dnf.len(), 1);
+    assert_eq!(dnf[0].args, vec!["--disablerepo=*", "-y", "remove", "nano"]);
 }
 
 #[test]
@@ -197,9 +245,9 @@ fn dnf_absent_already_absent_is_unchanged() {
 
 #[test]
 fn dnf_unusable_metadata_cache_fails_closed() {
-    // DESIGN §27: when the metadata-cache probe fails, the mutation is never
-    // attempted — dnf must not fall back to retrieving metadata. Nothing was
-    // mutated, so the truth is Failed/None, not Possible.
+    // DESIGN §27: when the snapshot completeness check fails, the mutation
+    // is never attempted — dnf must not fall back to retrieving metadata.
+    // Nothing was mutated, so the truth is Failed/None, not Possible.
     let dir = trusted_root("plat-dnf-nocache");
     let recipe = write_recipe(
         &dir,
@@ -214,14 +262,96 @@ fn dnf_unusable_metadata_cache_fails_closed() {
     assert_eq!(p.change, Change::None);
     assert_eq!(p.verification, Verification::NotPerformed);
     let reason = p.reason.as_deref().unwrap_or("");
-    assert!(reason.contains("metadata cache unusable"), "{}", reason);
-    // Only the probe ran; no install/remove was dispatched.
+    assert!(reason.contains("not locally complete"), "{}", reason);
+    // Only the snapshot-usability check ran; no install/remove dispatched.
     let dnf = commands_with(&r, "/usr/bin/dnf");
     assert_eq!(dnf.len(), 1);
     assert!(dnf[0].args.iter().any(|a| a == "repoquery"));
     let marker = find(&r, "marker");
     assert_eq!(marker.disposition, Disposition::BlockedByFailFast);
     assert_eq!(r.status, AggregateStatus::ApplyFailed);
+}
+
+#[test]
+fn dnf_missing_repodata_blocks_mutation() {
+    // Case B: an enabled repo without cached repodata makes the snapshot
+    // unusable — fail closed before any mutation (DESIGN §27).
+    let dir = trusted_root("plat-dnf-norepodata");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_repos[0].repodata_cached = false;
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = find(&r, "p");
+    assert_eq!(p.execution, Execution::Failed);
+    assert_eq!(p.change, Change::None);
+    assert_eq!(p.verification, Verification::NotPerformed);
+    let dnf = commands_with(&r, "/usr/bin/dnf");
+    assert_eq!(dnf.len(), 1);
+    assert!(dnf[0].args.iter().any(|a| a == "repoquery"));
+    // The snapshot was still cleaned up.
+    assert_eq!(commands_with(&r, "/usr/bin/rm").len(), 1);
+}
+
+#[test]
+fn dnf_missing_mirrorlist_blocks_mutation() {
+    // An enabled mirror-resolving repo whose mirror list is absent from the
+    // snapshot would re-resolve over the network during install — the
+    // mutation must fail closed even though repodata checks passed.
+    let dir = trusted_root("plat-dnf-nomirror");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_repos[0].mirrorlist_cached = false;
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = find(&r, "p");
+    assert_eq!(p.execution, Execution::Failed);
+    assert_eq!(p.change, Change::None);
+    assert_eq!(p.verification, Verification::NotPerformed);
+    let reason = p.reason.as_deref().unwrap_or("");
+    assert!(reason.contains("not locally complete"), "{}", reason);
+    // No install mutation was dispatched; repodata check + repolist ran.
+    let dnf = commands_with(&r, "/usr/bin/dnf");
+    assert_eq!(dnf.len(), 2);
+    assert!(!dnf.iter().any(|c| c.args.iter().any(|a| a == "install")));
+    assert_eq!(commands_with(&r, "/usr/bin/rm").len(), 1);
+}
+
+#[test]
+fn dnf_unresolvable_payload_location_blocks_mutation() {
+    // The transaction needs a payload that cached metadata cannot locate:
+    // fetching it would require repository access — fail closed instead.
+    let dir = trusted_root("plat-dnf-noloc");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_no_locations = true;
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = find(&r, "p");
+    assert_eq!(p.execution, Execution::Failed);
+    assert_eq!(p.change, Change::None);
+    assert_eq!(p.verification, Verification::NotPerformed);
+    let reason = p.reason.as_deref().unwrap_or("");
+    assert!(reason.contains("not locally complete"), "{}", reason);
+    // No install mutation was dispatched; check + repolist + dry-run ran.
+    let dnf = commands_with(&r, "/usr/bin/dnf");
+    assert!(!dnf.iter().any(|c| c.args.iter().any(|a| a == "-y")));
+    assert_eq!(commands_with(&r, "/usr/bin/rm").len(), 1);
+}
+
+#[test]
+fn dnf_no_payload_fetch_tool_blocks_mutation() {
+    // Without curl/wget a payload cannot be placed in the snapshot —
+    // fail closed rather than let the mutation reach for the network.
+    let dir = trusted_root("plat-dnf-nofetch");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.executables.remove("/usr/bin/curl");
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = find(&r, "p");
+    assert_eq!(p.execution, Execution::Failed);
+    assert_eq!(p.change, Change::None);
+    assert_eq!(p.verification, Verification::NotPerformed);
+    let dnf = commands_with(&r, "/usr/bin/dnf");
+    assert!(!dnf.iter().any(|c| c.args.iter().any(|a| a == "-y")));
+    assert_eq!(commands_with(&r, "/usr/bin/rm").len(), 1);
 }
 
 #[test]
@@ -331,10 +461,10 @@ fn dnf_sudo_path_records_sudo() {
     let r = run_recipe_fake(&recipe, Mode::Apply, true, FakeTarget::rocky9());
     assert_success(&r);
     let dnf = commands_with(&r, "/usr/bin/dnf");
-    assert_eq!(dnf.len(), 2);
+    assert_eq!(dnf.len(), 5);
     assert!(
         dnf.iter().all(|c| c.sudo),
-        "dnf probe and mutation must run under sudo identity"
+        "dnf checks and mutation must run under sudo identity"
     );
 }
 

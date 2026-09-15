@@ -4,6 +4,7 @@ use crate::executor::{Completion, ExecRequest, Output};
 use crate::expressions::{eval_boolean, eval_value_interpolated, parse_expr, EvalVal, Scope};
 use crate::model::FrozenResource;
 use crate::paths::{mode_to_string, parent_and_name, parse_mode};
+use crate::platform::PackageBackend;
 use crate::result::Diff;
 use crate::result::*;
 use crate::targetfs::{ObjKind, Stat, Xattrs};
@@ -2014,45 +2015,31 @@ impl Engine {
             return Ok(r);
         }
 
-        // DESIGN §27: some backends require a metadata-cache usability probe
-        // before mutating (dnf fetches metadata when none is cached even with
-        // metadata_expire=-1). The probe is read-only; a failure means the
-        // mutation is never attempted and nothing was changed.
-        if let Some(args) = backend.metadata_probe_args(&name) {
-            let mut probe = ExecRequest::new(backend.manager_program());
-            probe.env = baseline_env(self.fs.home_env());
-            probe.sensitive = sensitive;
-            probe.args = args;
-            probe.timeout_secs = 120;
-            let out = self.fs.exec(&probe)?;
-            match out.completion {
-                Completion::Exited(0) => {}
-                other => {
+        // DESIGN §27: a dnf install mutation runs cache-only (`-C`) against
+        // a private snapshot of the metadata cache whose completeness —
+        // repodata, mirror lists, and every required package payload — is
+        // proven inside the snapshot immediately beforehand. The mutation
+        // process itself can never fetch repository metadata; payloads are
+        // prefetched into the snapshot (payload downloads are allowed).
+        // A probe exit code is never used as proof: completeness is
+        // established against the snapshot the mutation actually uses.
+        // Failure to prove completeness fails closed before any mutation.
+        let mut snapshot_dir: Option<String> = None;
+        if backend == PackageBackend::Dnf && want_installed {
+            match self.dnf_metadata_snapshot(&name, sensitive)? {
+                DnfSnapshot::Ready(p) => snapshot_dir = Some(p),
+                DnfSnapshot::Blocked(detail, indeterminate) => {
                     let mut r = changed_result_sensitive(res, sensitive);
                     r.change = Change::None;
                     r.verification = Verification::NotPerformed;
-                    let detail = match &other {
-                        Completion::Indeterminate { reason, .. } => {
-                            r.execution = Execution::Indeterminate;
-                            format!("could not be determined: {}", reason)
-                        }
-                        Completion::Signaled(s) => {
-                            r.execution = Execution::Failed;
-                            format!("terminated by signal {}", s)
-                        }
-                        Completion::Exited(c) => {
-                            r.execution = Execution::Failed;
-                            let stderr_note = if sensitive {
-                                String::new()
-                            } else {
-                                format!(": {}", String::from_utf8_lossy(&out.stderr).trim())
-                            };
-                            format!("probe exited {}{}", c, stderr_note)
-                        }
+                    r.execution = if indeterminate {
+                        Execution::Indeterminate
+                    } else {
+                        Execution::Failed
                     };
                     r.reason = Some(format!(
-                        "{} metadata cache unusable; refusing to refresh repository metadata ({})",
-                        backend.manager_program(),
+                        "{} repository metadata not locally complete; refusing to fetch metadata ({})",
+                        backend.label(),
                         detail
                     ));
                     return Ok(r);
@@ -2063,7 +2050,7 @@ impl Engine {
         let mut req = ExecRequest::new(backend.manager_program());
         req.env = baseline_env(self.fs.home_env());
         req.sensitive = sensitive;
-        req.args = backend.mutate_args(want_installed, &name);
+        req.args = backend.mutate_args(want_installed, &name, snapshot_dir.as_deref());
         req.timeout_secs = 300;
         let action = if want_installed { "install" } else { "remove" };
         let pkg_disp = if sensitive {
@@ -2071,7 +2058,12 @@ impl Engine {
         } else {
             name.as_str()
         };
-        let out = self.fs.exec(&req)?;
+        let out = self.fs.exec(&req);
+        // The private snapshot is removed regardless of the outcome.
+        if let Some(snap) = &snapshot_dir {
+            self.dnf_snapshot_cleanup(snap);
+        }
+        let out = out?;
         match out.completion {
             Completion::Indeterminate { reason, .. } => {
                 let mut r = changed_result_sensitive(res, sensitive);
@@ -2176,6 +2168,468 @@ impl Engine {
             r.reason = Some("package state did not reach desired state after mutation".into());
         }
         Ok(r)
+    }
+
+    /// Prepare a private snapshot of the dnf metadata cache and prove that
+    /// it is locally complete for the install — every enabled repository's
+    /// repodata usable offline, the resolved mirror list for repos that
+    /// resolve via mirrors, and every package payload the transaction
+    /// needs prefetched into the snapshot's package dirs. Only then may
+    /// the `dnf -C install` mutation run, scoped to the snapshot: it has
+    /// no path to remote repository metadata at all (DESIGN §27).
+    ///
+    /// This is deliberately not a "probe then trust" design: the checks
+    /// run against the same private cachedir the mutation uses, so a
+    /// disappearing or changing system cache cannot invalidate the proof.
+    /// Any gap — missing repodata, a missing mirror list, an unparseable
+    /// repository list, an unresolvable payload — blocks the mutation.
+    fn dnf_metadata_snapshot(&mut self, name: &str, sensitive: bool) -> Result<DnfSnapshot> {
+        let name_disp = if sensitive { "[redacted]" } else { name };
+        // 1. Private snapshot directory.
+        let mut req = ExecRequest::new("/usr/bin/mktemp");
+        req.args = vec!["-d".to_string(), "/var/tmp/sinter-dnf.XXXXXXXX".to_string()];
+        req.env = baseline_env(self.fs.home_env());
+        let out = self.fs.exec(&req)?;
+        let snap = match out.completion {
+            Completion::Exited(0) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            Completion::Indeterminate { reason, .. } => {
+                return Ok(DnfSnapshot::Blocked(
+                    format!("metadata snapshot creation did not complete: {}", reason),
+                    true,
+                ));
+            }
+            _ => {
+                return Ok(DnfSnapshot::Blocked(
+                    "cannot create metadata snapshot directory".to_string(),
+                    false,
+                ));
+            }
+        };
+        if snap.is_empty() {
+            return Ok(DnfSnapshot::Blocked(
+                "cannot create metadata snapshot directory".to_string(),
+                false,
+            ));
+        }
+        // 2. Copy the metadata cache into the snapshot. From here on every
+        //    check — and the mutation — uses this private copy, never the
+        //    live system cache.
+        let mut req = ExecRequest::new("/usr/bin/cp");
+        req.args = vec![
+            "-a".to_string(),
+            "/var/cache/dnf/.".to_string(),
+            format!("{}/", snap),
+        ];
+        req.env = baseline_env(self.fs.home_env());
+        match self.fs.exec(&req)?.completion {
+            Completion::Exited(0) => {}
+            Completion::Indeterminate { reason, .. } => {
+                return self.dnf_snapshot_blocked(
+                    &snap,
+                    format!("metadata snapshot copy did not complete: {}", reason),
+                    true,
+                );
+            }
+            _ => {
+                return self.dnf_snapshot_blocked(
+                    &snap,
+                    "cannot snapshot the metadata cache".to_string(),
+                    false,
+                );
+            }
+        }
+        // 3. Prove every enabled repository's repodata loads from the
+        //    snapshot alone. `-C` makes this check itself incapable of
+        //    fetching; `*.skip_if_unavailable=0` turns any unusable
+        //    repository into an error instead of a silent skip.
+        let mut req = ExecRequest::new("/usr/bin/dnf");
+        req.args = PackageBackend::dnf_snapshot_check_args(&snap, name);
+        req.env = baseline_env(self.fs.home_env());
+        req.sensitive = sensitive;
+        req.timeout_secs = 120;
+        match self.fs.exec(&req)?.completion {
+            Completion::Exited(0) => {}
+            Completion::Indeterminate { reason, .. } => {
+                return self.dnf_snapshot_blocked(
+                    &snap,
+                    format!("metadata completeness check did not complete: {}", reason),
+                    true,
+                );
+            }
+            Completion::Signaled(s) => {
+                return self.dnf_snapshot_blocked(
+                    &snap,
+                    format!("metadata completeness check terminated by signal {}", s),
+                    false,
+                );
+            }
+            Completion::Exited(c) => {
+                return self.dnf_snapshot_blocked(
+                    &snap,
+                    format!(
+                        "snapshot repodata unusable for {} (check exited {})",
+                        name_disp, c
+                    ),
+                    false,
+                );
+            }
+        }
+        // 4. Enumerate enabled repositories and which resolve via a mirror
+        //    list — a repo whose repodata exists but whose mirror list is
+        //    missing would re-resolve over the network during the install.
+        let mut req = ExecRequest::new("/usr/bin/dnf");
+        req.args = PackageBackend::dnf_repolist_args();
+        req.env = baseline_env(self.fs.home_env());
+        req.timeout_secs = 120;
+        let repos = match self.fs.exec(&req)? {
+            Output {
+                completion: Completion::Exited(0),
+                stdout,
+                ..
+            } => match parse_dnf_enabled_repos(&String::from_utf8_lossy(&stdout)) {
+                Some(r) => r,
+                None => {
+                    return self.dnf_snapshot_blocked(
+                        &snap,
+                        "cannot establish the enabled repository set".to_string(),
+                        false,
+                    );
+                }
+            },
+            Output {
+                completion: Completion::Indeterminate { reason, .. },
+                ..
+            } => {
+                return self.dnf_snapshot_blocked(
+                    &snap,
+                    format!("repository enumeration did not complete: {}", reason),
+                    true,
+                );
+            }
+            _ => {
+                return self.dnf_snapshot_blocked(
+                    &snap,
+                    "cannot enumerate enabled repositories".to_string(),
+                    false,
+                );
+            }
+        };
+        // 5. List the snapshot's per-repository cache dirs and mirror lists
+        //    in one pass — used for both the mirror-list check below and
+        //    payload placement afterwards.
+        let mut req = ExecRequest::new("/usr/bin/find");
+        req.args = vec![
+            snap.clone(),
+            "-mindepth".to_string(),
+            "1".to_string(),
+            "-maxdepth".to_string(),
+            "2".to_string(),
+        ];
+        req.env = baseline_env(self.fs.home_env());
+        let listing = match self.fs.exec(&req)? {
+            Output {
+                completion: Completion::Exited(0),
+                stdout,
+                ..
+            } => String::from_utf8_lossy(&stdout).into_owned(),
+            Output {
+                completion: Completion::Indeterminate { reason, .. },
+                ..
+            } => {
+                return self.dnf_snapshot_blocked(
+                    &snap,
+                    format!("snapshot cache listing did not complete: {}", reason),
+                    true,
+                );
+            }
+            _ => {
+                return self.dnf_snapshot_blocked(
+                    &snap,
+                    "cannot list the metadata snapshot".to_string(),
+                    false,
+                );
+            }
+        };
+        // For every mirror-resolving enabled repository the snapshot must
+        // hold the resolved mirror list — payload URLs are composed from
+        // it entirely offline. Cache dirs are named <repoid>-<hash>.
+        for repoid in repos
+            .iter()
+            .filter(|(_, mirrors)| *mirrors)
+            .map(|(id, _)| id)
+        {
+            let want = format!("{}/{}-", snap, repoid);
+            let has_list = listing
+                .lines()
+                .any(|l| l.starts_with(&want) && l.ends_with("/mirrorlist"));
+            if !has_list {
+                return self.dnf_snapshot_blocked(
+                    &snap,
+                    format!("repository {} mirror list missing from snapshot", repoid),
+                    false,
+                );
+            }
+        }
+        // 6. Resolve the exact payload set from the snapshot alone. The
+        //    `--assumeno` dry run performs full dependency resolution
+        //    against cached metadata and aborts before any mutation or
+        //    download — its transaction table is what the install needs.
+        let mut req = ExecRequest::new("/usr/bin/dnf");
+        req.args = PackageBackend::dnf_dry_run_args(&snap, name);
+        req.env = baseline_env(self.fs.home_env());
+        req.sensitive = sensitive;
+        req.timeout_secs = 120;
+        let rows = match self.fs.exec(&req)? {
+            // Exit 1 = "Operation aborted" after a successful resolution;
+            // exit 0 = nothing to do. Anything else is a resolution error.
+            Output {
+                completion: Completion::Exited(0) | Completion::Exited(1),
+                stdout,
+                ..
+            } => match parse_dnf_install_set(&String::from_utf8_lossy(&stdout)) {
+                Some(r) => r,
+                None => {
+                    return self.dnf_snapshot_blocked(
+                        &snap,
+                        "cannot establish the install transaction set".to_string(),
+                        false,
+                    );
+                }
+            },
+            Output {
+                completion: Completion::Indeterminate { reason, .. },
+                ..
+            } => {
+                return self.dnf_snapshot_blocked(
+                    &snap,
+                    format!("install set resolution did not complete: {}", reason),
+                    true,
+                );
+            }
+            _ => {
+                return self.dnf_snapshot_blocked(
+                    &snap,
+                    format!("cannot resolve the install transaction for {}", name_disp),
+                    false,
+                );
+            }
+        };
+        if !rows.is_empty() {
+            match self.dnf_prefetch_payloads(&snap, &listing, &rows, sensitive, name_disp)? {
+                DnfSnapshot::Ready(_) => {}
+                blocked => return Ok(blocked),
+            }
+        }
+        Ok(DnfSnapshot::Ready(snap))
+    }
+
+    /// Prefetch every payload the install transaction needs into the
+    /// snapshot's per-repository package cache, so the subsequent
+    /// `dnf -C install` is provably incapable of touching the network
+    /// (DESIGN §27: payload downloads allowed, metadata downloads never).
+    /// URLs are resolved from the snapshot's own cached metadata and
+    /// mirror lists — no metadata is ever fetched to compute them.
+    fn dnf_prefetch_payloads(
+        &mut self,
+        snap: &str,
+        listing: &str,
+        rows: &[DnfInstallRow],
+        sensitive: bool,
+        name_disp: &str,
+    ) -> Result<DnfSnapshot> {
+        let blocked = |s: &mut Self, reason: String, indeterminate: bool| {
+            s.dnf_snapshot_cleanup(snap);
+            Ok(DnfSnapshot::Blocked(reason, indeterminate))
+        };
+        // Resolve payload URLs from cached metadata alone (`-C`): one
+        // repoquery for every package in the transaction set.
+        let names: Vec<String> = {
+            let mut v: Vec<String> = rows.iter().map(|r| r.name.clone()).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        let mut req = ExecRequest::new("/usr/bin/dnf");
+        req.args = PackageBackend::dnf_payload_location_args(snap, &names);
+        req.env = baseline_env(self.fs.home_env());
+        req.sensitive = sensitive;
+        req.timeout_secs = 120;
+        let urls: Vec<String> = match self.fs.exec(&req)? {
+            Output {
+                completion: Completion::Exited(0),
+                stdout,
+                ..
+            } => String::from_utf8_lossy(&stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect(),
+            Output {
+                completion: Completion::Indeterminate { reason, .. },
+                ..
+            } => {
+                return blocked(
+                    self,
+                    format!("payload location resolution did not complete: {}", reason),
+                    true,
+                )
+            }
+            _ => {
+                return blocked(
+                    self,
+                    format!("cannot resolve payload locations for {}", name_disp),
+                    false,
+                )
+            }
+        };
+        // A non-interactive payload fetcher on the target. curl is
+        // near-universal on RHEL-family systems; wget is the fallback.
+        let fetcher = match self.dnf_fetch_tool()? {
+            Ok(f) => f,
+            Err(reason) => return blocked(self, reason, true),
+        };
+        let fetcher = match fetcher {
+            Some(f) => f,
+            None => {
+                return blocked(
+                    self,
+                    "no payload fetch tool (curl/wget) available".to_string(),
+                    false,
+                )
+            }
+        };
+        for row in rows {
+            // rpm payload file names are <name>-<version-release>.<arch>.rpm
+            // with no epoch component; match the resolved URL by basename.
+            let want = format!("{}-{}.{}.rpm", row.name, row.verrel, row.arch);
+            let url = urls
+                .iter()
+                .find(|u| u.rsplit('/').next() == Some(want.as_str()));
+            let url = match url {
+                Some(u) => u.clone(),
+                None => {
+                    return blocked(
+                        self,
+                        format!("no cached payload location for {}", name_disp),
+                        false,
+                    )
+                }
+            };
+            // The repository's cache dir inside the snapshot.
+            let prefix = format!("{}/{}-", snap, row.repoid);
+            let repodir = listing
+                .lines()
+                .find(|l| l.starts_with(&prefix) && !l[prefix.len()..].contains('/'))
+                .map(|l| l.to_string());
+            let repodir = match repodir {
+                Some(d) => d,
+                None => {
+                    return blocked(
+                        self,
+                        format!("repository {} cache dir missing from snapshot", row.repoid),
+                        false,
+                    )
+                }
+            };
+            let pkgdir = format!("{}/packages", repodir);
+            let mut req = ExecRequest::new("/usr/bin/mkdir");
+            req.args = vec!["-p".to_string(), pkgdir.clone()];
+            req.env = baseline_env(self.fs.home_env());
+            match self.fs.exec(&req)?.completion {
+                Completion::Exited(0) => {}
+                Completion::Indeterminate { reason, .. } => {
+                    return blocked(
+                        self,
+                        format!("payload directory creation did not complete: {}", reason),
+                        true,
+                    );
+                }
+                _ => {
+                    return blocked(
+                        self,
+                        format!("cannot create payload directory in {}", repodir),
+                        false,
+                    )
+                }
+            }
+            let dest = format!("{}/{}", pkgdir, want);
+            let mut req = ExecRequest::new(fetcher.path());
+            req.args = fetcher
+                .payload_args(&dest, &url)
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            req.env = baseline_env(self.fs.home_env());
+            req.sensitive = sensitive;
+            req.timeout_secs = 300;
+            match self.fs.exec(&req)?.completion {
+                Completion::Exited(0) => {}
+                Completion::Indeterminate { reason, .. } => {
+                    return blocked(
+                        self,
+                        format!("payload fetch did not complete: {}", reason),
+                        true,
+                    );
+                }
+                _ => {
+                    return blocked(
+                        self,
+                        format!("payload fetch failed for {}", name_disp),
+                        false,
+                    )
+                }
+            }
+        }
+        Ok(DnfSnapshot::Ready(snap.to_string()))
+    }
+
+    /// Pick a non-interactive payload fetch tool on the target. `Err` is
+    /// an indeterminate outcome (the capability probe could not complete).
+    fn dnf_fetch_tool(&mut self) -> Result<std::result::Result<Option<DnfFetchTool>, String>> {
+        for (path, tool) in [
+            ("/usr/bin/curl", DnfFetchTool::Curl),
+            ("/usr/bin/wget", DnfFetchTool::Wget),
+        ] {
+            let mut req = ExecRequest::new("/usr/bin/test");
+            req.args = vec!["-x".to_string(), path.to_string()];
+            req.env = baseline_env(self.fs.home_env());
+            match self.fs.exec(&req)?.completion {
+                Completion::Exited(0) => return Ok(Ok(Some(tool))),
+                Completion::Exited(_) => {}
+                Completion::Indeterminate { reason, .. } => {
+                    return Ok(Err(format!(
+                        "payload fetch tool probe did not complete: {}",
+                        reason
+                    )));
+                }
+                Completion::Signaled(_) => {
+                    return Ok(Ok(None));
+                }
+            }
+        }
+        Ok(Ok(None))
+    }
+
+    fn dnf_snapshot_blocked(
+        &mut self,
+        snap: &str,
+        reason: String,
+        indeterminate: bool,
+    ) -> Result<DnfSnapshot> {
+        self.dnf_snapshot_cleanup(snap);
+        Ok(DnfSnapshot::Blocked(reason, indeterminate))
+    }
+
+    /// Best-effort removal of a private metadata snapshot directory.
+    fn dnf_snapshot_cleanup(&mut self, snap: &str) {
+        // The path is a `/var/tmp/sinter-dnf.*` directory we created.
+        if !snap.starts_with("/var/tmp/sinter-dnf.") {
+            return;
+        }
+        let mut req = ExecRequest::new("/usr/bin/rm");
+        req.args = vec!["-rf".to_string(), snap.to_string()];
+        req.env = baseline_env(self.fs.home_env());
+        let _ = self.fs.exec(&req);
     }
 
     fn observe_package_sensitive(
@@ -2619,13 +3073,24 @@ impl Engine {
                         // Re-evaluating without that context loses `item` and
                         // can invent a plan error for a valid defer.
                         let item = d.loop_item.as_ref().map(|v| EvalVal::known(v.clone()));
+                        // The producer resource or the consumer may be
+                        // sensitive; keep expression contents out of errors.
+                        let dep_sensitive = d.sensitive || res.sensitive || res.derived_sensitive;
                         let evaluated =
                             eval_value_interpolated(value, &self.scope(item.as_ref(), None, None))
                                 .map_err(|e| {
-                                    SinterError::plan(format!(
-                                        "{}: could not evaluate package dependency state: {}",
-                                        res.id, e
-                                    ))
+                                    if dep_sensitive {
+                                        SinterError::plan(format!(
+                                            "{}: could not evaluate package dependency state (value redacted): {}",
+                                            res.id,
+                                            e.category()
+                                        ))
+                                    } else {
+                                        SinterError::plan(format!(
+                                            "{}: could not evaluate package dependency state: {}",
+                                            res.id, e
+                                        ))
+                                    }
                                 })?;
                         if matches!(evaluated.val, Some(Value::Str(s)) if s == "present") {
                             return Ok(true);
@@ -2716,6 +3181,154 @@ impl Engine {
                 }
             }
         }
+    }
+}
+
+/// Outcome of preparing the private dnf metadata snapshot for an install.
+enum DnfSnapshot {
+    /// Verified snapshot cachedir path; the install may run against it.
+    Ready(String),
+    /// Completeness could not be proven — the mutation must fail closed.
+    /// (reason, indeterminate)
+    Blocked(String, bool),
+}
+
+/// Parse `dnf repolist -v` output into `(repo id, resolves-via-mirrorlist)`
+/// pairs. Every `Repo-id` line begins a block for an enabled repository
+/// (`repolist` lists enabled repos only); a `Repo-mirrors` field inside a
+/// block means the repo resolves through a mirror list whose cached copy
+/// the snapshot must contain. Returns `None` when no repository blocks are
+/// found — an empty parse cannot establish completeness.
+fn parse_dnf_enabled_repos(text: &str) -> Option<Vec<(String, bool)>> {
+    let mut out: Vec<(String, bool)> = Vec::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("Repo-id") {
+            let id = rest.trim_start_matches([' ', ':']).trim();
+            if id.is_empty() {
+                return None;
+            }
+            out.push((id.to_string(), false));
+        } else if line.starts_with("Repo-mirrors") {
+            if let Some(last) = out.last_mut() {
+                last.1 = true;
+            }
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// One package payload the install transaction will need, parsed from a
+/// `dnf -C install --assumeno` transaction table.
+#[derive(Debug)]
+struct DnfInstallRow {
+    name: String,
+    /// version-release as displayed (a leading `epoch:` is stripped —
+    /// rpm payload file names never carry the epoch).
+    verrel: String,
+    arch: String,
+    repoid: String,
+}
+
+/// Parse a `dnf install --assumeno` transaction table into the exact
+/// payload set (DESIGN §27). `None` on anything that is not a recognized
+/// complete table — never a partial guess. An empty table ("Nothing to
+/// do") yields an empty set.
+fn parse_dnf_install_set(text: &str) -> Option<Vec<DnfInstallRow>> {
+    let mut lines = text.lines();
+    // The transaction table follows a `Package ... Repository ... Size`
+    // column header terminated by a divider row.
+    let mut in_table = false;
+    let mut seen_summary = false;
+    let mut rows = Vec::new();
+    for line in lines.by_ref() {
+        if !in_table {
+            let t = line.trim();
+            if t.starts_with("Package") && t.contains("Repository") && t.contains("Size") {
+                in_table = true;
+            }
+            continue;
+        }
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if t.starts_with("Transaction Summary") {
+            seen_summary = true;
+            break;
+        }
+        if t.chars().all(|c| c == '=') {
+            continue;
+        }
+        if t.ends_with(':')
+            && t[..t.len() - 1]
+                .chars()
+                .all(|c| c.is_alphabetic() || c == ' ')
+        {
+            // Section headers ("Installing:", "Installing dependencies:",
+            // ...); rows under any section may need payloads, so sections
+            // are not individually classified.
+            continue;
+        }
+        let f: Vec<&str> = t.split_whitespace().collect();
+        // <name> <arch> <ver-rel> <repoid> <size> [unit]
+        if f.len() < 5 || f.len() > 6 {
+            return None;
+        }
+        let size_ok = f[4].chars().all(|c| c.is_ascii_digit() || c == '.')
+            && f[4].chars().any(|c| c.is_ascii_digit());
+        let unit_ok = f.len() == 5 || matches!(f[5], "k" | "M" | "G" | "B" | "kB" | "MB" | "GB");
+        if !size_ok || !unit_ok {
+            return None;
+        }
+        let verrel = match f[2].split_once(':') {
+            Some((ep, rest)) if ep.chars().all(|c| c.is_ascii_digit()) => rest,
+            _ => f[2],
+        };
+        rows.push(DnfInstallRow {
+            name: f[0].to_string(),
+            verrel: verrel.to_string(),
+            arch: f[1].to_string(),
+            repoid: f[3].to_string(),
+        });
+    }
+    if !seen_summary {
+        return None;
+    }
+    Some(rows)
+}
+
+/// Non-interactive payload fetch tool used to place resolved payloads
+/// into the snapshot package cache.
+#[derive(Debug, Clone, Copy)]
+enum DnfFetchTool {
+    Curl,
+    Wget,
+}
+
+impl DnfFetchTool {
+    fn payload_args<'a>(&'a self, dest: &'a str, url: &'a str) -> Vec<&'a str> {
+        match self {
+            // -f: fail on HTTP errors; -sS: quiet but report errors;
+            // -L: follow mirror redirects.
+            DnfFetchTool::Curl => vec!["-fsSL", "-o", dest, url],
+            DnfFetchTool::Wget => vec!["-q", "-O", dest, url],
+        }
+    }
+    fn path(&self) -> &'static str {
+        match self {
+            DnfFetchTool::Curl => "/usr/bin/curl",
+            DnfFetchTool::Wget => "/usr/bin/wget",
+        }
+    }
+}
+
+impl std::fmt::Display for DnfFetchTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.path())
     }
 }
 
@@ -2990,5 +3603,64 @@ mod package_tests {
                 s
             );
         }
+    }
+
+    fn table(body: &str) -> String {
+        format!(
+            "Dependencies resolved.\n\
+             ================================================================================\n \
+             Package                Arch        Version                Repository      Size\n\
+             ================================================================================\n\
+             {}\
+             Transaction Summary\n\
+             ================================================================================\n\
+             Install  2 Packages\n",
+            body
+        )
+    }
+
+    #[test]
+    fn dnf_install_set_parses_exact_rows() {
+        let out = table(
+            "Installing:\n \
+             httpd                  x86_64      2.4.62-13.el9_8.6      appstream       46 k\n\
+             Installing dependencies:\n \
+             apr                    x86_64      1.7.0-12.el9_3         appstream      122 k\n \
+             mailcap                noarch      2.1.49-5.el9.0.2       baseos          32 k\n\n",
+        );
+        let rows = parse_dnf_install_set(&out).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].name, "httpd");
+        assert_eq!(rows[0].arch, "x86_64");
+        assert_eq!(rows[0].verrel, "2.4.62-13.el9_8.6");
+        assert_eq!(rows[0].repoid, "appstream");
+        assert_eq!(rows[2].repoid, "baseos");
+    }
+
+    #[test]
+    fn dnf_install_set_strips_epoch_for_basename() {
+        // rpm payload file names never carry the epoch; the table shows it.
+        let out = table(
+            "Installing:\n \
+             coreutils              x86_64      1:8.32-38.el9          baseos         1.1 M\n",
+        );
+        let rows = parse_dnf_install_set(&out).unwrap();
+        assert_eq!(rows[0].verrel, "8.32-38.el9");
+    }
+
+    #[test]
+    fn dnf_install_set_rejects_malformed_and_incomplete() {
+        // No transaction summary at all — truncated output must not parse.
+        assert!(parse_dnf_install_set("Installing:\n httpd x86_64 1-1 appstream 1 k\n").is_none());
+        // A non-row line inside the table fails closed.
+        assert!(parse_dnf_install_set(&table("Installing:\n garbage line here\n")).is_none());
+        // A row with a non-numeric size fails closed.
+        assert!(
+            parse_dnf_install_set(&table("Installing:\n httpd x86_64 1-1 appstream huge\n"))
+                .is_none()
+        );
+        // No table at all ("Nothing to do") cannot prove a payload set —
+        // fail closed rather than assume.
+        assert!(parse_dnf_install_set("Nothing to do.\n").is_none());
     }
 }

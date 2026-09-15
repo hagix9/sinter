@@ -1412,8 +1412,9 @@ pub struct FakeTarget {
     /// Forced dnf/apt-get mutation completion, overriding the state
     /// transition. Does not apply to the dnf metadata-cache probe.
     pub manager_completion: Option<Completion>,
-    /// Forced completion for the `dnf -C repoquery` metadata-cache probe;
-    /// `None` models a usable cache (DESIGN §27 fail-closed path tests).
+    /// Forced completion for the `dnf -C repoquery` metadata-snapshot
+    /// usability check; `None` derives the outcome from `dnf_repos`
+    /// (DESIGN §27 fail-closed path tests).
     pub probe_completion: Option<Completion>,
     /// Forced package-query completion.
     pub query_completion: Option<Completion>,
@@ -1421,6 +1422,26 @@ pub struct FakeTarget {
     /// flags included). Each query pops the front entry; when the queue is
     /// empty the configured `query_completion` or the package state applies.
     pub query_results: std::collections::VecDeque<Output>,
+    /// Enabled dnf repositories as the fake models them — whether each
+    /// repo's repodata and resolved mirror list are present in the local
+    /// metadata cache snapshot.
+    pub dnf_repos: Vec<DnfRepo>,
+    /// When set, `repoquery --location` resolves no payload URLs — the
+    /// transaction payload set cannot be satisfied from the local cache.
+    pub dnf_no_locations: bool,
+}
+
+/// One enabled dnf repository in the fake model.
+#[derive(Debug, Clone)]
+pub struct DnfRepo {
+    pub id: String,
+    /// The repo resolves via a mirror list (`Repo-mirrors` in repolist -v).
+    pub mirrors: bool,
+    /// repodata is present in the local metadata cache.
+    pub repodata_cached: bool,
+    /// The resolved mirror list is present in the local cache (when
+    /// `mirrors` is set).
+    pub mirrorlist_cached: bool,
 }
 
 impl FakeTarget {
@@ -1433,16 +1454,28 @@ impl FakeTarget {
             uid: 1000,
             gid: 1000,
             home: "/home/fake".to_string(),
-            executables: ["/usr/bin/dnf", "/usr/bin/rpm", "/usr/bin/systemctl"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            executables: [
+                "/usr/bin/dnf",
+                "/usr/bin/rpm",
+                "/usr/bin/systemctl",
+                "/usr/bin/curl",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
             packages: std::collections::BTreeSet::new(),
             services: BTreeMap::new(),
             manager_completion: None,
             probe_completion: None,
             query_completion: None,
             query_results: std::collections::VecDeque::new(),
+            dnf_repos: vec![DnfRepo {
+                id: "baseos".to_string(),
+                mirrors: true,
+                repodata_cached: true,
+                mirrorlist_cached: true,
+            }],
+            dnf_no_locations: false,
         }
     }
 
@@ -1465,6 +1498,8 @@ impl FakeTarget {
             probe_completion: None,
             query_completion: None,
             query_results: std::collections::VecDeque::new(),
+            dnf_repos: Vec::new(),
+            dnf_no_locations: false,
         }
     }
 
@@ -1484,6 +1519,8 @@ impl FakeTarget {
             probe_completion: None,
             query_completion: None,
             query_results: std::collections::VecDeque::new(),
+            dnf_repos: Vec::new(),
+            dnf_no_locations: false,
         }
     }
 
@@ -1567,6 +1604,14 @@ impl FakeExecutor {
             "dpkg-query" => self.run_dpkg_query(&req.args),
             "dnf" | "apt-get" => self.run_manager(&prog, &req.args),
             "systemctl" => self.run_systemctl(&req.args),
+            "mktemp" => Self::exited(
+                0,
+                "/var/tmp/sinter-dnf.fakesnap\n".to_string(),
+                String::new(),
+            ),
+            "cp" | "rm" | "mkdir" => Self::exited(0, String::new(), String::new()),
+            "curl" | "wget" => Self::exited(0, String::new(), String::new()),
+            "find" => self.run_find(&req.args),
             // Anything else (e.g. user command resources): an unmodeled
             // operation is only a definite success when the program was
             // explicitly declared present on the target; otherwise it fails
@@ -1712,11 +1757,74 @@ impl FakeExecutor {
         }
     }
 
+    /// `find <snap> -mindepth 1 -maxdepth 2` — lists the snapshot's
+    /// per-repo cache dirs (`<repoid>-<hash>`), repodata, and cached
+    /// mirror lists for every modeled repo.
+    fn run_find(&mut self, args: &[String]) -> Output {
+        let root = args.first().cloned().unwrap_or_default();
+        let mut out = String::new();
+        for r in &self.target.dnf_repos {
+            if r.repodata_cached {
+                out.push_str(&format!("{}/{}-cafebabef00d\n", root, r.id));
+                out.push_str(&format!("{}/{}-cafebabef00d/repodata\n", root, r.id));
+                out.push_str(&format!(
+                    "{}/{}-cafebabef00d/repodata/repomd.xml\n",
+                    root, r.id
+                ));
+                if r.mirrors && r.mirrorlist_cached {
+                    out.push_str(&format!("{}/{}-cafebabef00d/mirrorlist\n", root, r.id));
+                }
+            }
+        }
+        Self::exited(0, out, String::new())
+    }
+
     fn run_manager(&mut self, prog: &str, args: &[String]) -> Output {
         let name = args.last().cloned().unwrap_or_default();
+        if prog == "dnf" && args.iter().any(|a| a == "repolist") {
+            // repolist -v: one block per enabled repo; Repo-mirrors marks
+            // repos that resolve via a mirror list.
+            let mut s = String::new();
+            for r in &self.target.dnf_repos {
+                s.push_str(&format!(
+                    "Repo-id            : {}\nRepo-name          : {}\nRepo-status        : enabled\n",
+                    r.id, r.id
+                ));
+                if r.mirrors {
+                    s.push_str("Repo-mirrors       : https://mirrors.example/?repo=x\n");
+                }
+                s.push('\n');
+            }
+            return Self::exited(0, s, String::new());
+        }
         if prog == "dnf" && args.iter().any(|a| a == "repoquery") {
-            // DESIGN §27 metadata-cache probe: models a usable cache unless
-            // the test forces a completion for the fail-closed path.
+            // `repoquery --location`: payload URLs composed from the cached
+            // mirror lists — one per name argument.
+            if args.iter().any(|a| a == "--location") {
+                let repoid = self
+                    .target
+                    .dnf_repos
+                    .first()
+                    .map(|r| r.id.clone())
+                    .unwrap_or_else(|| "baseos".to_string());
+                let mut out = String::new();
+                if !self.target.dnf_no_locations {
+                    for a in args
+                        .iter()
+                        .skip_while(|x| x.as_str() != "--location")
+                        .skip(1)
+                    {
+                        out.push_str(&format!(
+                            "https://mirror.example/{}/Packages/{}-1.0-1.el9.x86_64.rpm\n",
+                            repoid, a
+                        ));
+                    }
+                }
+                return Self::exited(0, out, String::new());
+            }
+            // DESIGN §27 snapshot-usability check: a forced completion wins;
+            // otherwise the check fails iff any enabled repo lacks cached
+            // repodata ("Cache-only enabled but no cache").
             if let Some(c) = &self.target.probe_completion {
                 return Output {
                     completion: c.clone(),
@@ -1726,7 +1834,50 @@ impl FakeExecutor {
                     stderr_truncated: false,
                 };
             }
-            return Self::exited(0, format!("{}\n", name), String::new());
+            if self.target.dnf_repos.iter().all(|r| r.repodata_cached) {
+                return Self::exited(0, format!("{}\n", name), String::new());
+            }
+            let missing = self
+                .target
+                .dnf_repos
+                .iter()
+                .find(|r| !r.repodata_cached)
+                .map(|r| r.id.clone())
+                .unwrap_or_else(|| "baseos".to_string());
+            return Self::exited(
+                1,
+                String::new(),
+                format!("Error: Cache-only enabled but no cache for '{}'\n", missing),
+            );
+        }
+        if prog == "dnf"
+            && args.iter().any(|a| a == "install")
+            && args.iter().any(|a| a == "--assumeno")
+        {
+            // Cache-only dry run: the transaction table naming the exact
+            // payload set, then "Operation aborted" (real dnf exits 1).
+            let repoid = self
+                .target
+                .dnf_repos
+                .first()
+                .map(|r| r.id.clone())
+                .unwrap_or_else(|| "baseos".to_string());
+            let table = format!(
+                "Dependencies resolved.\n\
+                 ================================================================================\n \
+                 Package                Arch        Version                Repository      Size\n\
+                 ================================================================================\n\
+                 Installing:\n \
+                 {n:<23}x86_64      1.0-1.el9              {r:<15} 1 k\n\n\
+                 Transaction Summary\n\
+                 ================================================================================\n\
+                 Install  1 Package\n\n\
+                 Total download size: 1 k\n\
+                 Operation aborted.\n",
+                n = name,
+                r = repoid
+            );
+            return Self::exited(1, table, String::new());
         }
         if let Some(c) = &self.target.manager_completion {
             return Output {
