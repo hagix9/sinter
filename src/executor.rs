@@ -1686,15 +1686,16 @@ impl FakeExecutor {
         if let Some(o) = self.next_query_result() {
             return o;
         }
-        // rpm -q -- <name>
+        // rpm -q -- <name>: reference rpm 4.16 prints the absent marker to
+        // stdout (not stderr) and exits 1.
         let name = args.last().cloned().unwrap_or_default();
         if self.target.packages.contains(&name) {
             Self::exited(0, format!("{}-1.0-1.el9.x86_64\n", name), String::new())
         } else {
             Self::exited(
                 1,
-                String::new(),
                 format!("package {} is not installed\n", name),
+                String::new(),
             )
         }
     }

@@ -161,26 +161,27 @@ impl PackageBackend {
 }
 
 /// Whether an `rpm -q` exit-1 result positively and unambiguously reports
-/// the package as not installed. rpm prints exactly
-/// "package <name> is not installed"; the baseline environment fixes
-/// LC_ALL=C.UTF-8 so the marker is locale-stable.
+/// the package as not installed.
+///
+/// Reference behavior (rpm 4.16, Rocky Linux 9.8, verified on-target):
+/// `rpm -q <absent>` exits 1, writes exactly
+/// `package <name> is not installed\n` to stdout, and writes nothing to
+/// stderr. The marker is locale-stable (identical under LC_ALL=ja_JP.UTF-8).
 ///
 /// Fail closed (DESIGN §27: observation failure is never absence): the
-/// marker must be the complete output on one stream with the other stream
-/// empty. Mixed diagnostics (e.g. an rpmdb error alongside the marker),
-/// substring matches inside unrelated output, truncation, or malformed
-/// bytes all make the observation uninterpretable and are classified as
-/// errors by the caller, never as `Absent`.
+/// marker must be the complete, exact byte content of stdout with stderr
+/// empty. A marker on the wrong stream, leading/trailing whitespace, an
+/// extra blank line, mixed diagnostics (e.g. an rpmdb error), substring
+/// matches inside unrelated output, truncation, or malformed bytes all
+/// make the observation uninterpretable and are classified as errors by
+/// the caller, never as `Absent`.
 fn rpm_reports_absent(out: &Output, name: &str) -> bool {
     if out.stdout_truncated || out.stderr_truncated {
         return false;
     }
-    let marker = format!("package {} is not installed", name);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let so = stdout.trim();
-    let se = stderr.trim();
-    (so == marker && se.is_empty()) || (se == marker && so.is_empty())
+    // Byte-exact comparison also rejects non-UTF-8 output.
+    let marker = format!("package {} is not installed\n", name);
+    out.stdout == marker.as_bytes() && out.stderr.is_empty()
 }
 
 fn observation_error(
@@ -283,7 +284,8 @@ mod tests {
                 .unwrap(),
             PackageState::Installed
         );
-        let absent = exited(1, "", "package nano is not installed\n");
+        // Reference rpm 4.16: absent marker on stdout, stderr empty.
+        let absent = exited(1, "package nano is not installed\n", "");
         assert_eq!(
             PackageBackend::Dnf
                 .classify_observation(&absent, "nano", "nano", false)
@@ -329,16 +331,27 @@ mod tests {
     }
 
     #[test]
-    fn rpm_absent_marker_checks_both_streams() {
-        // rpm writes the marker to stdout on el9, but accept either stream
-        // so a harmless redirection difference cannot manufacture fake
-        // "absent" — provided it is the complete output on that stream.
+    fn rpm_absent_marker_is_exact_stdout_only() {
+        // Reference: exit 1 + stdout exactly "package <name> is not
+        // installed\n" + stderr empty. Anything looser is an error.
         let out = exited(1, "package nano is not installed\n", "");
         assert!(rpm_reports_absent(&out, "nano"));
+        // Marker on the wrong stream is not a valid absent answer.
         let out = exited(1, "", "package nano is not installed\n");
-        assert!(rpm_reports_absent(&out, "nano"));
+        assert!(!rpm_reports_absent(&out, "nano"));
+        // Whitespace anywhere invalidates the exact contract.
+        let out = exited(1, " package nano is not installed\n", "");
+        assert!(!rpm_reports_absent(&out, "nano"));
+        let out = exited(1, "package nano is not installed\n ", "");
+        assert!(!rpm_reports_absent(&out, "nano"));
+        let out = exited(1, "package nano is not installed\n\n", "");
+        assert!(!rpm_reports_absent(&out, "nano"));
+        let out = exited(1, "package nano is not installed\n", " ");
+        assert!(!rpm_reports_absent(&out, "nano"));
+        let out = exited(1, "package nano is not installed", "");
+        assert!(!rpm_reports_absent(&out, "nano"));
         // A different package's marker does not prove this one absent.
-        let out = exited(1, "", "package other is not installed\n");
+        let out = exited(1, "package other is not installed\n", "");
         assert!(!rpm_reports_absent(&out, "nano"));
     }
 
@@ -368,9 +381,24 @@ mod tests {
             .classify_observation(&substr, "nano", "nano", false)
             .is_err());
         // Additional diagnostics on the same stream invalidate the result.
-        let extra_line = exited(1, "", "package nano is not installed\nextra noise\n");
+        let extra_line = exited(1, "package nano is not installed\nextra noise\n", "");
         assert!(PackageBackend::Dnf
             .classify_observation(&extra_line, "nano", "nano", false)
+            .is_err());
+        // An extra blank line after the marker is unexpected output.
+        let blank = exited(1, "package nano is not installed\n\n", "");
+        assert!(PackageBackend::Dnf
+            .classify_observation(&blank, "nano", "nano", false)
+            .is_err());
+        // Whitespace-only opposite stream is unexpected stream usage.
+        let ws_err = exited(1, "package nano is not installed\n", "  \n");
+        assert!(PackageBackend::Dnf
+            .classify_observation(&ws_err, "nano", "nano", false)
+            .is_err());
+        // Marker embedded in unrelated stdout text is a substring match.
+        let substr_out = exited(1, "warning: package nano is not installed anyway\n", "");
+        assert!(PackageBackend::Dnf
+            .classify_observation(&substr_out, "nano", "nano", false)
             .is_err());
         // Truncated output cannot prove the marker is the complete result.
         let mut trunc_out = exited(1, "package nano is not installed\n", "");

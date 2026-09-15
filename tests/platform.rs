@@ -471,11 +471,12 @@ fn rpm_reobserve_db_error_after_mutation_keeps_changed() {
     let dir = trusted_root("plat-rpm-reobs");
     let recipe = pkg_recipe(&dir, "nano", "present");
     let t = FakeTarget::rocky9().with_query_results(vec![
-        // Initial observation: clean, unambiguous absent.
+        // Initial observation: clean, unambiguous absent — the real rpm
+        // prints this marker to stdout (verified rpm 4.16, Rocky 9.8).
         sinter::executor::Output {
             completion: Completion::Exited(1),
-            stdout: Vec::new(),
-            stderr: b"package nano is not installed\n".to_vec(),
+            stdout: b"package nano is not installed\n".to_vec(),
+            stderr: Vec::new(),
             stdout_truncated: false,
             stderr_truncated: false,
         },
