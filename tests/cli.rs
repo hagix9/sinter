@@ -254,3 +254,114 @@ fn sensitive_invalid_package_name_never_leaks_to_stderr() {
         );
     }
 }
+
+#[test]
+fn sensitive_interpolation_error_never_leaks_to_output() {
+    // Audit P1-01 round 2: interpolation/reference parsing runs BEFORE
+    // package-name validation. A sentinel embedded in an unparseable
+    // interpolation on a sensitive resource must never reach stdout or
+    // stderr in any output mode.
+    let dir = trusted_root("cli-sens-interp");
+    let sentinel = "SINTER_P1_01_SECRET_SENTINEL_219b";
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: p\n    type: package\n    sensitive: true\n    with:\n      name: \"{{{{ {} }}}}\"\n      state: present\n",
+            sentinel
+        ),
+    );
+    for args in [
+        vec!["validate"],
+        vec!["validate", "--format", "json"],
+        vec!["plan", "--format", "json"],
+    ] {
+        let mut full: Vec<&str> = args.clone();
+        full.push(recipe.to_str().unwrap());
+        let out = Command::new(bin()).args(&full).output().unwrap();
+        assert_ne!(out.status.code(), Some(0), "{:?}", args);
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            combined.matches(sentinel).count(),
+            0,
+            "sentinel leaked in {:?}: {}",
+            args,
+            combined
+        );
+        assert!(
+            combined.contains("(value redacted)"),
+            "missing redaction marker in {:?}: {}",
+            args,
+            combined
+        );
+    }
+}
+
+#[test]
+fn sensitive_var_interpolation_error_never_leaks_to_output() {
+    // A malformed interpolation that textually names a sensitive variable is
+    // treated as sensitive-adjacent: its token contents never reach output.
+    let dir = trusted_root("cli-sens-varinterp");
+    let sentinel = "SINTER_P1_01_SECRET_SENTINEL_7f3a";
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nvars:\n  pkg:\n    value: {}\n    sensitive: true\nresources:\n  - id: p\n    type: package\n    with:\n      name: \"{{{{ vars.pkg {} }}}}\"\n      state: present\n",
+            sentinel, sentinel
+        ),
+    );
+    for args in [
+        vec!["validate"],
+        vec!["validate", "--format", "json"],
+        vec!["plan", "--format", "json"],
+    ] {
+        let mut full: Vec<&str> = args.clone();
+        full.push(recipe.to_str().unwrap());
+        let out = Command::new(bin()).args(&full).output().unwrap();
+        assert_ne!(out.status.code(), Some(0), "{:?}", args);
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            combined.matches(sentinel).count(),
+            0,
+            "sentinel leaked in {:?}: {}",
+            args,
+            combined
+        );
+        assert!(
+            combined.contains("(value redacted)"),
+            "missing redaction marker in {:?}: {}",
+            args,
+            combined
+        );
+    }
+}
+
+#[test]
+fn nonsensitive_interpolation_error_stays_descriptive() {
+    // The same parser error on a non-sensitive resource keeps its useful
+    // diagnostic detail — redaction must not blanket everything.
+    let dir = trusted_root("cli-nonsens-interp");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nresources:\n  - id: p\n    type: package\n    with:\n      name: \"{{ BARETOKEN }}\"\n      state: present\n",
+    );
+    let out = Command::new(bin())
+        .args(["validate", recipe.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{:?}", out);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("bare names are not allowed"), "{}", err);
+    assert!(err.contains("BARETOKEN"), "{}", err);
+    assert!(!err.contains("redacted"), "{}", err);
+}

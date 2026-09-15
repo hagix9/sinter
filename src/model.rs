@@ -196,16 +196,32 @@ fn expand_resource(canon: &Path, decl: &ResourceDecl, state: &mut LoadState) -> 
     // Collect register references from `when` and interpolated `with` values at
     // declaration time. This runs even when the loop is empty, so a forbidden
     // reference can never escape validation merely because no instance exists.
+    let sensitive_var_names: BTreeSet<String> = state
+        .vars
+        .iter()
+        .filter(|v| v.sensitive)
+        .map(|v| v.name.clone())
+        .collect();
     let mut register_refs: BTreeSet<String> = BTreeSet::new();
     if let Some(w) = &decl.when {
+        let when_sensitive =
+            decl.sensitive || value_may_be_sensitive(&Value::Str(w.clone()), &sensitive_var_names);
         let expr = parse_expr(w).map_err(|e| {
-            SinterError::schema(format!("{}: invalid when expression: {}", decl.id, e))
+            if when_sensitive {
+                SinterError::schema(format!(
+                    "{}: invalid when expression (value redacted): {}",
+                    decl.id,
+                    e.category()
+                ))
+            } else {
+                SinterError::schema(format!("{}: invalid when expression: {}", decl.id, e))
+            }
         })?;
         let mut names = BTreeSet::new();
         collect_register_refs(&expr, &mut register_refs, &mut names);
     }
     for v in decl.with.values() {
-        collect_value_register_refs(v, &mut register_refs)?;
+        collect_value_register_refs(v, &mut register_refs, decl.sensitive, &sensitive_var_names)?;
     }
 
     match &decl.loop_values {
@@ -399,11 +415,21 @@ fn validate_declaration_shape(
     sensitive_var_names: &BTreeSet<String>,
 ) -> Result<()> {
     let ctx = &d.id;
+    // Whether diagnostics about a `with` field must be redacted: sensitive
+    // resources redact everything; otherwise a field that references (or
+    // textually names, in unparseable form) a sensitive variable is treated
+    // as sensitive so its contents never reach diagnostics.
+    let field_sensitive = |key: &str| {
+        d.sensitive
+            || d.with
+                .get(key)
+                .is_some_and(|v| value_may_be_sensitive(v, sensitive_var_names))
+    };
     match d.type_.as_str() {
         "file" => {
             validate_with_fields(&d.with, FILE_FIELDS, ctx)?;
-            require_static_string_field(&d.with, "path", ctx)?;
-            require_optional_static_string(&d.with, "source", ctx)?;
+            require_static_string_field(&d.with, "path", ctx, field_sensitive("path"))?;
+            require_optional_static_string(&d.with, "source", ctx, field_sensitive("source"))?;
             require_optional_mode(
                 &d.with,
                 ctx,
@@ -416,7 +442,7 @@ fn validate_declaration_shape(
         }
         "directory" => {
             validate_with_fields(&d.with, DIR_FIELDS, ctx)?;
-            require_static_string_field(&d.with, "path", ctx)?;
+            require_static_string_field(&d.with, "path", ctx, field_sensitive("path"))?;
             require_optional_mode(
                 &d.with,
                 ctx,
@@ -428,13 +454,13 @@ fn validate_declaration_shape(
         }
         "link" => {
             validate_with_fields(&d.with, LINK_FIELDS, ctx)?;
-            require_static_string_field(&d.with, "path", ctx)?;
-            require_optional_static_string(&d.with, "target", ctx)?;
+            require_static_string_field(&d.with, "path", ctx, field_sensitive("path"))?;
+            require_optional_static_string(&d.with, "target", ctx, field_sensitive("target"))?;
         }
         "template" => {
             validate_with_fields(&d.with, TEMPLATE_FIELDS, ctx)?;
-            require_static_string_field(&d.with, "path", ctx)?;
-            require_static_string_field(&d.with, "source", ctx)?;
+            require_static_string_field(&d.with, "path", ctx, field_sensitive("path"))?;
+            require_static_string_field(&d.with, "source", ctx, field_sensitive("source"))?;
             require_optional_mode(
                 &d.with,
                 ctx,
@@ -452,7 +478,7 @@ fn validate_declaration_shape(
         }
         "command" => {
             validate_with_fields(&d.with, COMMAND_FIELDS, ctx)?;
-            require_static_string_field(&d.with, "program", ctx)?;
+            require_static_string_field(&d.with, "program", ctx, field_sensitive("program"))?;
             if let Some(Value::Str(p)) = d.with.get("program") {
                 if !p.starts_with('/') {
                     return Err(SinterError::schema(format!(
@@ -531,18 +557,14 @@ fn validate_declaration_shape(
         }
         "package" => {
             validate_with_fields(&d.with, PACKAGE_FIELDS, ctx)?;
-            require_static_string_field(&d.with, "name", ctx)?;
+            require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
             if let Some(Value::Str(s)) = d.with.get("name") {
                 // Literal names are validated here; interpolated names are
                 // resolved and validated again at freeze time. A rejected
                 // name never appears raw when the resource is sensitive or
                 // the name derives from a sensitive variable.
                 if !crate::expressions::has_interpolation(s) {
-                    let name_sensitive = d.sensitive
-                        || d.with.get("name").is_some_and(|v| {
-                            value_references_sensitive_var(v, sensitive_var_names)
-                        });
-                    validate_package_name(s, ctx, name_sensitive)?;
+                    validate_package_name(s, ctx, field_sensitive("name"))?;
                 }
             }
             validate_desired_enum(
@@ -555,7 +577,7 @@ fn validate_declaration_shape(
         }
         "service" => {
             validate_with_fields(&d.with, SERVICE_FIELDS, ctx)?;
-            require_static_string_field(&d.with, "name", ctx)?;
+            require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
             let state = d.with.get("state");
             let enabled = d.with.get("enabled");
             if state.is_none() && enabled.is_none() {
@@ -592,7 +614,12 @@ fn validate_declaration_shape(
     Ok(())
 }
 
-fn require_static_string_field(with: &BTreeMap<String, Value>, key: &str, ctx: &str) -> Result<()> {
+fn require_static_string_field(
+    with: &BTreeMap<String, Value>,
+    key: &str,
+    ctx: &str,
+    sensitive: bool,
+) -> Result<()> {
     match with.get(key) {
         Some(Value::Str(s)) => {
             if s.is_empty() {
@@ -601,7 +628,7 @@ fn require_static_string_field(with: &BTreeMap<String, Value>, key: &str, ctx: &
                     ctx, key
                 )));
             }
-            require_static_identifier_string(s, key, ctx)
+            require_static_identifier_string(s, key, ctx, sensitive)
         }
         Some(Value::Null) => Err(SinterError::schema(format!("{}: {} is required", ctx, key))),
         Some(_) => Err(SinterError::schema(format!(
@@ -659,6 +686,7 @@ fn require_optional_static_string(
     with: &BTreeMap<String, Value>,
     key: &str,
     ctx: &str,
+    sensitive: bool,
 ) -> Result<()> {
     match with.get(key) {
         None | Some(Value::Null) => Ok(()),
@@ -669,7 +697,7 @@ fn require_optional_static_string(
                     ctx, key
                 )));
             }
-            require_static_identifier_string(s, key, ctx)
+            require_static_identifier_string(s, key, ctx, sensitive)
         }
         Some(_) => Err(SinterError::schema(format!(
             "{}: {} must be a string",
@@ -681,7 +709,7 @@ fn require_optional_static_string(
 /// A static-identifier string may interpolate only statically-known values
 /// (`vars.<name>` and, inside a loop, `item`). Facts, registers, and command
 /// results may not form target identifiers.
-fn require_static_identifier_string(s: &str, key: &str, ctx: &str) -> Result<()> {
+fn require_static_identifier_string(s: &str, key: &str, ctx: &str, sensitive: bool) -> Result<()> {
     if s.contains('\0') {
         return Err(SinterError::schema(format!(
             "{}: {} may not contain NUL",
@@ -693,7 +721,16 @@ fn require_static_identifier_string(s: &str, key: &str, ctx: &str) -> Result<()>
     }
     for tok in extract_interpolation_exprs(s) {
         let expr = parse_expr(&tok).map_err(|e| {
-            SinterError::schema(format!("{}: {} has invalid interpolation: {}", ctx, key, e))
+            if sensitive {
+                SinterError::schema(format!(
+                    "{}: {} has invalid interpolation (value redacted): {}",
+                    ctx,
+                    key,
+                    e.category()
+                ))
+            } else {
+                SinterError::schema(format!("{}: {} has invalid interpolation: {}", ctx, key, e))
+            }
         })?;
         let mut regs = BTreeSet::new();
         let mut dynamic_names = BTreeSet::new();
@@ -712,6 +749,29 @@ fn require_static_identifier_string(s: &str, key: &str, ctx: &str) -> Result<()>
         }
     }
     Ok(())
+}
+
+/// Conservative sensitivity check for diagnostics: true when the value
+/// structurally references a sensitive variable OR its raw text names one
+/// (`vars.<name>`). The textual fallback covers interpolations that fail to
+/// parse — their token contents still name a sensitive source and must not
+/// be echoed into diagnostics.
+fn value_may_be_sensitive(v: &Value, sensitive_vars: &BTreeSet<String>) -> bool {
+    match v {
+        Value::Str(s) => {
+            sensitive_vars
+                .iter()
+                .any(|n| s.contains(&format!("vars.{n}")))
+                || value_references_sensitive_var(v, sensitive_vars)
+        }
+        Value::List(items) => items
+            .iter()
+            .any(|i| value_may_be_sensitive(i, sensitive_vars)),
+        Value::Map(m) => m
+            .values()
+            .any(|i| value_may_be_sensitive(i, sensitive_vars)),
+        _ => false,
+    }
 }
 
 fn value_references_sensitive_var(v: &Value, sensitive_vars: &BTreeSet<String>) -> bool {
@@ -936,18 +996,34 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
             template: None,
         };
 
-        // Validate `when` parses and gather register references.
+        // Validate `when` parses and gather register references. Sensitive
+        // conditions/resources keep token contents out of diagnostics.
         let mut expr_register_refs: BTreeSet<String> = BTreeSet::new();
         let mut scratch_names = BTreeSet::new();
         if let Some(w) = &r.when {
+            let when_sensitive =
+                r.sensitive || value_may_be_sensitive(&Value::Str(w.clone()), &sensitive_var_names);
             let expr = parse_expr(w).map_err(|e| {
-                SinterError::schema(format!("{}: invalid when expression: {}", r.id, e))
+                if when_sensitive {
+                    SinterError::schema(format!(
+                        "{}: invalid when expression (value redacted): {}",
+                        r.id,
+                        e.category()
+                    ))
+                } else {
+                    SinterError::schema(format!("{}: invalid when expression: {}", r.id, e))
+                }
             })?;
             collect_register_refs(&expr, &mut expr_register_refs, &mut scratch_names);
         }
         // Gather register references from interpolated `with` values.
         for v in r.with.values() {
-            collect_value_register_refs(v, &mut expr_register_refs)?;
+            collect_value_register_refs(
+                v,
+                &mut expr_register_refs,
+                r.sensitive,
+                &sensitive_var_names,
+            )?;
         }
         for reg in &expr_register_refs {
             let producer = register_producers.get(reg).ok_or_else(|| {
@@ -988,36 +1064,86 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
         };
 
         let resource_ctx = r.id.clone();
+        // Whether diagnostics about a `with` field must be redacted for this
+        // resource (explicit sensitivity or a reference to a sensitive
+        // variable — including unparseable text that still names one).
+        let field_sensitive = |key: &str| {
+            r.sensitive
+                || r.with
+                    .get(key)
+                    .is_some_and(|v| value_may_be_sensitive(v, &sensitive_var_names))
+        };
         match r.type_.as_str() {
             "file" => {
                 validate_with_fields(&r.with, FILE_FIELDS, &resource_ctx)?;
-                let path = static_string(&r.with, "path", &scope, &resource_ctx, true)?;
+                let path = static_string(
+                    &r.with,
+                    "path",
+                    &scope,
+                    &resource_ctx,
+                    true,
+                    field_sensitive("path"),
+                )?;
                 validate_path(&path)
                     .map_err(|e| SinterError::schema(format!("{}: {}", resource_ctx, e.message)))?;
                 fr.path = Some(path);
-                validate_file_common(&r.with, &scope, &resource_ctx, &mut fr)?;
+                validate_file_common(
+                    &r.with,
+                    &scope,
+                    &resource_ctx,
+                    &mut fr,
+                    &sensitive_var_names,
+                )?;
             }
             "directory" => {
                 validate_with_fields(&r.with, DIR_FIELDS, &resource_ctx)?;
-                let path = static_string(&r.with, "path", &scope, &resource_ctx, true)?;
+                let path = static_string(
+                    &r.with,
+                    "path",
+                    &scope,
+                    &resource_ctx,
+                    true,
+                    field_sensitive("path"),
+                )?;
                 validate_path(&path)
                     .map_err(|e| SinterError::schema(format!("{}: {}", resource_ctx, e.message)))?;
                 fr.path = Some(path);
             }
             "link" => {
                 validate_with_fields(&r.with, LINK_FIELDS, &resource_ctx)?;
-                let path = static_string(&r.with, "path", &scope, &resource_ctx, true)?;
+                let path = static_string(
+                    &r.with,
+                    "path",
+                    &scope,
+                    &resource_ctx,
+                    true,
+                    field_sensitive("path"),
+                )?;
                 validate_path(&path)
                     .map_err(|e| SinterError::schema(format!("{}: {}", resource_ctx, e.message)))?;
                 fr.path = Some(path);
             }
             "template" => {
                 validate_with_fields(&r.with, TEMPLATE_FIELDS, &resource_ctx)?;
-                let path = static_string(&r.with, "path", &scope, &resource_ctx, true)?;
+                let path = static_string(
+                    &r.with,
+                    "path",
+                    &scope,
+                    &resource_ctx,
+                    true,
+                    field_sensitive("path"),
+                )?;
                 validate_path(&path)
                     .map_err(|e| SinterError::schema(format!("{}: {}", resource_ctx, e.message)))?;
                 fr.path = Some(path);
-                let source = static_string(&r.with, "source", &scope, &resource_ctx, true)?;
+                let source = static_string(
+                    &r.with,
+                    "source",
+                    &scope,
+                    &resource_ctx,
+                    true,
+                    field_sensitive("source"),
+                )?;
                 let source_sensitive = r.sensitive
                     || value_references_sensitive_var(&r.with["source"], &sensitive_var_names);
                 fr.controller_source = Some(resolve_source(&r.origin, &source).map_err(|e| {
@@ -1036,11 +1162,24 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                         resource_ctx
                     )));
                 }
-                validate_file_common(&r.with, &scope, &resource_ctx, &mut fr)?;
+                validate_file_common(
+                    &r.with,
+                    &scope,
+                    &resource_ctx,
+                    &mut fr,
+                    &sensitive_var_names,
+                )?;
             }
             "command" => {
                 validate_with_fields(&r.with, COMMAND_FIELDS, &resource_ctx)?;
-                let program = static_string(&r.with, "program", &scope, &resource_ctx, true)?;
+                let program = static_string(
+                    &r.with,
+                    "program",
+                    &scope,
+                    &resource_ctx,
+                    true,
+                    field_sensitive("program"),
+                )?;
                 if !program.starts_with('/') {
                     return Err(SinterError::schema(format!(
                         "{}: program must be an absolute path",
@@ -1050,7 +1189,14 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                 fr.program = Some(program);
                 if let Some(v) = r.with.get("creates") {
                     if !v.is_null() {
-                        let s = static_string(&r.with, "creates", &scope, &resource_ctx, true)?;
+                        let s = static_string(
+                            &r.with,
+                            "creates",
+                            &scope,
+                            &resource_ctx,
+                            true,
+                            field_sensitive("creates"),
+                        )?;
                         validate_path(&s).map_err(|e| {
                             SinterError::schema(format!("{}: creates: {}", resource_ctx, e.message))
                         })?;
@@ -1059,33 +1205,43 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                 }
                 if let Some(v) = r.with.get("removes") {
                     if !v.is_null() {
-                        let s = static_string(&r.with, "removes", &scope, &resource_ctx, true)?;
+                        let s = static_string(
+                            &r.with,
+                            "removes",
+                            &scope,
+                            &resource_ctx,
+                            true,
+                            field_sensitive("removes"),
+                        )?;
                         validate_path(&s).map_err(|e| {
                             SinterError::schema(format!("{}: removes: {}", resource_ctx, e.message))
                         })?;
                         fr.removes = Some(s);
                     }
                 }
-                validate_command_fields(&r.with, &scope, &resource_ctx, &mut fr)?;
+                validate_command_fields(
+                    &r.with,
+                    &scope,
+                    &resource_ctx,
+                    &mut fr,
+                    &sensitive_var_names,
+                )?;
             }
             "package" => {
                 validate_with_fields(&r.with, PACKAGE_FIELDS, &resource_ctx)?;
-                let name_sensitive = r.sensitive
-                    || r.with
-                        .get("name")
-                        .is_some_and(|v| value_references_sensitive_var(v, &sensitive_var_names));
-                let name = static_string(&r.with, "name", &scope, &resource_ctx, true).map_err(
-                    |e| {
-                        if name_sensitive {
-                            SinterError::schema(format!(
-                                "{}: package name is not a statically-known string (value redacted)",
-                                resource_ctx
-                            ))
-                        } else {
-                            e
-                        }
-                    },
-                )?;
+                let name_sensitive = field_sensitive("name");
+                let name =
+                    static_string(&r.with, "name", &scope, &resource_ctx, true, name_sensitive)
+                        .map_err(|e| {
+                            if name_sensitive {
+                                SinterError::schema(format!(
+                            "{}: package name is not a statically-known string (value redacted)",
+                            resource_ctx
+                        ))
+                            } else {
+                                e
+                            }
+                        })?;
                 validate_package_name(&name, &resource_ctx, name_sensitive)?;
                 fr.package_name = Some(name);
                 validate_desired_enum(
@@ -1098,7 +1254,14 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
             }
             "service" => {
                 validate_with_fields(&r.with, SERVICE_FIELDS, &resource_ctx)?;
-                let name = static_string(&r.with, "name", &scope, &resource_ctx, true)?;
+                let name = static_string(
+                    &r.with,
+                    "name",
+                    &scope,
+                    &resource_ctx,
+                    true,
+                    field_sensitive("name"),
+                )?;
                 fr.service_name = Some(name);
                 let state = r.with.get("state");
                 let enabled = r.with.get("enabled");
@@ -1339,16 +1502,30 @@ pub fn resolve_source_pub(origin: &str, source: &str) -> Result<PathBuf> {
     Ok(joined)
 }
 
-fn collect_value_register_refs(v: &Value, out: &mut BTreeSet<String>) -> Result<()> {
+fn collect_value_register_refs(
+    v: &Value,
+    out: &mut BTreeSet<String>,
+    decl_sensitive: bool,
+    sensitive_vars: &BTreeSet<String>,
+) -> Result<()> {
     match v {
         Value::Str(s) => {
             if crate::expressions::has_interpolation(s) {
-                // Parse tokens to find registers.
-                let scope = Scope::empty();
-                let _ = scope;
+                // Parse tokens to find registers. When the value is sensitive
+                // (sensitive resource or derived from a sensitive variable)
+                // the token contents may carry secrets; parser errors are
+                // reduced to their safe category instead of echoing input.
+                let sensitive = decl_sensitive || value_may_be_sensitive(v, sensitive_vars);
                 for tok in extract_interpolation_exprs(s) {
                     let expr = parse_expr(&tok).map_err(|e| {
-                        SinterError::schema(format!("invalid interpolation expression: {}", e))
+                        if sensitive {
+                            SinterError::schema(format!(
+                                "invalid interpolation expression (value redacted): {}",
+                                e.category()
+                            ))
+                        } else {
+                            SinterError::schema(format!("invalid interpolation expression: {}", e))
+                        }
                     })?;
                     let mut names = BTreeSet::new();
                     collect_register_refs(&expr, out, &mut names);
@@ -1357,12 +1534,12 @@ fn collect_value_register_refs(v: &Value, out: &mut BTreeSet<String>) -> Result<
         }
         Value::List(items) => {
             for i in items {
-                collect_value_register_refs(i, out)?;
+                collect_value_register_refs(i, out, decl_sensitive, sensitive_vars)?;
             }
         }
         Value::Map(m) => {
             for i in m.values() {
-                collect_value_register_refs(i, out)?;
+                collect_value_register_refs(i, out, decl_sensitive, sensitive_vars)?;
             }
         }
         _ => {}
@@ -1425,6 +1602,7 @@ fn validate_file_common(
     scope: &Scope,
     ctx: &str,
     fr: &mut FrozenResource,
+    sensitive_vars: &BTreeSet<String>,
 ) -> Result<()> {
     let content = with.get("content");
     let source = with.get("source");
@@ -1460,10 +1638,10 @@ fn validate_file_common(
             return Err(SinterError::schema(format!("{}: invalid group", ctx)));
         }
     }
-    let _ = fr;
     // Validate that `source` is static when present.
     if source.is_some() {
-        let _ = static_string(with, "source", scope, ctx, true)?;
+        let sens = fr.sensitive || value_may_be_sensitive(&with["source"], sensitive_vars);
+        let _ = static_string(with, "source", scope, ctx, true, sens)?;
     }
     Ok(())
 }
@@ -1473,6 +1651,7 @@ fn validate_command_fields(
     scope: &Scope,
     ctx: &str,
     fr: &mut FrozenResource,
+    sensitive_vars: &BTreeSet<String>,
 ) -> Result<()> {
     if let Some(v) = with.get("args") {
         match v {
@@ -1564,7 +1743,8 @@ fn validate_command_fields(
     // permitted for the identifier, no sensitive).
     if let Some(v) = with.get("cwd") {
         if !v.is_null() {
-            let s = static_string(with, "cwd", scope, ctx, true)?;
+            let sens = fr.sensitive || value_may_be_sensitive(v, sensitive_vars);
+            let s = static_string(with, "cwd", scope, ctx, true, sens)?;
             validate_path(&s)
                 .map_err(|e| SinterError::schema(format!("{}: cwd: {}", ctx, e.message)))?;
         }
@@ -1648,6 +1828,7 @@ fn static_string(
     scope: &Scope,
     ctx: &str,
     require: bool,
+    sensitive: bool,
 ) -> Result<String> {
     let raw = match with.get(key) {
         Some(v) => v,
@@ -1666,10 +1847,19 @@ fn static_string(
         return Ok(String::new());
     }
     let ev = eval_value_interpolated(raw, scope).map_err(|e| {
-        SinterError::schema(format!(
-            "{}: {} must be a statically-known string ({}); facts and registers may not form identifiers",
-            ctx, key, e
-        ))
+        if sensitive {
+            SinterError::schema(format!(
+                "{}: {} must be a statically-known string (value redacted): {}",
+                ctx,
+                key,
+                e.category()
+            ))
+        } else {
+            SinterError::schema(format!(
+                "{}: {} must be a statically-known string ({}); facts and registers may not form identifiers",
+                ctx, key, e
+            ))
+        }
     })?;
     if ev.sensitive {
         return Err(SinterError::schema(format!(

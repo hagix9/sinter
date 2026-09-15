@@ -601,6 +601,105 @@ fn sensitive_var_package_name_is_redacted() {
 }
 
 #[test]
+fn sensitive_interpolation_error_is_redacted_at_reference_analysis() {
+    // Audit P1-01 round 2: register-reference analysis runs before package
+    // validation; a sentinel inside an unparseable interpolation on a
+    // sensitive resource must never reach the schema diagnostic.
+    let dir = trusted_root("plat-pkg-sens-interp");
+    let sentinel = "SINTER_P1_01_SECRET_SENTINEL_9c4d";
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: p\n    type: package\n    sensitive: true\n    with:\n      name: \"{{{{ {} }}}}\"\n      state: present\n",
+            sentinel
+        ),
+    );
+    let err = sinter::model::load_model(&recipe).unwrap_err();
+    assert!(
+        !err.message.contains(sentinel),
+        "sensitive interpolation leaked: {}",
+        err.message
+    );
+    assert!(
+        err.message.contains("(value redacted)"),
+        "err: {}",
+        err.message
+    );
+}
+
+#[test]
+fn sensitive_var_malformed_interpolation_is_redacted() {
+    // A malformed interpolation that textually names a sensitive variable
+    // is treated as sensitive-adjacent even though it cannot be parsed.
+    let dir = trusted_root("plat-pkg-sens-varinterp");
+    let sentinel = "SINTER_P1_01_SECRET_SENTINEL_7f3a";
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nvars:\n  pkg:\n    value: {}\n    sensitive: true\nresources:\n  - id: p\n    type: package\n    with:\n      name: \"{{{{ vars.pkg {} }}}}\"\n      state: present\n",
+            sentinel, sentinel
+        ),
+    );
+    let err = sinter::model::load_model(&recipe).unwrap_err();
+    assert!(
+        !err.message.contains(sentinel),
+        "sensitive-derived interpolation leaked: {}",
+        err.message
+    );
+    assert!(
+        err.message.contains("(value redacted)"),
+        "err: {}",
+        err.message
+    );
+}
+
+#[test]
+fn sensitive_when_expression_error_is_redacted() {
+    // The `when` parse path is equally covered for sensitive resources.
+    let dir = trusted_root("plat-pkg-sens-when");
+    let sentinel = "SINTER_P1_01_SECRET_SENTINEL_when9";
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: p\n    type: package\n    sensitive: true\n    when: \"{}\"\n    with:\n      name: nano\n      state: present\n",
+            sentinel
+        ),
+    );
+    let err = sinter::model::load_model(&recipe).unwrap_err();
+    assert!(
+        !err.message.contains(sentinel),
+        "sensitive when expression leaked: {}",
+        err.message
+    );
+    assert!(
+        err.message.contains("(value redacted)"),
+        "err: {}",
+        err.message
+    );
+}
+
+#[test]
+fn nonsensitive_interpolation_error_stays_descriptive_model() {
+    // Model level: a non-sensitive parse error keeps full token detail.
+    let dir = trusted_root("plat-pkg-badinterp");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nresources:\n  - id: p\n    type: package\n    with:\n      name: \"{{ BARETOKEN_9z }}\"\n      state: present\n",
+    );
+    let err = sinter::model::load_model(&recipe).unwrap_err();
+    assert!(
+        err.message.contains("BARETOKEN_9z"),
+        "non-sensitive error lost token detail: {}",
+        err.message
+    );
+    assert!(!err.message.contains("redacted"));
+}
+
+#[test]
 fn nonsensitive_invalid_package_name_stays_descriptive() {
     // The non-sensitive error must remain useful: it still names the value.
     let dir = trusted_root("plat-pkg-badlit");

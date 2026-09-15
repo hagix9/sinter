@@ -427,8 +427,19 @@ impl Engine {
         match &res.when {
             None => Ok(Some(true)),
             Some(w) => {
+                // Sensitive conditions keep expression contents out of
+                // diagnostics: parser/eval errors reduce to safe categories.
+                let sensitive = res.sensitive || res.derived_sensitive;
                 let expr = parse_expr(w).map_err(|e| {
-                    SinterError::plan(format!("{}: invalid when expression: {}", res.id, e))
+                    if sensitive {
+                        SinterError::plan(format!(
+                            "{}: invalid when expression (value redacted): {}",
+                            res.id,
+                            e.category()
+                        ))
+                    } else {
+                        SinterError::plan(format!("{}: invalid when expression: {}", res.id, e))
+                    }
                 })?;
                 match eval_boolean(&expr, &scope) {
                     Ok(v) => match v.val {
@@ -439,10 +450,20 @@ impl Engine {
                             res.id
                         ))),
                     },
-                    Err(e) => Err(SinterError::plan(format!(
-                        "{}: when evaluation error: {}",
-                        res.id, e
-                    ))),
+                    Err(e) => {
+                        if sensitive {
+                            Err(SinterError::plan(format!(
+                                "{}: when evaluation error (value redacted): {}",
+                                res.id,
+                                e.category()
+                            )))
+                        } else {
+                            Err(SinterError::plan(format!(
+                                "{}: when evaluation error: {}",
+                                res.id, e
+                            )))
+                        }
+                    }
                 }
             }
         }
@@ -509,9 +530,21 @@ impl Engine {
     ) -> Result<BTreeMap<String, EvalVal>> {
         let scope = self.scope(item, None, None);
         let mut out = BTreeMap::new();
+        // Sensitive resources (or values derived from sensitive sources)
+        // never leak raw expression contents through evaluation errors.
+        let sensitive = res.sensitive || res.derived_sensitive;
         for (k, v) in &res.with {
             let ev = eval_value_interpolated(v, &scope).map_err(|e| {
-                SinterError::apply(format!("{}: cannot evaluate with.{}: {}", res.id, k, e))
+                if sensitive {
+                    SinterError::apply(format!(
+                        "{}: cannot evaluate with.{} (value redacted): {}",
+                        res.id,
+                        k,
+                        e.category()
+                    ))
+                } else {
+                    SinterError::apply(format!("{}: cannot evaluate with.{}: {}", res.id, k, e))
+                }
             })?;
             out.insert(k.clone(), ev);
         }

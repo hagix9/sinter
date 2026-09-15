@@ -1844,8 +1844,17 @@ impl Engine {
                 )))
             }
         };
-        let expr = parse_expr(&cw)
-            .map_err(|e| SinterError::schema(format!("{}: invalid changed_when: {}", res.id, e)))?;
+        let expr = parse_expr(&cw).map_err(|e| {
+            if sensitive {
+                SinterError::schema(format!(
+                    "{}: invalid changed_when (value redacted): {}",
+                    res.id,
+                    e.category()
+                ))
+            } else {
+                SinterError::schema(format!("{}: invalid changed_when: {}", res.id, e))
+            }
+        })?;
         let mut fields: BTreeMap<String, EvalVal> = BTreeMap::new();
         fields.insert("executed".to_string(), EvalVal::known(Value::Bool(true)));
         fields.insert(
@@ -1904,7 +1913,14 @@ impl Engine {
                 Some(Value::Bool(b)) => Ok((Some(b), None)),
                 _ => Ok((None, Some("changed_when produced Unknown".into()))),
             },
-            Err(e) => Ok((None, Some(e.to_string()))),
+            Err(e) => Ok((
+                None,
+                Some(if sensitive {
+                    format!("expression error (value redacted): {}", e.category())
+                } else {
+                    e.to_string()
+                }),
+            )),
         }
     }
 
