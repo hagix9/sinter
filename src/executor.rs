@@ -1443,6 +1443,15 @@ pub struct FakeTarget {
     /// can model similar repository IDs or multiple cached hash directories
     /// (R2-04).
     pub snapshot_listing: Option<String>,
+    /// Overrides the `find /var/cache/dnf -mindepth 1 -maxdepth 1 -print0`
+    /// answer — the raw stdout bytes the live-cache enumeration yields, so
+    /// tests can model NUL-framing defects, invalid UTF-8, duplicate entries
+    /// and non-child paths through the production control path (R4-F01).
+    pub live_cache_find_output: Option<Output>,
+    /// Overrides the `mktemp -d` answer — the raw output the snapshot helper
+    /// yields, so tests can model a path outside the private snapshot
+    /// namespace, an extra line, or malformed output (R4-F01).
+    pub mktemp_output: Option<Output>,
     /// Mode reported for the private dnf snapshot root by `stat -c %a`
     /// before the metadata cache is copied into it (snapshot-permission
     /// hardening).
@@ -1514,6 +1523,8 @@ impl FakeTarget {
             dnf_dry_run_output: None,
             dnf_location_output: None,
             snapshot_listing: None,
+            live_cache_find_output: None,
+            mktemp_output: None,
             snapshot_mode: "700".to_string(),
             snapshot_mode_after_copy: None,
             snapshot_chmod_fails: false,
@@ -1547,6 +1558,8 @@ impl FakeTarget {
             dnf_dry_run_output: None,
             dnf_location_output: None,
             snapshot_listing: None,
+            live_cache_find_output: None,
+            mktemp_output: None,
             snapshot_mode: "700".to_string(),
             snapshot_mode_after_copy: None,
             snapshot_chmod_fails: false,
@@ -1577,6 +1590,8 @@ impl FakeTarget {
             dnf_dry_run_output: None,
             dnf_location_output: None,
             snapshot_listing: None,
+            live_cache_find_output: None,
+            mktemp_output: None,
             snapshot_mode: "700".to_string(),
             snapshot_mode_after_copy: None,
             snapshot_chmod_fails: false,
@@ -1676,7 +1691,11 @@ impl FakeExecutor {
             "dpkg-query" => self.run_dpkg_query(&req.args),
             "dnf" | "apt-get" => self.run_manager(&prog, &req.args),
             "systemctl" => self.run_systemctl(&req.args),
-            "mktemp" => Self::exited(0, format!("{}\n", FAKE_SNAP), String::new()),
+            "mktemp" => self
+                .target
+                .mktemp_output
+                .clone()
+                .unwrap_or_else(|| Self::exited(0, format!("{}\n", FAKE_SNAP), String::new())),
             "chmod" => {
                 // The private dnf snapshot root permission enforcement
                 // (0700). Only the snapshot root is modeled; any other
@@ -1884,11 +1903,15 @@ impl FakeExecutor {
         if root == LIVE_CACHE_ROOT {
             // The live metadata cache: one directory per repository whose
             // repodata is cached. A repo with no cached repodata has no
-            // directory here at all.
+            // directory here at all. An explicit raw-byte override wins so
+            // tests can model NUL-framing and path-domain defects (R4-F01).
+            if let Some(o) = self.target.live_cache_find_output.clone() {
+                return o;
+            }
             let mut out = String::new();
             for r in &self.target.dnf_repos {
                 if r.repodata_cached {
-                    out.push_str(&format!("{}/{}-cafebabef00d\0", root, r.id));
+                    out.push_str(&format!("{}/{}-cafebabecafebabe\0", root, r.id));
                 }
             }
             return Self::exited(0, out, String::new());
@@ -1899,14 +1922,14 @@ impl FakeExecutor {
         let mut out = String::new();
         for r in &self.target.dnf_repos {
             if r.repodata_cached {
-                out.push_str(&format!("{}/{}-cafebabef00d\n", root, r.id));
-                out.push_str(&format!("{}/{}-cafebabef00d/repodata\n", root, r.id));
+                out.push_str(&format!("{}/{}-cafebabecafebabe\n", root, r.id));
+                out.push_str(&format!("{}/{}-cafebabecafebabe/repodata\n", root, r.id));
                 out.push_str(&format!(
-                    "{}/{}-cafebabef00d/repodata/repomd.xml\n",
+                    "{}/{}-cafebabecafebabe/repodata/repomd.xml\n",
                     root, r.id
                 ));
                 if r.mirrors && r.mirrorlist_cached {
-                    out.push_str(&format!("{}/{}-cafebabef00d/mirrorlist\n", root, r.id));
+                    out.push_str(&format!("{}/{}-cafebabecafebabe/mirrorlist\n", root, r.id));
                 }
             }
         }
@@ -1952,22 +1975,37 @@ impl FakeExecutor {
     fn run_manager(&mut self, prog: &str, args: &[String]) -> Output {
         let name = args.last().cloned().unwrap_or_default();
         if prog == "dnf" && args.iter().any(|a| a == "repolist") {
-            // repolist -v: one block per enabled repo; Repo-mirrors marks
-            // repos that resolve via a mirror list. An explicit override
-            // wins so tests can model truncated or malformed enumeration.
+            // repolist -v: one block per enabled repo, in the exact shape
+            // `dnf/cli/commands/repolist.py::RepoListCommand.run` prints:
+            // blocks joined by a blank line, each opened by `Repo-id` and
+            // always showing `Repo-name`, closed by the `Total packages: N`
+            // footer. `Repo-status` is deliberately absent — plain
+            // `repolist -v` prints it only for `--all` or explicit repo
+            // arguments, never for this invocation (R4-F04). An explicit
+            // override wins so tests can model truncated or malformed
+            // enumeration.
             if let Some(o) = self.target.dnf_repolist_output.clone() {
                 return o;
             }
-            let mut s = String::new();
+            let mut blocks: Vec<String> = Vec::new();
+            let mut total_pkgs = 0usize;
             for r in &self.target.dnf_repos {
-                s.push_str(&format!(
-                    "Repo-id            : {}\nRepo-name          : {}\nRepo-status        : enabled\n",
-                    r.id, r.id
-                ));
+                let mut fields: Vec<String> = vec![
+                    format!("Repo-id            : {}", r.id),
+                    format!("Repo-name          : {}", r.id),
+                ];
                 if r.mirrors {
-                    s.push_str("Repo-mirrors       : https://mirrors.example/?repo=x\n");
+                    fields.push("Repo-mirrors       : https://mirrors.example/?repo=x".into());
                 }
-                s.push('\n');
+                fields.push("Repo-expire        : Never (last: unknown)".into());
+                fields.push("Repo-filename      : /etc/yum.repos.d/fake.repo".into());
+                total_pkgs += 1;
+                blocks.push(fields.join("\n"));
+            }
+            let mut s = String::new();
+            if !blocks.is_empty() {
+                s.push_str(&blocks.join("\n\n"));
+                s.push_str(&format!("\nTotal packages: {}\n", total_pkgs));
             }
             return Self::exited(0, s, String::new());
         }

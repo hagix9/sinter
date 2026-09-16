@@ -611,7 +611,7 @@ fn r2_04_ambiguous_repo_cache_dir_fails_closed() {
     // Two `<repoid>-<hash>` cache dirs exist for the same repository id (an
     // old hash alongside a fresh one): the destination is ambiguous.
     t.snapshot_listing = Some(format!(
-        "{snap}/baseos-cafebabef00d\n{snap}/baseos-cafebabef00d/mirrorlist\n{snap}/baseos-deadbeef00d\n",
+        "{snap}/baseos-cafebabecafebabe\n{snap}/baseos-cafebabecafebabe/mirrorlist\n{snap}/baseos-deadbeefdeadbeef\n",
         snap = FAKE_SNAP
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);

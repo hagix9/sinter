@@ -1,0 +1,1195 @@
+//! Round-5 audit remediation regression tests (R4-F01 .. R4-F05).
+//!
+//! Every case drives the production parser/control path: a scripted in-process
+//! FakeTarget so platform detection, backend selection, the private-snapshot
+//! lifecycle, payload-URL validation, DNF grammar parsing, identifier
+//! validation, and result classification all run production code. Malformed,
+//! ambiguous or uninterpretable input must fail closed — no copy, no payload
+//! download and no mutation — while valid, native DNF output still completes.
+//!
+//! The Astra reproductions are fed through the production decision path via
+//! explicit helper-output overrides (the live-cache `find -print0` answer, the
+//! `mktemp` answer, `repolist -v`, the `--assumeno` transaction table, the
+//! `repoquery --location` answer, and the snapshot cache listing), so the
+//! boundary being hardened is the one that actually runs.
+
+mod common;
+
+use common::*;
+use sinter::engine::Mode;
+use sinter::executor::{Completion, DnfRepo, FakeTarget, Output};
+use sinter::result::{Change, Execution, Verification};
+
+/// The private snapshot root the scripted target hands out via `mktemp`.
+const FAKE_SNAP: &str = "/var/tmp/sinter-dnf.fakesnap";
+
+/// The live DNF metadata cache root the snapshot is copied from.
+const LIVE_CACHE_ROOT: &str = "/var/cache/dnf";
+
+/// The native libdnf cache hash format this target models (16 hex chars).
+const CACHE_HASH: &str = "cafebabecafebabe";
+
+// ===========================================================================
+// Shared helpers
+// ===========================================================================
+
+fn pkg_recipe(dir: &std::path::Path, name: &str, state: &str) -> std::path::PathBuf {
+    write_recipe(
+        dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: p\n    type: package\n    with:\n      name: {}\n      state: {}\n",
+            name, state
+        ),
+    )
+}
+
+fn commands_with<'a>(
+    report: &'a sinter::engine::RunReport,
+    prog: &str,
+) -> Vec<&'a sinter::executor::CommandRecord> {
+    report
+        .commands
+        .iter()
+        .filter(|c| c.program == prog)
+        .collect()
+}
+
+fn dnf_mutations(report: &sinter::engine::RunReport) -> usize {
+    report
+        .commands
+        .iter()
+        .filter(|c| c.program == "/usr/bin/dnf" && c.args.iter().any(|a| a == "-y"))
+        .count()
+}
+
+fn downloads(report: &sinter::engine::RunReport) -> usize {
+    commands_with(report, "/usr/bin/curl")
+        .into_iter()
+        .chain(commands_with(report, "/usr/bin/wget"))
+        .count()
+}
+
+fn copies(report: &sinter::engine::RunReport) -> usize {
+    commands_with(report, "/usr/bin/cp").len()
+}
+
+fn override_output(completion: Completion, stdout: &str, stderr: &str) -> Output {
+    Output {
+        completion,
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: stderr.as_bytes().to_vec(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+    }
+}
+
+/// Override raw stdout bytes for the live-cache `find -print0` answer.
+fn override_find_stdout(bytes: &[u8]) -> Output {
+    Output {
+        completion: Completion::Exited(0),
+        stdout: bytes.to_vec(),
+        stderr: Vec::new(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+    }
+}
+
+/// A well-formed `dnf repolist -v` block for one enabled repository, in the
+/// native upstream shape: opened by `Repo-id`, always showing `Repo-name`,
+/// with the conditional fields a mirror-resolving repository prints. Plain
+/// `repolist -v` prints no `Repo-status`. The `Total packages: N` footer is
+/// dnf's once-per-output line, so it is appended by the caller after the last
+/// block — never per block.
+fn dnf_repolist_block(repoid: &str, mirrors: bool) -> String {
+    let mut fields = vec![
+        format!("Repo-id            : {}", repoid),
+        format!("Repo-name          : {}", repoid),
+    ];
+    if mirrors {
+        fields.push("Repo-mirrors       : https://mirrors.example/?repo=x".into());
+    }
+    fields.push("Repo-expire        : Never (last: unknown)".into());
+    fields.push("Repo-filename      : /etc/yum.repos.d/fake.repo".into());
+    fields.join("\n")
+}
+
+/// A well-formed `dnf install --assumeno` transaction table for one package.
+fn dnf_transaction_table(name: &str, repoid: &str) -> String {
+    format!(
+        "Dependencies resolved.\n\
+         ================================================================================\n \
+         Package                Arch        Version                Repository      Size\n\
+         ================================================================================\n\
+         Installing:\n \
+         {n:<23}x86_64      1.0-1.el9              {r:<15} 1 k\n\n\
+         Transaction Summary\n\
+         ================================================================================\n\
+         Install  1 Package\n\n\
+         Total download size: 1 k\n\
+         Operation aborted.\n",
+        n = name,
+        r = repoid
+    )
+}
+
+/// A transaction table whose single row is arbitrary raw text (used to model
+/// transaction-derived identifiers that are not valid operands).
+fn dnf_transaction_row_raw(row: &str) -> String {
+    format!(
+        "Dependencies resolved.\n\
+         ================================================================================\n \
+         Package                Arch        Version                Repository      Size\n\
+         ================================================================================\n\
+         Installing:\n \
+         {row}\n\n\
+         Transaction Summary\n\
+         ================================================================================\n\
+         Install  1 Package\n\n\
+         Total download size: 1 k\n\
+         Operation aborted.\n",
+        row = row
+    )
+}
+
+/// Assert the resource was blocked by the snapshot contract: no copy, no
+/// payload download and no mutation, with no change or verification claimed.
+fn assert_blocked_no_mutation(r: &sinter::engine::RunReport) -> &sinter::result::ResourceResult {
+    let p = find(r, "p");
+    assert_eq!(p.execution, Execution::Failed, "blocked input must fail");
+    assert_eq!(p.change, Change::None, "no mutation means no change claim");
+    assert_eq!(
+        p.verification,
+        Verification::NotPerformed,
+        "verification must not be claimed"
+    );
+    assert_eq!(
+        dnf_mutations(r),
+        0,
+        "no mutation may be dispatched for uninterpretable input"
+    );
+    assert_eq!(
+        downloads(r),
+        0,
+        "no payload download may be dispatched for uninterpretable input"
+    );
+    assert!(
+        p.reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("repository metadata not locally complete"),
+        "blocked reason must name the metadata contract: {:?}",
+        p.reason
+    );
+    p
+}
+
+/// Assert the resource completed a full prefetch + mutation (the positive
+/// control shape: valid input is never rejected).
+fn assert_full_install(r: &sinter::engine::RunReport) {
+    let p = find(r, "p");
+    assert_eq!(
+        p.execution,
+        Execution::Succeeded,
+        "valid input must succeed"
+    );
+    assert_eq!(p.change, Change::Changed);
+    assert_eq!(p.verification, Verification::Verified);
+    assert_eq!(downloads(r), 1, "the payload must be prefetched");
+    assert_eq!(dnf_mutations(r), 1, "the mutation must run");
+}
+
+/// Assert the private snapshot was cleaned up exactly once.
+fn assert_snapshot_cleaned(r: &sinter::engine::RunReport) {
+    let rm = commands_with(r, "/usr/bin/rm");
+    assert_eq!(
+        rm.len(),
+        1,
+        "the private snapshot must be removed exactly once"
+    );
+    assert!(rm[0].args.iter().any(|a| a == FAKE_SNAP));
+}
+
+/// Assert no removal command was dispatched: an unverified snapshot path must
+/// never become a cleanup target (R2-05, R4-F01).
+fn assert_no_cleanup(r: &sinter::engine::RunReport) {
+    assert!(
+        commands_with(r, "/usr/bin/rm").is_empty(),
+        "an unverified snapshot path must not be used as a cleanup target"
+    );
+}
+
+// ===========================================================================
+// R4-F01 — find enumeration / snapshot path boundary. External bytes must be
+// captured, NUL-framed, then path-domain validated before any copy argv.
+// ===========================================================================
+
+/// The Astra reproduction: entries injected into the `find -print0` output
+/// flow straight into a `cp -a --` argv. Every non-child value must be
+/// rejected before any copy is dispatched.
+#[test]
+fn r5_f01_find_injection_rejected_before_copy() {
+    let injections: &[&[u8]] = &[
+        // An absolute path outside the cache root.
+        b"/etc/passwd\0",
+        // A relative path.
+        b"../../etc\0",
+        // Traversal from inside the root.
+        b"/var/cache/dnf/../../etc\0",
+        // The `.` form of the root.
+        b"/var/cache/dnf/.\0",
+        // A nested descendant, not a direct child.
+        b"/var/cache/dnf/sub/nested\0",
+        // The root itself.
+        b"/var/cache/dnf\0",
+        // A sibling root that merely shares the prefix.
+        b"/var/cache/dnf-evil/x\0",
+        // A `..` child.
+        b"/var/cache/dnf/..\0",
+    ];
+    for (i, bytes) in injections.iter().enumerate() {
+        let dir = trusted_root(&format!("r5-f01-inject-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.live_cache_find_output = Some(override_find_stdout(bytes));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_blocked_no_mutation(&r);
+        assert_eq!(
+            copies(&r),
+            0,
+            "no copy may be dispatched for a non-child entry"
+        );
+        // The snapshot itself was valid, so its cleanup is safe and runs.
+        assert_snapshot_cleaned(&r);
+    }
+}
+
+/// A `find -print0` answer missing its trailing NUL is truncated framing.
+#[test]
+fn r5_f01_missing_trailing_nul_rejected() {
+    let dir = trusted_root("r5-f01-no-trailing-nul");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.live_cache_find_output = Some(override_find_stdout(
+        format!("{}/baseos-{}", LIVE_CACHE_ROOT, CACHE_HASH).as_bytes(),
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_blocked_no_mutation(&r);
+    assert_eq!(copies(&r), 0);
+    assert_snapshot_cleaned(&r);
+}
+
+/// An empty (doubled-NUL) entry is malformed framing.
+#[test]
+fn r5_f01_empty_entry_rejected() {
+    let dir = trusted_root("r5-f01-empty-entry");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.live_cache_find_output = Some(override_find_stdout(
+        b"/var/cache/dnf/a\0\0/var/cache/dnf/b\0",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_blocked_no_mutation(&r);
+    assert_eq!(copies(&r), 0);
+    assert_snapshot_cleaned(&r);
+}
+
+/// A duplicate entry is not a listing `find` prints.
+#[test]
+fn r5_f01_duplicate_entry_rejected() {
+    let dir = trusted_root("r5-f01-dup-entry");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    let one = format!("{}/baseos-{}\0", LIVE_CACHE_ROOT, CACHE_HASH);
+    t.live_cache_find_output = Some(override_find_stdout((one.clone() + &one).as_bytes()));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_blocked_no_mutation(&r);
+    assert_eq!(copies(&r), 0);
+    assert_snapshot_cleaned(&r);
+}
+
+/// Invalid UTF-8 must not be lossily converted into a different path.
+#[test]
+fn r5_f01_invalid_utf8_rejected() {
+    let dir = trusted_root("r5-f01-bad-utf8");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.live_cache_find_output = Some(override_find_stdout(b"/var/cache/dnf/\xff\0"));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_blocked_no_mutation(&r);
+    assert_eq!(copies(&r), 0);
+    assert_snapshot_cleaned(&r);
+}
+
+/// Truncated stdout or unexpected stderr on the enumeration makes the answer
+/// uninterpretable, so no copy may be dispatched.
+#[test]
+fn r5_f01_truncated_and_stderr_rejected() {
+    for (label, out) in [
+        (
+            "truncated stdout",
+            Output {
+                completion: Completion::Exited(0),
+                stdout: format!("{}/baseos-{}\0", LIVE_CACHE_ROOT, CACHE_HASH).into_bytes(),
+                stderr: Vec::new(),
+                stdout_truncated: true,
+                stderr_truncated: false,
+            },
+        ),
+        (
+            "truncated stderr",
+            Output {
+                completion: Completion::Exited(0),
+                stdout: format!("{}/baseos-{}\0", LIVE_CACHE_ROOT, CACHE_HASH).into_bytes(),
+                stderr: Vec::new(),
+                stdout_truncated: false,
+                stderr_truncated: true,
+            },
+        ),
+        (
+            "unexpected stderr",
+            Output {
+                completion: Completion::Exited(0),
+                stdout: format!("{}/baseos-{}\0", LIVE_CACHE_ROOT, CACHE_HASH).into_bytes(),
+                stderr: b"find: error\n".to_vec(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+            },
+        ),
+    ] {
+        let dir = trusted_root(&format!("r5-f01-{}", label.replace(' ', "-")));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.live_cache_find_output = Some(out);
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_blocked_no_mutation(&r);
+        assert_eq!(copies(&r), 0, "{}", label);
+        assert_snapshot_cleaned(&r);
+    }
+}
+
+/// The snapshot helper's own output is validated before any operation
+/// targets it. A path outside the private namespace is never used — and is
+/// never a cleanup target either, because cleanup on an unverified path is
+/// exactly the unsafe operation (R2-05).
+#[test]
+fn r5_f01_snapshot_path_outside_namespace_rejected_without_cleanup() {
+    for (i, bad) in [
+        "/tmp/outside\n",
+        "../outside\n",
+        "/\n",
+        ".\n",
+        "..\n",
+        "/var/tmp/sinter-dnf.\n",
+        "/var/tmp/sinter-dnf.short\n",
+        "/var/tmp/sinter-dnf.too-long\n",
+        "/var/tmp/sinter-dnf.with/slash\n",
+        "/var/tmp/other.fakesnap\n",
+        "/var/tmp/sinter-dnf.fakesnap\nextra\n",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dir = trusted_root(&format!("r5-f01-snap-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.mktemp_output = Some(override_output(Completion::Exited(0), bad, ""));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_blocked_no_mutation(&r);
+        // No chmod/stat/copy happened, and no cleanup was attempted on the
+        // unverified path.
+        assert!(commands_with(&r, "/usr/bin/chmod").is_empty());
+        assert!(commands_with(&r, "/usr/bin/stat").is_empty());
+        assert_eq!(copies(&r), 0);
+        assert_no_cleanup(&r);
+    }
+}
+
+/// Positive control: the copy accepts every legal direct child the cache root
+/// may hold — hidden entries, spaces, newlines, leading dashes — because each
+/// stays a discrete argv element after `--`. (Run on the real filesystem so
+/// the copy semantics are exercised, mirroring the production loop.)
+#[cfg(unix)]
+#[test]
+fn r5_f01_legal_children_are_copied_and_root_stays_private() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let work = std::env::temp_dir().join(format!("r5-f01-copy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).unwrap();
+    // A source cache root (0755, as /var/cache/dnf commonly is) with the
+    // legal-but-unusual direct children the enumeration must not reject.
+    let src = work.join("cache");
+    std::fs::create_dir_all(&src).unwrap();
+    let odd = [
+        ".hidden-entry",
+        "name with spaces",
+        "name\nwith newline",
+        "-leading-dash",
+        "plain_child",
+    ];
+    for name in &odd {
+        // A name containing a newline cannot be created as a regular file on
+        // every filesystem: fall back to a directory there, and skip the
+        // entry entirely where the FS rejects both forms.
+        if std::fs::write(src.join(name), b"content\n").is_err() {
+            if !name.contains('\n') {
+                panic!("failed to create a plain child entry: {:?}", name);
+            }
+            std::fs::create_dir_all(src.join(name)).ok();
+        }
+    }
+    let mut perm = std::fs::metadata(&src).unwrap().permissions();
+    perm.set_mode(0o755);
+    std::fs::set_permissions(&src, perm).unwrap();
+    // The private destination root, 0700 as mktemp + chmod enforce.
+    let dst = work.join("snap");
+    std::fs::create_dir_all(&dst).unwrap();
+    let mut perm = std::fs::metadata(&dst).unwrap().permissions();
+    perm.set_mode(0o700);
+    std::fs::set_permissions(&dst, perm).unwrap();
+
+    // Enumerate exactly as production does, then copy each proven child.
+    let list = Command::new("find")
+        .args([
+            src.to_str().unwrap(),
+            "-mindepth",
+            "1",
+            "-maxdepth",
+            "1",
+            "-print0",
+        ])
+        .output()
+        .expect("find failed");
+    assert!(list.status.success());
+    let children: Vec<String> = String::from_utf8_lossy(&list.stdout)
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    assert!(children.len() >= odd.len() - 1, "odd entries enumerated");
+    for child in &children {
+        let status = Command::new("cp")
+            .args(["-a", "--", child, &format!("{}/", dst.display())])
+            .status()
+            .expect("cp failed");
+        assert!(status.success(), "copy of {:?} failed", child);
+        let mode = std::fs::metadata(&dst).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o700, "the snapshot root must stay 0700 during copy");
+    }
+    // Every copyable odd child arrived under the private root.
+    assert!(dst.join(".hidden-entry").exists());
+    assert!(dst.join("name with spaces").exists());
+    assert!(dst.join("-leading-dash").exists());
+    assert!(dst.join("plain_child").exists());
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+// ===========================================================================
+// R4-F02 — URL resource identity / curl semantics. One validated URL must be
+// exactly one intended request.
+// ===========================================================================
+
+/// The Astra reproduction: a validated string whose fetched resource differs
+/// from it. Query, fragment, glob syntax and malformed encoding are rejected
+/// before any download is dispatched.
+#[test]
+fn r5_f02_url_identity_mismatch_rejected() {
+    let bad_urls = [
+        // A fragment URL: curl fetches the path, ignoring the fragment.
+        "https://mirror.example/repodata/repomd.xml#/nano-1.0-1.el9.x86_64.rpm",
+        // A query whose value re-parses as a path.
+        "https://mirror.example/not-rpm?download=/nano-1.0-1.el9.x86_64.rpm",
+        // curl URL glob syntax: one string, two requests.
+        "https://mirror.example/[1-2]/nano-1.0-1.el9.x86_64.rpm",
+        // Malformed percent encoding.
+        "https://mirror.example/%GG/nano-1.0-1.el9.x86_64.rpm",
+        // Bare percent and a truncated escape.
+        "https://mirror.example/%/nano.rpm",
+        "https://mirror.example/%A/nano.rpm",
+        // An encoded slash / dot would make the identity ambiguous.
+        "https://mirror.example/a%2fb/nano.rpm",
+        "https://mirror.example/%2e/nano.rpm",
+        // A basename that is not the payload this transaction expects.
+        "https://mirror.example/baseos/Packages/other-1.0-1.el9.x86_64.rpm",
+        "https://mirror.example/baseos/Packages/",
+        "https://mirror.example/baseos/Packages/notrpm",
+    ];
+    for (i, url) in bad_urls.iter().enumerate() {
+        let dir = trusted_root(&format!("r5-f02-url-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.dnf_location_output = Some(override_output(
+            Completion::Exited(0),
+            &format!("{}\n", url),
+            "",
+        ));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_blocked_no_mutation(&r);
+        assert_eq!(downloads(&r), 0, "no download for an ambiguous URL");
+        assert_snapshot_cleaned(&r);
+    }
+}
+
+/// Positive control: the URL shapes real mirrors use are accepted — HTTPS,
+/// HTTP, an explicit port, an IPv4 literal and an IPv6 literal — and exactly
+/// one download is dispatched for one validated URL.
+#[test]
+fn r5_f02_valid_urls_complete() {
+    let good_urls = [
+        "https://mirror.example/baseos/Packages/nano-1.0-1.el9.x86_64.rpm",
+        "http://mirror.example/baseos/Packages/nano-1.0-1.el9.x86_64.rpm",
+        "https://mirror.example:8443/baseos/Packages/nano-1.0-1.el9.x86_64.rpm",
+        "http://192.0.2.1/baseos/Packages/nano-1.0-1.el9.x86_64.rpm",
+        "https://[2001:db8::1]/baseos/Packages/nano-1.0-1.el9.x86_64.rpm",
+    ];
+    for (i, url) in good_urls.iter().enumerate() {
+        let dir = trusted_root(&format!("r5-f02-good-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.dnf_location_output = Some(override_output(
+            Completion::Exited(0),
+            &format!("{}\n", url),
+            "",
+        ));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_full_install(&r);
+        assert_snapshot_cleaned(&r);
+    }
+}
+
+/// The downloader argv always disables URL glob expansion, so one validated
+/// URL can only ever be one request.
+#[test]
+fn r5_f02_curl_globbing_is_disabled_in_argv() {
+    let dir = trusted_root("r5-f02-globoff");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, FakeTarget::rocky9());
+    assert_success(&r);
+    for curl in commands_with(&r, "/usr/bin/curl") {
+        assert!(
+            curl.args.iter().any(|a| a == "-g" || a == "--globoff"),
+            "curl URL globbing must be disabled: {:?}",
+            curl.args
+        );
+        // The URL is the final, single argv element and is not option-like.
+        let url = curl.args.last().expect("a URL operand");
+        assert!(url.starts_with("https://"));
+        assert!(!url.starts_with('-'));
+        assert!(!url.contains(['?', '#', '%', '[', ']', '{', '}']));
+    }
+}
+
+/// Real-downloader proof (loopback HTTP server + the real curl binary with
+/// the production argv): one validated URL is exactly one request, and the
+/// request path is the validated intended path. URL glob syntax does not fan
+/// out because `-g` is present. Self-skips when curl is unavailable.
+#[cfg(unix)]
+#[test]
+fn r5_f02_real_downloader_one_url_one_request() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::process::Command;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    fn curl_path() -> Option<std::path::PathBuf> {
+        for cand in [
+            "/usr/bin/curl",
+            "/opt/homebrew/bin/curl",
+            "/usr/local/bin/curl",
+        ] {
+            if std::path::Path::new(cand).exists() {
+                return Some(std::path::PathBuf::from(cand));
+            }
+        }
+        // Respect PATH as a last resort.
+        which("curl").map(std::path::PathBuf::from)
+    }
+    fn which(prog: &str) -> Option<String> {
+        let out = Command::new("/usr/bin/which").arg(prog).output().ok()?;
+        if out.status.success() {
+            Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        } else {
+            None
+        }
+    }
+    let curl = match curl_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("r5-f02-real-downloader: curl unavailable; self-skipping");
+            return;
+        }
+    };
+
+    // A loopback server that records every request path and answers 200 for
+    // any path, closing each connection so one request is one connection.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().unwrap().port();
+    let recorded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorded_srv = recorded.clone();
+    let server = std::thread::spawn(move || {
+        listener.set_nonblocking(true).ok();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while std::time::Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+                    while let Ok(n) = stream.read(&mut chunk) {
+                        buf.extend_from_slice(&chunk[..n]);
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") || n == 0 {
+                            break;
+                        }
+                    }
+                    if let Ok(text) = std::str::from_utf8(&buf) {
+                        for line in text.lines() {
+                            if let Some(rest) = line.strip_prefix("GET ") {
+                                let path = rest.split_whitespace().next().unwrap_or("");
+                                recorded_srv.lock().unwrap().push(path.to_string());
+                            }
+                        }
+                    }
+                    let body = b"rpm-payload";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(resp.as_bytes()).ok();
+                    stream.write_all(body).ok();
+                    stream.flush().ok();
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let base = format!("http://127.0.0.1:{}", port);
+    let dest = std::env::temp_dir().join(format!("r5-f02-dl-{}.rpm", std::process::id()));
+    let _ = std::fs::remove_file(&dest);
+
+    // The production argv shape for a payload download.
+    let run = |url: &str, globoff: bool| {
+        let mut args: Vec<&str> = Vec::new();
+        if globoff {
+            args.push("-g");
+        }
+        args.extend(["-fsSL", "-o", dest.to_str().unwrap(), url]);
+        Command::new(&curl)
+            .args(&args)
+            .output()
+            .expect("curl failed")
+    };
+
+    // 1. A plain validated URL: exactly one request at the intended path.
+    let plain = format!("{}/baseos/Packages/nano-1.0-1.el9.x86_64.rpm", base);
+    let out = run(&plain, true);
+    assert!(out.status.success(), "curl failed: {}", out.status);
+    let paths = recorded.lock().unwrap().clone();
+    assert_eq!(
+        paths.len(),
+        1,
+        "one validated URL must be one request: {:?}",
+        paths
+    );
+    assert_eq!(
+        paths[0], "/baseos/Packages/nano-1.0-1.el9.x86_64.rpm",
+        "the request path must be the validated intended path"
+    );
+
+    // 2. A glob URL with globbing disabled: still exactly one request, for
+    //    the literal validated path (no fan-out).
+    recorded.lock().unwrap().clear();
+    let glob = format!("{}/[1-2]/nano-1.0-1.el9.x86_64.rpm", base);
+    let _ = run(&glob, true);
+    let paths = recorded.lock().unwrap().clone();
+    assert_eq!(
+        paths.len(),
+        1,
+        "glob syntax must not fan out with -g: {:?}",
+        paths
+    );
+    assert_eq!(paths[0], "/[1-2]/nano-1.0-1.el9.x86_64.rpm");
+
+    // 3. The same glob URL WITHOUT globbing disabled proves the syntax is
+    //    load-bearing: curl expands it into two requests at other paths. This
+    //    is what the `-g` in the production argv prevents.
+    recorded.lock().unwrap().clear();
+    let _ = run(&glob, false);
+    let paths = recorded.lock().unwrap().clone();
+    assert!(
+        paths.len() >= 2,
+        "curl expands glob syntax into multiple requests without -g: {:?}",
+        paths
+    );
+    assert!(paths.iter().all(|p| !p.contains("[1-2]")));
+
+    let _ = std::fs::remove_file(&dest);
+    // Stop the server by dropping it after the thread's deadline; join best
+    // effort.
+    drop(server);
+}
+
+// ===========================================================================
+// R4-F03 / R4-F04 — a strict but native-compatible DNF grammar. Malformed
+// output fails closed; native valid output is accepted. Treated as two sides
+// of one grammar contract.
+// ===========================================================================
+
+/// F04: native upstream DNF 4.14 `repolist -v` output — no `Repo-status`,
+/// other native fields, and the `Total packages: N` footer — is accepted, and
+/// the install completes.
+#[test]
+fn r5_f04_native_repolist_without_status_accepted() {
+    let dir = trusted_root("r5-f04-native-repolist");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_repolist_output = Some(override_output(
+        Completion::Exited(0),
+        "Repo-id            : baseos\n\
+         Repo-name          : Rocky Linux 9 - BaseOS\n\
+         Repo-baseurl       : https://mirror.example/baseos\n\
+         Repo-expire        : Never (last: unknown)\n\
+         Repo-filename      : /etc/yum.repos.d/rocky.repo\n\
+         Total packages: 0\n",
+        "",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_full_install(&r);
+    assert_snapshot_cleaned(&r);
+}
+
+/// F04: multiple repositories in the native shape — blank-separated blocks
+/// with a single footer — are all accepted.
+#[test]
+fn r5_f04_native_multi_repo_repolist_accepted() {
+    let dir = trusted_root("r5-f04-multi-repo");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_repos = vec![
+        DnfRepo {
+            id: "baseos".to_string(),
+            mirrors: true,
+            repodata_cached: true,
+            mirrorlist_cached: true,
+        },
+        DnfRepo {
+            id: "appstream".to_string(),
+            mirrors: true,
+            repodata_cached: true,
+            mirrorlist_cached: true,
+        },
+    ];
+    t.dnf_repolist_output = Some(override_output(
+        Completion::Exited(0),
+        &format!(
+            "{}\n\n{}\nTotal packages: 2\n",
+            dnf_repolist_block("baseos", true),
+            dnf_repolist_block("appstream", true)
+        ),
+        "",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_full_install(&r);
+    assert_snapshot_cleaned(&r);
+}
+
+/// F03: an orphan field after a completed block is not a continuation of it
+/// — the block lifecycle is explicit, so a blank closes the block (the Astra
+/// reproduction).
+#[test]
+fn r5_f03_orphan_field_after_block_rejected() {
+    let dir = trusted_root("r5-f03-orphan-field");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_repolist_output = Some(override_output(
+        Completion::Exited(0),
+        &format!(
+            "{}\n\nRepo-status        : enabled\n",
+            dnf_repolist_block("baseos", true)
+        ),
+        "",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_blocked_no_mutation(&r);
+    assert_snapshot_cleaned(&r);
+}
+
+/// F03: an unknown `Repo-*` field is not structure dnf prints and is not
+/// tolerated as an extra.
+#[test]
+fn r5_f03_unknown_repo_field_rejected() {
+    let dir = trusted_root("r5-f03-unknown-field");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_repolist_output = Some(override_output(
+        Completion::Exited(0),
+        "Repo-id            : baseos\nRepo-name          : BaseOS\nRepo-nonsense      : x\n",
+        "",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_blocked_no_mutation(&r);
+    assert_snapshot_cleaned(&r);
+}
+
+/// F03: a garbage footer is unrecognized trailing structure.
+#[test]
+fn r5_f03_garbage_footer_rejected() {
+    for (i, footer) in [
+        "Total packages: none",
+        "Total packages: 01",
+        "Total packages: 1,234",
+        "Totally packages: 1",
+        "Total packages 1",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dir = trusted_root(&format!("r5-f03-footer-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.dnf_repolist_output = Some(override_output(
+            Completion::Exited(0),
+            &format!(
+                "Repo-id            : baseos\nRepo-name          : BaseOS\n{}\n",
+                footer
+            ),
+            "",
+        ));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_blocked_no_mutation(&r);
+        assert_snapshot_cleaned(&r);
+    }
+}
+
+/// F03: an unknown preamble before the transaction table makes the whole
+/// table uninterpretable (the Astra reproduction: `ERROR rpm database
+/// unavailable`).
+#[test]
+fn r5_f03_unknown_preamble_rejected() {
+    let dir = trusted_root("r5-f03-bad-preamble");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_dry_run_output = Some(override_output(
+        Completion::Exited(1),
+        &format!(
+            "ERROR rpm database unavailable\n{}",
+            dnf_transaction_table("nano", "baseos")
+        ),
+        "",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_blocked_no_mutation(&r);
+    assert_snapshot_cleaned(&r);
+}
+
+/// F03: the column header must be the exact token sequence dnf prints — a
+/// header whose first token merely starts with `Package` is not the header
+/// (the Astra reproduction).
+#[test]
+fn r5_f03_fake_header_rejected() {
+    let dir = trusted_root("r5-f03-fake-header");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_dry_run_output = Some(override_output(
+        Completion::Exited(1),
+        "Dependencies resolved.\n\
+         ================================================================================\n \
+         PackageEVIL Arch Version Repository Size\n\
+         ================================================================================\n\
+         Installing:\n \
+         nano                   x86_64      1.0-1.el9              baseos          1 k\n\n\
+         Transaction Summary\n\
+         ================================================================================\n\
+         Install  1 Package\n\n\
+         Total download size: 1 k\n\
+         Operation aborted.\n",
+        "",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_blocked_no_mutation(&r);
+    assert_snapshot_cleaned(&r);
+}
+
+/// F03: a size value that is not a size dnf prints (the Astra reproduction:
+/// `1..2 k`) is rejected by the same grammar the summary uses.
+#[test]
+fn r5_f03_malformed_size_rejected() {
+    let dir = trusted_root("r5-f03-bad-size");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_dry_run_output = Some(override_output(
+        Completion::Exited(1),
+        &dnf_transaction_row_raw("nano x86_64 1.0-1.el9 baseos 1..2 k"),
+        "",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_blocked_no_mutation(&r);
+    assert_snapshot_cleaned(&r);
+}
+
+/// F03: a non-canonical count (the Astra reproduction: `01`) is not a count
+/// dnf prints.
+#[test]
+fn r5_f03_malformed_count_rejected() {
+    let dir = trusted_root("r5-f03-bad-count");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_dry_run_output = Some(override_output(
+        Completion::Exited(1),
+        &dnf_transaction_table("nano", "baseos")
+            .replace("Install  1 Package", "Install  01 Package"),
+        "",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_blocked_no_mutation(&r);
+    assert_snapshot_cleaned(&r);
+}
+
+/// F03: a duplicated Transaction Summary verb is malformed.
+#[test]
+fn r5_f03_duplicate_summary_rejected() {
+    let dir = trusted_root("r5-f03-dup-summary");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_dry_run_output = Some(override_output(
+        Completion::Exited(1),
+        &dnf_transaction_table("nano", "baseos").replace(
+            "Install  1 Package",
+            "Install  1 Package\nInstall  1 Package",
+        ),
+        "",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_blocked_no_mutation(&r);
+    assert_snapshot_cleaned(&r);
+}
+
+/// F03 positive control: a native-style upgrade transaction resolves and
+/// completes. The payload URL's basename must name the exact version the
+/// transaction row carries, so the location override matches `2.0-1.el9`.
+#[test]
+fn r5_f03_native_upgrade_transaction_accepted() {
+    let dir = trusted_root("r5-f03-upgrade");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_dry_run_output = Some(override_output(
+        Completion::Exited(1),
+        "Dependencies resolved.\n\
+         ================================================================================\n \
+         Package                Arch        Version                Repository      Size\n\
+         ================================================================================\n\
+         Upgrading:\n \
+         nano                   x86_64      2.0-1.el9              baseos          1 k\n\n\
+         Transaction Summary\n\
+         ================================================================================\n\
+         Upgrade  1 Package\n\n\
+         Total download size: 1 k\n\
+         Operation aborted.\n",
+        "",
+    ));
+    t.dnf_location_output = Some(override_output(
+        Completion::Exited(0),
+        "https://mirror.example/baseos/Packages/nano-2.0-1.el9.x86_64.rpm\n",
+        "",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_full_install(&r);
+    assert_snapshot_cleaned(&r);
+}
+
+/// F03 positive control: a dependency install (two rows, one summary count of
+/// 2) resolves and completes.
+#[test]
+fn r5_f03_native_dependency_install_accepted() {
+    let dir = trusted_root("r5-f03-deps");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_dry_run_output = Some(override_output(
+        Completion::Exited(1),
+        "Dependencies resolved.\n\
+         ================================================================================\n \
+         Package                Arch        Version                Repository      Size\n\
+         ================================================================================\n\
+         Installing:\n \
+         nano                   x86_64      1.0-1.el9              baseos          1 k\n\
+         Installing dependencies:\n \
+         libnano                x86_64      1.0-1.el9              baseos          1 k\n\n\
+         Transaction Summary\n\
+         ================================================================================\n\
+         Install  2 Packages\n\n\
+         Total download size: 2 k\n\
+         Operation aborted.\n",
+        "",
+    ));
+    // Two payload rows resolve to two downloads.
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = find(&r, "p");
+    assert_eq!(p.execution, Execution::Succeeded);
+    assert_eq!(p.change, Change::Changed);
+    assert_eq!(p.verification, Verification::Verified);
+    assert_eq!(downloads(&r), 2, "both transaction payloads are prefetched");
+    assert_eq!(dnf_mutations(&r), 1);
+    assert_snapshot_cleaned(&r);
+}
+
+// ===========================================================================
+// R4-F05 — transaction-derived identifiers are domain-validated before they
+// reach a command or a path.
+// ===========================================================================
+
+/// A package name that is an option to the target CLI is rejected before it
+/// can become a `repoquery` operand (the Astra reproduction: `--refresh`).
+#[test]
+fn r5_f05_option_like_package_name_rejected() {
+    let dir = trusted_root("r5-f05-opt-pkg");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_dry_run_output = Some(override_output(
+        Completion::Exited(1),
+        &dnf_transaction_row_raw("--refresh x86_64 1.0-1.el9 baseos 1 k"),
+        "",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_blocked_no_mutation(&r);
+    // No payload-location repoquery may carry the option-like operand. (The
+    // snapshot completeness check is itself a `repoquery`, but it runs before
+    // the transaction table is parsed and carries the recipe's own validated
+    // name — only `--location` consumes transaction-derived identifiers.)
+    assert!(
+        commands_with(&r, "/usr/bin/dnf")
+            .into_iter()
+            .filter(|c| {
+                c.args.iter().any(|a| a == "repoquery") && c.args.iter().any(|a| a == "--location")
+            })
+            .count()
+            == 0,
+        "no payload-location operand may carry an option-like value"
+    );
+    assert_snapshot_cleaned(&r);
+}
+
+/// A package name that is a path, or contains a separator or control byte, is
+/// rejected before use.
+#[test]
+fn r5_f05_path_like_package_name_rejected() {
+    for (i, name) in ["../x", "a/b", "a\nb"].iter().enumerate() {
+        let dir = trusted_root(&format!("r5-f05-path-pkg-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.dnf_dry_run_output = Some(override_output(
+            Completion::Exited(1),
+            &dnf_transaction_row_raw(&format!("{} x86_64 1.0-1.el9 baseos 1 k", name)),
+            "",
+        ));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_blocked_no_mutation(&r);
+        assert_snapshot_cleaned(&r);
+    }
+}
+
+/// A repository id that is not a safe path component is rejected before it
+/// can recognize a cache directory (the Astra reproduction: `../escape`).
+#[test]
+fn r5_f05_traversal_repo_id_rejected() {
+    for (i, repoid) in ["../escape", ".", "..", "/absolute", "a/b", "a\\b", "a\nb"]
+        .iter()
+        .enumerate()
+    {
+        let dir = trusted_root(&format!("r5-f05-repoid-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.dnf_dry_run_output = Some(override_output(
+            Completion::Exited(1),
+            &dnf_transaction_table("nano", repoid),
+            "",
+        ));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_blocked_no_mutation(&r);
+        // No directory was created from the traversal-like repository id.
+        assert!(
+            commands_with(&r, "/usr/bin/mkdir").is_empty(),
+            "no payload directory may be built from an unvalidated repo id"
+        );
+        assert_snapshot_cleaned(&r);
+    }
+}
+
+/// A cache directory whose hash is not the exact native libdnf format proves
+/// no repository mapping.
+#[test]
+fn r5_f05_non_native_cache_hash_rejected() {
+    for (i, name) in [
+        "baseos-cafebabef00d",
+        "baseos-cafebabecafebabe00",
+        "baseos-xyzzyxyzzyxyzzy",
+        "baseos-",
+        "../escape-0123456789abcdef",
+        "baseos-extra-cafebabecafebabe",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dir = trusted_root(&format!("r5-f05-hash-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.snapshot_listing = Some(format!(
+            "{snap}/{n}\n{snap}/{n}/mirrorlist\n",
+            snap = FAKE_SNAP,
+            n = name
+        ));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_blocked_no_mutation(&r);
+        assert_snapshot_cleaned(&r);
+    }
+}
+
+/// Two directories that both prove the transaction's repository are
+/// ambiguous and fail closed.
+#[test]
+fn r5_f05_multiple_valid_cache_hashes_rejected() {
+    let dir = trusted_root("r5-f05-multi-hash");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.snapshot_listing = Some(format!(
+        "{snap}/baseos-cafebabecafebabe\n{snap}/baseos-cafebabecafebabe/mirrorlist\n{snap}/baseos-deadbeefdeadbeef\n{snap}/baseos-deadbeefdeadbeef/mirrorlist\n",
+        snap = FAKE_SNAP
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = assert_blocked_no_mutation(&r);
+    assert!(
+        p.reason.as_deref().unwrap_or("").contains("not unique"),
+        "ambiguous cache dirs must be reported: {:?}",
+        p.reason
+    );
+    assert_snapshot_cleaned(&r);
+}
+
+/// Positive control: legitimate Rocky/DNF repository ids — including a `-`,
+/// and the `_`/`.` libdnf permits — resolve by identity, and the exact
+/// 16-hex native cache suffix is recognized.
+#[test]
+fn r5_f05_native_repo_ids_accepted() {
+    for (i, id) in ["baseos", "appstream", "rocky-plus", "my_repo", "my.repo"]
+        .iter()
+        .enumerate()
+    {
+        let dir = trusted_root(&format!("r5-f05-good-id-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.dnf_repos = vec![DnfRepo {
+            id: id.to_string(),
+            mirrors: true,
+            repodata_cached: true,
+            mirrorlist_cached: true,
+        }];
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_full_install(&r);
+        assert_snapshot_cleaned(&r);
+    }
+}

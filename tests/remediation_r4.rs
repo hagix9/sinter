@@ -633,7 +633,7 @@ fn r4_a03_prefix_collision_rejected() {
     let recipe = pkg_recipe(&dir, "nano", "present");
     let mut t = FakeTarget::rocky9();
     t.snapshot_listing = Some(format!(
-        "{snap}/baseos-extra-abc\n{snap}/baseos-extra-abc/mirrorlist\n",
+        "{snap}/baseos-extra-abcdef0123456789\n{snap}/baseos-extra-abcdef0123456789/mirrorlist\n",
         snap = FAKE_SNAP
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
@@ -650,7 +650,7 @@ fn r4_a03_correct_dir_chosen_among_prefix_confusable() {
     let recipe = pkg_recipe(&dir, "nano", "present");
     let mut t = FakeTarget::rocky9();
     t.snapshot_listing = Some(format!(
-        "{snap}/baseos-cafebabef00d\n{snap}/baseos-cafebabef00d/repodata\n{snap}/baseos-cafebabef00d/repodata/repomd.xml\n{snap}/baseos-cafebabef00d/mirrorlist\n{snap}/baseos-extra-abc\n{snap}/baseos-extra-abc/repodata\n",
+        "{snap}/baseos-cafebabecafebabe\n{snap}/baseos-cafebabecafebabe/repodata\n{snap}/baseos-cafebabecafebabe/repodata/repomd.xml\n{snap}/baseos-cafebabecafebabe/mirrorlist\n{snap}/baseos-extra-abcdef0123456789\n{snap}/baseos-extra-abcdef0123456789/repodata\n",
         snap = FAKE_SNAP
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
@@ -685,7 +685,7 @@ fn r4_a03_stale_duplicate_dirs_rejected() {
     let recipe = pkg_recipe(&dir, "nano", "present");
     let mut t = FakeTarget::rocky9();
     t.snapshot_listing = Some(format!(
-        "{snap}/baseos-cafebabef00d\n{snap}/baseos-cafebabef00d/mirrorlist\n{snap}/baseos-deadbeef00d\n{snap}/baseos-deadbeef00d/mirrorlist\n",
+        "{snap}/baseos-cafebabecafebabe\n{snap}/baseos-cafebabecafebabe/mirrorlist\n{snap}/baseos-deadbeefdeadbeef\n{snap}/baseos-deadbeefdeadbeef/mirrorlist\n",
         snap = FAKE_SNAP
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
@@ -705,7 +705,7 @@ fn r4_a03_duplicate_directory_listing_rejected() {
     let recipe = pkg_recipe(&dir, "nano", "present");
     let mut t = FakeTarget::rocky9();
     t.snapshot_listing = Some(format!(
-        "{snap}/baseos-cafebabef00d\n{snap}/baseos-cafebabef00d\n{snap}/baseos-cafebabef00d/mirrorlist\n",
+        "{snap}/baseos-cafebabecafebabe\n{snap}/baseos-cafebabecafebabe\n{snap}/baseos-cafebabecafebabe/mirrorlist\n",
         snap = FAKE_SNAP
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
@@ -1019,14 +1019,17 @@ fn r4_argv_boundaries_hold_for_payload_and_paths() {
     let r = run_recipe_fake(&recipe, Mode::Apply, false, FakeTarget::rocky9());
     assert_success(&r);
     for curl in commands_with(&r, "/usr/bin/curl") {
-        // -fsSL -o <dest> <url>: the URL is the final, single argv element.
-        assert_eq!(curl.args.len(), 4);
-        assert_eq!(curl.args[0], "-fsSL");
-        assert_eq!(curl.args[1], "-o");
-        assert!(curl.args[2].starts_with(FAKE_SNAP));
-        assert!(curl.args[3].starts_with("https://"));
-        assert!(!curl.args[3].contains('\n'));
-        assert!(!curl.args[3].starts_with('-'));
+        // -g -fsSL -o <dest> <url>: URL globbing is disabled (-g) so one
+        // validated URL is exactly one request, and the URL is the final,
+        // single argv element.
+        assert_eq!(curl.args.len(), 5);
+        assert_eq!(curl.args[0], "-g");
+        assert_eq!(curl.args[1], "-fsSL");
+        assert_eq!(curl.args[2], "-o");
+        assert!(curl.args[3].starts_with(FAKE_SNAP));
+        assert!(curl.args[4].starts_with("https://"));
+        assert!(!curl.args[4].contains('\n'));
+        assert!(!curl.args[4].starts_with('-'));
     }
     for mkdir in commands_with(&r, "/usr/bin/mkdir") {
         assert!(mkdir.args.iter().all(|a| a == "-p" || !a.starts_with('-')));
