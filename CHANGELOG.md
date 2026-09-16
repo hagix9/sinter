@@ -2,6 +2,65 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [0.2.0] - 2026-09-16
+
+Second release of Sinter: RHEL-family platform support while preserving the
+v0.1 contract on Ubuntu.
+
+### Added
+
+- RHEL-family platform detection from `/etc/os-release`.
+- Rocky Linux 9 x86_64 support (`dnf` package backend, `systemd`).
+- DNF package observation, install, and removal through the same
+  platform-neutral `type: package` recipe contract; the backend (`apt` or
+  `dnf`) is selected from the detected platform.
+
+### Changed / improved
+
+- Package installation on RHEL-family targets runs through a private snapshot
+  of the DNF metadata cache: cache-only metadata validation and transaction
+  resolution, validated RPM payload prefetch, then the final cache-only `dnf`
+  mutation.
+- DNF output is parsed under strict per-command grammars compatible with
+  native DNF 4.14 streams, including real `repolist -v` preambles, benign
+  informational stderr lines, and `--assumeno` transaction trailers.
+
+### Security and safety
+
+- DNF output parsing fails closed on malformed, ambiguous, or unexpected
+  output.
+- The private metadata snapshot is created with 0700 permissions and removed
+  after the operation, including on failure.
+- Mutation, cleanup, and verification outcomes are reported truthfully,
+  including failure-after-mutation.
+- Sensitive and derived-sensitive values remain redacted in output,
+  diagnostics, and errors.
+- Ubuntu 24.04 LTS behavior is unchanged.
+
+### Supported environment
+
+- Ubuntu 24.04 LTS amd64 — apt, systemd, OpenSSH, `/bin/sh`, passwordless
+  `sudo -n` when privilege escalation is required (existing target).
+- Rocky Linux 9 x86_64 — dnf, systemd, OpenSSH, `/bin/sh`, passwordless
+  `sudo -n` when privilege escalation is required (new in v0.2.0).
+
+Rocky Linux 9 acceptance reference: Rocky Linux 9.8 x86_64, DNF 4.14.0.
+Other Rocky 9 minor releases share the same interfaces; 9.8 is the verified
+reference.
+
+### Validation
+
+- Rocky Linux 9.8 x86_64 final acceptance: real SSH, `sudo -n`, package
+  install/remove/idempotency, file/service/command resources, sensitive-output
+  redaction, and failure-truth verification against DNF 4.14.0.
+- Automated test suite green; fmt/clippy/diff-check clean.
+
+### Known limitations
+
+- No inventory, roles, plugins, orchestration, or embedded scripting.
+- Hashed `known_hosts` entries are not supported.
+- Managed hosts require no Sinter agent or runtime.
+
 ## [0.1.0] - 2026-09-13
 
 First public release of Sinter.

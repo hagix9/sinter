@@ -59,10 +59,11 @@ sinter plan --host server.example.com recipe.yaml
 sinter apply --host server.example.com --sudo recipe.yaml
 ```
 
-This repository implements **Sinter v0.1** as specified by `GOALS.md` and
-`DESIGN.md`, which are the authoritative specification. The implementation does
-not add features beyond v0.1 scope: no roles, plugins, inventory, orchestration,
-or embedded scripting.
+This repository implements **Sinter v0.2** as specified by `GOALS.md` and
+`DESIGN.md`, which are the authoritative specification; v0.2 extends the v0.1
+contract with RHEL-family platform support (Rocky Linux 9, `dnf`). The
+implementation still adds no features beyond that scope: no roles, plugins,
+inventory, orchestration, or embedded scripting.
 
 ## Build
 
@@ -108,7 +109,7 @@ desired state, ChangeSets, and execution behavior.
 
 Top-level fields: `version`, `vars`, `include`, `resources`, `handlers`.
 
-Resource types in v0.1: `file`, `directory`, `template`, `link`, `command`,
+Resource types in v0.2: `file`, `directory`, `template`, `link`, `command`,
 `package`, `service`. Handlers are delayed `restart`/`reload` service actions.
 
 A minimal recipe:
@@ -164,14 +165,28 @@ handlers:
 - Failed, indeterminate, verification-failure, and possible-change outcomes are
   reported truthfully.
 
-## Reference environment
+## Supported platforms
 
-The mandatory integration target is Ubuntu 24.04 LTS amd64 with systemd,
-apt, OpenSSH server, `/bin/sh`, and passwordless `sudo -n`. The controller
-reference environments are macOS, Ubuntu 24.04 LTS, and other environments where
-the binary builds.
+Managed targets:
 
-RHEL-family distributions are outside the v0.1 support scope.
+| Platform | Architecture | Package backend | Status |
+|----------|--------------|-----------------|--------|
+| Ubuntu 24.04 LTS | amd64 | apt | Supported |
+| Rocky Linux 9 | x86_64 | dnf | Supported |
+
+Package recipes are platform-neutral: the same `type: package` / `state:
+present` resource is handled by `apt` on Ubuntu and `dnf` on RHEL-family
+targets, selected from the detected `/etc/os-release` identity.
+
+The Rocky Linux 9 acceptance reference is Rocky Linux 9.8 x86_64 with DNF
+4.14.0 — verified for package install/remove/idempotency, file, service, and
+command resources over real SSH with `sudo -n`. Other Rocky 9 minor releases
+share the same interfaces; 9.8 is the verified reference.
+
+All managed targets require systemd, an OpenSSH server, `/bin/sh`, and
+passwordless `sudo -n` when privilege escalation is required. The controller
+reference environments are macOS, Ubuntu 24.04 LTS, and other environments
+where the binary builds.
 
 ## Testing
 

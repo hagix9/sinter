@@ -61,9 +61,10 @@ sinter apply --host server.example.com --sudo recipe.yaml
 ```
 
 このリポジトリは、`GOALS.md`と`DESIGN.md`で定義された
-**Sinter v0.1**を実装しています。これら2ファイルがv0.1の正式な仕様です。
-v0.1の範囲を超えるroles、plugins、inventory、orchestration、
-embedded scriptingは実装対象に含めません。
+**Sinter v0.2**を実装しています。これら2ファイルが正式な仕様であり、
+v0.2はv0.1のcontractにRHEL系platform対応（Rocky Linux 9、`dnf`）を
+追加しています。roles、plugins、inventory、orchestration、
+embedded scriptingは依然として実装対象に含めません。
 
 ## ビルド
 
@@ -109,7 +110,7 @@ desired state、ChangeSet、実行動作が同等になります。
 トップレベルのフィールドは`version`、`vars`、`include`、`resources`、
 `handlers`です。
 
-v0.1のresource typeは`file`、`directory`、`template`、`link`、
+v0.2のresource typeは`file`、`directory`、`template`、`link`、
 `command`、`package`、`service`です。
 handlerは遅延実行されるserviceの`restart` / `reload`アクションです。
 
@@ -168,15 +169,29 @@ handlers:
 - failed、indeterminate、verification failure、possible-changeを
   実際の結果に沿って報告します。
 
-## リファレンス環境
+## サポートプラットフォーム
 
-必須のintegration targetは、Ubuntu 24.04 LTS amd64、systemd、apt、
-OpenSSH server、`/bin/sh`、必要に応じてpasswordless `sudo -n`です。
+managed target:
 
+| Platform | Architecture | Package backend | Status |
+|----------|--------------|-----------------|--------|
+| Ubuntu 24.04 LTS | amd64 | apt | Supported |
+| Rocky Linux 9 | x86_64 | dnf | Supported |
+
+package recipeはplatform-neutralです。同じ`type: package` / `state:
+present` resourceを、Ubuntuでは`apt`、RHEL系では`dnf`が処理します。
+backendは検出した`/etc/os-release`のidentityから選択されます。
+
+Rocky Linux 9のacceptance referenceは、Rocky Linux 9.8 x86_64 /
+DNF 4.14.0です。実SSHと`sudo -n`経由でpackageの
+install/remove/冪等性、file、service、command resourceを検証済みです。
+Rocky 9の他のminor releaseも同じinterfaceを共有しますが、
+検証済みreferenceは9.8です。
+
+すべてのmanaged targetには、systemd、OpenSSH server、`/bin/sh`、および
+権限昇格が必要な場合のpasswordless `sudo -n`が必要です。
 controllerのreference environmentはmacOS、Ubuntu 24.04 LTS、および
 バイナリをbuildできるその他の環境です。
-
-RHEL系ディストリビューションはv0.1のサポート範囲外です。
 
 ## テスト
 
