@@ -1,0 +1,53 @@
+/* Sinter docs — restrained product-documentation styling on top of Starlight. */
+
+:root {
+  --sl-color-accent-low: #2a1f14;
+  --sl-color-accent: #b0681f;
+  --sl-color-accent-high: #f3d9b8;
+  --sl-color-text-accent: #d68f3a;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #f7ead9;
+  --sl-color-accent: #9a5a17;
+  --sl-color-accent-high: #3d2c16;
+  --sl-color-text-accent: #8a4f10;
+}
+
+/* Slightly wider measure for parameter tables. The description column wraps;
+   other columns stay on one line for scanning. Tables scroll horizontally only
+   when the content column cannot fit them. */
+.sl-markdown-content table {
+  display: block;
+  overflow-x: auto;
+}
+.sl-markdown-content table th,
+.sl-markdown-content table td {
+  white-space: nowrap;
+}
+.sl-markdown-content table td:last-child {
+  white-space: normal;
+  min-width: 14rem;
+}
+
+/* Narrow tables (three columns or fewer, e.g. the platform matrix and exit
+   codes) wrap their cells so they fit small viewports instead of forcing
+   horizontal scroll. The first column keeps identifiers on one line. */
+.sl-markdown-content table:not(:has(td:nth-child(4), th:nth-child(4))) th,
+.sl-markdown-content table:not(:has(td:nth-child(4), th:nth-child(4))) td {
+  white-space: normal;
+}
+.sl-markdown-content table:not(:has(td:nth-child(4), th:nth-child(4))) th:first-child,
+.sl-markdown-content table:not(:has(td:nth-child(4), th:nth-child(4))) td:first-child {
+  white-space: nowrap;
+}
+.sl-markdown-content table:not(:has(td:nth-child(4), th:nth-child(4))) td:last-child {
+  min-width: 0;
+}
+
+/* Inline code in table cells may break anywhere so CJK text and long
+   identifiers (e.g. `registers.<name>`) wrap instead of clipping. */
+.sl-markdown-content table code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}

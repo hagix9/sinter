@@ -1,0 +1,77 @@
+{
+  "locale": "ja",
+  "resourceTypes": {
+    "file": {
+      "summary": "通常ファイルの内容とメタデータを管理する。",
+      "parameters": {
+        "path": "管理対象ファイルの絶対パス。",
+        "state": "present または absent。",
+        "content": "ファイルに書き込む文字列。source とは排他。",
+        "source": "path にコピーするコントローラ側のファイル。content とは排他。",
+        "owner": "ファイルの所有者名。",
+        "group": "ファイルのグループ名。",
+        "mode": "引用符付きの 4 桁 8 進数文字列（例 \"0644\"）。"
+      }
+    },
+    "directory": {
+      "summary": "ディレクトリを目的のメタデータで存在させる。",
+      "parameters": {
+        "path": "管理対象ディレクトリの絶対パス。",
+        "state": "present または absent。",
+        "owner": "ディレクトリの所有者名。",
+        "group": "ディレクトリのグループ名。",
+        "mode": "引用符付きの 4 桁 8 進数文字列（例 \"0755\"）。"
+      }
+    },
+    "link": {
+      "summary": "シンボリックリンクを管理する。",
+      "parameters": {
+        "path": "シンボリックリンクの絶対パス。",
+        "target": "リンク先。state が present の場合は必須。",
+        "state": "present または absent。"
+      }
+    },
+    "template": {
+      "summary": "コントローラ側のテンプレートをレンダリングして管理対象パスに配置する。",
+      "parameters": {
+        "path": "配置先の絶対パス。",
+        "source": "コントローラ側テンプレートのパス。レシピからの相対パスで解決される。",
+        "state": "present または absent。",
+        "vars": "template.<name> として参照できるテンプレートローカルな値。",
+        "owner": "ファイルの所有者名。",
+        "group": "ファイルのグループ名。",
+        "mode": "引用符付きの 4 桁 8 進数文字列。"
+      }
+    },
+    "command": {
+      "summary": "正確な argv と固定された環境ベースラインでターゲット上のプログラムを実行する。",
+      "parameters": {
+        "program": "実行ファイルの絶対パス。",
+        "args": "正確な argv。シェル評価は行われない。",
+        "cwd": "作業ディレクトリ。",
+        "env": "追加の環境変数。PATH、LANG、LC_ALL、HOME は予約済み。",
+        "timeout_seconds": "実行タイムアウト。",
+        "success_codes": "成功とみなす終了コード。",
+        "creates": "ガード: このパスが存在する場合は実行をスキップ。removes とは排他。",
+        "removes": "ガード: このパスが存在しない場合は実行をスキップ。creates とは排他。",
+        "changed_when": "result.<field> に対する式で、実行を changed とみなすかを決定する。",
+        "register": "構造化された結果を後続の式で参照するための名前。"
+      }
+    },
+    "package": {
+      "summary": "ターゲットのパッケージバックエンド（apt または dnf）でパッケージをインストール・削除する。",
+      "parameters": {
+        "name": "パッケージ名。",
+        "state": "present または absent。必須。"
+      }
+    },
+    "service": {
+      "summary": "systemd サービスの起動状態と有効化を管理する。",
+      "parameters": {
+        "name": "systemd ユニット名。",
+        "state": "running または stopped。",
+        "enabled": "ユニットを有効化するかどうか。state と enabled の少なくとも一方が必須。"
+      }
+    }
+  }
+}

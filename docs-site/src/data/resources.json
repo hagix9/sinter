@@ -1,0 +1,105 @@
+{
+  "version": "0.2.0",
+  "resourceTypes": [
+    {
+      "type": "file",
+      "summary": "Manage a regular file's content and metadata.",
+      "docPath": "reference/resources/file",
+      "parameters": [
+        { "name": "path", "required": true, "type": "string (absolute path)", "default": null, "description": "Absolute path of the managed file." },
+        { "name": "state", "required": false, "type": "string", "default": "present", "description": "present or absent." },
+        { "name": "content", "required": false, "type": "string", "default": null, "description": "Literal file content. Mutually exclusive with source." },
+        { "name": "source", "required": false, "type": "string", "default": null, "description": "Controller-side file copied to path. Mutually exclusive with content." },
+        { "name": "owner", "required": false, "type": "string", "default": null, "description": "File owner name." },
+        { "name": "group", "required": false, "type": "string", "default": null, "description": "File group name." },
+        { "name": "mode", "required": false, "type": "string", "default": null, "description": "Quoted four-digit octal string, e.g. \"0644\"." }
+      ],
+      "platforms": ["ubuntu", "rocky"],
+      "example": "resources:\n  - id: motd\n    type: file\n    with:\n      path: /etc/motd\n      content: \"managed by sinter\\n\"\n      mode: \"0644\"\n      owner: root\n      group: root"
+    },
+    {
+      "type": "directory",
+      "summary": "Ensure a directory exists with the desired metadata.",
+      "docPath": "reference/resources/directory",
+      "parameters": [
+        { "name": "path", "required": true, "type": "string (absolute path)", "default": null, "description": "Absolute path of the managed directory." },
+        { "name": "state", "required": false, "type": "string", "default": "present", "description": "present or absent." },
+        { "name": "owner", "required": false, "type": "string", "default": null, "description": "Directory owner name." },
+        { "name": "group", "required": false, "type": "string", "default": null, "description": "Directory group name." },
+        { "name": "mode", "required": false, "type": "string", "default": null, "description": "Quoted four-digit octal string, e.g. \"0755\"." }
+      ],
+      "platforms": ["ubuntu", "rocky"],
+      "example": "resources:\n  - id: appdir\n    type: directory\n    with:\n      path: /opt/myapp\n      mode: \"0755\"\n      owner: root\n      group: root"
+    },
+    {
+      "type": "link",
+      "summary": "Manage a symbolic link.",
+      "docPath": "reference/resources/link",
+      "parameters": [
+        { "name": "path", "required": true, "type": "string (absolute path)", "default": null, "description": "Absolute path of the symlink." },
+        { "name": "target", "required": true, "type": "string", "default": null, "description": "Symlink target. Required when state is present." },
+        { "name": "state", "required": false, "type": "string", "default": "present", "description": "present or absent." }
+      ],
+      "platforms": ["ubuntu", "rocky"],
+      "example": "resources:\n  - id: vimrc\n    type: link\n    with:\n      path: /etc/vim/vimrc.local\n      target: /opt/myapp/vimrc.local"
+    },
+    {
+      "type": "template",
+      "summary": "Render a controller-side template file to a managed path.",
+      "docPath": "reference/resources/template",
+      "parameters": [
+        { "name": "path", "required": true, "type": "string (absolute path)", "default": null, "description": "Absolute destination path." },
+        { "name": "source", "required": true, "type": "string", "default": null, "description": "Controller-side template path, resolved relative to the recipe." },
+        { "name": "state", "required": false, "type": "string", "default": "present", "description": "present or absent." },
+        { "name": "vars", "required": false, "type": "map", "default": null, "description": "Template-local values exposed as template.<name>." },
+        { "name": "owner", "required": false, "type": "string", "default": null, "description": "File owner name." },
+        { "name": "group", "required": false, "type": "string", "default": null, "description": "File group name." },
+        { "name": "mode", "required": false, "type": "string", "default": null, "description": "Quoted four-digit octal string." }
+      ],
+      "platforms": ["ubuntu", "rocky"],
+      "example": "resources:\n  - id: app_conf\n    type: template\n    with:\n      path: /etc/myapp/config.ini\n      source: templates/config.ini\n      mode: \"0640\"\n      vars:\n        listen_port: 8080"
+    },
+    {
+      "type": "command",
+      "summary": "Execute a program on the target with exact argv and a fixed environment baseline.",
+      "docPath": "reference/resources/command",
+      "parameters": [
+        { "name": "program", "required": true, "type": "string (absolute path)", "default": null, "description": "Absolute path of the executable." },
+        { "name": "args", "required": false, "type": "list of strings", "default": "[]", "description": "Exact argv; no shell evaluation." },
+        { "name": "cwd", "required": false, "type": "string (absolute path)", "default": null, "description": "Working directory." },
+        { "name": "env", "required": false, "type": "map of strings", "default": "{}", "description": "Extra environment variables. PATH, LANG, LC_ALL, HOME are reserved." },
+        { "name": "timeout_seconds", "required": false, "type": "integer 1..86400", "default": "300", "description": "Execution timeout." },
+        { "name": "success_codes", "required": false, "type": "list of integers 0..255", "default": "[0]", "description": "Exit codes treated as success." },
+        { "name": "creates", "required": false, "type": "string (absolute path)", "default": null, "description": "Guard: skip execution when this path exists. Mutually exclusive with removes." },
+        { "name": "removes", "required": false, "type": "string (absolute path)", "default": null, "description": "Guard: skip execution when this path does not exist. Mutually exclusive with creates." },
+        { "name": "changed_when", "required": false, "type": "string (expression)", "default": null, "description": "Expression over result.<field> deciding whether the run counts as changed." },
+        { "name": "register", "required": false, "type": "string (identifier)", "default": null, "description": "Name under which the structured result is stored for later expressions." }
+      ],
+      "platforms": ["ubuntu", "rocky"],
+      "example": "resources:\n  - id: update_index\n    type: command\n    with:\n      program: /usr/bin/touch\n      args: [\"/var/lib/myapp/indexed\"]\n      creates: /var/lib/myapp/indexed"
+    },
+    {
+      "type": "package",
+      "summary": "Install or remove a package via the target's package backend (apt or dnf).",
+      "docPath": "reference/resources/package",
+      "parameters": [
+        { "name": "name", "required": true, "type": "string", "default": null, "description": "Package name." },
+        { "name": "state", "required": true, "type": "string", "default": null, "description": "present or absent. Required." }
+      ],
+      "platforms": ["ubuntu", "rocky"],
+      "example": "resources:\n  - id: tree\n    type: package\n    with:\n      name: tree\n      state: present"
+    },
+    {
+      "type": "service",
+      "summary": "Manage a systemd service's run state and enablement.",
+      "docPath": "reference/resources/service",
+      "parameters": [
+        { "name": "name", "required": true, "type": "string", "default": null, "description": "systemd unit name." },
+        { "name": "state", "required": false, "type": "string", "default": null, "description": "running or stopped." },
+        { "name": "enabled", "required": false, "type": "boolean", "default": null, "description": "Whether the unit is enabled. At least one of state or enabled is required." }
+      ],
+      "platforms": ["ubuntu", "rocky"],
+      "example": "resources:\n  - id: sshd\n    type: service\n    with:\n      name: sshd\n      state: running\n      enabled: true"
+    }
+  ]
+}
