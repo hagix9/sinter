@@ -1448,10 +1448,11 @@ pub struct FakeTarget {
     /// hardening).
     pub snapshot_mode: String,
     /// Mode reported for the snapshot root by `stat -c %a` AFTER the
-    /// metadata cache copy, modeling a copy that widened the root away from
-    /// 0700 (snapshot-permission hardening). `None` keeps the copy honest:
-    /// `cp -a` of source contents into an existing directory does not change
-    /// the root's own mode.
+    /// metadata cache copy, modeling a root that is not 0700 once content
+    /// has been placed in it (snapshot-permission hardening). `None` keeps
+    /// the copy honest: the copy brings each child of the live cache root
+    /// into the existing directory and never makes the root itself a copy
+    /// target, so the root's own mode survives the copy unchanged (R4-A04).
     pub snapshot_mode_after_copy: Option<String>,
     /// When true, the snapshot-root `chmod 700` fails (permission hardening
     /// fail-closed tests).
@@ -1621,6 +1622,10 @@ impl FakeTarget {
 /// The private snapshot root the scripted target hands out via `mktemp`.
 const FAKE_SNAP: &str = "/var/tmp/sinter-dnf.fakesnap";
 
+/// The live DNF metadata cache root the scripted target copies a snapshot
+/// from (R4-A04).
+const LIVE_CACHE_ROOT: &str = "/var/cache/dnf";
+
 pub struct FakeExecutor {
     pub log: Vec<CommandRecord>,
     pub sudo: bool,
@@ -1689,11 +1694,16 @@ impl FakeExecutor {
             }
             "stat" => self.run_stat(&req.args),
             "cp" => {
-                // The metadata cache copy into the private snapshot root.
-                // The root's own mode is not changed by copying contents
-                // into an existing directory; an override models a copy that
-                // does widen it.
-                if req.args.iter().any(|a| a.starts_with(FAKE_SNAP)) {
+                // The metadata cache copy into the private snapshot root:
+                // `cp -a -- <child> <snap>/`, one child of the live cache root
+                // at a time. Copying children into the existing directory
+                // never rewrites the destination root's own mode (R4-A04), so
+                // an override is the only way a post-copy root is not 0700.
+                let is_snap_copy = req
+                    .args
+                    .iter()
+                    .any(|a| a.starts_with(FAKE_SNAP) || a.starts_with(LIVE_CACHE_ROOT));
+                if is_snap_copy {
                     self.snap_copied = true;
                 }
                 Self::exited(0, String::new(), String::new())
@@ -1865,8 +1875,24 @@ impl FakeExecutor {
     /// per-repo cache dirs (`<repoid>-<hash>`), repodata, and cached
     /// mirror lists for every modeled repo. An explicit listing override
     /// wins so tests can model ambiguous cache layouts.
+    ///
+    /// `find /var/cache/dnf -mindepth 1 -maxdepth 1 -print0` — lists the
+    /// live cache root's own entries (NUL-separated, hidden ones included),
+    /// which the snapshot copy copies one at a time (R4-A04).
     fn run_find(&mut self, args: &[String]) -> Output {
         let root = args.first().cloned().unwrap_or_default();
+        if root == LIVE_CACHE_ROOT {
+            // The live metadata cache: one directory per repository whose
+            // repodata is cached. A repo with no cached repodata has no
+            // directory here at all.
+            let mut out = String::new();
+            for r in &self.target.dnf_repos {
+                if r.repodata_cached {
+                    out.push_str(&format!("{}/{}-cafebabef00d\0", root, r.id));
+                }
+            }
+            return Self::exited(0, out, String::new());
+        }
         if let Some(listing) = self.target.snapshot_listing.clone() {
             return Self::exited(0, listing, String::new());
         }
@@ -1901,8 +1927,10 @@ impl FakeExecutor {
                     "injected snapshot stat failure".to_string(),
                 );
             }
-            // A copy that widened the root is reported by the post-copy
-            // verification; before the copy the mktemp/chmod mode applies.
+            // A root that is not 0700 after content was placed in it is
+            // reported by the post-copy verification; before the copy the
+            // mktemp/chmod mode applies. The copy itself cannot widen the
+            // root (R4-A04), so an override models some other cause.
             let mode = if self.snap_copied {
                 self.target
                     .snapshot_mode_after_copy

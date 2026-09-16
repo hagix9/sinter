@@ -180,11 +180,13 @@ fn dnf_observes_absent_and_installs() {
     // Every dnf invocation is cache-only or repo-disabled: no process can
     // fetch repository metadata.
     assert!(dnf.iter().all(|c| c.args.iter().any(|a| a == "-C")));
-    // Snapshot lifecycle: created, populated, listed, payload prefetched
-    // into the repo package dir, removed.
+    // Snapshot lifecycle: created, the live cache root enumerated (children
+    // only, so the private root's own 0700 metadata is never a copy target),
+    // populated, listed, payload prefetched into the repo package dir,
+    // removed (R4-A04).
     assert_eq!(commands_with(&r, "/usr/bin/mktemp").len(), 1);
     assert_eq!(commands_with(&r, "/usr/bin/cp").len(), 1);
-    assert_eq!(commands_with(&r, "/usr/bin/find").len(), 1);
+    assert_eq!(commands_with(&r, "/usr/bin/find").len(), 2);
     assert_eq!(commands_with(&r, "/usr/bin/mkdir").len(), 1);
     assert_eq!(commands_with(&r, "/usr/bin/curl").len(), 1);
     assert_eq!(commands_with(&r, "/usr/bin/rm").len(), 1);

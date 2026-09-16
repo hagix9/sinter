@@ -2361,6 +2361,106 @@ impl Engine {
         Ok(DnfSnapshot::Ready(snap.to_string()))
     }
 
+    /// The live DNF metadata cache Sinter snapshots with `cp -a`.
+    const LIVE_CACHE_ROOT: &'static str = "/var/cache/dnf";
+
+    /// Copy the live DNF metadata cache into the private snapshot root
+    /// (R4-A04). Only the *children* of the live cache root are copied.
+    /// `cp -a <root>/. <dst>/` copies the source root's own metadata onto the
+    /// destination as well, so a 0755 live cache root widens the private 0700
+    /// snapshot root *while secret content is being placed into it* — the
+    /// privacy invariant must hold for the whole copy, not only after it.
+    /// Copying each child of the root into the existing snapshot directory
+    /// creates new entries only and never makes the root itself a copy
+    /// target, so the mode and ownership enforced before the copy hold
+    /// throughout it.
+    ///
+    /// The children are enumerated with `find` — not a shell glob, which
+    /// would miss dotfile entries and re-interpret names — and every path is
+    /// a discrete argv element, so a cache entry name can never alter the
+    /// command structure.
+    fn copy_dnf_cache_into_snapshot(&mut self, snap: &str) -> Result<DnfSnapshot> {
+        // Enumerate the live cache root's own entries, hidden ones included.
+        // `-print0` keeps names with spaces or newlines discrete.
+        let mut req = ExecRequest::new("/usr/bin/find");
+        req.args = vec![
+            Self::LIVE_CACHE_ROOT.to_string(),
+            "-mindepth".to_string(),
+            "1".to_string(),
+            "-maxdepth".to_string(),
+            "1".to_string(),
+            "-print0".to_string(),
+        ];
+        req.env = baseline_env(self.fs.home_env());
+        let list_out = self.snap_exec(
+            snap,
+            &req,
+            "metadata cache enumeration",
+            "dnf_snapshot_dispatch_fail",
+        )?;
+        let children: Vec<String> = match list_out.completion {
+            Completion::Exited(0) => String::from_utf8_lossy(&list_out.stdout)
+                .split('\0')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect(),
+            Completion::Indeterminate { reason, .. } => {
+                return self.dnf_snapshot_blocked(
+                    snap,
+                    format!("metadata cache enumeration did not complete: {}", reason),
+                    true,
+                );
+            }
+            _ => {
+                return self.dnf_snapshot_blocked(
+                    snap,
+                    "cannot enumerate the metadata cache".to_string(),
+                    false,
+                );
+            }
+        };
+        // Each child is copied into the existing snapshot root: `-a` keeps
+        // each child's own metadata, and the root's metadata is never
+        // rewritten because the root is neither the source nor the
+        // destination of any copy.
+        for child in &children {
+            let mut req = ExecRequest::new("/usr/bin/cp");
+            req.args = vec![
+                "-a".to_string(),
+                "--".to_string(),
+                child.clone(),
+                format!("{}/", snap),
+            ];
+            req.env = baseline_env(self.fs.home_env());
+            match self
+                .snap_exec(
+                    snap,
+                    &req,
+                    "metadata cache copy",
+                    "dnf_snapshot_dispatch_fail",
+                )?
+                .completion
+            {
+                Completion::Exited(0) => {}
+                Completion::Indeterminate { reason, .. } => {
+                    return self.dnf_snapshot_blocked(
+                        snap,
+                        format!("metadata snapshot copy did not complete: {}", reason),
+                        true,
+                    );
+                }
+                _ => {
+                    return self.dnf_snapshot_blocked(
+                        snap,
+                        "cannot snapshot the metadata cache".to_string(),
+                        false,
+                    );
+                }
+            }
+        }
+        Ok(DnfSnapshot::Ready(snap.to_string()))
+    }
+
     /// Prepare a private snapshot of the dnf metadata cache and prove that
     /// it is locally complete for the install — every enabled repository's
     /// repodata usable offline, the resolved mirror list for repos that
@@ -2414,38 +2514,13 @@ impl Engine {
         }
         // 3. Copy the metadata cache into the snapshot. From here on every
         //    check — and the mutation — uses this private copy, never the
-        //    live system cache.
-        let mut req = ExecRequest::new("/usr/bin/cp");
-        req.args = vec![
-            "-a".to_string(),
-            "/var/cache/dnf/.".to_string(),
-            format!("{}/", snap),
-        ];
-        req.env = baseline_env(self.fs.home_env());
-        match self
-            .snap_exec(
-                &snap,
-                &req,
-                "metadata cache copy",
-                "dnf_snapshot_dispatch_fail",
-            )?
-            .completion
-        {
-            Completion::Exited(0) => {}
-            Completion::Indeterminate { reason, .. } => {
-                return self.dnf_snapshot_blocked(
-                    &snap,
-                    format!("metadata snapshot copy did not complete: {}", reason),
-                    true,
-                );
-            }
-            _ => {
-                return self.dnf_snapshot_blocked(
-                    &snap,
-                    "cannot snapshot the metadata cache".to_string(),
-                    false,
-                );
-            }
+        //    live system cache. Only the children of the live cache root are
+        //    copied, so the private root's own 0700 metadata is never a copy
+        //    target and the privacy invariant holds *during* the copy
+        //    (R4-A04); the post-copy verification below still proves it
+        //    independently.
+        if let blocked @ DnfSnapshot::Blocked(..) = self.copy_dnf_cache_into_snapshot(&snap)? {
+            return Ok(blocked);
         }
         // 3b. Re-verify the root after the copy: a snapshot whose
         //     permissions (or owner) cannot be established is not usable and
@@ -2582,17 +2657,15 @@ impl Engine {
         };
         // For every mirror-resolving enabled repository the snapshot must
         // hold the resolved mirror list — payload URLs are composed from
-        // it entirely offline. Cache dirs are named <repoid>-<hash>.
+        // it entirely offline. The mirror list must be in the repository's
+        // own cache directory, proved by identity rather than by a name
+        // prefix (R4-A03).
         for repoid in repos
             .iter()
             .filter(|(_, mirrors)| *mirrors)
             .map(|(id, _)| id)
         {
-            let want = format!("{}/{}-", snap, repoid);
-            let has_list = listing
-                .lines()
-                .any(|l| l.starts_with(&want) && l.ends_with("/mirrorlist"));
-            if !has_list {
+            if !listing_has_mirrorlist(&listing, &snap, repoid) {
                 return self.dnf_snapshot_blocked(
                     &snap,
                     format!("repository {} mirror list missing from snapshot", repoid),
@@ -2777,14 +2850,18 @@ impl Engine {
                     )
                 }
             };
-            // The repository's cache dir inside the snapshot. It must also be
-            // uniquely resolvable: several `<repoid>-<hash>` directories (an
-            // old hash plus a fresh one, or two repositories with a shared
-            // id prefix) would make the destination ambiguous.
-            let prefix = format!("{}/{}-", snap, row.repoid);
+            // The repository's cache dir inside the snapshot. It must be
+            // provably and uniquely resolvable (R2-04, R4-A03): the directory
+            // name must prove it belongs to this transaction's repository —
+            // not merely share an id prefix with it — and only one such
+            // directory may exist.
+            let prefix = format!("{}/", snap);
             let dirs: Vec<&str> = listing
                 .lines()
-                .filter(|l| l.starts_with(&prefix) && !l[prefix.len()..].contains('/'))
+                .filter_map(|l| {
+                    let name = l.strip_prefix(&prefix)?;
+                    is_repo_cache_dir(&row.repoid, name).then_some(name)
+                })
                 .collect();
             let repodir = match dirs.len() {
                 0 => {
@@ -2794,7 +2871,7 @@ impl Engine {
                         false,
                     )
                 }
-                1 => dirs[0].to_string(),
+                1 => format!("{}/{}", snap, dirs[0]),
                 n => {
                     return blocked(
                         self,
@@ -3582,12 +3659,15 @@ enum DnfSnapshot {
 /// block means the repo resolves through a mirror list whose cached copy
 /// the snapshot must contain.
 ///
-/// Fail closed (R2-03): a recognized field must have the exact
-/// `Repo-<name> : <value>` shape dnf prints. A prefix match with a
-/// malformed separator (e.g. `Repo-idNOT_A_FIELD: baseos`), an empty value,
-/// or any line that is not a `Repo-` field or a blank separator yields
-/// `None`: a partially understood repository set can never prove the
-/// snapshot is complete, so it is never guessed from.
+/// Fail closed (R2-03, R4-A01): a recognized field must have the exact
+/// `Repo-<name> : <value>` shape dnf prints, and each field must appear
+/// exactly once in its block. A prefix match with a malformed separator
+/// (e.g. `Repo-idNOT_A_FIELD: baseos`), an empty value, a duplicated field, a
+/// duplicated repository identity, or any line that is not a `Repo-` field or
+/// a blank separator yields `None`: a partially understood repository set can
+/// never prove the snapshot is complete, so it is never guessed from. One
+/// malformed block among several valid ones rejects the whole output — the
+/// repository set cannot be proven, so only some of it may never be trusted.
 ///
 /// A block is only a complete enabled-repository record when it shows both
 /// the identity (`Repo-id`) and the enabled state (`Repo-status`); seeing a
@@ -3597,10 +3677,14 @@ enum DnfSnapshot {
 /// `enabled` contradicts `repolist` semantics and is rejected as well.
 fn parse_dnf_enabled_repos(text: &str) -> Option<Vec<(String, bool)>> {
     let mut out: Vec<(String, bool)> = Vec::new();
-    // The block currently being read: whether a `Repo-id` opened it and
-    // whether its `Repo-status` line has been seen yet.
+    // Repository identities already seen: `repolist` lists each repository
+    // once, so a repeated identity is not an interpretable repository set.
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // The block currently being read: whether a `Repo-id` opened it, whether
+    // its `Repo-status` line has been seen, and which fields it showed.
     let mut open = false;
     let mut have_status = false;
+    let mut block_fields: Vec<&str> = Vec::new();
     for line in text.lines() {
         let t = line.trim();
         if t.is_empty() {
@@ -3608,6 +3692,7 @@ fn parse_dnf_enabled_repos(text: &str) -> Option<Vec<(String, bool)>> {
             if open && !have_status {
                 return None;
             }
+            block_fields.clear();
             continue;
         }
         if let Some(id) = repo_field_value(t, "Repo-id") {
@@ -3615,9 +3700,16 @@ fn parse_dnf_enabled_repos(text: &str) -> Option<Vec<(String, bool)>> {
             if open && !have_status {
                 return None;
             }
+            // A duplicate repository identity is not a repository set dnf
+            // prints, whatever the other fields say.
+            if !seen_ids.insert(id.to_string()) {
+                return None;
+            }
             out.push((id.to_string(), false));
             open = true;
             have_status = false;
+            block_fields.clear();
+            repo_field_once(&mut block_fields, "Repo-id");
         } else if t.starts_with("Repo-id") {
             // A prefix match that is not a well-formed Repo-id field
             // (e.g. `Repo-idNOT_A_FIELD: baseos`) is unrecognized structure.
@@ -3628,22 +3720,32 @@ fn parse_dnf_enabled_repos(text: &str) -> Option<Vec<(String, bool)>> {
             if !open || status != "enabled" {
                 return None;
             }
+            // A repeated status is malformed output even when it agrees; a
+            // contradictory one was rejected by the check above.
+            if !repo_field_once(&mut block_fields, "Repo-status") {
+                return None;
+            }
             have_status = true;
         } else if t.starts_with("Repo-status") {
             return None;
         } else if repo_field_value(t, "Repo-mirrors").is_some() {
             // A repo that resolves through a mirror list.
+            if !open || !repo_field_once(&mut block_fields, "Repo-mirrors") {
+                return None;
+            }
             let last = out.last_mut()?;
             last.1 = true;
         } else if t.starts_with("Repo-mirrors") {
             return None;
-        } else if t.starts_with("Repo-") {
-            // Any other dnf repository field; it must still carry the
-            // standard `name : value` separator, otherwise the output is not
-            // the format this parser understands.
-            if !t.contains(':') {
+        } else if let Some((name, _value)) = split_repo_field(t) {
+            // Any other dnf repository field; it must still be a well-formed
+            // field that appears once in its block.
+            if !open || !repo_field_once(&mut block_fields, name) {
                 return None;
             }
+        } else if t.starts_with("Repo-") {
+            // A `Repo-` line without the `name : value` shape dnf prints.
+            return None;
         } else {
             // Unrecognized line structure.
             return None;
@@ -3661,57 +3763,330 @@ fn parse_dnf_enabled_repos(text: &str) -> Option<Vec<(String, bool)>> {
     }
 }
 
-/// Extract the value of a `Repo-<field> ... : <value>` line. After the field
-/// name only alignment whitespace and then the field terminator `:` may
-/// appear; anything else (a prefix match running into other characters, an
-/// empty value) means the line is not the dnf field it looks like.
-fn repo_field_value<'a>(line: &'a str, field: &str) -> Option<&'a str> {
-    let rest = line.strip_prefix(field)?;
-    let value = rest.trim_start().strip_prefix(':')?.trim();
+/// Split a well-formed `Repo-<name> ... : <value>` line into its field name
+/// and value (R2-03, R4-A01). dnf prints each field name left-justified in a
+/// fixed-width column followed by ` : ` and the value. A line that is not
+/// exactly that shape — a field name run into other characters
+/// (`Repo-idNOT_A_FIELD: baseos`), an empty value, or a missing separator —
+/// is not a field dnf prints and yields `None`.
+fn split_repo_field(t: &str) -> Option<(&str, &str)> {
+    let (name, value) = t.split_once(':')?;
+    let name = name.trim();
+    if !name.starts_with("Repo-") || name.len() <= "Repo-".len() {
+        return None;
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    let value = value.trim();
     if value.is_empty() {
         return None;
     }
-    Some(value)
+    Some((name, value))
+}
+
+/// Extract the value of a `Repo-<field> ... : <value>` line. The field name
+/// must match exactly: a prefix that runs into other characters
+/// (`Repo-idNOT_A_FIELD: baseos`) is not the field it resembles.
+fn repo_field_value<'a>(line: &'a str, field: &str) -> Option<&'a str> {
+    let (name, value) = split_repo_field(line)?;
+    if name == field {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+/// Record a field name seen once in the current repository block, rejecting a
+/// repeat: dnf prints every field exactly once, so a duplicated field is
+/// malformed output even when the two values agree.
+fn repo_field_once<'a>(block_fields: &mut Vec<&'a str>, name: &'a str) -> bool {
+    if block_fields.contains(&name) {
+        return false;
+    }
+    block_fields.push(name);
+    true
+}
+
+/// Whether a snapshot cache directory name is exactly the directory DNF
+/// keeps for repository `repoid` (R4-A03). librepo names a repository's
+/// metadata cache `<repo-id>-<hash>`, where the hash is a hexadecimal digest
+/// derived from the repository configuration. A repository id may itself
+/// contain '-' but the hash never does, so the identity a directory name
+/// proves is exactly the text before its *last* '-' — provided the text after
+/// it is a non-empty hexadecimal hash. That boundary is unambiguous, so a
+/// directory either proves it belongs to `repoid` or proves it does not:
+/// `baseos-extra-abc` proves repository `baseos-extra`, never `baseos`.
+fn is_repo_cache_dir(repoid: &str, name: &str) -> bool {
+    let Some((id, hash)) = name.rsplit_once('-') else {
+        return false;
+    };
+    !id.is_empty()
+        && !hash.is_empty()
+        && hash.bytes().all(|b| b.is_ascii_hexdigit())
+        && id == repoid
+}
+
+/// Whether the snapshot listing shows the cached mirror list for repository
+/// `repoid` (R4-A03). The line must be exactly `<snap>/<repoid>-<hash>/
+/// mirrorlist`, where the directory name proves it belongs to `repoid` — a
+/// directory that merely shares an id prefix is not this repository's.
+fn listing_has_mirrorlist(listing: &str, snap: &str, repoid: &str) -> bool {
+    let prefix = format!("{}/", snap);
+    listing.lines().any(|l| {
+        let Some(rest) = l.strip_prefix(&prefix) else {
+            return false;
+        };
+        let Some(dirname) = rest.strip_suffix("/mirrorlist") else {
+            return false;
+        };
+        is_repo_cache_dir(repoid, dirname)
+    })
 }
 
 /// Classify a resolved payload location as a URL this tool can actually and
-/// safely fetch (R2-03-C). The location is handed to a non-interactive
+/// safely fetch (R2-03-C, R4-A02). The location is handed to a non-interactive
 /// downloader as one argv element, so a value that is not a well-formed
-/// absolute http(s) URL must never be treated as a payload location:
-/// relative paths, scheme-less strings, unsupported schemes, and host-less
-/// URLs are all rejected rather than passed to the downloader. The value is
+/// absolute http(s) URL must never be treated as a payload location. The URL
+/// grammar is checked structurally, component by component, rather than by
+/// prefix matching: relative paths, scheme-less strings, unsupported schemes,
+/// host-less URLs, malformed authorities, malformed IPv6 literals and invalid
+/// ports are all rejected rather than passed to the downloader. The value is
 /// never echoed in the returned reason: location text is repository data.
 fn validate_payload_url(url: &str) -> std::result::Result<(), &'static str> {
     if url.is_empty() {
         return Err("empty payload location");
     }
-    // A whitespace or control character in a URL can only come from a
-    // malformed or hostile repository record.
+    // Whitespace or a control character anywhere in a URL can only come from
+    // a malformed or hostile repository record. This is checked before any
+    // parsing because a URL parser may silently discard such characters
+    // instead of rejecting the URL, which would make the value ambiguous.
     if url
-        .chars()
-        .any(|c| c.is_whitespace() || (c.is_control() && c != '\t'))
+        .bytes()
+        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
     {
         return Err("payload location contains whitespace");
+    }
+    // Only the RFC 3986 URL character set may appear; a character outside it
+    // (a backslash, a quote, an angle bracket, non-ASCII) makes the value
+    // something a URL parser could interpret in more than one way.
+    if !url.chars().all(is_url_char) {
+        return Err("payload location is not a URL");
     }
     let (scheme, rest) = url
         .split_once("://")
         .ok_or("payload location is not a URL")?;
+    if scheme.is_empty() {
+        return Err("payload location is not a URL");
+    }
     if scheme != "http" && scheme != "https" {
         return Err("payload location uses an unsupported scheme");
     }
-    // An absolute URL must name a host: `https:/path` is host-less.
-    if rest.is_empty() || rest.starts_with('/') {
+    // The authority component ends at the first '/', '?' or '#'.
+    let (authority, after) = match rest.find(['/', '?', '#']) {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    if authority.is_empty() {
         return Err("payload location has no host");
     }
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if host.is_empty() {
-        return Err("payload location has no host");
+    // `userinfo@host:port`; only the last '@' can separate them.
+    let host_port = match authority.rsplit_once('@') {
+        Some((userinfo, host)) => {
+            if userinfo.is_empty() || !userinfo.chars().all(is_url_userinfo_char) {
+                return Err("payload location has a malformed authority");
+            }
+            host
+        }
+        None => authority,
+    };
+    // The port, if any, and the host it belongs to. A bracketed host is an
+    // IPv6 literal; any other host is a registered name (which also covers
+    // IPv4 literals). The two forms are never mixed.
+    let port: Option<&str> = if let Some(inner) = host_port.strip_prefix('[') {
+        let Some(end) = inner.find(']') else {
+            return Err("payload location has a malformed host");
+        };
+        let (ipv6, tail) = (&inner[..end], &inner[end + 1..]);
+        if !is_ipv6_address(ipv6) {
+            return Err("payload location has a malformed host");
+        }
+        match tail.strip_prefix(':') {
+            Some(p) => Some(p),
+            None if tail.is_empty() => None,
+            None => return Err("payload location has a malformed host"),
+        }
+    } else {
+        match host_port.rsplit_once(':') {
+            Some((host, port)) => {
+                if host.is_empty() || !host.chars().all(is_url_reg_name_char) {
+                    return Err("payload location has a malformed host");
+                }
+                Some(port)
+            }
+            None => {
+                // An empty host (`user@/path`) names no host at all.
+                if host_port.is_empty() || !host_port.chars().all(is_url_reg_name_char) {
+                    return Err("payload location has a malformed host");
+                }
+                None
+            }
+        }
+    };
+    // A port is a plain decimal number in the valid TCP port range.
+    if let Some(port) = port {
+        let in_range = |n: u32| (1..=65535).contains(&n);
+        if port.is_empty()
+            || !port.bytes().all(|b| b.is_ascii_digit())
+            || !port.parse::<u32>().map(in_range).unwrap_or(false)
+        {
+            return Err("payload location has a malformed port");
+        }
     }
-    // There must be a path after the host to fetch from.
-    if !rest.contains('/') {
-        return Err("payload location has no path");
+    // There must be an absolute path to fetch from: a URL whose authority is
+    // followed by a query or fragment alone names no resource, and a
+    // scheme-relative string is not a location.
+    let path = match after {
+        s if s.starts_with('/') => s,
+        _ => return Err("payload location has no path"),
+    };
+    // The final path segment names the payload; an empty one (a trailing
+    // slash) names a directory rather than a package.
+    if path.rsplit('/').next().unwrap_or("").is_empty() {
+        return Err("payload location has no payload name");
     }
     Ok(())
+}
+
+/// Whether a character may appear in a URL this tool fetches (RFC 3986):
+/// unreserved characters, sub-delimiters, gen-delimiters and the percent
+/// sigil.
+fn is_url_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '-' | '.'
+                | '_'
+                | '~'
+                | '!'
+                | '$'
+                | '&'
+                | '\''
+                | '('
+                | ')'
+                | '*'
+                | '+'
+                | ','
+                | ';'
+                | '='
+                | ':'
+                | '/'
+                | '?'
+                | '#'
+                | '['
+                | ']'
+                | '@'
+                | '%'
+        )
+}
+
+/// Whether a character may appear in the userinfo component of a URL
+/// (RFC 3986): unreserved characters, sub-delimiters, percent-encodings and
+/// the colon that separates a user from a password.
+fn is_url_userinfo_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '-' | '.' | '_' | '~' | '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ',' | ';'
+        )
+        || matches!(c, ':' | '%')
+}
+
+/// Whether a character may appear in a registered host name (RFC 3986):
+/// unreserved characters, sub-delimiters and percent-encodings. IPv4 literals
+/// are covered by this set as well.
+fn is_url_reg_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '-' | '.'
+                | '_'
+                | '~'
+                | '!'
+                | '$'
+                | '&'
+                | '\''
+                | '('
+                | ')'
+                | '*'
+                | '+'
+                | ','
+                | ';'
+                | '='
+        )
+        || c == '%'
+}
+
+/// Whether a text is a valid IPv6 address (RFC 4291): up to eight groups of
+/// one to four hexadecimal digits separated by ':', at most one '::'
+/// compression, optionally ending in an embedded IPv4 address (which occupies
+/// the final two groups). Anything else — too many groups, a group wider than
+/// four digits, a second compression, a stray empty group, an embedded IPv4
+/// anywhere but last — is not an address and fails closed.
+fn is_ipv6_address(t: &str) -> bool {
+    if t.is_empty() || t.matches("::").count() > 1 {
+        return false;
+    }
+    match t.split_once("::") {
+        Some((left, right)) => {
+            matches!(
+                (ipv6_half_groups(left, false), ipv6_half_groups(right, true)),
+                (Some(l), Some(r)) if l + r <= 7
+            )
+        }
+        None => ipv6_half_groups(t, true) == Some(8),
+    }
+}
+
+/// The number of groups in one half of an IPv6 text. An empty half holds zero
+/// groups. `ipv4_last` allows the final group of the half to be an embedded
+/// IPv4 address, which counts as two groups; it is only valid there.
+fn ipv6_half_groups(half: &str, ipv4_last: bool) -> Option<usize> {
+    if half.is_empty() {
+        return Some(0);
+    }
+    let parts: Vec<&str> = half.split(':').collect();
+    let mut groups = 0;
+    for (i, part) in parts.iter().enumerate() {
+        let last = i + 1 == parts.len();
+        if part.is_empty() {
+            return None;
+        }
+        if last && ipv4_last && is_ipv4_address(part) {
+            groups += 2;
+        } else if part.len() <= 4 && part.bytes().all(|b| b.is_ascii_hexdigit()) {
+            groups += 1;
+        } else {
+            return None;
+        }
+    }
+    Some(groups)
+}
+
+/// Whether a text is a valid IPv4 address: four decimal octets, each at most
+/// 255.
+fn is_ipv4_address(t: &str) -> bool {
+    let parts: Vec<&str> = t.split('.').collect();
+    parts.len() == 4
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.len() <= 3
+                && p.bytes().all(|b| b.is_ascii_digit())
+                && p.parse::<u16>().map(|n| n <= 255).unwrap_or(false)
+        })
 }
 
 /// One package payload the install transaction will need, parsed from a
@@ -3793,10 +4168,14 @@ fn parse_dnf_row(t: &str) -> Option<DnfInstallRow> {
     })
 }
 
-/// Parse a Transaction Summary count line: `<Verb> <N> Package[s]`.
+/// Parse a Transaction Summary count line: exactly `<Verb> <N> Package[s]`
+/// (R4-A01). The verb must be one dnf prints, the count a plain decimal
+/// number, and the noun must agree with the count — dnf prints the singular
+/// `Package` only for a count of one. Any extra token is unrecognized
+/// structure and fails closed.
 fn parse_dnf_summary_line(t: &str) -> Option<(&'static str, usize)> {
     let f: Vec<&str> = t.split_whitespace().collect();
-    if f.len() < 3 {
+    if f.len() != 3 {
         return None;
     }
     let verb = match f[0] {
@@ -3807,10 +4186,81 @@ fn parse_dnf_summary_line(t: &str) -> Option<(&'static str, usize)> {
         "Remove" => "Remove",
         _ => return None,
     };
-    if f[2] != "Packages" && f[2] != "Package" {
+    // The count is a plain decimal number — a sign, a space or any other
+    // decoration is not a count dnf prints.
+    if f[1].is_empty() || !f[1].bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    Some((verb, f[1].parse::<usize>().ok()?))
+    let count = f[1].parse::<usize>().ok()?;
+    // The noun must agree with the count: dnf prints `Package` only for one.
+    let noun = if count == 1 { "Package" } else { "Packages" };
+    if f[2] != noun {
+        return None;
+    }
+    Some((verb, count))
+}
+
+/// A dnf size value: `<number> [<unit>]`, where the number is a plain decimal
+/// (a single optional decimal point) and the unit one dnf prints.
+fn is_dnf_size_value(t: &str) -> bool {
+    let f: Vec<&str> = t.split_whitespace().collect();
+    match f.len() {
+        1 => is_dnf_size_number(f[0]),
+        2 => is_dnf_size_number(f[0]) && is_dnf_size_unit(f[1]),
+        _ => false,
+    }
+}
+
+fn is_dnf_size_number(t: &str) -> bool {
+    !t.is_empty()
+        && t.matches('.').count() <= 1
+        && t.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+        && t.bytes().any(|b| b.is_ascii_digit())
+}
+
+fn is_dnf_size_unit(t: &str) -> bool {
+    matches!(
+        t,
+        "B" | "k"
+            | "M"
+            | "G"
+            | "T"
+            | "P"
+            | "E"
+            | "kB"
+            | "MB"
+            | "GB"
+            | "TB"
+            | "KiB"
+            | "MiB"
+            | "GiB"
+            | "TiB"
+    )
+}
+
+/// A line dnf prints after the Transaction Summary counts (R4-A01). Each is
+/// matched against its exact grammar; a line that merely resembles one —
+/// `Totally malformed` starting like `Total` — is unrecognized structure and
+/// fails closed instead of being tolerated as a prefix.
+fn is_known_trailing_line(t: &str) -> bool {
+    if t == "Operation aborted." {
+        return true;
+    }
+    for prefix in ["Total download size:", "Total size:", "Disk usage:"] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            return is_dnf_size_value(rest.trim());
+        }
+    }
+    // `Last metadata expiration check: <h:mm:ss> ago on <date>`.
+    if let Some(rest) = t.strip_prefix("Last metadata expiration check:") {
+        let f: Vec<&str> = rest.split_whitespace().collect();
+        return f.len() >= 4
+            && f[0].matches(':').count() == 2
+            && f[0].bytes().all(|b| b.is_ascii_digit() || b == b':')
+            && f[1] == "ago"
+            && f[2] == "on";
+    }
+    false
 }
 
 /// Parse a `dnf install --assumeno` transaction table into the exact
@@ -3894,15 +4344,16 @@ fn parse_dnf_install_set(text: &str) -> Option<Vec<DnfInstallRow>> {
             }
             summary_divider = true;
         } else if let Some((verb, n)) = parse_dnf_summary_line(t) {
+            // Each summary verb appears exactly once: a repeated verb is
+            // malformed output, whatever the two counts say.
+            if counts.iter().any(|(v, _)| *v == verb) {
+                return None;
+            }
             counts.push((verb, n));
         } else if is_divider(t) {
             continue;
-        } else if t.starts_with("Total")
-            || t.starts_with("Disk usage")
-            || t == "Operation aborted."
-            || t.starts_with("Last metadata expiration check")
-        {
-            // Known trailing lines dnf prints after the counts.
+        } else if is_known_trailing_line(t) {
+            // A known line dnf prints after the counts, matched exactly.
             continue;
         } else {
             // Unrecognized trailing structure.
