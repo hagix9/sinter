@@ -2,6 +2,8 @@
 
 **English** | [日本語](README.ja.md)
 
+**Documentation:** <https://hagix9.github.io/sinter/> ([日本語](https://hagix9.github.io/sinter/ja/))
+
 **Small enough to understand, strong enough to trust.**
 
 Sinter is a lightweight, agentless configuration-management tool inspired by Itamae.

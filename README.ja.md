@@ -2,6 +2,8 @@
 
 [English](README.md) | **日本語**
 
+**ドキュメント:** <https://hagix9.github.io/sinter/ja/> ([English](https://hagix9.github.io/sinter/))
+
 **Small enough to understand, strong enough to trust.**
 
 Sinterは、Itamaeに着想を得た軽量なエージェントレス構成管理ツールです。
