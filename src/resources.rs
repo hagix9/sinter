@@ -2603,7 +2603,11 @@ impl Engine {
                 // R2-03: a clean check must also be a complete one. Exit 0
                 // with unexpected stderr or a truncated capture cannot prove
                 // the snapshot usable.
-                if let Err(e) = self.dnf_output_guard(&check_out, "metadata completeness check") {
+                if let Err(e) = self.dnf_output_guard(
+                    &check_out,
+                    "metadata completeness check",
+                    &[DnfStderr::MetadataExpiration],
+                ) {
                     return self.dnf_snapshot_blocked(&snap, e.message, false);
                 }
             }
@@ -2647,7 +2651,11 @@ impl Engine {
                 // routes through the blocked path like every other snapshot
                 // defect: a bare `?` would leak the private snapshot (R2-05)
                 // and bypass the metadata-contract result.
-                if let Err(e) = self.dnf_output_guard(&repos_out, "repository enumeration") {
+                if let Err(e) = self.dnf_output_guard(
+                    &repos_out,
+                    "repository enumeration",
+                    &[DnfStderr::MetadataExpiration],
+                ) {
                     return self.dnf_snapshot_blocked(&snap, e.message, false);
                 }
                 match parse_dnf_enabled_repos(&String::from_utf8_lossy(&repos_out.stdout)) {
@@ -2741,12 +2749,21 @@ impl Engine {
         req.timeout_secs = 120;
         let dry_out = self.snap_exec(&snap, &req, "install set resolution", "")?;
         let rows = match dry_out.completion {
-            // Exit 1 = "Operation aborted" after a successful resolution;
+            // Exit 1 = "Operation aborted." after a successful resolution;
             // exit 0 = nothing to do. Anything else is a resolution error.
+            // The stderr contract follows the exit status (R5-F04): the
+            // CliError line is only ever expected after an aborted
+            // resolution — on an exit-0 stderr it contradicts the completion
+            // and is unexpected like any other line.
             Completion::Exited(0) | Completion::Exited(1) => {
+                let expected = match dry_out.completion {
+                    Completion::Exited(1) => &[DnfStderr::OperationAborted][..],
+                    _ => &[][..],
+                };
                 // R2-03: the transaction table must be complete and clean
                 // before it can be trusted as the exact payload set.
-                if let Err(e) = self.dnf_output_guard(&dry_out, "install set resolution") {
+                if let Err(e) = self.dnf_output_guard(&dry_out, "install set resolution", expected)
+                {
                     return self.dnf_snapshot_blocked(&snap, e.message, false);
                 }
                 match parse_dnf_install_set(&String::from_utf8_lossy(&dry_out.stdout)) {
@@ -2823,7 +2840,11 @@ impl Engine {
             Completion::Exited(0) => {
                 // R2-03: payload locations are only trustworthy when the
                 // whole answer was captured and no stderr was produced.
-                if let Err(e) = self.dnf_output_guard(&loc_out, "payload location resolution") {
+                if let Err(e) = self.dnf_output_guard(
+                    &loc_out,
+                    "payload location resolution",
+                    &[DnfStderr::MetadataExpiration],
+                ) {
                     return blocked(self, e.message, false);
                 }
                 let mut urls: Vec<String> = Vec::new();
@@ -3084,7 +3105,17 @@ impl Engine {
     /// nothing to stderr: truncated stdout/stderr means the table could be cut
     /// mid-structure, and unexpected stderr means dnf reported something this
     /// parser does not model. Both fail closed rather than guessing.
-    fn dnf_output_guard(&self, out: &Output, what: &str) -> Result<()> {
+    /// Guard one dnf command's captured output before it is trusted: a
+    /// truncated capture is never a complete answer, and stderr is matched
+    /// line-by-line against the command's own allowlist of native benign
+    /// lines (R5-F04). Real dnf 4 emits informational diagnostics on stderr
+    /// for some subcommands — `Last metadata expiration check:` for
+    /// `repoquery`/`repolist` (whose CLI redirects INFO to stderr) and
+    /// `Operation aborted.` for `--assumeno` (a `CliError` logged at ERROR).
+    /// Anything else on stderr — an unknown line, an extra line, a repeated
+    /// benign line, non-UTF-8 bytes — fails closed exactly as before. stderr
+    /// is never ignored wholesale.
+    fn dnf_output_guard(&self, out: &Output, what: &str, benign: &[DnfStderr]) -> Result<()> {
         if out.stdout_truncated {
             return Err(SinterError::apply(format!(
                 "{} output was incomplete (stdout truncated)",
@@ -3097,12 +3128,29 @@ impl Engine {
                 what
             )));
         }
-        if !out.stderr.is_empty() {
-            return Err(SinterError::apply(format!(
+        if out.stderr.is_empty() {
+            return Ok(());
+        }
+        let unexpected = || {
+            SinterError::apply(format!(
                 "{} produced unexpected stderr ({} bytes)",
                 what,
                 out.stderr.len()
-            )));
+            ))
+        };
+        // A byte stream that is not UTF-8 cannot be matched against the
+        // expected lines and is not a native informational message.
+        let Ok(text) = std::str::from_utf8(&out.stderr) else {
+            return Err(unexpected());
+        };
+        // Each native benign line may appear at most once: dnf emits each
+        // exactly once, so a repeat is not native output.
+        let mut seen = vec![false; benign.len()];
+        for line in text.lines() {
+            match benign.iter().position(|k| k.matches(line)) {
+                Some(i) if !seen[i] => seen[i] = true,
+                _ => return Err(unexpected()),
+            }
         }
         Ok(())
     }
@@ -3709,6 +3757,33 @@ enum DnfSnapshot {
     Blocked(String, bool),
 }
 
+/// A benign stderr line one dnf subcommand is known to print on a normal,
+/// successful run (R5-F04). The contract is per-command and each kind is
+/// matched by an exact grammar — never a prefix — so a line that merely
+/// resembles the expected one still fails closed.
+#[derive(Clone, Copy)]
+enum DnfStderr {
+    /// `Last metadata expiration check: <age> ago on <date>.` — logged at
+    /// INFO when the sack is loaded from cache (dnf/base.py `fill_sack`).
+    /// `repoquery` and `repolist` redirect INFO to stderr, so this line is
+    /// expected there for those commands (at most once).
+    MetadataExpiration,
+    /// `Operation aborted.` — an `--assumeno` install resolves the
+    /// transaction, prints the table, then aborts the prompt by raising
+    /// `CliError`, which `main` logs at ERROR level → stderr (at most once).
+    /// Expected only for the `install --assumeno` resolution step.
+    OperationAborted,
+}
+
+impl DnfStderr {
+    fn matches(&self, line: &str) -> bool {
+        match self {
+            Self::MetadataExpiration => is_metadata_expiration_line(line),
+            Self::OperationAborted => line == "Operation aborted.",
+        }
+    }
+}
+
 /// Parse `dnf repolist -v` output into `(repo id, resolves-via-mirrorlist)`
 /// pairs. Every `Repo-id` line begins a block for an enabled repository
 /// (`repolist` lists enabled repos only); a `Repo-mirrors` field inside a
@@ -3761,6 +3836,10 @@ fn parse_dnf_enabled_repos(text: &str) -> Option<Vec<(String, bool)>> {
     // least one real repository block.
     let mut complete = 0usize;
     let mut footer_seen = false;
+    // Preamble lines dnf prints before the first block — each at most once
+    // (R5-F04). The set keeps a preamble line from repeating or reappearing
+    // in preamble position after itself.
+    let mut preamble_fields: Vec<&str> = Vec::new();
     for line in text.lines() {
         let t = line.trim();
         if footer_seen {
@@ -3784,6 +3863,21 @@ fn parse_dnf_enabled_repos(text: &str) -> Option<Vec<(String, bool)>> {
                 block_fields.clear();
             }
             continue;
+        }
+        // Native preamble (R5-F04): before the first `Repo-id` opens a
+        // block, `repolist -v` prints `Loaded plugins:`, `DNF version:` and
+        // `cachedir:` lines — each matched by its own grammar and accepted
+        // at most once, in any order. Once a repository id has been seen a
+        // preamble-shaped line is unrecognized structure (the checks below
+        // reject it), so a preamble field inside or after a block still
+        // fails closed.
+        if seen_ids.is_empty() {
+            if let Some(kind) = repolist_preamble_line(t) {
+                if !repo_field_once(&mut preamble_fields, kind) {
+                    return None;
+                }
+                continue;
+            }
         }
         // The native footer ends the repository list and is matched exactly.
         if parse_repolist_footer(t).is_some() {
@@ -3939,6 +4033,136 @@ fn parse_repolist_footer(t: &str) -> Option<usize> {
         return None;
     }
     rest.parse::<usize>().ok()
+}
+
+/// A preamble line `dnf -C repolist -v` prints before the first repository
+/// block (R5-F04): `Loaded plugins: <names>` when plugins are enabled, and
+/// the `-v` debug lines `DNF version: <ver>` and `cachedir: <path>`
+/// (`dnf/cli/cli.py::_log_essentials`). Each is matched by its own grammar —
+/// an arbitrary banner or a field-shaped line that merely resembles one is
+/// not a preamble and yields `None`.
+fn repolist_preamble_line(t: &str) -> Option<&'static str> {
+    if let Some(rest) = t.strip_prefix("Loaded plugins:") {
+        return is_dnf_plugin_list(rest.trim()).then_some("Loaded plugins");
+    }
+    if let Some(rest) = t.strip_prefix("DNF version:") {
+        return is_dnf_version(rest.trim()).then_some("DNF version");
+    }
+    if let Some(rest) = t.strip_prefix("cachedir:") {
+        return is_dnf_cachedir(rest.trim()).then_some("cachedir");
+    }
+    None
+}
+
+/// The `Loaded plugins:` list: plugin names joined by `, `, each a Python
+/// attribute name (`[A-Za-z0-9_-]+` — e.g. `config-manager`,
+/// `generate_completion_cache`).
+fn is_dnf_plugin_list(t: &str) -> bool {
+    !t.is_empty()
+        && t.split(", ").all(|n| {
+            !n.is_empty()
+                && n.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        })
+}
+
+/// The `DNF version:` value: `dnf.const.VERSION`, a dotted number such as
+/// `4.14.0`.
+fn is_dnf_version(t: &str) -> bool {
+    !t.is_empty()
+        && t.split('.')
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The `cachedir:` value: an absolute path naming the metadata cache root.
+/// Restricted to the printable path alphabet dnf/installroot paths use; a
+/// path carrying whitespace or control bytes is not this line.
+fn is_dnf_cachedir(t: &str) -> bool {
+    t.len() > 1
+        && t.starts_with('/')
+        && t.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+' | b'=' | b'@')
+        })
+}
+
+/// The informational line dnf logs at INFO after loading repository
+/// metadata: `Last metadata expiration check: <age> ago on <date>.`
+/// (dnf/base.py `fill_sack`: `_("Last metadata expiration check: %s ago on
+/// %s.")` with a `datetime.timedelta` age and a `strftime("%c")` date). The
+/// grammar is exactly what dnf renders under the C locale this tool forces —
+/// anything merely resembling the line is not it.
+fn is_metadata_expiration_line(t: &str) -> bool {
+    let Some(rest) = t.strip_prefix("Last metadata expiration check: ") else {
+        return false;
+    };
+    let Some((age, date)) = rest.split_once(" ago on ") else {
+        return false;
+    };
+    is_dnf_timedelta_age(age) && is_dnf_ctime_date(date)
+}
+
+/// A `str(datetime.timedelta)` age: `H:MM:SS`, or `<N> day[s], H:MM:SS`.
+/// A negative timedelta always carries a day count (`-1 day, 23:59:59`),
+/// so a leading `-` is only valid in the day form.
+fn is_dnf_timedelta_age(t: &str) -> bool {
+    let f: Vec<&str> = t.split_whitespace().collect();
+    match f.len() {
+        1 => is_dnf_hms(f[0], false),
+        3 => {
+            let days = f[0].strip_prefix('-').unwrap_or(f[0]);
+            !days.is_empty()
+                && days.bytes().all(|b| b.is_ascii_digit())
+                && (f[1] == "day," || f[1] == "days,")
+                && is_dnf_hms(f[2], false)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `s` is exactly `w` decimal digits whose value is under `max`.
+fn is_bounded_digits(s: &str, w: usize, max: u32) -> bool {
+    s.len() == w && s.bytes().all(|b| b.is_ascii_digit()) && s.parse::<u32>().is_ok_and(|v| v < max)
+}
+
+/// An `H:MM:SS` duration (`padded=false`: the hour is not zero-padded and
+/// not bounded — timedelta renders `26:00:00` for a day-plus overflow only
+/// via the day form) or a strict `HH:MM:SS` clock time (`padded=true`:
+/// exactly two digits, hour < 24). Minutes and seconds are two digits < 60
+/// in both forms.
+fn is_dnf_hms(t: &str, padded: bool) -> bool {
+    let f: Vec<&str> = t.split(':').collect();
+    f.len() == 3
+        && (if padded {
+            is_bounded_digits(f[0], 2, 24)
+        } else {
+            !f[0].is_empty() && f[0].bytes().all(|b| b.is_ascii_digit())
+        })
+        && is_bounded_digits(f[1], 2, 60)
+        && is_bounded_digits(f[2], 2, 60)
+}
+
+/// A `strftime("%c")` date under the C locale plus the message's literal
+/// trailing dot: `Www Mmm D[D] HH:MM:SS YYYY.` — the day is `%e`
+/// (space-padded, so it splits to one or two digits), weekday and month are
+/// the C-locale abbreviations, the clock is strict `%H:%M:%S`, the year four
+/// digits.
+fn is_dnf_ctime_date(t: &str) -> bool {
+    let Some(t) = t.strip_suffix('.') else {
+        return false;
+    };
+    const DAYS: &[&str] = &["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    const MONTHS: &[&str] = &[
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let f: Vec<&str> = t.split_whitespace().collect();
+    f.len() == 5
+        && DAYS.contains(&f[0])
+        && MONTHS.contains(&f[1])
+        && (1..=2).contains(&f[2].len())
+        && f[2].bytes().all(|b| b.is_ascii_digit())
+        && is_dnf_hms(f[3], true)
+        && f[4].len() == 4
+        && f[4].bytes().all(|b| b.is_ascii_digit())
 }
 
 /// The indented `Updated` line dnf prints under `Repo-metalink` for an enabled
@@ -4252,9 +4476,16 @@ fn listing_has_mirrorlist(listing: &str, snap: &str, repoid: &str) -> bool {
 ///     basename changes the identity), and a malformed one (`%`, `%A`, `%GG`)
 ///     is not a location at all. RPM payload names never need encoding, so
 ///     rejecting `%` outright keeps the identity byte-exact;
-///   * the path has no empty segment and no `.`/`..` segment, and its final
-///     segment is a well-formed RPM payload name — the exact resource the
-///     transaction row expects, matched by basename without ambiguity.
+///   * the path has no `.`/`..` segment, and its final segment is a
+///     well-formed RPM payload name — the exact resource the transaction
+///     row expects, matched by basename without ambiguity. An empty
+///     segment (a doubled `/`) is *not* rejected: native
+///     `repoquery --location` output legitimately contains it because the
+///     mirror baseurl ends in `/` and dnf joins the package path with
+///     another `/` (e.g. the real Rocky 9 mirror
+///     `.../pub/rocky//9.8/BaseOS/...`, R5-F04). A doubled separator is
+///     requested byte-for-byte by the downloader and still resolves to one
+///     resource — unlike a dot segment, nothing reinterprets it.
 ///
 /// The value is never echoed in the returned reason: location text is
 /// repository data (R2-01).
@@ -4363,13 +4594,14 @@ fn validate_payload_url(url: &str) -> std::result::Result<(), &'static str> {
     if path.bytes().any(|b| matches!(b, b'[' | b']' | b'{' | b'}')) {
         return Err("payload location uses URL glob syntax");
     }
-    // Every path segment is a real component: no empty segment (a doubled
-    // separator) and no dot-segment, so the path is already normalized and the
-    // final segment is the resource the downloader requests.
+    // Dot segments are rejected: URL normalization would reinterpret them
+    // and the resource the downloader actually receives could differ from
+    // the path as written. An empty segment (a doubled `/`) is *not* a dot
+    // segment and is not normalized away by the downloader — curl requests
+    // the path literally — and native `repoquery --location` output
+    // produces it whenever the mirror baseurl ends in `/` (the real Rocky
+    // mirrors do: `.../pub/rocky//9.8/...`, R5-F04).
     for seg in path.split('/') {
-        if seg.is_empty() {
-            return Err("payload location has an empty path segment");
-        }
         if seg == "." || seg == ".." {
             return Err("payload location has a dot path segment");
         }
@@ -4577,6 +4809,32 @@ fn is_divider(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c == '=')
 }
 
+/// A `replacing` sub-line dnf appends to a transaction row when the new
+/// package obsoletes an installed one: `     replacing  <name>.<arch>
+/// <evr>` (dnf 4 `output.py`: `'     ' + _('replacing') + '  %s%s.%s %s'`).
+/// The named package is being removed by the transaction, not downloaded,
+/// so the line is only recognized — its fields are never consumed — but it
+/// must still have the exact native shape.
+fn is_dnf_replacing_line(t: &str) -> bool {
+    let Some(rest) = t.strip_prefix("replacing") else {
+        return false;
+    };
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    if f.len() != 2 {
+        return false;
+    }
+    // `<name>.<arch> <evr>`
+    let Some((n, a)) = f[0].rsplit_once('.') else {
+        return false;
+    };
+    valid_package_name(n)
+        && valid_package_arch(a)
+        && !f[1].is_empty()
+        && f[1].bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-' | b':' | b'~')
+        })
+}
+
 /// Parse one transaction-table row:
 /// `<name> <arch> <ver-rel> <repoid> <size> [unit]`. Every field is a value
 /// derived from dnf diagnostic output, so each is domain-validated before it
@@ -4702,24 +4960,20 @@ fn is_dnf_size_unit(t: &str) -> bool {
 /// `Totally malformed` starting like `Total` — is unrecognized structure and
 /// fails closed instead of being tolerated as a prefix.
 fn is_known_trailing_line(t: &str) -> bool {
-    if t == "Operation aborted." {
-        return true;
-    }
-    for prefix in ["Total download size:", "Total size:", "Disk usage:"] {
+    // `Operation aborted.` is *not* a stdout line: the `--assumeno` abort is
+    // a `CliError` dnf logs at ERROR → stderr (R5-F04). Its expected stream
+    // is the command's stderr contract, not this table.
+    for prefix in [
+        "Total download size:",
+        "Total size:",
+        "Disk usage:",
+        "Installed size:",
+    ] {
         if let Some(rest) = t.strip_prefix(prefix) {
             return is_dnf_size_value(rest.trim());
         }
     }
-    // `Last metadata expiration check: <h:mm:ss> ago on <date>`.
-    if let Some(rest) = t.strip_prefix("Last metadata expiration check:") {
-        let f: Vec<&str> = rest.split_whitespace().collect();
-        return f.len() >= 4
-            && f[0].matches(':').count() == 2
-            && f[0].bytes().all(|b| b.is_ascii_digit() || b == b':')
-            && f[1] == "ago"
-            && f[2] == "on";
-    }
-    false
+    is_metadata_expiration_line(t)
 }
 
 /// A line dnf prints before the transaction table (R4-F03). Anything dnf
@@ -4731,27 +4985,24 @@ fn is_known_preamble_line(t: &str) -> bool {
     if t == "Dependencies resolved." {
         return true;
     }
-    // `Last metadata expiration check: <h:mm:ss> ago on <date>`.
-    if let Some(rest) = t.strip_prefix("Last metadata expiration check:") {
-        let f: Vec<&str> = rest.split_whitespace().collect();
-        return f.len() >= 4
-            && f[0].matches(':').count() == 2
-            && f[0].bytes().all(|b| b.is_ascii_digit() || b == b':')
-            && f[1] == "ago"
-            && f[2] == "on";
-    }
-    false
+    is_metadata_expiration_line(t)
 }
 
-/// The transaction-table column header dnf prints
-/// (`pkg_attr_labels = (_('Package'), _('Arch'), _('Version'),
-/// _('Repository'), _('Size'))` in dnf 4 `output.py`), matched as an exact
+/// The transaction-table column header dnf prints, matched as an exact
 /// token sequence: a header that merely starts with `Package` and contains
 /// the column words (`PackageEVIL Arch Version Repository Size`) is not the
-/// header dnf prints (R4-F03).
+/// header dnf prints (R4-F03). The arch and repository labels are
+/// width-dependent in dnf 4 (`select_short_long` in `output.py`): a wide
+/// table prints `Architecture`/`Repository`, a narrow one `Arch`/`Repo` —
+/// both are native (R5-F04).
 fn is_transaction_header(t: &str) -> bool {
-    t.split_whitespace().collect::<Vec<&str>>().as_slice()
-        == ["Package", "Arch", "Version", "Repository", "Size"]
+    let f: Vec<&str> = t.split_whitespace().collect();
+    f.len() == 5
+        && f[0] == "Package"
+        && (f[1] == "Arch" || f[1] == "Architecture")
+        && f[2] == "Version"
+        && (f[3] == "Repo" || f[3] == "Repository")
+        && f[4] == "Size"
 }
 
 /// Parse a `dnf install --assumeno` transaction table into the exact
@@ -4829,6 +5080,15 @@ fn parse_dnf_install_set(text: &str) -> Option<Vec<DnfInstallRow>> {
             }
             if let Some(section) = DNF_TABLE_SECTIONS.iter().copied().find(|s| *s == t) {
                 current_section = Some(section);
+                continue;
+            }
+            // `     replacing  <name>.<arch> <evr>` is appended under a row
+            // when the transaction obsoletes an installed package
+            // (`output.py` `_add_line` obsoletes). It names a package being
+            // replaced — not a payload to fetch — so it is validated and
+            // skipped, never pushed into the transaction rows.
+            if is_dnf_replacing_line(t) {
+                current_section?;
                 continue;
             }
             // A payload row must sit under a recognized section header.
@@ -5469,10 +5729,19 @@ mod package_tests {
         assert!(validate_payload_url("https://mirror.example/baseos/Packages/").is_err());
         assert!(validate_payload_url("https://mirror.example/baseos/Packages/notrpm").is_err());
         assert!(validate_payload_url("https://mirror.example/baseos/Packages/.rpm").is_err());
-        // Dot-segments and empty segments are not a normalized path.
+        // Dot-segments are not a normalized path.
         assert!(validate_payload_url("https://mirror.example/./x.rpm").is_err());
         assert!(validate_payload_url("https://mirror.example/../x.rpm").is_err());
-        assert!(validate_payload_url("https://mirror.example//x.rpm").is_err());
+        // A doubled separator is native `repoquery --location` output — the
+        // mirror baseurl ends in `/` and the package path joins with another
+        // (the real Rocky 9 mirror serves `.../pub/rocky//9.8/...`, R5-F04).
+        // It is requested byte-for-byte and the basename still pins the
+        // payload identity.
+        assert!(validate_payload_url("https://mirror.example//x.rpm").is_ok());
+        assert!(validate_payload_url(
+            "https://mirror.example/pub/rocky//9.8/BaseOS/x86_64/os/Packages/n/nano-5.6.1-7.el9.x86_64.rpm"
+        )
+        .is_ok());
         // A URL that would be an option to the downloader.
         assert!(validate_payload_url("-g/x.rpm").is_err());
         // Positive: the shapes real mirrors use, including an explicit port,
@@ -5680,6 +5949,11 @@ mod package_tests {
         assert!(is_transaction_header(
             "Package Arch Version Repository Size"
         ));
+        // The wide layout native dnf prints when the columns allow the long
+        // labels (real Rocky 9.8 capture, R5-F04).
+        assert!(is_transaction_header(
+            " Package        Architecture     Version                 Repository        Size"
+        ));
         // A header whose first token merely starts with `Package`.
         assert!(!is_transaction_header(
             "PackageEVIL Arch Version Repository Size"
@@ -5690,11 +5964,83 @@ mod package_tests {
         assert!(!is_transaction_header("Package Arch Version Repository"));
         assert!(is_known_preamble_line("Dependencies resolved."));
         assert!(is_known_preamble_line(
-            "Last metadata expiration check: 0:12:34 ago on Tue 16 Sep 2026 04:00:00."
+            "Last metadata expiration check: 0:12:34 ago on Tue Sep 16 04:00:00 2026."
         ));
         // An error banner is not a preamble dnf prints before the table.
         assert!(!is_known_preamble_line("ERROR rpm database unavailable"));
         assert!(!is_known_preamble_line("some other noise"));
+    }
+
+    /// R5-F04: the `Last metadata expiration check:` line is matched by the
+    /// exact grammar dnf renders under the C locale — `timedelta ago on
+    /// strftime("%c")` plus the message's trailing dot. Anything merely
+    /// resembling it is not the native line.
+    #[test]
+    fn metadata_expiration_line_grammar_is_exact() {
+        // The real Rocky 9.8 / dnf 4.14.0 capture.
+        assert!(is_metadata_expiration_line(
+            "Last metadata expiration check: 1:35:13 ago on Wed Sep 16 10:28:01 2026."
+        ));
+        // A space-padded day (%e) and a day-count timedelta are native too.
+        assert!(is_metadata_expiration_line(
+            "Last metadata expiration check: 2 days, 3:04:05 ago on Tue Sep  1 05:55:47 2026."
+        ));
+        // The line alone, or with a different tail, is not the message.
+        assert!(!is_metadata_expiration_line(
+            "Last metadata expiration check:"
+        ));
+        assert!(!is_metadata_expiration_line(
+            "Last metadata expiration check: 0:30:00 ago"
+        ));
+        assert!(!is_metadata_expiration_line(
+            "Last metadata expiration check: soon ago on Wed Sep 16 10:28:01 2026."
+        ));
+        assert!(!is_metadata_expiration_line(
+            "Last metadata expiration check: 0:30:00 ago on yesterday."
+        ));
+        // A malformed clock is not a %c date.
+        assert!(!is_metadata_expiration_line(
+            "Last metadata expiration check: 0:30:00 ago on Wed Sep 16 25:28:01 2026."
+        ));
+        // Missing trailing dot — not the message dnf prints.
+        assert!(!is_metadata_expiration_line(
+            "Last metadata expiration check: 0:30:00 ago on Wed Sep 16 10:28:01 2026"
+        ));
+        // Trailing content after the native line.
+        assert!(!is_metadata_expiration_line(
+            "Last metadata expiration check: 0:30:00 ago on Wed Sep 16 10:28:01 2026. extra"
+        ));
+    }
+
+    /// R5-F04: the `repolist -v` preamble accepts exactly the three lines
+    /// native dnf prints before the first block, each by its own grammar.
+    #[test]
+    fn repolist_preamble_grammar_is_exact() {
+        // The real Rocky 9.8 capture.
+        assert_eq!(
+            repolist_preamble_line(
+                "Loaded plugins: builddep, changelog, config-manager, copr, debug, \
+                 debuginfo-install, download, generate_completion_cache, groups-manager, \
+                 needs-restarting, playground, repoclosure, repodiff, repograph, \
+                 repomanage, reposync, system-upgrade"
+            ),
+            Some("Loaded plugins")
+        );
+        assert_eq!(
+            repolist_preamble_line("DNF version: 4.14.0"),
+            Some("DNF version")
+        );
+        assert_eq!(
+            repolist_preamble_line("cachedir: /var/cache/dnf"),
+            Some("cachedir")
+        );
+        // Malformed or unknown preambles are not native lines.
+        assert_eq!(repolist_preamble_line("Loaded plugins:"), None);
+        assert_eq!(repolist_preamble_line("DNF version:"), None);
+        assert_eq!(repolist_preamble_line("DNF version: 4.x"), None);
+        assert_eq!(repolist_preamble_line("cachedir: relative/path"), None);
+        assert_eq!(repolist_preamble_line("Banner: hello"), None);
+        assert_eq!(repolist_preamble_line("Loaded pluginz: x"), None);
     }
 
     /// R4-F03: the repolist block lifecycle — a blank closes a block, so a

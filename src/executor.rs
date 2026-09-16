@@ -1416,6 +1416,11 @@ pub struct FakeTarget {
     /// usability check; `None` derives the outcome from `dnf_repos`
     /// (DESIGN §27 fail-closed path tests).
     pub probe_completion: Option<Completion>,
+    /// Overrides the complete output of the `dnf -C repoquery`
+    /// metadata-snapshot usability check, so tests can model benign or
+    /// unexpected stderr content on a successful check (R5-F04). Wins over
+    /// `probe_completion`.
+    pub dnf_probe_output: Option<Output>,
     /// Forced package-query completion.
     pub query_completion: Option<Completion>,
     /// Ordered complete package-query results (stdout, stderr, truncation
@@ -1510,6 +1515,7 @@ impl FakeTarget {
             services: BTreeMap::new(),
             manager_completion: None,
             probe_completion: None,
+            dnf_probe_output: None,
             query_completion: None,
             query_results: std::collections::VecDeque::new(),
             dnf_repos: vec![DnfRepo {
@@ -1550,6 +1556,7 @@ impl FakeTarget {
             services: BTreeMap::new(),
             manager_completion: None,
             probe_completion: None,
+            dnf_probe_output: None,
             query_completion: None,
             query_results: std::collections::VecDeque::new(),
             dnf_repos: Vec::new(),
@@ -1582,6 +1589,7 @@ impl FakeTarget {
             services: BTreeMap::new(),
             manager_completion: None,
             probe_completion: None,
+            dnf_probe_output: None,
             query_completion: None,
             query_results: std::collections::VecDeque::new(),
             dnf_repos: Vec::new(),
@@ -1975,15 +1983,20 @@ impl FakeExecutor {
     fn run_manager(&mut self, prog: &str, args: &[String]) -> Output {
         let name = args.last().cloned().unwrap_or_default();
         if prog == "dnf" && args.iter().any(|a| a == "repolist") {
-            // repolist -v: one block per enabled repo, in the exact shape
+            // repolist -v: the real dnf 4.14 stream layout (R5-F04). stdout
+            // opens with the native preamble — `Loaded plugins:`, then the
+            // `-v` debug lines `DNF version:`/`cachedir:` — then one block
+            // per enabled repo in the shape
             // `dnf/cli/commands/repolist.py::RepoListCommand.run` prints:
             // blocks joined by a blank line, each opened by `Repo-id` and
             // always showing `Repo-name`, closed by the `Total packages: N`
             // footer. `Repo-status` is deliberately absent — plain
             // `repolist -v` prints it only for `--all` or explicit repo
-            // arguments, never for this invocation (R4-F04). An explicit
-            // override wins so tests can model truncated or malformed
-            // enumeration.
+            // arguments, never for this invocation (R4-F04). repolist
+            // redirects INFO to stderr, so the informational metadata-age
+            // line lands there — exactly once — on a successful run. An
+            // explicit override wins so tests can model truncated or
+            // malformed enumeration.
             if let Some(o) = self.target.dnf_repolist_output.clone() {
                 return o;
             }
@@ -2002,12 +2015,24 @@ impl FakeExecutor {
                 total_pkgs += 1;
                 blocks.push(fields.join("\n"));
             }
-            let mut s = String::new();
+            let mut s = String::from(
+                "Loaded plugins: builddep, changelog, config-manager, copr, debug, \
+                 debuginfo-install, download, generate_completion_cache, groups-manager, \
+                 needs-restarting, playground, repoclosure, repodiff, repograph, repomanage, \
+                 reposync, system-upgrade\n\
+                 DNF version: 4.14.0\n\
+                 cachedir: /var/cache/dnf\n",
+            );
             if !blocks.is_empty() {
                 s.push_str(&blocks.join("\n\n"));
                 s.push_str(&format!("\nTotal packages: {}\n", total_pkgs));
             }
-            return Self::exited(0, s, String::new());
+            return Self::exited(
+                0,
+                s,
+                "Last metadata expiration check: 0:30:00 ago on Wed Sep 16 10:28:01 2026.\n"
+                    .to_string(),
+            );
         }
         if prog == "dnf" && args.iter().any(|a| a == "repoquery") {
             // `repoquery --location`: payload URLs composed from the cached
@@ -2036,11 +2061,23 @@ impl FakeExecutor {
                         ));
                     }
                 }
-                return Self::exited(0, out, String::new());
+                // repoquery redirects INFO to stderr: a successful answer
+                // carries the native metadata-age line there (R5-F04).
+                return Self::exited(
+                    0,
+                    out,
+                    "Last metadata expiration check: 0:30:00 ago on Wed Sep 16 10:28:01 2026.\n"
+                        .to_string(),
+                );
             }
-            // DESIGN §27 snapshot-usability check: a forced completion wins;
-            // otherwise the check fails iff any enabled repo lacks cached
-            // repodata ("Cache-only enabled but no cache").
+            // DESIGN §27 snapshot-usability check: a full-output override
+            // wins, then a forced completion; otherwise the check fails iff
+            // any enabled repo lacks cached repodata ("Cache-only enabled but
+            // no cache"). A real `dnf -C repoquery` emits the metadata-age
+            // INFO line on stderr for a successful check (R5-F04).
+            if let Some(o) = self.target.dnf_probe_output.clone() {
+                return o;
+            }
             if let Some(c) = &self.target.probe_completion {
                 return Output {
                     completion: c.clone(),
@@ -2051,7 +2088,12 @@ impl FakeExecutor {
                 };
             }
             if self.target.dnf_repos.iter().all(|r| r.repodata_cached) {
-                return Self::exited(0, format!("{}\n", name), String::new());
+                return Self::exited(
+                    0,
+                    format!("{}\n", name),
+                    "Last metadata expiration check: 0:30:00 ago on Wed Sep 16 10:28:01 2026.\n"
+                        .to_string(),
+                );
             }
             let missing = self
                 .target
@@ -2071,7 +2113,11 @@ impl FakeExecutor {
             && args.iter().any(|a| a == "--assumeno")
         {
             // Cache-only dry run: the transaction table naming the exact
-            // payload set, then "Operation aborted" (real dnf exits 1). An
+            // payload set, in the real dnf 4.14 stream layout (R5-F04):
+            // stdout carries the `Last metadata expiration check` INFO line,
+            // the table, `Total download size:` and `Installed size:`;
+            // stderr carries `Operation aborted.` — the `CliError` the
+            // assumeno abort raises, logged at ERROR (real dnf exits 1). An
             // explicit override wins so tests can model truncated, malformed,
             // or ambiguous transactions.
             if let Some(o) = self.target.dnf_dry_run_output.clone() {
@@ -2084,21 +2130,22 @@ impl FakeExecutor {
                 .map(|r| r.id.clone())
                 .unwrap_or_else(|| "baseos".to_string());
             let table = format!(
-                "Dependencies resolved.\n\
+                "Last metadata expiration check: 0:30:00 ago on Wed Sep 16 10:28:01 2026.\n\
+                 Dependencies resolved.\n\
                  ================================================================================\n \
-                 Package                Arch        Version                Repository      Size\n\
+                 Package                Architecture     Version                 Repository        Size\n\
                  ================================================================================\n\
                  Installing:\n \
-                 {n:<23}x86_64      1.0-1.el9              {r:<15} 1 k\n\n\
+                 {n:<15}x86_64           1.0-1.el9             {r:<16} 1 k\n\n\
                  Transaction Summary\n\
                  ================================================================================\n\
                  Install  1 Package\n\n\
                  Total download size: 1 k\n\
-                 Operation aborted.\n",
+                 Installed size: 2 k\n",
                 n = name,
                 r = repoid
             );
-            return Self::exited(1, table, String::new());
+            return Self::exited(1, table, "Operation aborted.\n".to_string());
         }
         if let Some(c) = &self.target.manager_completion {
             return Output {

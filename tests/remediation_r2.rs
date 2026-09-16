@@ -83,6 +83,10 @@ fn dnf_mutations(report: &sinter::engine::RunReport) -> usize {
         .count()
 }
 
+/// The `CliError` line an `--assumeno` install leaves on stderr (R5-F04):
+/// the abort is logged at ERROR level, so it lands on stderr — never stdout.
+const DNF_ABORT_STDERR: &str = "Operation aborted.\n";
+
 /// A well-formed `dnf repolist -v` body for one enabled repository.
 fn dnf_repolist_text(repoid: &str, mirrors: bool) -> String {
     let mut s = format!(
@@ -109,7 +113,7 @@ fn dnf_transaction_table(name: &str, repoid: &str) -> String {
          ================================================================================\n\
          Install  1 Package\n\n\
          Total download size: 1 k\n\
-         Operation aborted.\n",
+         Installed size: 2 k\n",
         n = name,
         r = repoid
     )
@@ -534,8 +538,8 @@ fn r2_03_transaction_body_summary_mismatch_fails_closed() {
          ================================================================================\n\
          Install  1 Package\n\n\
          Total download size: 2 k\n\
-         Operation aborted.\n",
-        "",
+         Installed size: 2 k\n",
+        DNF_ABORT_STDERR,
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_blocked_no_mutation(&r);

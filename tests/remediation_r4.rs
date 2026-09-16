@@ -65,6 +65,10 @@ fn downloads(report: &sinter::engine::RunReport) -> usize {
         .count()
 }
 
+/// The `CliError` line an `--assumeno` install leaves on stderr (R5-F04):
+/// the abort is logged at ERROR level, so it lands on stderr — never stdout.
+const DNF_ABORT_STDERR: &str = "Operation aborted.\n";
+
 /// A well-formed `dnf repolist -v` body for one enabled repository.
 fn dnf_repolist_text(repoid: &str, mirrors: bool) -> String {
     let mut s = format!(
@@ -91,7 +95,7 @@ fn dnf_transaction_table(name: &str, repoid: &str) -> String {
          ================================================================================\n\
          Install  1 Package\n\n\
          Total download size: 1 k\n\
-         Operation aborted.\n",
+         Installed size: 2 k\n",
         n = name,
         r = repoid
     )
@@ -361,7 +365,7 @@ fn r4_a01_extra_summary_token_rejected() {
             "Install  1 Package ATTACK\n",
             1,
         ),
-        "",
+        DNF_ABORT_STDERR,
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_blocked_no_mutation(&r);
@@ -381,7 +385,7 @@ fn r4_a01_summary_singular_plural_mismatch_rejected() {
             "Install  1 Packages\n",
             1,
         ),
-        "",
+        DNF_ABORT_STDERR,
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_blocked_no_mutation(&r);
@@ -401,7 +405,7 @@ fn r4_a01_decorated_count_rejected() {
             "Install  +1 Package\n",
             1,
         ),
-        "",
+        DNF_ABORT_STDERR,
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_blocked_no_mutation(&r);
@@ -421,7 +425,7 @@ fn r4_a01_trailing_garbage_rejected() {
             "{}Totally malformed\n",
             dnf_transaction_table("nano", "baseos")
         ),
-        "",
+        DNF_ABORT_STDERR,
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_blocked_no_mutation(&r);
@@ -441,7 +445,7 @@ fn r4_a01_malformed_total_line_rejected() {
             "Total download size: lots\n",
             1,
         ),
-        "",
+        DNF_ABORT_STDERR,
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_blocked_no_mutation(&r);
@@ -475,7 +479,7 @@ fn r4_a01_valid_fractional_size_installs() {
             "Total download size: 1.8 M\n",
             1,
         ),
-        "",
+        DNF_ABORT_STDERR,
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_full_install(&r);
@@ -670,7 +674,7 @@ fn r4_a03_similar_repo_ids_disambiguated() {
     t.dnf_dry_run_output = Some(override_output(
         Completion::Exited(1),
         &dnf_transaction_table("nano", "baseos"),
-        "",
+        DNF_ABORT_STDERR,
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_full_install(&r);

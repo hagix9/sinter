@@ -114,20 +114,30 @@ fn dnf_repolist_block(repoid: &str, mirrors: bool) -> String {
     fields.join("\n")
 }
 
-/// A well-formed `dnf install --assumeno` transaction table for one package.
+/// The `CliError` line an `--assumeno` install leaves on stderr: the abort
+/// is logged at ERROR level, so it lands on stderr — never stdout (R5-F04).
+const DNF_ABORT_STDERR: &str = "Operation aborted.\n";
+
+/// A well-formed `dnf install --assumeno` transaction table for one package,
+/// in the real dnf 4.14 stream layout (R5-F04): the INFO-level metadata-age
+/// line, `Dependencies resolved.`, the wide column header (`Architecture`/
+/// `Repository` are the long forms dnf picks when the columns allow), and
+/// the `Installed size:` trailer. `Operation aborted.` is *not* part of
+/// stdout — callers pass it as the dry-run's stderr.
 fn dnf_transaction_table(name: &str, repoid: &str) -> String {
     format!(
-        "Dependencies resolved.\n\
+        "Last metadata expiration check: 0:30:00 ago on Wed Sep 16 10:28:01 2026.\n\
+         Dependencies resolved.\n\
          ================================================================================\n \
-         Package                Arch        Version                Repository      Size\n\
+         Package        Architecture     Version                 Repository        Size\n\
          ================================================================================\n\
          Installing:\n \
-         {n:<23}x86_64      1.0-1.el9              {r:<15} 1 k\n\n\
+         {n:<15}x86_64           1.0-1.el9             {r:<16} 1 k\n\n\
          Transaction Summary\n\
          ================================================================================\n\
          Install  1 Package\n\n\
          Total download size: 1 k\n\
-         Operation aborted.\n",
+         Installed size: 2 k\n",
         n = name,
         r = repoid
     )
@@ -137,9 +147,10 @@ fn dnf_transaction_table(name: &str, repoid: &str) -> String {
 /// transaction-derived identifiers that are not valid operands).
 fn dnf_transaction_row_raw(row: &str) -> String {
     format!(
-        "Dependencies resolved.\n\
+        "Last metadata expiration check: 0:30:00 ago on Wed Sep 16 10:28:01 2026.\n\
+         Dependencies resolved.\n\
          ================================================================================\n \
-         Package                Arch        Version                Repository      Size\n\
+         Package        Architecture     Version                 Repository        Size\n\
          ================================================================================\n\
          Installing:\n \
          {row}\n\n\
@@ -147,7 +158,7 @@ fn dnf_transaction_row_raw(row: &str) -> String {
          ================================================================================\n\
          Install  1 Package\n\n\
          Total download size: 1 k\n\
-         Operation aborted.\n",
+         Installed size: 2 k\n",
         row = row
     )
 }
@@ -881,7 +892,7 @@ fn r5_f03_unknown_preamble_rejected() {
             "ERROR rpm database unavailable\n{}",
             dnf_transaction_table("nano", "baseos")
         ),
-        "",
+        DNF_ABORT_STDERR,
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_blocked_no_mutation(&r);
@@ -908,8 +919,8 @@ fn r5_f03_fake_header_rejected() {
          ================================================================================\n\
          Install  1 Package\n\n\
          Total download size: 1 k\n\
-         Operation aborted.\n",
-        "",
+         Installed size: 2 k\n",
+        DNF_ABORT_STDERR,
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_blocked_no_mutation(&r);
@@ -926,7 +937,7 @@ fn r5_f03_malformed_size_rejected() {
     t.dnf_dry_run_output = Some(override_output(
         Completion::Exited(1),
         &dnf_transaction_row_raw("nano x86_64 1.0-1.el9 baseos 1..2 k"),
-        "",
+        DNF_ABORT_STDERR,
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_blocked_no_mutation(&r);
@@ -944,7 +955,7 @@ fn r5_f03_malformed_count_rejected() {
         Completion::Exited(1),
         &dnf_transaction_table("nano", "baseos")
             .replace("Install  1 Package", "Install  01 Package"),
-        "",
+        DNF_ABORT_STDERR,
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_blocked_no_mutation(&r);
@@ -963,7 +974,7 @@ fn r5_f03_duplicate_summary_rejected() {
             "Install  1 Package",
             "Install  1 Package\nInstall  1 Package",
         ),
-        "",
+        DNF_ABORT_STDERR,
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_blocked_no_mutation(&r);
@@ -990,8 +1001,8 @@ fn r5_f03_native_upgrade_transaction_accepted() {
          ================================================================================\n\
          Upgrade  1 Package\n\n\
          Total download size: 1 k\n\
-         Operation aborted.\n",
-        "",
+         Installed size: 2 k\n",
+        DNF_ABORT_STDERR,
     ));
     t.dnf_location_output = Some(override_output(
         Completion::Exited(0),
@@ -1024,8 +1035,8 @@ fn r5_f03_native_dependency_install_accepted() {
          ================================================================================\n\
          Install  2 Packages\n\n\
          Total download size: 2 k\n\
-         Operation aborted.\n",
-        "",
+         Installed size: 2 k\n",
+        DNF_ABORT_STDERR,
     ));
     // Two payload rows resolve to two downloads.
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
@@ -1053,7 +1064,7 @@ fn r5_f05_option_like_package_name_rejected() {
     t.dnf_dry_run_output = Some(override_output(
         Completion::Exited(1),
         &dnf_transaction_row_raw("--refresh x86_64 1.0-1.el9 baseos 1 k"),
-        "",
+        DNF_ABORT_STDERR,
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_blocked_no_mutation(&r);
@@ -1192,4 +1203,620 @@ fn r5_f05_native_repo_ids_accepted() {
         assert_full_install(&r);
         assert_snapshot_cleaned(&r);
     }
+}
+
+// ===========================================================================
+// R5-F04 closure — native Rocky 9.8 / DNF 4.14.0 stream contracts. Each dnf
+// subcommand carries its own exact stderr grammar: the benign lines real dnf
+// prints are accepted for that command only, and everything else — an unknown
+// line, an extra line, a repeat, a malformed line, non-UTF-8 bytes or a
+// truncated capture — still fails closed before any mutation.
+// ===========================================================================
+
+/// The real `dnf -C repoquery` stderr captured on Rocky 9.8 / dnf 4.14.0
+/// under `LC_ALL=C.UTF-8` (repoquery redirects INFO to stderr).
+const REAL_REPOQUERY_STDERR: &str =
+    "Last metadata expiration check: 1:35:13 ago on Wed Sep 16 10:28:01 2026.\n";
+
+/// A `dnf_probe_output` override in the native success shape: exit 0, the
+/// queried name on stdout, and the real benign stderr line.
+fn repoquery_probe_output(stderr: &str) -> Output {
+    override_output(Completion::Exited(0), "nano\n", stderr)
+}
+
+/// Positive: the byte-exact benign stderr a successful `dnf -C repoquery`
+/// emits on real Rocky 9.8 is accepted by the metadata-completeness check.
+#[test]
+fn r51_repoquery_native_expiration_stderr_accepted() {
+    let dir = trusted_root("r51-repoquery-native-stderr");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_probe_output = Some(repoquery_probe_output(REAL_REPOQUERY_STDERR));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_full_install(&r);
+    assert_snapshot_cleaned(&r);
+}
+
+/// Positive: an empty repoquery stderr is native too — the line is emitted
+/// only while metadata is being aged/loaded, so absence is a normal
+/// variation, not a defect.
+#[test]
+fn r51_repoquery_empty_stderr_accepted() {
+    let dir = trusted_root("r51-repoquery-empty-stderr");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_probe_output = Some(repoquery_probe_output(""));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_full_install(&r);
+    assert_snapshot_cleaned(&r);
+}
+
+/// Negative: any stderr line that is not the exact benign grammar fails
+/// closed — including the `--assumeno` line on the wrong command.
+#[test]
+fn r51_repoquery_unknown_stderr_rejected() {
+    for (i, stderr) in [
+        "Warning: something odd\n",
+        "Operation aborted.\n",
+        "Last metadata expiration check: soon.\n",
+        "Last metadata expiration check\n",
+        "Last metadata expiration check: 1:35:13 ago on Wed Sep 16 10:28:01 2026. extra\n",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dir = trusted_root(&format!("r51-repoquery-bad-stderr-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.dnf_probe_output = Some(repoquery_probe_output(stderr));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_blocked_no_mutation(&r);
+        assert_snapshot_cleaned(&r);
+    }
+}
+
+/// Negative: the benign line plus any extra content is not the native
+/// answer — and a repeat of the benign line is not either (dnf emits it at
+/// most once).
+#[test]
+fn r51_repoquery_extra_or_duplicate_stderr_rejected() {
+    for (i, stderr) in [
+        "Last metadata expiration check: 1:35:13 ago on Wed Sep 16 10:28:01 2026.\nUnexpected line\n",
+        "Last metadata expiration check: 1:35:13 ago on Wed Sep 16 10:28:01 2026.\nLast metadata expiration check: 1:35:13 ago on Wed Sep 16 10:28:01 2026.\n",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dir = trusted_root(&format!("r51-repoquery-extra-stderr-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.dnf_probe_output = Some(repoquery_probe_output(stderr));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_blocked_no_mutation(&r);
+        assert_snapshot_cleaned(&r);
+    }
+}
+
+/// Negative: a truncated or non-UTF-8 capture can never be matched against
+/// the expected lines and fails closed.
+#[test]
+fn r51_repoquery_truncated_or_nonutf8_stderr_rejected() {
+    let dir = trusted_root("r51-repoquery-truncated-stderr");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_probe_output = Some(Output {
+        completion: Completion::Exited(0),
+        stdout: b"nano\n".to_vec(),
+        stderr: b"Last metadata expiration che".to_vec(),
+        stdout_truncated: false,
+        stderr_truncated: true,
+    });
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_blocked_no_mutation(&r);
+    assert_snapshot_cleaned(&r);
+
+    let dir = trusted_root("r51-repoquery-nonutf8-stderr");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_probe_output = Some(Output {
+        completion: Completion::Exited(0),
+        stdout: b"nano\n".to_vec(),
+        stderr: b"Last metadata \xff\xfe\n".to_vec(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+    });
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_blocked_no_mutation(&r);
+    assert_snapshot_cleaned(&r);
+}
+
+// -- repolist -v -----------------------------------------------------------
+
+/// Positive: the real native preamble (`Loaded plugins:` / `DNF version:` /
+/// `cachedir:`) and benign stderr from the Rocky 9.8 capture, with a block
+/// using real field values — including `Repo-distro-tags` and a
+/// `Repo-baseurl` carrying the `(32 more)` suffix dnf prints.
+#[test]
+fn r51_repolist_native_preamble_and_stderr_accepted() {
+    let dir = trusted_root("r51-repolist-native");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_repolist_output = Some(override_output(
+        Completion::Exited(0),
+        "Loaded plugins: builddep, changelog, config-manager, copr, debug, debuginfo-install, download, generate_completion_cache, groups-manager, needs-restarting, playground, repoclosure, repodiff, repograph, repomanage, reposync, system-upgrade\n\
+         DNF version: 4.14.0\n\
+         cachedir: /var/cache/dnf\n\
+         Repo-id            : baseos\n\
+         Repo-name          : Rocky Linux 9 - BaseOS\n\
+         Repo-revision      : 9.8\n\
+         Repo-distro-tags      : [cpe:/o:rocky:rocky:9.8]:  ,  , ., 8, 9, L, R, c, i, k, n, o, u, x, y\n\
+         Repo-updated       : Tue Sep 15 12:23:34 2026\n\
+         Repo-pkgs          : 2767\n\
+         Repo-available-pkgs: 2767\n\
+         Repo-size          : 13 G\n\
+         Repo-mirrors       : https://mirrors.rockylinux.org/mirrorlist?arch=x86_64&repo=BaseOS-9\n\
+         Repo-baseurl       : https://rocky-linux-asia-northeast1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//9.8/BaseOS/x86_64/os/ (32 more)\n\
+         Repo-expire        : 21600 second(s) (last: Wed Sep 16 10:28:00 2026)\n\
+         Repo-filename      : /etc/yum.repos.d/rocky.repo\n\
+         Total packages: 14291\n",
+        "Last metadata expiration check: 0:41:14 ago on Wed Sep 16 10:28:01 2026.\n",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_full_install(&r);
+    assert_snapshot_cleaned(&r);
+}
+
+/// Negative: an unknown or malformed preamble line is not native structure —
+/// banners, empty plugin lists, non-numeric versions and relative cachedirs
+/// all fail closed.
+#[test]
+fn r51_repolist_malformed_preamble_rejected() {
+    for (i, pre) in [
+        "Banner: hello\n",
+        "Loaded plugins:\n",
+        "DNF version:\n",
+        "DNF version: 4.x\n",
+        "cachedir: var/cache/dnf\n",
+        "Repo-info          : stray\n",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dir = trusted_root(&format!("r51-repolist-bad-pre-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.dnf_repolist_output = Some(override_output(
+            Completion::Exited(0),
+            &format!(
+                "{}{}",
+                pre,
+                "Repo-id            : baseos\nRepo-name          : BaseOS\nRepo-mirrors       : https://m/?repo=baseos\nTotal packages: 1\n"
+            ),
+            "",
+        ));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_blocked_no_mutation(&r);
+        assert_snapshot_cleaned(&r);
+    }
+}
+
+/// Negative: preamble grammar only lives before the first `Repo-id` — the
+/// same line inside a repository block, or repeated in the preamble, is
+/// unrecognized structure.
+#[test]
+fn r51_repolist_preamble_misplaced_or_duplicate_rejected() {
+    for (i, out) in [
+        // `DNF version:` inside a repo block.
+        "Repo-id            : baseos\nRepo-name          : BaseOS\nDNF version: 4.14.0\nRepo-mirrors       : https://m/?repo=baseos\nTotal packages: 1\n",
+        // `cachedir:` after the first block.
+        "Repo-id            : baseos\nRepo-name          : BaseOS\nRepo-mirrors       : https://m/?repo=baseos\n\ncachedir: /var/cache/dnf\nRepo-id            : appstream\nRepo-name          : AppStream\nTotal packages: 1\n",
+        // A duplicated preamble line.
+        "DNF version: 4.14.0\nDNF version: 4.14.0\nRepo-id            : baseos\nRepo-name          : BaseOS\nRepo-mirrors       : https://m/?repo=baseos\nTotal packages: 1\n",
+        // A preamble line after the footer.
+        "Repo-id            : baseos\nRepo-name          : BaseOS\nRepo-mirrors       : https://m/?repo=baseos\nTotal packages: 1\nDNF version: 4.14.0\n",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dir = trusted_root(&format!("r51-repolist-bad-pre2-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.dnf_repolist_output = Some(override_output(Completion::Exited(0), out, ""));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_blocked_no_mutation(&r);
+        assert_snapshot_cleaned(&r);
+    }
+}
+
+/// Negative: arbitrary repolist stderr — including the assumeno line on the
+/// wrong command — fails closed.
+#[test]
+fn r51_repolist_unknown_stderr_rejected() {
+    for (i, stderr) in ["Plugin warning\n", "Operation aborted.\n"]
+        .iter()
+        .enumerate()
+    {
+        let dir = trusted_root(&format!("r51-repolist-bad-stderr-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.dnf_repolist_output = Some(override_output(
+            Completion::Exited(0),
+            &format!(
+                "{}\nTotal packages: 1\n",
+                dnf_repolist_block("baseos", true)
+            ),
+            stderr,
+        ));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_blocked_no_mutation(&r);
+        assert_snapshot_cleaned(&r);
+    }
+}
+
+// -- install --assumeno -----------------------------------------------------
+
+/// Positive: the real `--assumeno` contract — exit 1, the transaction table
+/// with `Installed size:` on stdout, `Operation aborted.` on stderr — is
+/// accepted. (The FakeTarget default already models it; this override pins
+/// the byte-exact Rocky capture.)
+#[test]
+fn r51_assumeno_native_streams_accepted() {
+    let dir = trusted_root("r51-assumeno-native");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_dry_run_output = Some(override_output(
+        Completion::Exited(1),
+        "Last metadata expiration check: 0:41:15 ago on Wed Sep 16 10:28:01 2026.\n\
+         Dependencies resolved.\n\
+         ================================================================================\n \
+         Package        Architecture     Version                 Repository        Size\n\
+         ================================================================================\n\
+         Installing:\n \
+         nano           x86_64           5.6.1-7.el9             baseos           691 k\n\n\
+         Transaction Summary\n\
+         ================================================================================\n\
+         Install  1 Package\n\n\
+         Total download size: 691 k\n\
+         Installed size: 2.7 M\n",
+        DNF_ABORT_STDERR,
+    ));
+    t.dnf_location_output = Some(override_output(
+        Completion::Exited(0),
+        "https://rocky-linux-asia-northeast1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//9.8/BaseOS/x86_64/os/Packages/n/nano-5.6.1-7.el9.x86_64.rpm\n",
+        REAL_REPOQUERY_STDERR,
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_full_install(&r);
+    assert_snapshot_cleaned(&r);
+}
+
+/// Negative: any other stderr on the dry run fails closed — even content
+/// that would be benign on a different dnf subcommand.
+#[test]
+fn r51_assumeno_unexpected_stderr_rejected() {
+    for (i, stderr) in [
+        "Last metadata expiration check: 0:41:15 ago on Wed Sep 16 10:28:01 2026.\n",
+        "Operation aborted.\nExtra line\n",
+        "Operation aborted.\nOperation aborted.\n",
+        "warning: assumeno\n",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dir = trusted_root(&format!("r51-assumeno-bad-stderr-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.dnf_dry_run_output = Some(override_output(
+            Completion::Exited(1),
+            &dnf_transaction_table("nano", "baseos"),
+            stderr,
+        ));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_blocked_no_mutation(&r);
+        assert_snapshot_cleaned(&r);
+    }
+}
+
+/// Negative: `Operation aborted.` on an exit-0 stderr contradicts the
+/// completion — the line is only expected after the exit-1 abort.
+#[test]
+fn r51_assumeno_abort_stderr_on_exit0_rejected() {
+    let dir = trusted_root("r51-assumeno-abort-exit0");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_dry_run_output = Some(override_output(
+        Completion::Exited(0),
+        "Nothing to do.\n",
+        DNF_ABORT_STDERR,
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_blocked_no_mutation(&r);
+    assert_snapshot_cleaned(&r);
+}
+
+/// Negative: `Operation aborted.` is a stderr line — the same text inside
+/// the stdout table is unrecognized structure.
+#[test]
+fn r51_assumeno_abort_in_stdout_rejected() {
+    let dir = trusted_root("r51-assumeno-abort-stdout");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_dry_run_output = Some(override_output(
+        Completion::Exited(1),
+        &format!(
+            "{}Operation aborted.\n",
+            dnf_transaction_table("nano", "baseos")
+        ),
+        DNF_ABORT_STDERR,
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_blocked_no_mutation(&r);
+    assert_snapshot_cleaned(&r);
+}
+
+/// Negative: `Installed size:` must carry a real dnf size value — anything
+/// else after the label is a malformed trailer.
+#[test]
+fn r51_malformed_installed_size_rejected() {
+    for (i, trailer) in [
+        "Installed size: huge\n",
+        "Installed size:\n",
+        "Installed size: 2 k extra\n",
+        "Installed size 2 k\n",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dir = trusted_root(&format!("r51-bad-instsize-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.dnf_dry_run_output = Some(override_output(
+            Completion::Exited(1),
+            &dnf_transaction_table("nano", "baseos").replace("Installed size: 2 k\n", trailer),
+            DNF_ABORT_STDERR,
+        ));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_blocked_no_mutation(&r);
+        assert_snapshot_cleaned(&r);
+    }
+}
+
+/// Negative: content after the native trailer is not part of the table.
+#[test]
+fn r51_transaction_trailing_garbage_rejected() {
+    for (i, tail) in ["Done.\n", "Complete!\n", "garbage garbage\n"]
+        .iter()
+        .enumerate()
+    {
+        let dir = trusted_root(&format!("r51-tail-garbage-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.dnf_dry_run_output = Some(override_output(
+            Completion::Exited(1),
+            &format!("{}{}", dnf_transaction_table("nano", "baseos"), tail),
+            DNF_ABORT_STDERR,
+        ));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_blocked_no_mutation(&r);
+        assert_snapshot_cleaned(&r);
+    }
+}
+
+// -- repoquery --location ----------------------------------------------------
+
+/// Positive: the real `repoquery --location` answer — a payload URL carrying
+/// the doubled path separator native Rocky mirrors emit — plus the benign
+/// expiration stderr resolves to exactly one prefetched payload.
+#[test]
+fn r51_location_native_url_and_stderr_accepted() {
+    let dir = trusted_root("r51-location-native");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_location_output = Some(override_output(
+        Completion::Exited(0),
+        "https://rocky-linux-asia-northeast1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//9.8/BaseOS/x86_64/os/Packages/n/nano-1.0-1.el9.x86_64.rpm\n",
+        REAL_REPOQUERY_STDERR,
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_full_install(&r);
+    // The download must request the URL byte-for-byte — the doubled
+    // separator is part of the resource identity.
+    let curls = commands_with(&r, "/usr/bin/curl");
+    assert_eq!(curls.len(), 1);
+    assert!(curls[0].args.iter().any(|a| a.contains("/pub/rocky//9.8/")));
+    assert_snapshot_cleaned(&r);
+}
+
+/// Negative: any other stderr on the location query fails closed, and a
+/// stdout line that is not a fetchable URL is unrecognized structure.
+#[test]
+fn r51_location_bad_streams_rejected() {
+    for (i, (stdout, stderr)) in [
+        (
+            "https://mirror.example/baseos/Packages/nano-1.0-1.el9.x86_64.rpm\n",
+            "Operation aborted.\n",
+        ),
+        (
+            "https://mirror.example/baseos/Packages/nano-1.0-1.el9.x86_64.rpm\n",
+            "Last metadata expiration check: 1:35:13 ago on Wed Sep 16 10:28:01 2026.\nextra\n",
+        ),
+        (
+            "https://mirror.example/baseos/Packages/nano-1.0-1.el9.x86_64.rpm\nnot-a-url\n",
+            "",
+        ),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dir = trusted_root(&format!("r51-location-bad-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.dnf_location_output = Some(override_output(Completion::Exited(0), stdout, stderr));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_blocked_no_mutation(&r);
+        assert_snapshot_cleaned(&r);
+    }
+}
+
+/// F04 closure: the complete byte-exact `dnf -C repolist -v` capture from
+/// Rocky Linux 9.8 / dnf 4.14.0 (`LC_ALL=C.UTF-8`) — all six enabled
+/// repositories with their real field sets, the full plugin list, and the
+/// real footer — parses and drives a complete install, alongside the real
+/// `--assumeno` table and a real `--location` URL carrying the native
+/// doubled path separator.
+#[test]
+fn r51_full_real_rocky_capture_replay() {
+    let dir = trusted_root("r51-real-rocks-replay");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_repos = vec![
+        DnfRepo {
+            id: "appstream".to_string(),
+            mirrors: true,
+            repodata_cached: true,
+            mirrorlist_cached: true,
+        },
+        DnfRepo {
+            id: "baseos".to_string(),
+            mirrors: true,
+            repodata_cached: true,
+            mirrorlist_cached: true,
+        },
+        DnfRepo {
+            id: "extras".to_string(),
+            mirrors: true,
+            repodata_cached: true,
+            mirrorlist_cached: true,
+        },
+        DnfRepo {
+            id: "google-cloud-ops-agent".to_string(),
+            mirrors: false,
+            repodata_cached: true,
+            mirrorlist_cached: false,
+        },
+        DnfRepo {
+            id: "google-cloud-sdk".to_string(),
+            mirrors: false,
+            repodata_cached: true,
+            mirrorlist_cached: false,
+        },
+        DnfRepo {
+            id: "google-compute-engine".to_string(),
+            mirrors: false,
+            repodata_cached: true,
+            mirrorlist_cached: false,
+        },
+    ];
+    t.dnf_probe_output = Some(repoquery_probe_output(REAL_REPOQUERY_STDERR));
+    // Byte-exact stdout of `dnf -C repolist -v` on the Rocky 9.8 target.
+    t.dnf_repolist_output = Some(override_output(
+        Completion::Exited(0),
+        r#"Loaded plugins: builddep, changelog, config-manager, copr, debug, debuginfo-install, download, generate_completion_cache, groups-manager, needs-restarting, playground, repoclosure, repodiff, repograph, repomanage, reposync, system-upgrade
+DNF version: 4.14.0
+cachedir: /var/cache/dnf
+Repo-id            : appstream
+Repo-name          : Rocky Linux 9 - AppStream
+Repo-revision      : 9.8
+Repo-distro-tags      : [cpe:/o:rocky:rocky:9.8]:  ,  , ., 8, 9, L, R, c, i, k, n, o, u, x, y
+Repo-updated       : Tue Sep 15 12:21:30 2026
+Repo-pkgs          : 9598
+Repo-available-pkgs: 8547
+Repo-size          : 25 G
+Repo-mirrors       : https://mirrors.rockylinux.org/mirrorlist?arch=x86_64&repo=AppStream-9
+Repo-baseurl       : https://rocky-linux-asia-northeast1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//9.8/AppStream/x86_64/os/ (32 more)
+Repo-expire        : 21600 second(s) (last: Wed Sep 16 10:28:01 2026)
+Repo-filename      : /etc/yum.repos.d/rocky.repo
+
+Repo-id            : baseos
+Repo-name          : Rocky Linux 9 - BaseOS
+Repo-revision      : 9.8
+Repo-distro-tags      : [cpe:/o:rocky:rocky:9.8]:  ,  , ., 8, 9, L, R, c, i, k, n, o, u, x, y
+Repo-updated       : Tue Sep 15 12:23:34 2026
+Repo-pkgs          : 2767
+Repo-available-pkgs: 2767
+Repo-size          : 13 G
+Repo-mirrors       : https://mirrors.rockylinux.org/mirrorlist?arch=x86_64&repo=BaseOS-9
+Repo-baseurl       : https://rocky-linux-asia-northeast1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//9.8/BaseOS/x86_64/os/ (32 more)
+Repo-expire        : 21600 second(s) (last: Wed Sep 16 10:28:00 2026)
+Repo-filename      : /etc/yum.repos.d/rocky.repo
+
+Repo-id            : extras
+Repo-name          : Rocky Linux 9 - Extras
+Repo-revision      : 9.8
+Repo-distro-tags      : [cpe:/o:rocky:rocky:9.8]:  ,  , ., 8, 9, L, R, c, i, k, n, o, u, x, y
+Repo-updated       : Tue Sep  1 05:55:47 2026
+Repo-pkgs          : 57
+Repo-available-pkgs: 57
+Repo-size          : 3.4 M
+Repo-mirrors       : https://mirrors.rockylinux.org/mirrorlist?arch=x86_64&repo=extras-9
+Repo-baseurl       : https://rocky-linux-asia-northeast1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//9.8/extras/x86_64/os/ (32 more)
+Repo-expire        : 21600 second(s) (last: Wed Sep 16 10:28:01 2026)
+Repo-filename      : /etc/yum.repos.d/rocky-extras.repo
+
+Repo-id            : google-cloud-ops-agent
+Repo-name          : Google Cloud Ops Agent Repository
+Repo-revision      : 1789404420939961
+Repo-updated       : Fri Dec  2 04:21:13 1994
+Repo-pkgs          : 48
+Repo-available-pkgs: 48
+Repo-size          : 7.4 G
+Repo-baseurl       : https://packages.cloud.google.com/yum/repos/google-cloud-ops-agent-el9-x86_64-2
+Repo-expire        : 172800 second(s) (last: Wed Sep 16 10:28:00 2026)
+Repo-filename      : /etc/yum.repos.d/osconfig_managed_db65a01907.repo
+
+Repo-id            : google-cloud-sdk
+Repo-name          : Google Cloud SDK
+Repo-revision      : 1789473720061509
+Repo-updated       : Mon Apr 15 00:48:05 2013
+Repo-pkgs          : 1806
+Repo-available-pkgs: 1806
+Repo-size          : 64 G
+Repo-baseurl       : https://packages.cloud.google.com/yum/repos/cloud-sdk-el9-x86_64
+Repo-expire        : 172800 second(s) (last: Wed Sep 16 10:27:59 2026)
+Repo-filename      : /etc/yum.repos.d/google-cloud.repo
+
+Repo-id            : google-compute-engine
+Repo-name          : Google Compute Engine
+Repo-revision      : 1785174405970831
+Repo-updated       : Wed Aug 24 04:18:23 2011
+Repo-pkgs          : 15
+Repo-available-pkgs: 15
+Repo-size          : 147 M
+Repo-baseurl       : https://packages.cloud.google.com/yum/repos/google-compute-engine-el9-x86_64-stable
+Repo-expire        : 172800 second(s) (last: Wed Sep 16 10:27:59 2026)
+Repo-filename      : /etc/yum.repos.d/google-cloud.repo
+Total packages: 14291
+"#,
+        // Byte-exact stderr of the same invocation.
+        "Last metadata expiration check: 0:41:14 ago on Wed Sep 16 10:28:01 2026.\n",
+    ));
+    // Byte-exact stdout/stderr of `dnf -C install --assumeno nano`.
+    t.dnf_dry_run_output = Some(override_output(
+        Completion::Exited(1),
+        r#"Last metadata expiration check: 0:41:15 ago on Wed Sep 16 10:28:01 2026.
+Dependencies resolved.
+================================================================================
+ Package        Architecture     Version                 Repository        Size
+================================================================================
+Installing:
+ nano           x86_64           5.6.1-7.el9             baseos           691 k
+
+Transaction Summary
+================================================================================
+Install  1 Package
+
+Total download size: 691 k
+Installed size: 2.7 M
+"#,
+        DNF_ABORT_STDERR,
+    ));
+    // Byte-exact `dnf -C repoquery --location nano` answer.
+    t.dnf_location_output = Some(override_output(
+        Completion::Exited(0),
+        "https://rocky-linux-asia-northeast1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//9.8/BaseOS/x86_64/os/Packages/n/nano-5.6.1-7.el9.x86_64.rpm\n",
+        "Last metadata expiration check: 1:35:14 ago on Wed Sep 16 10:28:01 2026.\n",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_full_install(&r);
+    assert_snapshot_cleaned(&r);
 }
