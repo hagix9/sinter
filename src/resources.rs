@@ -2058,12 +2058,58 @@ impl Engine {
         } else {
             name.as_str()
         };
-        let out = self.fs.exec(&req);
-        // The private snapshot is removed regardless of the outcome.
-        if let Some(snap) = &snapshot_dir {
-            self.dnf_snapshot_cleanup(snap);
-        }
-        let out = out?;
+        // R2-05: a dispatch failure before the mutation's start can be
+        // established leaves the snapshot behind. The cleanup outcome is
+        // attached to the propagated error so it is never discarded by a
+        // bare `?` — but the mutation itself never ran, so there is no
+        // mutation truth to preserve.
+        let out = if self.fs.fault() == Some("package_mutation_dispatch_fail") {
+            Err(SinterError::apply(format!(
+                "injected {} {} dispatch failure",
+                backend.label(),
+                action
+            )))
+        } else {
+            self.fs.exec(&req)
+        };
+        // R2-02: the mutation completion state must be classified BEFORE any
+        // further command is sent to the target. When the mutation's
+        // completion cannot be established the remote process may still be
+        // running, and dispatching anything else to this target afterwards —
+        // snapshot cleanup, re-observation, retry, or a diagnostic command —
+        // is forbidden. The result keeps the existing
+        // Indeterminate/Possible truthfulness contract.
+        let mutation_indeterminate = match &out {
+            Ok(o) => matches!(o.completion, Completion::Indeterminate { .. }),
+            // A pre-dispatch failure ran no command at all; the snapshot may
+            // still exist and must be cleaned up (R2-05).
+            Err(_) => false,
+        };
+        let cleanup_failure = if mutation_indeterminate {
+            // R2-02: do not touch the target again. The private snapshot is
+            // deliberately left in place.
+            None
+        } else if let Some(snap) = &snapshot_dir {
+            self.dnf_snapshot_cleanup(snap)
+        } else {
+            None
+        };
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => {
+                let mut reason = format!(
+                    "{} {} {} failed to dispatch: {}",
+                    backend.manager_program(),
+                    action,
+                    pkg_disp,
+                    e.message
+                );
+                if let Some(msg) = &cleanup_failure {
+                    reason.push_str(&format!("; private snapshot cleanup failed: {}", msg));
+                }
+                return Err(SinterError::apply(reason));
+            }
+        };
         match out.completion {
             Completion::Indeterminate { reason, .. } => {
                 let mut r = changed_result_sensitive(res, sensitive);
@@ -2087,6 +2133,7 @@ impl Engine {
                     backend.label(),
                     s
                 ));
+                Self::note_snapshot_cleanup_failure(&mut r, &cleanup_failure);
                 return Ok(r);
             }
             Completion::Exited(code) => {
@@ -2110,6 +2157,7 @@ impl Engine {
                         code,
                         stderr_note
                     ));
+                    Self::note_snapshot_cleanup_failure(&mut r, &cleanup_failure);
                     return Ok(r);
                 }
             }
@@ -2125,6 +2173,7 @@ impl Engine {
             r.execution = Execution::Indeterminate;
             r.verification = Verification::Unknown;
             r.reason = Some("injected package re-observation indeterminate after mutation".into());
+            Self::note_snapshot_cleanup_failure(&mut r, &cleanup_failure);
             return Ok(r);
         }
         if self.fs.fault() == Some("package_reobserve_fail") {
@@ -2133,6 +2182,7 @@ impl Engine {
             r.execution = Execution::Failed;
             r.verification = Verification::Failed;
             r.reason = Some("injected package re-observation failure after mutation".into());
+            Self::note_snapshot_cleanup_failure(&mut r, &cleanup_failure);
             return Ok(r);
         }
         let after = match self.observe_package_sensitive(backend, &name, sensitive) {
@@ -2154,6 +2204,7 @@ impl Engine {
                     "package mutation succeeded but re-observation failed: {}",
                     e.message
                 ));
+                Self::note_snapshot_cleanup_failure(&mut r, &cleanup_failure);
                 return Ok(r);
             }
         };
@@ -2167,7 +2218,147 @@ impl Engine {
             r.verification = Verification::Failed;
             r.reason = Some("package state did not reach desired state after mutation".into());
         }
+        Self::note_snapshot_cleanup_failure(&mut r, &cleanup_failure);
         Ok(r)
+    }
+
+    /// Surface a private-snapshot cleanup failure on a result whose mutation
+    /// already definitively completed. The mutation truth (Changed) and any
+    /// verification already established are preserved exactly — a leftover
+    /// private snapshot is a real post-mutation defect, so the resource is
+    /// not reported as cleanly successful, but the defect must never weaken
+    /// what already happened (R2-05).
+    fn note_snapshot_cleanup_failure(r: &mut ResourceResult, cleanup_failure: &Option<String>) {
+        let Some(msg) = cleanup_failure else {
+            return;
+        };
+        let detail = format!("; private snapshot cleanup failed: {}", msg);
+        match &mut r.reason {
+            Some(reason) => reason.push_str(&detail),
+            None => r.reason = Some(format!("private snapshot cleanup failed: {}", msg)),
+        }
+        if r.execution == Execution::Succeeded {
+            r.execution = Execution::Failed;
+        }
+    }
+
+    /// Enforce the private snapshot root to 0700 and prove the mode and
+    /// ownership by reading them back (snapshot-permission hardening). This
+    /// runs before the metadata cache is copied into the root so the privacy
+    /// guarantee covers the copy itself, not just the moment after it.
+    fn enforce_snapshot_permissions(&mut self, snap: &str) -> Result<DnfSnapshot> {
+        let mut req = ExecRequest::new("/usr/bin/chmod");
+        req.args = vec!["700".to_string(), snap.to_string()];
+        req.env = baseline_env(self.fs.home_env());
+        match self
+            .snap_exec(
+                snap,
+                &req,
+                "snapshot permission enforcement",
+                "snapshot_chmod_dispatch_fail",
+            )?
+            .completion
+        {
+            Completion::Exited(0) => {}
+            Completion::Indeterminate { reason, .. } => {
+                return self.dnf_snapshot_blocked(
+                    snap,
+                    format!(
+                        "snapshot permission enforcement did not complete: {}",
+                        reason
+                    ),
+                    true,
+                );
+            }
+            _ => {
+                return self.dnf_snapshot_blocked(
+                    snap,
+                    "cannot enforce the private snapshot directory permissions".to_string(),
+                    false,
+                );
+            }
+        }
+        self.verify_snapshot_permissions(snap, "before the metadata cache copy")
+    }
+
+    /// Read the private snapshot root's mode and owner back and require 0700
+    /// owned by the effective execution identity. A snapshot whose
+    /// permissions or owner cannot be established is not usable and fails
+    /// closed. `when` names the point in the snapshot lifetime for the
+    /// failure reason.
+    fn verify_snapshot_permissions(&mut self, snap: &str, when: &str) -> Result<DnfSnapshot> {
+        let mut req = ExecRequest::new("/usr/bin/stat");
+        req.args = vec![
+            "-c".to_string(),
+            "%a %u".to_string(),
+            "--".to_string(),
+            snap.to_string(),
+        ];
+        req.env = baseline_env(self.fs.home_env());
+        let perm_out = self.snap_exec(
+            snap,
+            &req,
+            "snapshot permission verification",
+            "snapshot_stat_dispatch_fail",
+        )?;
+        match perm_out.completion {
+            Completion::Exited(0) => {
+                let text = String::from_utf8_lossy(&perm_out.stdout);
+                let mut fields = text.split_whitespace();
+                let (mode, uid) = (fields.next(), fields.next());
+                match (mode, uid) {
+                    (Some("700"), Some(uid_str)) => match uid_str.parse::<u32>() {
+                        Ok(owner) if owner == self.fs.target_uid() => {}
+                        Ok(owner) => {
+                            return self.dnf_snapshot_blocked(
+                                snap,
+                                format!(
+                                    "private snapshot directory is owned by uid {}, expected {}",
+                                    owner,
+                                    self.fs.target_uid()
+                                ),
+                                false,
+                            );
+                        }
+                        Err(_) => {
+                            return self.dnf_snapshot_blocked(
+                                snap,
+                                "cannot determine the private snapshot directory owner".to_string(),
+                                false,
+                            );
+                        }
+                    },
+                    _ => {
+                        return self.dnf_snapshot_blocked(
+                            snap,
+                            "private snapshot directory is not 0700".to_string(),
+                            false,
+                        );
+                    }
+                }
+            }
+            Completion::Indeterminate { reason, .. } => {
+                return self.dnf_snapshot_blocked(
+                    snap,
+                    format!(
+                        "snapshot permission verification did not complete ({}): {}",
+                        when, reason
+                    ),
+                    true,
+                );
+            }
+            _ => {
+                return self.dnf_snapshot_blocked(
+                    snap,
+                    format!(
+                        "cannot verify the private snapshot directory permissions ({})",
+                        when
+                    ),
+                    false,
+                );
+            }
+        }
+        Ok(DnfSnapshot::Ready(snap.to_string()))
     }
 
     /// Prepare a private snapshot of the dnf metadata cache and prove that
@@ -2211,7 +2402,17 @@ impl Engine {
                 false,
             ));
         }
-        // 2. Copy the metadata cache into the snapshot. From here on every
+        // 2. Enforce the private snapshot root to 0700 and prove mode and
+        //    ownership by reading them back BEFORE any content is copied
+        //    into it. The privacy guarantee then covers the copy itself
+        //    rather than only the moment after it: `cp -a` copies the
+        //    source *contents* into an existing directory and does not
+        //    change the root's own mode, which the post-copy verification
+        //    in step 3 proves independently.
+        if let blocked @ DnfSnapshot::Blocked(..) = self.enforce_snapshot_permissions(&snap)? {
+            return Ok(blocked);
+        }
+        // 3. Copy the metadata cache into the snapshot. From here on every
         //    check — and the mutation — uses this private copy, never the
         //    live system cache.
         let mut req = ExecRequest::new("/usr/bin/cp");
@@ -2221,7 +2422,15 @@ impl Engine {
             format!("{}/", snap),
         ];
         req.env = baseline_env(self.fs.home_env());
-        match self.fs.exec(&req)?.completion {
+        match self
+            .snap_exec(
+                &snap,
+                &req,
+                "metadata cache copy",
+                "dnf_snapshot_dispatch_fail",
+            )?
+            .completion
+        {
             Completion::Exited(0) => {}
             Completion::Indeterminate { reason, .. } => {
                 return self.dnf_snapshot_blocked(
@@ -2238,6 +2447,15 @@ impl Engine {
                 );
             }
         }
+        // 3b. Re-verify the root after the copy: a snapshot whose
+        //     permissions (or owner) cannot be established is not usable and
+        //     fails closed, so the 0700 guarantee holds across the whole
+        //     snapshot lifetime.
+        if let blocked @ DnfSnapshot::Blocked(..) =
+            self.verify_snapshot_permissions(&snap, "after the metadata cache copy")?
+        {
+            return Ok(blocked);
+        }
         // 3. Prove every enabled repository's repodata loads from the
         //    snapshot alone. `-C` makes this check itself incapable of
         //    fetching; `*.skip_if_unavailable=0` turns any unusable
@@ -2247,8 +2465,16 @@ impl Engine {
         req.env = baseline_env(self.fs.home_env());
         req.sensitive = sensitive;
         req.timeout_secs = 120;
-        match self.fs.exec(&req)?.completion {
-            Completion::Exited(0) => {}
+        let check_out = self.snap_exec(&snap, &req, "metadata completeness check", "")?;
+        match check_out.completion {
+            Completion::Exited(0) => {
+                // R2-03: a clean check must also be a complete one. Exit 0
+                // with unexpected stderr or a truncated capture cannot prove
+                // the snapshot usable.
+                if let Err(e) = self.dnf_output_guard(&check_out, "metadata completeness check") {
+                    return self.dnf_snapshot_blocked(&snap, e.message, false);
+                }
+            }
             Completion::Indeterminate { reason, .. } => {
                 return self.dnf_snapshot_blocked(
                     &snap,
@@ -2281,25 +2507,29 @@ impl Engine {
         req.args = PackageBackend::dnf_repolist_args();
         req.env = baseline_env(self.fs.home_env());
         req.timeout_secs = 120;
-        let repos = match self.fs.exec(&req)? {
-            Output {
-                completion: Completion::Exited(0),
-                stdout,
-                ..
-            } => match parse_dnf_enabled_repos(&String::from_utf8_lossy(&stdout)) {
-                Some(r) => r,
-                None => {
-                    return self.dnf_snapshot_blocked(
-                        &snap,
-                        "cannot establish the enabled repository set".to_string(),
-                        false,
-                    );
+        let repos_out = self.snap_exec(&snap, &req, "repository enumeration", "")?;
+        let repos = match repos_out.completion {
+            Completion::Exited(0) => {
+                // R2-03: reject truncated or stderr-bearing output before
+                // trusting a parse of the repository list. The guard failure
+                // routes through the blocked path like every other snapshot
+                // defect: a bare `?` would leak the private snapshot (R2-05)
+                // and bypass the metadata-contract result.
+                if let Err(e) = self.dnf_output_guard(&repos_out, "repository enumeration") {
+                    return self.dnf_snapshot_blocked(&snap, e.message, false);
                 }
-            },
-            Output {
-                completion: Completion::Indeterminate { reason, .. },
-                ..
-            } => {
+                match parse_dnf_enabled_repos(&String::from_utf8_lossy(&repos_out.stdout)) {
+                    Some(r) => r,
+                    None => {
+                        return self.dnf_snapshot_blocked(
+                            &snap,
+                            "cannot establish the enabled repository set".to_string(),
+                            false,
+                        );
+                    }
+                }
+            }
+            Completion::Indeterminate { reason, .. } => {
                 return self.dnf_snapshot_blocked(
                     &snap,
                     format!("repository enumeration did not complete: {}", reason),
@@ -2326,7 +2556,7 @@ impl Engine {
             "2".to_string(),
         ];
         req.env = baseline_env(self.fs.home_env());
-        let listing = match self.fs.exec(&req)? {
+        let listing = match self.snap_exec(&snap, &req, "snapshot cache listing", "")? {
             Output {
                 completion: Completion::Exited(0),
                 stdout,
@@ -2379,27 +2609,28 @@ impl Engine {
         req.env = baseline_env(self.fs.home_env());
         req.sensitive = sensitive;
         req.timeout_secs = 120;
-        let rows = match self.fs.exec(&req)? {
+        let dry_out = self.snap_exec(&snap, &req, "install set resolution", "")?;
+        let rows = match dry_out.completion {
             // Exit 1 = "Operation aborted" after a successful resolution;
             // exit 0 = nothing to do. Anything else is a resolution error.
-            Output {
-                completion: Completion::Exited(0) | Completion::Exited(1),
-                stdout,
-                ..
-            } => match parse_dnf_install_set(&String::from_utf8_lossy(&stdout)) {
-                Some(r) => r,
-                None => {
-                    return self.dnf_snapshot_blocked(
-                        &snap,
-                        "cannot establish the install transaction set".to_string(),
-                        false,
-                    );
+            Completion::Exited(0) | Completion::Exited(1) => {
+                // R2-03: the transaction table must be complete and clean
+                // before it can be trusted as the exact payload set.
+                if let Err(e) = self.dnf_output_guard(&dry_out, "install set resolution") {
+                    return self.dnf_snapshot_blocked(&snap, e.message, false);
                 }
-            },
-            Output {
-                completion: Completion::Indeterminate { reason, .. },
-                ..
-            } => {
+                match parse_dnf_install_set(&String::from_utf8_lossy(&dry_out.stdout)) {
+                    Some(r) => r,
+                    None => {
+                        return self.dnf_snapshot_blocked(
+                            &snap,
+                            "cannot establish the install transaction set".to_string(),
+                            false,
+                        );
+                    }
+                }
+            }
+            Completion::Indeterminate { reason, .. } => {
                 return self.dnf_snapshot_blocked(
                     &snap,
                     format!("install set resolution did not complete: {}", reason),
@@ -2437,8 +2668,11 @@ impl Engine {
         sensitive: bool,
         name_disp: &str,
     ) -> Result<DnfSnapshot> {
-        let blocked = |s: &mut Self, reason: String, indeterminate: bool| {
-            s.dnf_snapshot_cleanup(snap);
+        let blocked = |s: &mut Self, reason: String, indeterminate: bool| -> Result<DnfSnapshot> {
+            let mut reason = reason;
+            if let Some(msg) = s.dnf_snapshot_cleanup(snap) {
+                reason.push_str(&format!("; private snapshot cleanup failed: {}", msg));
+            }
             Ok(DnfSnapshot::Blocked(reason, indeterminate))
         };
         // Resolve payload URLs from cached metadata alone (`-C`): one
@@ -2454,20 +2688,30 @@ impl Engine {
         req.env = baseline_env(self.fs.home_env());
         req.sensitive = sensitive;
         req.timeout_secs = 120;
-        let urls: Vec<String> = match self.fs.exec(&req)? {
-            Output {
-                completion: Completion::Exited(0),
-                stdout,
-                ..
-            } => String::from_utf8_lossy(&stdout)
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect(),
-            Output {
-                completion: Completion::Indeterminate { reason, .. },
-                ..
-            } => {
+        let loc_out = self.snap_exec(snap, &req, "payload location resolution", "")?;
+        let urls: Vec<String> = match loc_out.completion {
+            Completion::Exited(0) => {
+                // R2-03: payload locations are only trustworthy when the
+                // whole answer was captured and no stderr was produced.
+                if let Err(e) = self.dnf_output_guard(&loc_out, "payload location resolution") {
+                    return blocked(self, e.message, false);
+                }
+                let mut urls: Vec<String> = Vec::new();
+                for l in String::from_utf8_lossy(&loc_out.stdout).lines() {
+                    let l = l.trim();
+                    if l.is_empty() {
+                        continue;
+                    }
+                    // R2-03-C: each location must be a URL the downloader can
+                    // actually fetch; anything else is unrecognized structure.
+                    if let Err(reason) = validate_payload_url(l) {
+                        return blocked(self, format!("{} for {}", reason, name_disp), false);
+                    }
+                    urls.push(l.to_string());
+                }
+                urls
+            }
+            Completion::Indeterminate { reason, .. } => {
                 return blocked(
                     self,
                     format!("payload location resolution did not complete: {}", reason),
@@ -2484,7 +2728,10 @@ impl Engine {
         };
         // A non-interactive payload fetcher on the target. curl is
         // near-universal on RHEL-family systems; wget is the fallback.
-        let fetcher = match self.dnf_fetch_tool()? {
+        // A dispatch failure here runs after the snapshot exists, so it goes
+        // through the same cleanup policy as every other preparation step
+        // (R2-05): a bare `?` would leak the private snapshot.
+        let fetcher = match self.dnf_fetch_tool(snap)? {
             Ok(f) => f,
             Err(reason) => return blocked(self, reason, true),
         };
@@ -2502,31 +2749,59 @@ impl Engine {
             // rpm payload file names are <name>-<version-release>.<arch>.rpm
             // with no epoch component; match the resolved URL by basename.
             let want = format!("{}-{}.{}.rpm", row.name, row.verrel, row.arch);
-            let url = urls
+            // R2-04: the transaction row must map to exactly one payload
+            // location. Multiple URLs sharing a basename cannot be told
+            // apart, so the mapping is ambiguous and must fail closed
+            // instead of picking the first candidate.
+            let candidates: Vec<&String> = urls
                 .iter()
-                .find(|u| u.rsplit('/').next() == Some(want.as_str()));
-            let url = match url {
-                Some(u) => u.clone(),
-                None => {
+                .filter(|u| u.rsplit('/').next() == Some(want.as_str()))
+                .collect();
+            let url = match candidates.len() {
+                0 => {
                     return blocked(
                         self,
                         format!("no cached payload location for {}", name_disp),
                         false,
                     )
                 }
+                1 => candidates[0].clone(),
+                n => {
+                    return blocked(
+                        self,
+                        format!(
+                            "payload location for {} is not unique ({} candidate URLs)",
+                            name_disp, n
+                        ),
+                        false,
+                    )
+                }
             };
-            // The repository's cache dir inside the snapshot.
+            // The repository's cache dir inside the snapshot. It must also be
+            // uniquely resolvable: several `<repoid>-<hash>` directories (an
+            // old hash plus a fresh one, or two repositories with a shared
+            // id prefix) would make the destination ambiguous.
             let prefix = format!("{}/{}-", snap, row.repoid);
-            let repodir = listing
+            let dirs: Vec<&str> = listing
                 .lines()
-                .find(|l| l.starts_with(&prefix) && !l[prefix.len()..].contains('/'))
-                .map(|l| l.to_string());
-            let repodir = match repodir {
-                Some(d) => d,
-                None => {
+                .filter(|l| l.starts_with(&prefix) && !l[prefix.len()..].contains('/'))
+                .collect();
+            let repodir = match dirs.len() {
+                0 => {
                     return blocked(
                         self,
                         format!("repository {} cache dir missing from snapshot", row.repoid),
+                        false,
+                    )
+                }
+                1 => dirs[0].to_string(),
+                n => {
+                    return blocked(
+                        self,
+                        format!(
+                            "repository {} cache dir is not unique ({} candidate directories)",
+                            row.repoid, n
+                        ),
                         false,
                     )
                 }
@@ -2535,7 +2810,15 @@ impl Engine {
             let mut req = ExecRequest::new("/usr/bin/mkdir");
             req.args = vec!["-p".to_string(), pkgdir.clone()];
             req.env = baseline_env(self.fs.home_env());
-            match self.fs.exec(&req)?.completion {
+            match self
+                .snap_exec(
+                    snap,
+                    &req,
+                    "payload directory creation",
+                    "payload_mkdir_fail",
+                )?
+                .completion
+            {
                 Completion::Exited(0) => {}
                 Completion::Indeterminate { reason, .. } => {
                     return blocked(
@@ -2562,7 +2845,10 @@ impl Engine {
             req.env = baseline_env(self.fs.home_env());
             req.sensitive = sensitive;
             req.timeout_secs = 300;
-            match self.fs.exec(&req)?.completion {
+            match self
+                .snap_exec(snap, &req, "payload download", "payload_download_fail")?
+                .completion
+            {
                 Completion::Exited(0) => {}
                 Completion::Indeterminate { reason, .. } => {
                     return blocked(
@@ -2585,7 +2871,13 @@ impl Engine {
 
     /// Pick a non-interactive payload fetch tool on the target. `Err` is
     /// an indeterminate outcome (the capability probe could not complete).
-    fn dnf_fetch_tool(&mut self) -> Result<std::result::Result<Option<DnfFetchTool>, String>> {
+    /// The probe is a snapshot-preparation command: a dispatch failure is
+    /// routed through the cleanup policy so the private snapshot is never
+    /// leaked by a bare `?` (R2-05).
+    fn dnf_fetch_tool(
+        &mut self,
+        snap: &str,
+    ) -> Result<std::result::Result<Option<DnfFetchTool>, String>> {
         for (path, tool) in [
             ("/usr/bin/curl", DnfFetchTool::Curl),
             ("/usr/bin/wget", DnfFetchTool::Wget),
@@ -2593,7 +2885,15 @@ impl Engine {
             let mut req = ExecRequest::new("/usr/bin/test");
             req.args = vec!["-x".to_string(), path.to_string()];
             req.env = baseline_env(self.fs.home_env());
-            match self.fs.exec(&req)?.completion {
+            match self
+                .snap_exec(
+                    snap,
+                    &req,
+                    "payload fetch tool detection",
+                    "payload_fetch_tool_fail",
+                )?
+                .completion
+            {
                 Completion::Exited(0) => return Ok(Ok(Some(tool))),
                 Completion::Exited(_) => {}
                 Completion::Indeterminate { reason, .. } => {
@@ -2610,26 +2910,109 @@ impl Engine {
         Ok(Ok(None))
     }
 
+    /// Run one snapshot-preparation command. A transport-level dispatch
+    /// failure (`Err`) leaves the private snapshot directory behind, so it is
+    /// cleaned up here and the failure is propagated with the cleanup outcome
+    /// attached — a bare `?` would leak the snapshot (R2-05).
+    ///
+    /// `fault` names the resource-layer fault this call models a dispatch
+    /// failure for, so tests can target a specific preparation step; an empty
+    /// name disables injection for that call.
+    fn snap_exec(
+        &mut self,
+        snap: &str,
+        req: &ExecRequest,
+        what: &str,
+        fault: &str,
+    ) -> Result<Output> {
+        let out = if !fault.is_empty() && self.fs.fault() == Some(fault) {
+            Err(SinterError::apply(format!(
+                "injected {} dispatch failure",
+                what
+            )))
+        } else {
+            self.fs.exec(req)
+        };
+        match out {
+            Ok(o) => Ok(o),
+            Err(e) => {
+                let mut reason = format!("{} failed to dispatch: {}", what, e.message);
+                if let Some(msg) = self.dnf_snapshot_cleanup(snap) {
+                    reason.push_str(&format!("; private snapshot cleanup failed: {}", msg));
+                }
+                Err(SinterError::apply(reason))
+            }
+        }
+    }
+
+    /// Guard the interpretation of any dnf diagnostic output (R2-03). A result
+    /// is only interpretable when the whole capture completed and dnf wrote
+    /// nothing to stderr: truncated stdout/stderr means the table could be cut
+    /// mid-structure, and unexpected stderr means dnf reported something this
+    /// parser does not model. Both fail closed rather than guessing.
+    fn dnf_output_guard(&self, out: &Output, what: &str) -> Result<()> {
+        if out.stdout_truncated {
+            return Err(SinterError::apply(format!(
+                "{} output was incomplete (stdout truncated)",
+                what
+            )));
+        }
+        if out.stderr_truncated {
+            return Err(SinterError::apply(format!(
+                "{} output was incomplete (stderr truncated)",
+                what
+            )));
+        }
+        if !out.stderr.is_empty() {
+            return Err(SinterError::apply(format!(
+                "{} produced unexpected stderr ({} bytes)",
+                what,
+                out.stderr.len()
+            )));
+        }
+        Ok(())
+    }
+
     fn dnf_snapshot_blocked(
         &mut self,
         snap: &str,
         reason: String,
         indeterminate: bool,
     ) -> Result<DnfSnapshot> {
-        self.dnf_snapshot_cleanup(snap);
+        let mut reason = reason;
+        if let Some(msg) = self.dnf_snapshot_cleanup(snap) {
+            // The blocking reason is preserved; the cleanup failure is
+            // appended so it is never swallowed (R2-05).
+            reason.push_str(&format!("; private snapshot cleanup failed: {}", msg));
+        }
         Ok(DnfSnapshot::Blocked(reason, indeterminate))
     }
 
-    /// Best-effort removal of a private metadata snapshot directory.
-    fn dnf_snapshot_cleanup(&mut self, snap: &str) {
+    /// Best-effort removal of a private metadata snapshot directory. Returns
+    /// `Some(reason)` when the removal could not be proven successful — a
+    /// non-zero exit, a signal, an indeterminate completion, or a transport
+    /// failure all count. Callers must surface the failure instead of
+    /// discarding it (R2-05).
+    fn dnf_snapshot_cleanup(&mut self, snap: &str) -> Option<String> {
         // The path is a `/var/tmp/sinter-dnf.*` directory we created.
         if !snap.starts_with("/var/tmp/sinter-dnf.") {
-            return;
+            return Some(format!(
+                "snapshot path is outside the expected prefix: {}",
+                snap
+            ));
         }
         let mut req = ExecRequest::new("/usr/bin/rm");
         req.args = vec!["-rf".to_string(), snap.to_string()];
         req.env = baseline_env(self.fs.home_env());
-        let _ = self.fs.exec(&req);
+        match self.fs.exec(&req) {
+            Ok(out) => match out.completion {
+                Completion::Exited(0) => None,
+                Completion::Exited(c) => Some(format!("rm -rf exited {}", c)),
+                Completion::Signaled(s) => Some(format!("rm -rf terminated by signal {}", s)),
+                Completion::Indeterminate { reason, .. } => Some(reason),
+            },
+            Err(e) => Some(e.message),
+        }
     }
 
     fn observe_package_sensitive(
@@ -3197,22 +3580,79 @@ enum DnfSnapshot {
 /// pairs. Every `Repo-id` line begins a block for an enabled repository
 /// (`repolist` lists enabled repos only); a `Repo-mirrors` field inside a
 /// block means the repo resolves through a mirror list whose cached copy
-/// the snapshot must contain. Returns `None` when no repository blocks are
-/// found — an empty parse cannot establish completeness.
+/// the snapshot must contain.
+///
+/// Fail closed (R2-03): a recognized field must have the exact
+/// `Repo-<name> : <value>` shape dnf prints. A prefix match with a
+/// malformed separator (e.g. `Repo-idNOT_A_FIELD: baseos`), an empty value,
+/// or any line that is not a `Repo-` field or a blank separator yields
+/// `None`: a partially understood repository set can never prove the
+/// snapshot is complete, so it is never guessed from.
+///
+/// A block is only a complete enabled-repository record when it shows both
+/// the identity (`Repo-id`) and the enabled state (`Repo-status`); seeing a
+/// repo id alone proves nothing about the repository set (R2-03-A). A block
+/// that ends — at a blank separator or at end of input — without both
+/// fields is incomplete output and fails closed. A status other than
+/// `enabled` contradicts `repolist` semantics and is rejected as well.
 fn parse_dnf_enabled_repos(text: &str) -> Option<Vec<(String, bool)>> {
     let mut out: Vec<(String, bool)> = Vec::new();
+    // The block currently being read: whether a `Repo-id` opened it and
+    // whether its `Repo-status` line has been seen yet.
+    let mut open = false;
+    let mut have_status = false;
     for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("Repo-id") {
-            let id = rest.trim_start_matches([' ', ':']).trim();
-            if id.is_empty() {
+        let t = line.trim();
+        if t.is_empty() {
+            // Blocks are separated by blank lines; a blank closes the block.
+            if open && !have_status {
+                return None;
+            }
+            continue;
+        }
+        if let Some(id) = repo_field_value(t, "Repo-id") {
+            // A new block opens; the previous one must have been complete.
+            if open && !have_status {
                 return None;
             }
             out.push((id.to_string(), false));
-        } else if line.starts_with("Repo-mirrors") {
-            if let Some(last) = out.last_mut() {
-                last.1 = true;
+            open = true;
+            have_status = false;
+        } else if t.starts_with("Repo-id") {
+            // A prefix match that is not a well-formed Repo-id field
+            // (e.g. `Repo-idNOT_A_FIELD: baseos`) is unrecognized structure.
+            return None;
+        } else if let Some(status) = repo_field_value(t, "Repo-status") {
+            // A status field with no enclosing block is malformed; a status
+            // other than enabled contradicts the `repolist` command itself.
+            if !open || status != "enabled" {
+                return None;
             }
+            have_status = true;
+        } else if t.starts_with("Repo-status") {
+            return None;
+        } else if repo_field_value(t, "Repo-mirrors").is_some() {
+            // A repo that resolves through a mirror list.
+            let last = out.last_mut()?;
+            last.1 = true;
+        } else if t.starts_with("Repo-mirrors") {
+            return None;
+        } else if t.starts_with("Repo-") {
+            // Any other dnf repository field; it must still carry the
+            // standard `name : value` separator, otherwise the output is not
+            // the format this parser understands.
+            if !t.contains(':') {
+                return None;
+            }
+        } else {
+            // Unrecognized line structure.
+            return None;
         }
+    }
+    // The final block must be complete too: output that stops after a bare
+    // `Repo-id` is incomplete, not an enabled-repository record.
+    if open && !have_status {
+        return None;
     }
     if out.is_empty() {
         None
@@ -3221,84 +3661,298 @@ fn parse_dnf_enabled_repos(text: &str) -> Option<Vec<(String, bool)>> {
     }
 }
 
+/// Extract the value of a `Repo-<field> ... : <value>` line. After the field
+/// name only alignment whitespace and then the field terminator `:` may
+/// appear; anything else (a prefix match running into other characters, an
+/// empty value) means the line is not the dnf field it looks like.
+fn repo_field_value<'a>(line: &'a str, field: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(field)?;
+    let value = rest.trim_start().strip_prefix(':')?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value)
+}
+
+/// Classify a resolved payload location as a URL this tool can actually and
+/// safely fetch (R2-03-C). The location is handed to a non-interactive
+/// downloader as one argv element, so a value that is not a well-formed
+/// absolute http(s) URL must never be treated as a payload location:
+/// relative paths, scheme-less strings, unsupported schemes, and host-less
+/// URLs are all rejected rather than passed to the downloader. The value is
+/// never echoed in the returned reason: location text is repository data.
+fn validate_payload_url(url: &str) -> std::result::Result<(), &'static str> {
+    if url.is_empty() {
+        return Err("empty payload location");
+    }
+    // A whitespace or control character in a URL can only come from a
+    // malformed or hostile repository record.
+    if url
+        .chars()
+        .any(|c| c.is_whitespace() || (c.is_control() && c != '\t'))
+    {
+        return Err("payload location contains whitespace");
+    }
+    let (scheme, rest) = url
+        .split_once("://")
+        .ok_or("payload location is not a URL")?;
+    if scheme != "http" && scheme != "https" {
+        return Err("payload location uses an unsupported scheme");
+    }
+    // An absolute URL must name a host: `https:/path` is host-less.
+    if rest.is_empty() || rest.starts_with('/') {
+        return Err("payload location has no host");
+    }
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if host.is_empty() {
+        return Err("payload location has no host");
+    }
+    // There must be a path after the host to fetch from.
+    if !rest.contains('/') {
+        return Err("payload location has no path");
+    }
+    Ok(())
+}
+
 /// One package payload the install transaction will need, parsed from a
 /// `dnf -C install --assumeno` transaction table.
 #[derive(Debug)]
 struct DnfInstallRow {
     name: String,
-    /// version-release as displayed (a leading `epoch:` is stripped —
-    /// rpm payload file names never carry the epoch).
+    /// version-release as displayed, with any leading `epoch:` stripped —
+    /// rpm payload file names never carry the epoch.
     verrel: String,
     arch: String,
     repoid: String,
 }
 
-/// Parse a `dnf install --assumeno` transaction table into the exact
-/// payload set (DESIGN §27). `None` on anything that is not a recognized
-/// complete table — never a partial guess. An empty table ("Nothing to
-/// do") yields an empty set.
-fn parse_dnf_install_set(text: &str) -> Option<Vec<DnfInstallRow>> {
-    let mut lines = text.lines();
-    // The transaction table follows a `Package ... Repository ... Size`
-    // column header terminated by a divider row.
-    let mut in_table = false;
-    let mut seen_summary = false;
-    let mut rows = Vec::new();
-    for line in lines.by_ref() {
-        if !in_table {
-            let t = line.trim();
-            if t.starts_with("Package") && t.contains("Repository") && t.contains("Size") {
-                in_table = true;
-            }
-            continue;
+/// Recognized dnf transaction-table sections. Rows only ever appear under
+/// one of these headers. A section outside this set is unknown structure and
+/// fails closed rather than risk a mis-parsed or silently skipped payload
+/// row (R2-03).
+const DNF_TABLE_SECTIONS: &[&str] = &[
+    "Installing:",
+    "Installing dependencies:",
+    "Installing weak dependencies:",
+    "Reinstalling:",
+    "Upgrading:",
+    "Upgrading dependencies:",
+    "Downgrading:",
+    "Removing:",
+    "Removing dependencies:",
+    // Old versions cleaned up by an upgrade/downgrade; not counted in the
+    // Transaction Summary verbs.
+    "Cleanup:",
+];
+
+/// The Transaction Summary verb a table section's rows are counted by.
+fn dnf_section_verb(section: &str) -> Option<&'static str> {
+    match section {
+        "Installing:" | "Installing dependencies:" | "Installing weak dependencies:" => {
+            Some("Install")
         }
+        "Reinstalling:" => Some("Reinstall"),
+        "Upgrading:" | "Upgrading dependencies:" => Some("Upgrade"),
+        "Downgrading:" => Some("Downgrade"),
+        "Removing:" | "Removing dependencies:" => Some("Remove"),
+        // Cleanup rows accompany an upgrade/downgrade and are not counted.
+        "Cleanup:" => None,
+        _ => None,
+    }
+}
+
+fn is_divider(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c == '=')
+}
+
+/// Parse one transaction-table row:
+/// `<name> <arch> <ver-rel> <repoid> <size> [unit]`.
+fn parse_dnf_row(t: &str) -> Option<DnfInstallRow> {
+    let f: Vec<&str> = t.split_whitespace().collect();
+    if f.len() < 5 || f.len() > 6 {
+        return None;
+    }
+    let size_ok = f[4].chars().all(|c| c.is_ascii_digit() || c == '.')
+        && f[4].chars().any(|c| c.is_ascii_digit());
+    let unit_ok = f.len() == 5 || matches!(f[5], "k" | "M" | "G" | "B" | "kB" | "MB" | "GB");
+    if !size_ok || !unit_ok {
+        return None;
+    }
+    // rpm payload file names never carry the epoch the table may print.
+    let verrel = match f[2].split_once(':') {
+        Some((ep, rest)) if !ep.is_empty() && ep.chars().all(|c| c.is_ascii_digit()) => {
+            rest.to_string()
+        }
+        _ => f[2].to_string(),
+    };
+    Some(DnfInstallRow {
+        name: f[0].to_string(),
+        verrel,
+        arch: f[1].to_string(),
+        repoid: f[3].to_string(),
+    })
+}
+
+/// Parse a Transaction Summary count line: `<Verb> <N> Package[s]`.
+fn parse_dnf_summary_line(t: &str) -> Option<(&'static str, usize)> {
+    let f: Vec<&str> = t.split_whitespace().collect();
+    if f.len() < 3 {
+        return None;
+    }
+    let verb = match f[0] {
+        "Install" => "Install",
+        "Reinstall" => "Reinstall",
+        "Upgrade" => "Upgrade",
+        "Downgrade" => "Downgrade",
+        "Remove" => "Remove",
+        _ => return None,
+    };
+    if f[2] != "Packages" && f[2] != "Package" {
+        return None;
+    }
+    Some((verb, f[1].parse::<usize>().ok()?))
+}
+
+/// Parse a `dnf install --assumeno` transaction table into the exact
+/// payload set (DESIGN §27). Fail closed (`None`) on anything that is not a
+/// recognized, complete table — never a partial guess.
+///
+/// A complete answer is exactly one of:
+///   - `Nothing to do.` as the sole content — dnf reports that no
+///     transaction is needed, so the payload set is provably empty; or
+///   - a full table: a column header (`Package … Repository … Size`)
+///     followed by a `=` divider, one or more rows grouped exclusively under
+///     recognized section headers, then a `Transaction Summary` section with
+///     its own divider whose per-verb package counts must equal the rows
+///     parsed for that verb. Format drift fails closed.
+fn parse_dnf_install_set(text: &str) -> Option<Vec<DnfInstallRow>> {
+    let lines: Vec<&str> = text.lines().collect();
+    // `Nothing to do.` is a complete answer only when it is the sole
+    // content — anything else around it is unrecognized structure.
+    let non_blank: Vec<&str> = lines
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if non_blank.first() == Some(&"Nothing to do.") {
+        if non_blank.len() == 1 {
+            return Some(Vec::new());
+        }
+        return None;
+    }
+    // Locate the column header.
+    let mut header_idx = None;
+    for (i, line) in lines.iter().enumerate() {
         let t = line.trim();
+        if t.starts_with("Package")
+            && t.contains("Arch")
+            && t.contains("Version")
+            && t.contains("Repository")
+            && t.contains("Size")
+        {
+            header_idx = Some(i);
+            break;
+        }
+    }
+    let header_idx = header_idx?;
+    // The header must be terminated by a divider row.
+    if !is_divider(lines.get(header_idx + 1)?.trim()) {
+        return None;
+    }
+    let mut rows: Vec<(&'static str, DnfInstallRow)> = Vec::new();
+    let mut counts: Vec<(&'static str, usize)> = Vec::new();
+    let mut current_section: Option<&'static str> = None;
+    let mut seen_summary = false;
+    let mut summary_divider = false;
+    let mut i = header_idx + 2;
+    while i < lines.len() {
+        let t = lines[i].trim();
+        i += 1;
         if t.is_empty() {
             continue;
         }
-        if t.starts_with("Transaction Summary") {
-            seen_summary = true;
-            break;
-        }
-        if t.chars().all(|c| c == '=') {
+        if !seen_summary {
+            if t == "Transaction Summary" {
+                seen_summary = true;
+                continue;
+            }
+            if is_divider(t) {
+                continue;
+            }
+            if let Some(section) = DNF_TABLE_SECTIONS.iter().copied().find(|s| *s == t) {
+                current_section = Some(section);
+                continue;
+            }
+            // A payload row must sit under a recognized section header.
+            let section = current_section?;
+            let row = parse_dnf_row(t)?;
+            rows.push((section, row));
+        } else if !summary_divider {
+            // The summary must be introduced by a divider.
+            if !is_divider(t) {
+                return None;
+            }
+            summary_divider = true;
+        } else if let Some((verb, n)) = parse_dnf_summary_line(t) {
+            counts.push((verb, n));
+        } else if is_divider(t) {
             continue;
-        }
-        if t.ends_with(':')
-            && t[..t.len() - 1]
-                .chars()
-                .all(|c| c.is_alphabetic() || c == ' ')
+        } else if t.starts_with("Total")
+            || t.starts_with("Disk usage")
+            || t == "Operation aborted."
+            || t.starts_with("Last metadata expiration check")
         {
-            // Section headers ("Installing:", "Installing dependencies:",
-            // ...); rows under any section may need payloads, so sections
-            // are not individually classified.
+            // Known trailing lines dnf prints after the counts.
             continue;
-        }
-        let f: Vec<&str> = t.split_whitespace().collect();
-        // <name> <arch> <ver-rel> <repoid> <size> [unit]
-        if f.len() < 5 || f.len() > 6 {
+        } else {
+            // Unrecognized trailing structure.
             return None;
         }
-        let size_ok = f[4].chars().all(|c| c.is_ascii_digit() || c == '.')
-            && f[4].chars().any(|c| c.is_ascii_digit());
-        let unit_ok = f.len() == 5 || matches!(f[5], "k" | "M" | "G" | "B" | "kB" | "MB" | "GB");
-        if !size_ok || !unit_ok {
-            return None;
-        }
-        let verrel = match f[2].split_once(':') {
-            Some((ep, rest)) if ep.chars().all(|c| c.is_ascii_digit()) => rest,
-            _ => f[2],
-        };
-        rows.push(DnfInstallRow {
-            name: f[0].to_string(),
-            verrel: verrel.to_string(),
-            arch: f[1].to_string(),
-            repoid: f[3].to_string(),
-        });
     }
-    if !seen_summary {
+    if !seen_summary || !summary_divider || counts.is_empty() || rows.is_empty() {
+        // A summary with no rows is inconsistent: a real empty transaction
+        // prints `Nothing to do.` instead (R2-03).
         return None;
     }
-    Some(rows)
+    // Cross-check the summary counts against the parsed rows, in both
+    // directions (R2-03-B). Counting only what the summary happens to list
+    // would let a body whose `Upgrading:` rows are missing from the summary
+    // pass as a consistent transaction.
+    let mut cleanup_rows = false;
+    let mut body_counts: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
+    for (section, _) in &rows {
+        if *section == "Cleanup:" {
+            cleanup_rows = true;
+        }
+        if let Some(verb) = dnf_section_verb(section) {
+            *body_counts.entry(verb).or_insert(0) += 1;
+        }
+    }
+    // Every summary line must agree with the rows counted for its verb.
+    for (verb, count) in &counts {
+        let matching = body_counts.get(verb).copied().unwrap_or(0);
+        if matching != *count {
+            return None;
+        }
+    }
+    // And the summary must account for every counted action the body
+    // performed: a verb with rows but no matching summary line is a
+    // missing count, not a zero this parser may assume.
+    for (verb, count) in &body_counts {
+        if !counts.iter().any(|(v, c)| v == verb && c == count) {
+            return None;
+        }
+    }
+    // Cleanup rows are old versions removed during an upgrade/downgrade and
+    // are not counted by a summary verb; they may only appear alongside one.
+    if cleanup_rows
+        && !body_counts.contains_key("Upgrade")
+        && !body_counts.contains_key("Downgrade")
+    {
+        return None;
+    }
+    Some(rows.into_iter().map(|(_, r)| r).collect())
 }
 
 /// Non-interactive payload fetch tool used to place resolved payloads
@@ -3606,6 +4260,11 @@ mod package_tests {
     }
 
     fn table(body: &str) -> String {
+        table_summary(body, "Install  1 Package")
+    }
+
+    /// Build a transaction table with an explicit Transaction Summary line.
+    fn table_summary(body: &str, summary: &str) -> String {
         format!(
             "Dependencies resolved.\n\
              ================================================================================\n \
@@ -3614,19 +4273,20 @@ mod package_tests {
              {}\
              Transaction Summary\n\
              ================================================================================\n\
-             Install  2 Packages\n",
-            body
+             {}\n",
+            body, summary
         )
     }
 
     #[test]
     fn dnf_install_set_parses_exact_rows() {
-        let out = table(
+        let out = table_summary(
             "Installing:\n \
              httpd                  x86_64      2.4.62-13.el9_8.6      appstream       46 k\n\
              Installing dependencies:\n \
              apr                    x86_64      1.7.0-12.el9_3         appstream      122 k\n \
              mailcap                noarch      2.1.49-5.el9.0.2       baseos          32 k\n\n",
+            "Install  3 Packages",
         );
         let rows = parse_dnf_install_set(&out).unwrap();
         assert_eq!(rows.len(), 3);
@@ -3640,12 +4300,21 @@ mod package_tests {
     #[test]
     fn dnf_install_set_strips_epoch_for_basename() {
         // rpm payload file names never carry the epoch; the table shows it.
-        let out = table(
+        let out = table_summary(
             "Installing:\n \
              coreutils              x86_64      1:8.32-38.el9          baseos         1.1 M\n",
+            "Install  1 Package",
         );
         let rows = parse_dnf_install_set(&out).unwrap();
         assert_eq!(rows[0].verrel, "8.32-38.el9");
+    }
+
+    #[test]
+    fn dnf_install_set_nothing_to_do_is_an_empty_set() {
+        // `Nothing to do.` is a complete, unambiguous answer: the payload set
+        // is provably empty (R2-03: code, comment, and test agree).
+        let rows = parse_dnf_install_set("Nothing to do.\n").unwrap();
+        assert!(rows.is_empty());
     }
 
     #[test]
@@ -3655,12 +4324,150 @@ mod package_tests {
         // A non-row line inside the table fails closed.
         assert!(parse_dnf_install_set(&table("Installing:\n garbage line here\n")).is_none());
         // A row with a non-numeric size fails closed.
+        assert!(parse_dnf_install_set(&table_summary(
+            "Installing:\n httpd x86_64 1-1 appstream huge\n",
+            "Install  1 Package"
+        ))
+        .is_none());
+        // A table header with a Transaction Summary but no package rows is
+        // inconsistent — a real empty transaction prints "Nothing to do."
+        assert!(parse_dnf_install_set(&table_summary("", "Install  0 Packages")).is_none());
+        // A header that is not followed by a divider fails closed.
+        assert!(parse_dnf_install_set(
+            "Package Arch Version Repository Size\nhttpd x86_64 1-1 appstream 1 k\n"
+        )
+        .is_none());
+        // An unknown transaction section is unrecognized structure.
         assert!(
-            parse_dnf_install_set(&table("Installing:\n httpd x86_64 1-1 appstream huge\n"))
-                .is_none()
+            parse_dnf_install_set(&table("Bogus:\n httpd x86_64 1-1 appstream 1 k\n")).is_none()
         );
-        // No table at all ("Nothing to do") cannot prove a payload set —
-        // fail closed rather than assume.
-        assert!(parse_dnf_install_set("Nothing to do.\n").is_none());
+        // A row outside any section header fails closed.
+        assert!(parse_dnf_install_set(&table_summary(
+            "httpd x86_64 1-1 appstream 1 k\n",
+            "Install  1 Package"
+        ))
+        .is_none());
+        // `Nothing to do.` buried in other output is not a sole answer.
+        assert!(parse_dnf_install_set("Nothing to do.\nextra noise\n").is_none());
+        // Transaction Summary counts must match the parsed rows.
+        assert!(parse_dnf_install_set(&table_summary(
+            "Installing:\n httpd x86_64 1-1 appstream 1 k\n",
+            "Install  2 Packages"
+        ))
+        .is_none());
+        // A Transaction Summary without its divider fails closed.
+        assert!(
+            parse_dnf_install_set(
+                "Dependencies resolved.\n\
+                 ================================================================================\n \
+                 Package                Arch        Version                Repository      Size\n\
+                 ================================================================================\n\
+                 Installing:\n \
+                 httpd                  x86_64      1-1                    appstream       1 k\n\
+                 Transaction Summary\n\
+                 Install  1 Package\n"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn dnf_enabled_repos_parses_strictly() {
+        let text = "Repo-id            : baseos\nRepo-name          : BaseOS\nRepo-status        : enabled\nRepo-mirrors       : https://mirrors.example/?repo=baseos\n\nRepo-id            : appstream\nRepo-name          : AppStream\nRepo-status        : enabled\n\n";
+        let repos = parse_dnf_enabled_repos(text).unwrap();
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0], ("baseos".to_string(), true));
+        assert_eq!(repos[1], ("appstream".to_string(), false));
+    }
+
+    #[test]
+    fn dnf_enabled_repos_rejects_malformed_fields() {
+        // A Repo-id prefix match with a malformed separator (R2-03
+        // reproduction) must not be accepted as a repository id.
+        assert!(parse_dnf_enabled_repos("Repo-idNOT_A_FIELD: baseos\n").is_none());
+        // An empty value is not a repository id.
+        assert!(parse_dnf_enabled_repos("Repo-id            : \n").is_none());
+        // A Repo- field with no separator is unrecognized structure.
+        assert!(parse_dnf_enabled_repos("Repo-namegarbage\n").is_none());
+        // A non-Repo- line is unrecognized structure.
+        assert!(parse_dnf_enabled_repos("Repo-id : baseos\nsome other line\n").is_none());
+        // A mirror field with no enclosing block is malformed.
+        assert!(parse_dnf_enabled_repos("Repo-mirrors : https://x\n").is_none());
+        // No repos at all cannot establish completeness.
+        assert!(parse_dnf_enabled_repos("").is_none());
+    }
+
+    #[test]
+    fn dnf_enabled_repos_rejects_incomplete_blocks() {
+        // R2-03-A: seeing a repo id alone proves nothing about the repository
+        // — the block must also confirm its enabled status.
+        assert!(parse_dnf_enabled_repos("Repo-id            : baseos\n").is_none());
+        // A block whose status line is missing at the blank separator.
+        assert!(parse_dnf_enabled_repos(
+            "Repo-id            : baseos\nRepo-name          : BaseOS\n\nRepo-status        : enabled\n"
+        )
+        .is_none());
+        // A status that is not `enabled` contradicts `repolist` semantics.
+        assert!(parse_dnf_enabled_repos(
+            "Repo-id            : baseos\nRepo-status        : disabled\n"
+        )
+        .is_none());
+        // A status field with no enclosing block is malformed.
+        assert!(parse_dnf_enabled_repos("Repo-status        : enabled\n").is_none());
+        // A complete single block parses.
+        let repos =
+            parse_dnf_enabled_repos("Repo-id            : baseos\nRepo-status        : enabled\n")
+                .unwrap();
+        assert_eq!(repos, vec![("baseos".to_string(), false)]);
+    }
+
+    #[test]
+    fn dnf_install_set_summary_must_account_for_the_body() {
+        // R2-03-B: the body performs an Upgrade the summary never reports;
+        // reading only the summary lines would miss it.
+        assert!(parse_dnf_install_set(&table_summary(
+            "Installing:\n httpd x86_64 1-1 appstream 1 k\nUpgrading:\n foo x86_64 2-1 appstream 1 k\n",
+            "Install  1 Package"
+        ))
+        .is_none());
+        // A summary verb with no body rows is inconsistent in the other
+        // direction as well.
+        assert!(parse_dnf_install_set(&table_summary(
+            "Installing:\n httpd x86_64 1-1 appstream 1 k\n",
+            "Install  1 Package\nUpgrade  1 Package"
+        ))
+        .is_none());
+        // A consistent multi-action table parses, and every section under a
+        // shared verb is counted together.
+        let rows = parse_dnf_install_set(&table_summary(
+            "Installing:\n httpd x86_64 1-1 appstream 1 k\nInstalling dependencies:\n apr x86_64 1-1 appstream 1 k\nUpgrading:\n foo x86_64 2-1 appstream 1 k\n",
+            "Install  2 Packages\nUpgrade  1 Package"
+        ))
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn payload_location_must_be_a_fetchable_url() {
+        // R2-03-C: basename agreement is not enough — the value must be an
+        // absolute http(s) URL the downloader can actually fetch.
+        assert!(validate_payload_url("not-a-url/nano-1.0-1.el9.x86_64.rpm").is_err());
+        assert!(validate_payload_url("/local/path/nano-1.0-1.el9.x86_64.rpm").is_err());
+        assert!(validate_payload_url("file:///nano-1.0-1.el9.x86_64.rpm").is_err());
+        // A host-less absolute URL (`https:///path` names no host).
+        assert!(validate_payload_url("https:///nano-1.0-1.el9.x86_64.rpm").is_err());
+        // A URL with no path after the host.
+        assert!(validate_payload_url("https://mirror.example").is_err());
+        assert!(validate_payload_url("https://mirror /x.rpm").is_err());
+        assert!(validate_payload_url("").is_err());
+        assert!(validate_payload_url("HTTPS://mirror.example/x.rpm").is_err());
+        // A well-formed absolute URL is accepted — a single-label host is a
+        // legitimate LAN mirror name.
+        assert!(validate_payload_url(
+            "https://mirror.example/baseos/Packages/nano-1.0-1.el9.x86_64.rpm"
+        )
+        .is_ok());
+        assert!(validate_payload_url("http://mirror.example/x.rpm").is_ok());
+        assert!(validate_payload_url("https://lan-mirror/x.rpm").is_ok());
     }
 }

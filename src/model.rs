@@ -94,6 +94,16 @@ impl Model {
 
 /// Load and expand the recipe starting at `entry`.
 pub fn load_model(entry: &Path) -> Result<Model> {
+    // Pre-pass: collect every sensitive variable name across the whole
+    // include graph before any resource is expanded. Sensitivity of an
+    // expression must not depend on include ordering — a resource in an
+    // included file may reference a sensitive variable declared by the
+    // including parent, and includes are expanded before the parent's own
+    // variables become visible. Using the complete, order-independent set
+    // everywhere keeps diagnostics redacted on every path (DESIGN §31).
+    let mut global_sensitive_vars: BTreeSet<String> = BTreeSet::new();
+    let mut pre_seen: HashSet<PathBuf> = HashSet::new();
+    collect_sensitive_vars(entry, &mut pre_seen, &mut global_sensitive_vars)?;
     let mut state = LoadState {
         seen: HashSet::new(),
         vars: Vec::new(),
@@ -101,9 +111,43 @@ pub fn load_model(entry: &Path) -> Result<Model> {
         handlers: Vec::new(),
         var_names: HashSet::new(),
         declarations: Vec::new(),
+        global_sensitive_vars,
     };
     state.load(entry)?;
     freeze(state, entry)
+}
+
+/// Recursively collect every sensitive variable name in the include graph.
+/// This runs before expansion so sensitivity decisions are independent of
+/// include ordering.
+fn collect_sensitive_vars(
+    path: &Path,
+    seen: &mut HashSet<PathBuf>,
+    names: &mut BTreeSet<String>,
+) -> Result<()> {
+    let canon = canonicalize(path)?;
+    if !seen.insert(canon.clone()) {
+        return Err(SinterError::schema(format!(
+            "recipe {} is included more than once (include cycle or duplicate include)",
+            canon.display()
+        )));
+    }
+    let doc = parse_document(&canon)?;
+    for v in &doc.vars {
+        if v.sensitive {
+            names.insert(v.name.clone());
+        }
+    }
+    let base_dir = canon.parent().unwrap_or_else(|| Path::new("."));
+    for inc in &doc.includes {
+        let inc_path = if Path::new(&inc.path).is_absolute() {
+            PathBuf::from(&inc.path)
+        } else {
+            base_dir.join(&inc.path)
+        };
+        collect_sensitive_vars(&inc_path, seen, names)?;
+    }
+    Ok(())
 }
 
 struct LoadState {
@@ -115,6 +159,10 @@ struct LoadState {
     /// Every resource declaration, recorded independently of loop expansion so
     /// invalid declarations are rejected even when their loop is empty.
     declarations: Vec<Declaration>,
+    /// Sensitive variable names across the entire include graph, collected in
+    /// a pre-pass. Sensitivity decisions use this set so they never depend on
+    /// the order in which documents happen to be expanded.
+    global_sensitive_vars: BTreeSet<String>,
 }
 
 /// A resource declaration as written, retained for declaration-level
@@ -196,12 +244,9 @@ fn expand_resource(canon: &Path, decl: &ResourceDecl, state: &mut LoadState) -> 
     // Collect register references from `when` and interpolated `with` values at
     // declaration time. This runs even when the loop is empty, so a forbidden
     // reference can never escape validation merely because no instance exists.
-    let sensitive_var_names: BTreeSet<String> = state
-        .vars
-        .iter()
-        .filter(|v| v.sensitive)
-        .map(|v| v.name.clone())
-        .collect();
+    // Sensitivity uses the global pre-pass set so redaction does not depend on
+    // include ordering.
+    let sensitive_var_names: BTreeSet<String> = state.global_sensitive_vars.clone();
     let mut register_refs: BTreeSet<String> = BTreeSet::new();
     if let Some(w) = &decl.when {
         let when_sensitive =
@@ -1312,10 +1357,19 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
         // Conservative static sensitivity used for early diagnostics. Computed
         // BEFORE template body validation so body-derived values are redacted
         // whenever sensitivity is explicit OR inherited from a sensitive
-        // variable in a `with` field (DESIGN §31).
+        // variable in a `with` field or in the `when` condition (DESIGN §31).
         let mut derived_from_with = r.sensitive;
         for v in r.with.values() {
             if value_references_sensitive_var(v, &sensitive_var_names) {
+                derived_from_with = true;
+            }
+        }
+        // A `when` condition that references a sensitive variable makes the
+        // whole resource's diagnostics sensitive: the raw expression tokens
+        // must never surface, including from later runtime evaluation of the
+        // condition itself.
+        if let Some(w) = &r.when {
+            if value_may_be_sensitive(&Value::Str(w.clone()), &sensitive_var_names) {
                 derived_from_with = true;
             }
         }
@@ -1719,10 +1773,24 @@ fn validate_command_fields(
         if !v.is_null() {
             match v.as_str() {
                 Some(s) => {
+                    // A changed_when expression is sensitive when the resource
+                    // is sensitive or the expression references (or textually
+                    // names) a sensitive variable: its tokens must never reach
+                    // diagnostics on any parse/validation path.
+                    let cw_sensitive = fr.sensitive
+                        || value_may_be_sensitive(&Value::Str(s.to_string()), sensitive_vars);
                     let expr = parse_expr(s).map_err(|e| {
-                        SinterError::schema(format!("{}: invalid changed_when: {}", ctx, e))
+                        if cw_sensitive {
+                            SinterError::schema(format!(
+                                "{}: invalid changed_when (value redacted): {}",
+                                ctx,
+                                e.category()
+                            ))
+                        } else {
+                            SinterError::schema(format!("{}: invalid changed_when: {}", ctx, e))
+                        }
                     })?;
-                    validate_changed_when(&expr, ctx)?;
+                    validate_changed_when(&expr, ctx, cw_sensitive)?;
                 }
                 None => {
                     return Err(SinterError::schema(format!(
@@ -1781,7 +1849,7 @@ fn validate_command_fields(
 
 const RESERVED_ENV: &[&str] = &["PATH", "LANG", "LC_ALL", "HOME"];
 
-fn validate_changed_when(e: &Expr, ctx: &str) -> Result<()> {
+fn validate_changed_when(e: &Expr, ctx: &str, sensitive: bool) -> Result<()> {
     let mut regs = BTreeSet::new();
     let mut names = BTreeSet::new();
     collect_register_refs(e, &mut regs, &mut names);
@@ -1791,23 +1859,29 @@ fn validate_changed_when(e: &Expr, ctx: &str) -> Result<()> {
             ctx
         )));
     }
-    validate_changed_when_fields(e, ctx)
+    validate_changed_when_fields(e, ctx, sensitive)
 }
 
-fn validate_changed_when_fields(e: &Expr, ctx: &str) -> Result<()> {
+fn validate_changed_when_fields(e: &Expr, ctx: &str, sensitive: bool) -> Result<()> {
     match e {
         Expr::Or(a, b) | Expr::And(a, b) | Expr::Cmp(a, _, b) => {
-            validate_changed_when_fields(a, ctx)?;
-            validate_changed_when_fields(b, ctx)
+            validate_changed_when_fields(a, ctx, sensitive)?;
+            validate_changed_when_fields(b, ctx, sensitive)
         }
-        Expr::Not(a) => validate_changed_when_fields(a, ctx),
+        Expr::Not(a) => validate_changed_when_fields(a, ctx, sensitive),
         Expr::ResultField(name) => match name.as_str() {
             "executed" | "exit_code" | "stdout" | "stderr" | "stdout_complete"
             | "stderr_complete" => Ok(()),
-            other => Err(SinterError::schema(format!(
-                "{}: changed_when may not read result.{}",
-                ctx, other
-            ))),
+            // The offending field name is expression content: redact it when
+            // the expression is sensitive instead of echoing the token.
+            other => Err(SinterError::schema(if sensitive {
+                format!(
+                    "{}: changed_when may not read an unknown result field (value redacted)",
+                    ctx
+                )
+            } else {
+                format!("{}: changed_when may not read result.{}", ctx, other)
+            })),
         },
         Expr::Var(_)
         | Expr::Fact(_)

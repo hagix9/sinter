@@ -1429,6 +1429,39 @@ pub struct FakeTarget {
     /// When set, `repoquery --location` resolves no payload URLs — the
     /// transaction payload set cannot be satisfied from the local cache.
     pub dnf_no_locations: bool,
+    /// Overrides the `dnf repolist -v` output, so tests can model truncated or
+    /// malformed repository enumeration (R2-03).
+    pub dnf_repolist_output: Option<Output>,
+    /// Overrides the cache-only `dnf install --assumeno` transaction table,
+    /// so tests can model truncated, malformed, or ambiguous transactions
+    /// (R2-03/R2-04).
+    pub dnf_dry_run_output: Option<Output>,
+    /// Overrides the `repoquery --location` output, so tests can model
+    /// duplicate or ambiguous payload URLs (R2-04).
+    pub dnf_location_output: Option<Output>,
+    /// Overrides the `find <snap> -mindepth 1 -maxdepth 2` listing, so tests
+    /// can model similar repository IDs or multiple cached hash directories
+    /// (R2-04).
+    pub snapshot_listing: Option<String>,
+    /// Mode reported for the private dnf snapshot root by `stat -c %a`
+    /// before the metadata cache is copied into it (snapshot-permission
+    /// hardening).
+    pub snapshot_mode: String,
+    /// Mode reported for the snapshot root by `stat -c %a` AFTER the
+    /// metadata cache copy, modeling a copy that widened the root away from
+    /// 0700 (snapshot-permission hardening). `None` keeps the copy honest:
+    /// `cp -a` of source contents into an existing directory does not change
+    /// the root's own mode.
+    pub snapshot_mode_after_copy: Option<String>,
+    /// When true, the snapshot-root `chmod 700` fails (permission hardening
+    /// fail-closed tests).
+    pub snapshot_chmod_fails: bool,
+    /// When true, the snapshot-root `stat -c %a %u` verification fails
+    /// (permission hardening fail-closed tests).
+    pub snapshot_stat_fails: bool,
+    /// When true, the snapshot-root `rm -rf` fails (R2-05 cleanup-truth
+    /// tests).
+    pub snapshot_rm_fails: bool,
 }
 
 /// One enabled dnf repository in the fake model.
@@ -1476,6 +1509,15 @@ impl FakeTarget {
                 mirrorlist_cached: true,
             }],
             dnf_no_locations: false,
+            dnf_repolist_output: None,
+            dnf_dry_run_output: None,
+            dnf_location_output: None,
+            snapshot_listing: None,
+            snapshot_mode: "700".to_string(),
+            snapshot_mode_after_copy: None,
+            snapshot_chmod_fails: false,
+            snapshot_stat_fails: false,
+            snapshot_rm_fails: false,
         }
     }
 
@@ -1500,6 +1542,15 @@ impl FakeTarget {
             query_results: std::collections::VecDeque::new(),
             dnf_repos: Vec::new(),
             dnf_no_locations: false,
+            dnf_repolist_output: None,
+            dnf_dry_run_output: None,
+            dnf_location_output: None,
+            snapshot_listing: None,
+            snapshot_mode: "700".to_string(),
+            snapshot_mode_after_copy: None,
+            snapshot_chmod_fails: false,
+            snapshot_stat_fails: false,
+            snapshot_rm_fails: false,
         }
     }
 
@@ -1521,6 +1572,15 @@ impl FakeTarget {
             query_results: std::collections::VecDeque::new(),
             dnf_repos: Vec::new(),
             dnf_no_locations: false,
+            dnf_repolist_output: None,
+            dnf_dry_run_output: None,
+            dnf_location_output: None,
+            snapshot_listing: None,
+            snapshot_mode: "700".to_string(),
+            snapshot_mode_after_copy: None,
+            snapshot_chmod_fails: false,
+            snapshot_stat_fails: false,
+            snapshot_rm_fails: false,
         }
     }
 
@@ -1558,11 +1618,17 @@ impl FakeTarget {
     }
 }
 
+/// The private snapshot root the scripted target hands out via `mktemp`.
+const FAKE_SNAP: &str = "/var/tmp/sinter-dnf.fakesnap";
+
 pub struct FakeExecutor {
     pub log: Vec<CommandRecord>,
     pub sudo: bool,
     pub home: String,
     target: FakeTarget,
+    /// Whether the metadata cache copy into the private snapshot root has
+    /// run, so the post-copy `stat` can report a copy that widened the root.
+    snap_copied: bool,
 }
 
 impl FakeExecutor {
@@ -1573,6 +1639,7 @@ impl FakeExecutor {
             sudo,
             home,
             target,
+            snap_copied: false,
         }
     }
 
@@ -1604,12 +1671,49 @@ impl FakeExecutor {
             "dpkg-query" => self.run_dpkg_query(&req.args),
             "dnf" | "apt-get" => self.run_manager(&prog, &req.args),
             "systemctl" => self.run_systemctl(&req.args),
-            "mktemp" => Self::exited(
-                0,
-                "/var/tmp/sinter-dnf.fakesnap\n".to_string(),
-                String::new(),
-            ),
-            "cp" | "rm" | "mkdir" => Self::exited(0, String::new(), String::new()),
+            "mktemp" => Self::exited(0, format!("{}\n", FAKE_SNAP), String::new()),
+            "chmod" => {
+                // The private dnf snapshot root permission enforcement
+                // (0700). Only the snapshot root is modeled; any other
+                // chmod is an unmodeled no-op that succeeds.
+                let is_snap = req.args.iter().any(|a| a == FAKE_SNAP);
+                if is_snap && self.target.snapshot_chmod_fails {
+                    Self::exited(
+                        1,
+                        String::new(),
+                        "injected snapshot chmod failure".to_string(),
+                    )
+                } else {
+                    Self::exited(0, String::new(), String::new())
+                }
+            }
+            "stat" => self.run_stat(&req.args),
+            "cp" => {
+                // The metadata cache copy into the private snapshot root.
+                // The root's own mode is not changed by copying contents
+                // into an existing directory; an override models a copy that
+                // does widen it.
+                if req.args.iter().any(|a| a.starts_with(FAKE_SNAP)) {
+                    self.snap_copied = true;
+                }
+                Self::exited(0, String::new(), String::new())
+            }
+            "mkdir" => Self::exited(0, String::new(), String::new()),
+            "rm" => {
+                // `rm -rf <snap>` cleans up the private dnf metadata
+                // snapshot. Only the snapshot root is modeled; any other rm
+                // is an unmodeled no-op that succeeds.
+                let is_snap = req.args.iter().any(|a| a == FAKE_SNAP);
+                if is_snap && self.target.snapshot_rm_fails {
+                    Self::exited(
+                        1,
+                        String::new(),
+                        "injected snapshot removal failure".to_string(),
+                    )
+                } else {
+                    Self::exited(0, String::new(), String::new())
+                }
+            }
             "curl" | "wget" => Self::exited(0, String::new(), String::new()),
             "find" => self.run_find(&req.args),
             // Anything else (e.g. user command resources): an unmodeled
@@ -1759,9 +1863,13 @@ impl FakeExecutor {
 
     /// `find <snap> -mindepth 1 -maxdepth 2` — lists the snapshot's
     /// per-repo cache dirs (`<repoid>-<hash>`), repodata, and cached
-    /// mirror lists for every modeled repo.
+    /// mirror lists for every modeled repo. An explicit listing override
+    /// wins so tests can model ambiguous cache layouts.
     fn run_find(&mut self, args: &[String]) -> Output {
         let root = args.first().cloned().unwrap_or_default();
+        if let Some(listing) = self.target.snapshot_listing.clone() {
+            return Self::exited(0, listing, String::new());
+        }
         let mut out = String::new();
         for r in &self.target.dnf_repos {
             if r.repodata_cached {
@@ -1779,11 +1887,49 @@ impl FakeExecutor {
         Self::exited(0, out, String::new())
     }
 
+    /// `stat -c %a %u -- <snap>` — verifies the private snapshot root stays
+    /// 0700 and is owned by the effective execution identity. Any other
+    /// stat shape is an unmodeled filesystem query and fails honestly.
+    fn run_stat(&mut self, args: &[String]) -> Output {
+        let is_snap_verify = args.iter().any(|a| a == "%a %u")
+            && args.last().map(|p| p == FAKE_SNAP).unwrap_or(false);
+        if is_snap_verify {
+            if self.target.snapshot_stat_fails {
+                return Self::exited(
+                    1,
+                    String::new(),
+                    "injected snapshot stat failure".to_string(),
+                );
+            }
+            // A copy that widened the root is reported by the post-copy
+            // verification; before the copy the mktemp/chmod mode applies.
+            let mode = if self.snap_copied {
+                self.target
+                    .snapshot_mode_after_copy
+                    .as_deref()
+                    .unwrap_or(&self.target.snapshot_mode)
+            } else {
+                &self.target.snapshot_mode
+            };
+            let uid = if self.sudo { 0 } else { self.target.uid };
+            return Self::exited(0, format!("{} {}\n", mode, uid), String::new());
+        }
+        Self::exited(
+            1,
+            String::new(),
+            "fake target has no modeled filesystem".to_string(),
+        )
+    }
+
     fn run_manager(&mut self, prog: &str, args: &[String]) -> Output {
         let name = args.last().cloned().unwrap_or_default();
         if prog == "dnf" && args.iter().any(|a| a == "repolist") {
             // repolist -v: one block per enabled repo; Repo-mirrors marks
-            // repos that resolve via a mirror list.
+            // repos that resolve via a mirror list. An explicit override
+            // wins so tests can model truncated or malformed enumeration.
+            if let Some(o) = self.target.dnf_repolist_output.clone() {
+                return o;
+            }
             let mut s = String::new();
             for r in &self.target.dnf_repos {
                 s.push_str(&format!(
@@ -1799,8 +1945,12 @@ impl FakeExecutor {
         }
         if prog == "dnf" && args.iter().any(|a| a == "repoquery") {
             // `repoquery --location`: payload URLs composed from the cached
-            // mirror lists — one per name argument.
+            // mirror lists — one per name argument. An explicit override
+            // wins so tests can model duplicate/ambiguous URLs.
             if args.iter().any(|a| a == "--location") {
+                if let Some(o) = self.target.dnf_location_output.clone() {
+                    return o;
+                }
                 let repoid = self
                     .target
                     .dnf_repos
@@ -1855,7 +2005,12 @@ impl FakeExecutor {
             && args.iter().any(|a| a == "--assumeno")
         {
             // Cache-only dry run: the transaction table naming the exact
-            // payload set, then "Operation aborted" (real dnf exits 1).
+            // payload set, then "Operation aborted" (real dnf exits 1). An
+            // explicit override wins so tests can model truncated, malformed,
+            // or ambiguous transactions.
+            if let Some(o) = self.target.dnf_dry_run_output.clone() {
+                return o;
+            }
             let repoid = self
                 .target
                 .dnf_repos
