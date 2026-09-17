@@ -1,5 +1,5 @@
 {
-  "version": "0.2.0",
+  "version": "0.2.1",
   "resourceTypes": [
     {
       "type": "file",
@@ -84,10 +84,11 @@
       "docPath": "reference/resources/package",
       "parameters": [
         { "name": "name", "required": true, "type": "string", "default": null, "description": "Package name." },
-        { "name": "state", "required": true, "type": "string", "default": null, "description": "present or absent. Required." }
+        { "name": "state", "required": true, "type": "string", "default": null, "description": "present or absent. Required." },
+        { "name": "env", "required": false, "type": "map of strings", "default": "{}", "description": "Environment variables for this package operation; not persistent host configuration." }
       ],
       "platforms": ["ubuntu", "rocky"],
-      "example": "resources:\n  - id: tree\n    type: package\n    with:\n      name: tree\n      state: present"
+      "example": "resources:\n  - id: install-tools\n    type: package\n    with:\n      name: curl\n      state: present\n      env:\n        HTTP_PROXY: \"http://proxy.example.com:3128\"\n        HTTPS_PROXY: \"http://proxy.example.com:3128\"\n        NO_PROXY: \"localhost,127.0.0.1,.example.internal\""
     },
     {
       "type": "service",

@@ -17,19 +17,36 @@ RHEL-family targets.
     state: present
 ```
 
+An operation may provide environment variables explicitly. They are passed only
+to this package operation (including its privileged apt/dnf execution); they do
+not configure a persistent host-wide environment.
+
+```yaml
+- id: install-tools
+  type: package
+  with:
+    name: curl
+    state: present
+    env:
+      HTTP_PROXY: "http://proxy.example.com:3128"
+      HTTPS_PROXY: "http://proxy.example.com:3128"
+      NO_PROXY: "localhost,127.0.0.1,.example.internal"
+```
+
 ## Parameters
 
 | Parameter | Required | Type | Default | Description |
 |-----------|----------|------|---------|-------------|
 | `name` | yes | string | — | Package name (validated). |
 | `state` | yes | string | — | `present` or `absent`. Required. |
+| `env` | no | map of strings | empty | Environment variables for this package operation. |
 
 ## Expected behavior
 
 - Backend is chosen automatically from the target's `/etc/os-release`
   identity — recipes stay platform-neutral.
 - `present` on Ubuntu → `apt`; on Rocky/RHEL family → `dnf`.
-- No version pinning in v0.2.0.
+- No version pinning in v0.2.1.
 - On dnf targets, installs run through a private cache snapshot — see
   [Execution Model](/sinter/en/concepts/execution-model/) and the
   [Rocky guide](/sinter/en/guides/rocky-linux/).

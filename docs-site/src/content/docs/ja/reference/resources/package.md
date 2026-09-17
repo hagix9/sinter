@@ -18,19 +18,36 @@ description: ターゲットのパッケージバックエンドでパッケー�
     state: present
 ```
 
+操作ごとに環境変数を明示できます。環境変数はこのパッケージ操作（権限
+昇格した `apt` / `dnf` の実行を含む）にだけ渡され、ホスト全体の永続的な
+設定にはなりません。
+
+```yaml
+- id: install-tools
+  type: package
+  with:
+    name: curl
+    state: present
+    env:
+      HTTP_PROXY: "http://proxy.example.com:3128"
+      HTTPS_PROXY: "http://proxy.example.com:3128"
+      NO_PROXY: "localhost,127.0.0.1,.example.internal"
+```
+
 ## パラメータ
 
 | パラメータ | 必須 | 型 | デフォルト | 説明 |
 |-----------|------|-----|-----------|------|
 | `name` | はい | string | — | パッケージ名（検証される）。 |
 | `state` | はい | string | — | `present` または `absent`。必須。 |
+| `env` | いいえ | string の map | 空 | このパッケージ操作に渡す環境変数。 |
 
 ## 期待される動作
 
 - バックエンドはターゲットの `/etc/os-release` の識別情報から自動的に
   選択されます — レシピはプラットフォーム中立のままです。
 - Ubuntu での `present` → `apt`。Rocky/RHEL ファミリ → `dnf`。
-- v0.2.0 ではバージョン固定はありません。
+- v0.2.1 ではバージョン固定はありません。
 - dnf ターゲットでは、インストールはプライベートキャッシュ
   スナップショット経由で行われます —
   [実行モデル](/sinter/ja/concepts/execution-model/)と

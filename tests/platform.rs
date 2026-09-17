@@ -10,6 +10,7 @@ use common::*;
 use sinter::engine::{AggregateStatus, Mode};
 use sinter::error::ErrorKind;
 use sinter::executor::{Completion, FakeTarget};
+use sinter::model::load_model;
 use sinter::result::{Change, Disposition, Execution, Verification};
 
 fn pkg_recipe(dir: &std::path::Path, name: &str, state: &str) -> std::path::PathBuf {
@@ -663,6 +664,96 @@ fn package_name_rejects_option_injection() {
         let r = sinter::model::load_model(&recipe);
         assert!(r.is_err(), "package name {:?} must be rejected", bad);
     }
+}
+
+#[test]
+fn package_env_reaches_apt_mutation_and_plan_is_non_mutating() {
+    let dir = trusted_root("package-env-apt");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nresources:\n  - id: p\n    type: package\n    with:\n      name: nano\n      state: present\n      env:\n        HTTP_PROXY: 'http://proxy.example:3128'\n        NO_PROXY: 'localhost,127.0.0.1'\n",
+    );
+    let plan = run_recipe_fake(&recipe, Mode::Plan, true, FakeTarget::ubuntu2404());
+    assert_eq!(mutation_command_count(&plan), 0);
+    let applied = run_recipe_fake(&recipe, Mode::Apply, true, FakeTarget::ubuntu2404());
+    let apt = commands_with(&applied, "/usr/bin/apt-get");
+    assert_eq!(apt.len(), 1);
+    assert_eq!(
+        apt[0].env.get("HTTP_PROXY"),
+        Some(&"http://proxy.example:3128".to_string())
+    );
+    assert_eq!(
+        apt[0].env.get("NO_PROXY"),
+        Some(&"localhost,127.0.0.1".to_string())
+    );
+    assert!(apt[0].sudo);
+}
+
+#[test]
+fn package_null_env_is_empty_and_keeps_existing_behavior() {
+    let dir = trusted_root("package-env-null");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nresources:\n  - id: p\n    type: package\n    with:\n      name: nano\n      state: present\n      env: null\n",
+    );
+    let report = run_recipe_fake(&recipe, Mode::Apply, false, FakeTarget::ubuntu2404());
+    let apt = commands_with(&report, "/usr/bin/apt-get");
+    assert_eq!(apt.len(), 1);
+    assert!(!apt[0].env.contains_key("HTTP_PROXY"));
+}
+
+#[test]
+fn package_env_reaches_dnf_mutation_and_special_values_are_argv_safe() {
+    let dir = trusted_root("package-env-dnf");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nresources:\n  - id: p\n    type: package\n    with:\n      name: nano\n      state: present\n      env:\n        HTTPS_PROXY: 'http://user:p a$s;word@proxy.example:3128'\n        NO_PROXY: 'a.example,127.0.0.1'\n",
+    );
+    let applied = run_recipe_fake(&recipe, Mode::Apply, false, FakeTarget::rocky9());
+    let dnf = commands_with(&applied, "/usr/bin/dnf");
+    let mutation = dnf
+        .iter()
+        .find(|c| c.args.windows(2).any(|w| w == ["-y", "install"]))
+        .unwrap();
+    assert_eq!(
+        mutation.env.get("HTTPS_PROXY"),
+        Some(&"http://user:p a$s;word@proxy.example:3128".to_string())
+    );
+    assert_eq!(
+        mutation.env.get("NO_PROXY"),
+        Some(&"a.example,127.0.0.1".to_string())
+    );
+    let curl = commands_with(&applied, "/usr/bin/curl");
+    assert!(!curl.is_empty());
+    assert_eq!(
+        curl[0].env.get("HTTPS_PROXY"),
+        Some(&"http://user:p a$s;word@proxy.example:3128".to_string())
+    );
+}
+
+#[test]
+fn package_env_rejects_invalid_names_and_redacts_sensitive_values() {
+    let dir = trusted_root("package-env-validation");
+    let invalid = write_recipe(
+        &dir,
+        "invalid.yaml",
+        "version: 1\nresources:\n  - id: p\n    type: package\n    with:\n      name: nano\n      state: present\n      env:\n        BAD-NAME: value\n",
+    );
+    let err = load_model(&invalid).unwrap_err();
+    assert!(err.message.contains("invalid environment variable name"));
+
+    let sensitive = write_recipe(
+        &dir,
+        "sensitive.yaml",
+        "version: 1\nresources:\n  - id: p\n    type: package\n    sensitive: true\n    with:\n      name: nano\n      state: present\n      env:\n        HTTPS_PROXY: 'http://user:SINTER_V021_PROXY_SECRET_DO_NOT_LEAK_7F31@proxy.example:3128'\n",
+    );
+    let report = run_recipe_fake(&sensitive, Mode::Apply, false, FakeTarget::ubuntu2404());
+    let joined = format!("{:?}", report.commands);
+    assert!(!joined.contains("SINTER_V021_PROXY_SECRET_DO_NOT_LEAK_7F31"));
+    assert!(joined.contains("[redacted]"));
 }
 
 #[test]

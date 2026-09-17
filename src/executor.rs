@@ -131,6 +131,9 @@ impl Output {
 pub struct CommandRecord {
     pub program: String,
     pub args: Vec<String>,
+    /// Environment passed to the target process. Sensitive requests retain
+    /// only a redacted marker, just like program and argv.
+    pub env: BTreeMap<String, String>,
     pub sudo: bool,
     /// True when the recorded invocation may carry sensitive values. The stored
     /// program/args are then a redacted placeholder, never the raw command line.
@@ -197,6 +200,7 @@ impl Executor {
             CommandRecord {
                 program: "[redacted]".to_string(),
                 args: vec!["[redacted]".to_string()],
+                env: BTreeMap::from([("[redacted]".to_string(), "[redacted]".to_string())]),
                 sudo,
                 sensitive: true,
             }
@@ -204,6 +208,7 @@ impl Executor {
             CommandRecord {
                 program: req.program.clone(),
                 args: req.args.clone(),
+                env: req.env.clone(),
                 sudo,
                 sensitive: false,
             }

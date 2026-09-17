@@ -123,6 +123,41 @@ fn ev_list_str(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<Option<(Vec<S
     }
 }
 
+fn ev_env(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<(BTreeMap<String, String>, bool)> {
+    let Some(v) = m.get(key) else {
+        return Ok((BTreeMap::new(), false));
+    };
+    let Some(value) = &v.val else {
+        return Err(SinterError::unknown(format!(
+            "with.{} could not be evaluated (unknown)",
+            key
+        )));
+    };
+    if matches!(value, Value::Null) {
+        return Ok((BTreeMap::new(), v.sensitive));
+    }
+    let Value::Map(entries) = value else {
+        return Err(SinterError::apply(format!("with.{} must be a map", key)));
+    };
+    let mut out = BTreeMap::new();
+    for (name, value) in entries {
+        let Value::Str(value) = value else {
+            return Err(SinterError::apply(format!(
+                "with.{} values must be strings",
+                key
+            )));
+        };
+        if value.contains('\0') || name.contains('\0') {
+            return Err(SinterError::schema(format!(
+                "with.{} may not contain NUL",
+                key
+            )));
+        }
+        out.insert(name.clone(), value.clone());
+    }
+    Ok((out, v.sensitive))
+}
+
 fn derived_sensitivity(base: bool, vals: &BTreeMap<String, EvalVal>) -> bool {
     base || vals.values().any(|v| v.sensitive)
 }
@@ -1961,6 +1996,7 @@ impl Engine {
             .clone()
             .ok_or_else(|| SinterError::schema(format!("{}: package missing name", res.id)))?;
         let vals = self.eval_with(res, item)?;
+        let (package_env, env_sensitive) = ev_env(&vals, "env")?;
         let state = ev_str(&vals, "state")?
             .map(|(s, _)| s)
             .ok_or_else(|| SinterError::schema(format!("{}: package state is required", res.id)))?;
@@ -1970,7 +2006,7 @@ impl Engine {
                 res.id
             )));
         }
-        let sensitive = res.sensitive || res.derived_sensitive;
+        let sensitive = res.sensitive || res.derived_sensitive || env_sensitive;
         // The backend was selected from detected /etc/os-release identity at
         // capability detection (DESIGN §8 phase F, §27). A package resource
         // with no supported backend is a capability error, not a guess.
@@ -2026,7 +2062,7 @@ impl Engine {
         // Failure to prove completeness fails closed before any mutation.
         let mut snapshot_dir: Option<String> = None;
         if backend == PackageBackend::Dnf && want_installed {
-            match self.dnf_metadata_snapshot(&name, sensitive)? {
+            match self.dnf_metadata_snapshot(&name, sensitive, &package_env)? {
                 DnfSnapshot::Ready(p) => snapshot_dir = Some(p),
                 DnfSnapshot::Blocked(detail, indeterminate) => {
                     let mut r = changed_result_sensitive(res, sensitive);
@@ -2049,6 +2085,7 @@ impl Engine {
 
         let mut req = ExecRequest::new(backend.manager_program());
         req.env = baseline_env(self.fs.home_env());
+        req.env.extend(package_env);
         req.sensitive = sensitive;
         req.args = backend.mutate_args(want_installed, &name, snapshot_dir.as_deref());
         req.timeout_secs = 300;
@@ -2502,7 +2539,12 @@ impl Engine {
     /// disappearing or changing system cache cannot invalidate the proof.
     /// Any gap — missing repodata, a missing mirror list, an unparseable
     /// repository list, an unresolvable payload — blocks the mutation.
-    fn dnf_metadata_snapshot(&mut self, name: &str, sensitive: bool) -> Result<DnfSnapshot> {
+    fn dnf_metadata_snapshot(
+        &mut self,
+        name: &str,
+        sensitive: bool,
+        package_env: &BTreeMap<String, String>,
+    ) -> Result<DnfSnapshot> {
         let name_disp = if sensitive { "[redacted]" } else { name };
         // 1. Private snapshot directory.
         let mut req = ExecRequest::new("/usr/bin/mktemp");
@@ -2793,7 +2835,14 @@ impl Engine {
             }
         };
         if !rows.is_empty() {
-            match self.dnf_prefetch_payloads(&snap, &listing, &rows, sensitive, name_disp)? {
+            match self.dnf_prefetch_payloads(
+                &snap,
+                &listing,
+                &rows,
+                sensitive,
+                name_disp,
+                package_env,
+            )? {
                 DnfSnapshot::Ready(_) => {}
                 blocked => return Ok(blocked),
             }
@@ -2814,6 +2863,7 @@ impl Engine {
         rows: &[DnfInstallRow],
         sensitive: bool,
         name_disp: &str,
+        package_env: &BTreeMap<String, String>,
     ) -> Result<DnfSnapshot> {
         let blocked = |s: &mut Self, reason: String, indeterminate: bool| -> Result<DnfSnapshot> {
             let mut reason = reason;
@@ -2998,6 +3048,7 @@ impl Engine {
                 .map(|s| s.to_string())
                 .collect();
             req.env = baseline_env(self.fs.home_env());
+            req.env.extend(package_env.clone());
             req.sensitive = sensitive;
             req.timeout_secs = 300;
             match self

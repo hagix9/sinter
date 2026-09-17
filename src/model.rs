@@ -602,6 +602,9 @@ fn validate_declaration_shape(
         }
         "package" => {
             validate_with_fields(&d.with, PACKAGE_FIELDS, ctx)?;
+            if let Some(v) = d.with.get("env") {
+                validate_env_map(v, ctx)?;
+            }
             require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
             if let Some(Value::Str(s)) = d.with.get("name") {
                 // Literal names are validated here; interpolated names are
@@ -1274,6 +1277,9 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
             }
             "package" => {
                 validate_with_fields(&r.with, PACKAGE_FIELDS, &resource_ctx)?;
+                if let Some(v) = r.with.get("env") {
+                    validate_env_map(v, &resource_ctx)?;
+                }
                 let name_sensitive = field_sensitive("name");
                 let name =
                     static_string(&r.with, "name", &scope, &resource_ctx, true, name_sensitive)
@@ -1849,6 +1855,44 @@ fn validate_command_fields(
 
 const RESERVED_ENV: &[&str] = &["PATH", "LANG", "LC_ALL", "HOME"];
 
+fn validate_env_map(value: &Value, ctx: &str) -> Result<()> {
+    match value {
+        Value::Null => Ok(()),
+        Value::Map(m) => {
+            for (key, val) in m {
+                let mut chars = key.chars();
+                let valid = chars
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !valid {
+                    return Err(SinterError::schema(format!(
+                        "{}: invalid environment variable name {:?}",
+                        ctx, key
+                    )));
+                }
+                if RESERVED_ENV.contains(&key.as_str()) {
+                    return Err(SinterError::schema(format!(
+                        "{}: env name {} is reserved by the command baseline",
+                        ctx, key
+                    )));
+                }
+                if !matches!(val, Value::Str(_)) {
+                    return Err(SinterError::schema(format!(
+                        "{}: env values must be strings",
+                        ctx
+                    )));
+                }
+            }
+            Ok(())
+        }
+        _ => Err(SinterError::schema(format!(
+            "{}: env must be a map of strings",
+            ctx
+        ))),
+    }
+}
+
 fn validate_changed_when(e: &Expr, ctx: &str, sensitive: bool) -> Result<()> {
     let mut regs = BTreeSet::new();
     let mut names = BTreeSet::new();
@@ -1996,7 +2040,7 @@ pub const COMMAND_FIELDS: &[&str] = &[
     "changed_when",
     "register",
 ];
-pub const PACKAGE_FIELDS: &[&str] = &["name", "state"];
+pub const PACKAGE_FIELDS: &[&str] = &["name", "state", "env"];
 pub const SERVICE_FIELDS: &[&str] = &["name", "state", "enabled"];
 
 #[cfg(test)]

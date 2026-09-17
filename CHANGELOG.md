@@ -2,6 +2,26 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [0.2.1] - 2026-09-17
+
+Maintenance release adding explicit per-operation environment variables to
+package resources.
+
+### Added
+
+- Optional `with.env` maps for package resources. Variables are passed to the
+  selected `apt` or `dnf` operation, including privileged execution, without
+  changing the host-wide environment.
+- Environment variable names are validated and values are handled through the
+  existing structured command and sensitive-value redaction paths.
+
+### Validation
+
+- Ubuntu 24.04.4 x86_64 / apt and Rocky Linux 9.8 x86_64 / dnf real-host
+  acceptance passed, including plan safety, sudo propagation, idempotency,
+  and sensitive-output checks.
+- Forced-proxy/Squid connectivity was not part of this release acceptance.
+
 ## [0.2.0] - 2026-09-16
 
 Second release of Sinter: RHEL-family platform support while preserving the
