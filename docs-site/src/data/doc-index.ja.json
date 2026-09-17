@@ -12,7 +12,7 @@
     { "title": "実行モデル", "path": "concepts/execution-model", "description": "plan と apply、観測、検証、fail-fast、indeterminate 状態。", "keywords": "plan apply 観測 検証 fail-fast indeterminate" },
     { "title": "Ubuntu ガイド", "path": "guides/ubuntu", "description": "Ubuntu 24.04 LTS amd64 ターゲットガイド（apt バックエンド）。", "keywords": "ubuntu apt 24.04 amd64" },
     { "title": "Rocky Linux ガイド", "path": "guides/rocky-linux", "description": "Rocky Linux 9 x86_64 ターゲットガイド（dnf バックエンド）。", "keywords": "rocky rhel dnf 9 x86_64" },
-    { "title": "レシピ概要", "path": "recipes/overview", "description": "v0.2.0 の機能に基づくレシピ例。", "keywords": "レシピ 例 baseline" },
+    { "title": "レシピ概要", "path": "recipes/overview", "description": "v0.2.1 の機能に基づくレシピ例。", "keywords": "レシピ 例 baseline" },
     { "title": "CLI リファレンス", "path": "reference/cli", "description": "sinter validate/plan/apply のフラグと終了コード。", "keywords": "cli フラグ 終了コード host port user sudo identity known_hosts format" },
     { "title": "レシピフォーマット", "path": "reference/recipe-format", "description": "トップレベルフィールド、式、補間のリファレンス。", "keywords": "version vars include resources handlers 式 補間" },
     { "title": "リソースリファレンス", "path": "reference/resources", "description": "すべてのリソースタイプとパラメータ。", "keywords": "リソースタイプ パラメータ リファレンス" },

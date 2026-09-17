@@ -83,10 +83,10 @@ export function buildWebmcp(locale: Locale) {
       requirements: requirementsI18n[locale],
     },
     installation: {
-      release: 'v0.2.0',
+      release: 'v0.2.1',
       artifacts: [
-        'sinter-v0.2.0-ubuntu24.04-amd64.tar.gz',
-        'sinter-v0.2.0-rocky9-x86_64.tar.gz',
+        'sinter-v0.2.1-ubuntu24.04-amd64.tar.gz',
+        'sinter-v0.2.1-rocky9-x86_64.tar.gz',
         'SHA256SUMS',
       ],
       releaseUrl: 'https://github.com/hagix9/sinter/releases',

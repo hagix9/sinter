@@ -31,6 +31,15 @@ sinter apply --host web01.example.com --sudo recipe.yaml
 stateful resource immediately before deciding whether to mutate it — a
 previous plan is never reused as current state.
 
+## One host per invocation
+
+Each `plan` or `apply` targets exactly **one** host. Omit `--host` to run
+against the controller itself (localhost); pass `--host` for a remote SSH
+target. There is no Ansible-style inventory: Sinter has no host lists,
+groups, or fleet orchestration. To manage multiple hosts, invoke Sinter once
+per host (the same recipe works everywhere in the support matrix); run any
+fan-out or ordering you need from your own scripts.
+
 ## Supported managed targets
 
 | Platform | Architecture | Package backend |

@@ -37,7 +37,7 @@ for the two managed-target platforms.
 
 ## Scope
 
-v0.2.0 scope does not include inventory, roles, plugins, orchestration, or
+v0.2.1 scope does not include inventory, roles, plugins, orchestration, or
 embedded scripting. See the
 [CHANGELOG](https://github.com/hagix9/sinter/blob/main/CHANGELOG.md) for
 release history.

@@ -108,6 +108,11 @@ export default defineConfig({
                 { slug: 'reference/resources/service' },
               ],
             },
+            {
+              label: 'Documentation WebMCP',
+              translations: { ja: 'ドキュメント WebMCP' },
+              slug: 'reference/webmcp',
+            },
           ],
         },
         {

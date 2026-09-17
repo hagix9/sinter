@@ -3,7 +3,7 @@ title: リソース
 description: リソースモデル — 共通フィールド、順序、依存関係、通知。
 ---
 
-リソースは目的の状態の単位です。v0.2.0 では 7 つのタイプが実装されて
+リソースは目的の状態の単位です。v0.2.1 では 7 つのタイプが実装されて
 います: `file`、`directory`、`link`、`template`、`command`、`package`、
 `service`。
 
@@ -19,6 +19,27 @@ description: リソースモデル — 共通フィールド、順序、依存�
 | `when` | boolean 式。false の場合、そのリソースと依存先はブロックされる。 |
 | `loop` | アイテムごとにリソースを展開する（`{{ item }}`）。 |
 | `depends_on` | 先に成功していなければならないリソース id のリスト。 |
+
+## ループ
+
+`loop` を持つリソースはアイテムごとに 1 回展開され、フィールド内では
+`{{ item }}` が使えます:
+
+```yaml
+resources:
+  - id: tool
+    type: package
+    with:
+      name: "{{ item }}"
+      state: present
+    loop: [jq, curl]
+```
+
+各展開にはインスタンス id（`tool[0]`、`tool[1]`、…）が割り当てられ、
+他のリソースが `depends_on` で参照するときはこの形を使います
+（例: `depends_on: [tool[0]]`）。展開前のループ id（`tool`）や、ループ外から
+ループ宣言自体への依存は検証エラーになります。`register` をループ内で使う
+こともできません。
 | `notify` | リソースが変更されたときに起動されるハンドラ id。 |
 | `sensitive` | このリソースの値と派生値をすべての出力でマスクする。 |
 

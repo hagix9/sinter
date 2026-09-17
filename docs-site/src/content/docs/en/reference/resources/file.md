@@ -26,7 +26,7 @@ and mode — or is absent.
 | `path` | yes | string (absolute path) | — | Managed file path. |
 | `state` | no | string | `present` | `present` or `absent`. |
 | `content` | no | string | — | Literal content. Mutually exclusive with `source`. |
-| `source` | no | string | — | Controller-side file copied to `path`. Mutually exclusive with `content`. |
+| `source` | no | string | — | Controller-side file copied to `path`; relative paths are resolved against the recipe file's directory. Mutually exclusive with `content`. |
 | `owner` | no | string | — | Owner name. |
 | `group` | no | string | — | Group name. |
 | `mode` | no | string | — | Quoted four-digit octal, e.g. `"0644"`. |

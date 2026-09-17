@@ -26,7 +26,7 @@ description: 通常ファイルの内容とメタデータを管理する。
 | `path` | はい | string（絶対パス） | — | 管理対象ファイルのパス。 |
 | `state` | いいえ | string | `present` | `present` または `absent`。 |
 | `content` | いいえ | string | — | リテラルな内容。`source` とは排他。 |
-| `source` | いいえ | string | — | `path` にコピーするコントローラ側ファイル。`content` とは排他。 |
+| `source` | いいえ | string | — | `path` にコピーするコントローラ側ファイル。相対パスはレシピファイルのディレクトリから解決されます。`content` とは排他。 |
 | `owner` | いいえ | string | — | 所有者名。 |
 | `group` | いいえ | string | — | グループ名。 |
 | `mode` | いいえ | string | — | 引用符付きの 4 桁 8 進数。例: `"0644"`。 |

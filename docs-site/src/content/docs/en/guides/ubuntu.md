@@ -4,7 +4,7 @@ description: Ubuntu 24.04 LTS amd64 managed-target guide — apt backend.
 ---
 
 Ubuntu 24.04 LTS amd64 is the original Sinter reference target and remains
-fully supported in v0.2.0.
+fully supported in v0.2.1.
 
 ## Requirements
 

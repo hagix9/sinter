@@ -12,7 +12,7 @@ Commands:
   apply     Apply a recipe to a target
 ```
 
-`sinter --version` prints the version (e.g. `sinter 0.2.0`).
+`sinter --version` prints the version (e.g. `sinter 0.2.1`).
 
 ## validate
 
@@ -53,6 +53,52 @@ handlers.
 | `--sudo` | off | Run target-side operations via `sudo -n`. |
 | `--verbose` | off | Verbose output. |
 | `--format` | `text` | `text` or `json`. |
+
+## Reading plan / apply output
+
+A `plan` starts with `== Sinter PLAN ==`, an `apply` with
+`== Sinter APPLY ==`, followed by a `target facts:` line (hostname, OS,
+family, version, architecture as detected on the target). Each resource then
+prints one status line plus, where applicable, a diff and a reason:
+
+```text
+CHANGED  motd [template] known/normal
+    + managed by sinter
+    - (previous content)
+```
+
+| Status | Meaning |
+|--------|---------|
+| `ok` | Resource already matched the desired state — nothing was mutated. |
+| `CHANGED` | Resource was mutated (or, in `plan`, would be mutated). |
+| `POSSIBLE` | A change may have occurred but could not be confirmed. |
+| `FAILED` | Resource failed — remaining resources are blocked (fail-fast). |
+| `INDET` | Mutation outcome is unknown (e.g. timeout after dispatch); never auto-retried. |
+| `skip` | Resource's `when` condition evaluated to false. |
+| `guard` | A `creates`/`removes` guard already satisfied — command not run. |
+| `blocked` | Resource was not run because an earlier resource failed/was indeterminate, or a dependency was not satisfied. |
+| `?` | Result is unknown (e.g. a `command` resource in `plan`, which never executes commands). |
+
+The `known/` prefix shows whether the resource's current state was fully
+observed (`known`) or is partly unknown (`unknown`). Handlers, when they run,
+are listed at the end under `handlers:`; handlers queued but not executed
+appear under `pending handlers`.
+
+Quick answers:
+
+- **Did Sinter change anything?** Look for `CHANGED` lines; a converged run
+  shows only `ok` (plus `skip`/`guard`).
+- **Did plan only observe?** `plan` prints the same statuses but performs no
+  mutation — a pending change appears as `CHANGED` in the plan output while
+  the target stays untouched.
+- **Was something skipped or blocked?** `skip` means your own `when` chose it;
+  `blocked` means an earlier problem prevented it.
+- **Is a result unknown?** `?` or `POSSIBLE` / `INDET` — inspect the target
+  before re-applying.
+
+`--format json` emits the same information in structured form. In a `plan`,
+notified handlers are always reported as pending — a plan never executes
+handlers.
 
 ## Exit codes
 

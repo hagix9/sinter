@@ -31,6 +31,14 @@ A portless entry does not authorize a non-default port.
 
 Hashed entries are not supported — use unhashed entries.
 
+**`SSH authentication failed for user@host`**
+
+Host-key verification passed but your key was not accepted. Check that a
+key is available: an ssh-agent holding the key, an explicit `--identity
+<path>`, or a default `~/.ssh/id_ed25519` / `~/.ssh/id_rsa`. The
+matching public key must already be authorized for the target user — Sinter
+does not provision keys. (This is separate from the host-key checks above.)
+
 ## Privilege escalation
 
 **`sudo` failures**

@@ -40,8 +40,10 @@ For sensitive content, hashes and sizes are also hidden.
 
 ## Includes
 
-`include` expands other recipe files into the model. Duplicate includes are
-rejected.
+`include` expands other recipe files into the model. Relative paths are
+resolved against the including recipe file's directory; absolute paths are
+used as given. The same file is never expanded twice — duplicate includes
+and include cycles are rejected.
 
 ## Resources
 
@@ -67,13 +69,14 @@ parameters.
 ```yaml
 handlers:
   - id: restart_app
-    service: app          # resource id or unit name
-    action: restart       # restart or reload
+    service: app.service   # systemd unit name on the target
+    action: restart        # restart or reload
 ```
 
-Handlers run once at the end of an apply, only when notified by a resource
-that actually changed. Multiple notifications of the same handler are
-deduplicated.
+`service` is the **systemd unit name on the target** — it is not resolved from
+a Sinter resource id. Handlers run once at the end of an apply, only when
+notified by a resource that actually changed. Multiple notifications of the
+same handler are deduplicated.
 
 ## Expressions
 

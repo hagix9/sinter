@@ -3,7 +3,7 @@ title: Resources
 description: The resource model — common fields, ordering, dependencies, notifications.
 ---
 
-Resources are the unit of desired state. v0.2.0 implements seven types:
+Resources are the unit of desired state. v0.2.1 implements seven types:
 `file`, `directory`, `link`, `template`, `command`, `package`, `service`.
 
 ## Common fields
@@ -18,6 +18,27 @@ Every resource accepts:
 | `when` | Boolean expression; false blocks the resource and its dependents. |
 | `loop` | Expand the resource once per item (`{{ item }}`). |
 | `depends_on` | List of resource ids that must succeed first. |
+
+## Loops
+
+A resource with `loop` is expanded once per item, with `{{ item }}` available
+in its fields:
+
+```yaml
+resources:
+  - id: tool
+    type: package
+    with:
+      name: "{{ item }}"
+      state: present
+    loop: [jq, curl]
+```
+
+Each expansion gets an instance id — `tool[0]`, `tool[1]`, … — which is how
+other resources must address it in `depends_on` (e.g.
+`depends_on: [tool[0]]`). Depending on the bare loop id (`tool`) or on the
+loop declaration from a resource outside the loop is a validation error, as
+is `register` inside a loop.
 | `notify` | Handler ids triggered when the resource changes. |
 | `sensitive` | Redact this resource's values and derived values in all output. |
 

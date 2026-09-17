@@ -11,7 +11,7 @@
     { "title": "Execution Model", "path": "concepts/execution-model", "description": "plan vs apply, observation, verification, fail-fast, indeterminate states.", "keywords": "plan apply observe verify fail-fast indeterminate" },
     { "title": "Ubuntu Guide", "path": "guides/ubuntu", "description": "Ubuntu 24.04 LTS amd64 target guide (apt backend).", "keywords": "ubuntu apt 24.04 amd64" },
     { "title": "Rocky Linux Guide", "path": "guides/rocky-linux", "description": "Rocky Linux 9 x86_64 target guide (dnf backend).", "keywords": "rocky rhel dnf 9 x86_64" },
-    { "title": "Recipe Overview", "path": "recipes/overview", "description": "Recipe examples based on v0.2.0 functionality.", "keywords": "recipes examples baseline" },
+    { "title": "Recipe Overview", "path": "recipes/overview", "description": "Recipe examples based on v0.2.1 functionality.", "keywords": "recipes examples baseline" },
     { "title": "CLI Reference", "path": "reference/cli", "description": "sinter validate/plan/apply flags and exit codes.", "keywords": "cli flags exit codes host port user sudo identity known_hosts format" },
     { "title": "Recipe Format", "path": "reference/recipe-format", "description": "Top-level fields, expressions, and interpolation reference.", "keywords": "version vars include resources handlers expressions interpolation" },
     { "title": "Resource Reference", "path": "reference/resources", "description": "All resource types and their parameters.", "keywords": "resource types parameters reference" },
