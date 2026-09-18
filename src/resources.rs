@@ -626,8 +626,10 @@ impl Engine {
             }
             if !xattrs.inspected {
                 return Err(SinterError::apply(format!(
-                    "{}: cannot inspect security metadata of {}; refusing content replacement",
-                    res.id, path
+                    "{}: cannot inspect security metadata of {}; refusing content replacement{}",
+                    res.id,
+                    path,
+                    self.fs.xattr_inspection_unavailable().unwrap_or_default()
                 )));
             }
             let bytes = effective.clone().unwrap_or_default();
@@ -6131,5 +6133,139 @@ mod package_tests {
         .is_none());
         // A footer with no repository block at all.
         assert!(parse_dnf_enabled_repos("Total packages: 0\n").is_none());
+    }
+
+    /// Rocky Linux 10 ships dnf 4.20.0 and rpm 4.19. Native `repolist -v`
+    /// output (captured on a real Rocky 10.2 target under Sinter's pinned
+    /// C.UTF-8 locale) uses the same field grammar as dnf 4.14, with two
+    /// newer fields this parser already knows: `Repo-distro-tags` and
+    /// `Repo-available-pkgs`. A mirror-resolving repo carries `Repo-mirrors`
+    /// and a `Repo-baseurl` whose value ends in `(32 more)` (the mirror list
+    /// has more than one entry) and contains a doubled separator — native
+    /// upstream output, not a defect.
+    const ROCKY10_REPOLIST: &str = "\
+Loaded plugins: builddep, changelog, config-manager, copr, debuginfo-install, download, generate_completion_cache, groups-manager, needs-restarting, playground, repoclosure, repodiff, repograph, repomanage, reposync, system-upgrade\n\
+DNF version: 4.20.0\n\
+cachedir: /var/cache/dnf\n\
+Repo-id            : appstream\n\
+Repo-name          : Rocky Linux 10 - AppStream\n\
+Repo-revision      : 10.2\n\
+Repo-distro-tags      : [cpe:/o:rocky:rocky:10.2]:  ,  , ., 0, 1, 2, L, R, c, i, k, n, o, u, x, y\n\
+Repo-updated       : Thu Sep 17 07:46:26 2026\n\
+Repo-pkgs          : 6773\n\
+Repo-available-pkgs: 6773\n\
+Repo-size          : 19 G\n\
+Repo-mirrors       : https://mirrors.rockylinux.org/mirrorlist?arch=x86_64&repo=AppStream-10\n\
+Repo-baseurl       : https://rocky-linux-asia-northeast1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//10.2/AppStream/x86_64/os/ (32 more)\n\
+Repo-expire        : 21600 second(s) (last: Thu Sep 17 20:41:17 2026)\n\
+Repo-filename      : /etc/yum.repos.d/rocky.repo\n\
+\n\
+Repo-id            : baseos\n\
+Repo-name          : Rocky Linux 10 - BaseOS\n\
+Repo-revision      : 10.2\n\
+Repo-distro-tags      : [cpe:/o:rocky:rocky:10.2]:  ,  , ., 0, 1, 2, L, R, c, i, k, n, o, u, x, y\n\
+Repo-updated       : Thu Sep 17 07:49:34 2026\n\
+Repo-pkgs          : 2311\n\
+Repo-available-pkgs: 2311\n\
+Repo-size          : 13 G\n\
+Repo-mirrors       : https://mirrors.rockylinux.org/mirrorlist?arch=x86_64&repo=BaseOS-10\n\
+Repo-baseurl       : https://rocky-linux-asia-northeast1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//10.2/BaseOS/x86_64/os/ (32 more)\n\
+Repo-expire        : 21600 second(s) (last: Thu Sep 17 20:41:17 2026)\n\
+Repo-filename      : /etc/yum.repos.d/rocky.repo\n\
+\n\
+Repo-id            : extras\n\
+Repo-name          : Rocky Linux 10 - Extras\n\
+Repo-revision      : 10.2\n\
+Repo-updated       : Tue Sep  1 07:41:40 2026\n\
+Repo-pkgs          : 23\n\
+Repo-available-pkgs: 23\n\
+Repo-size          : 66 M\n\
+Repo-mirrors       : https://mirrors.rockylinux.org/mirrorlist?arch=x86_64&repo=extras-10\n\
+Repo-baseurl       : https://rocky-linux-asia-northeast1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//10.2/extras/x86_64/os/ (32 more)\n\
+Repo-expire        : 21600 second(s) (last: Thu Sep 17 20:41:18 2026)\n\
+Repo-filename      : /etc/yum.repos.d/rocky-extras.repo\n\
+Total packages: 9107\n";
+
+    #[test]
+    fn rocky10_dnf420_repolist_parses_with_mirror_flags() {
+        let repos = parse_dnf_enabled_repos(ROCKY10_REPOLIST)
+            .expect("real Rocky 10 / dnf 4.20.0 repolist -v output must parse");
+        assert_eq!(
+            repos,
+            vec![
+                ("appstream".to_string(), true),
+                ("baseos".to_string(), true),
+                ("extras".to_string(), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn rocky10_dnf420_repolist_footer_is_ungrouped_under_pinned_locale() {
+        // dnf 4.20 groups the footer count with a comma in some locales
+        // (`Total packages: 10,900`), but Sinter pins LANG/LC_ALL to C.UTF-8
+        // for every dnf command, where it prints a plain decimal. The strict
+        // grammar therefore accepts the real pinned-locale form and rejects
+        // any grouped variant without loosening: a count this parser cannot
+        // prove decimal cannot prove the repository set is complete.
+        assert!(parse_repolist_footer("Total packages: 9107").is_some());
+        assert!(parse_repolist_footer("Total packages: 10,900").is_none());
+        // The full Rocky 10 stream with a grouped footer is rejected whole.
+        let grouped = ROCKY10_REPOLIST.replace("Total packages: 9107", "Total packages: 9,107");
+        assert!(parse_dnf_enabled_repos(&grouped).is_none());
+    }
+
+    #[test]
+    fn rocky10_dnf420_install_table_parses() {
+        // Real cache-only `dnf install --assumeno tree` on Rocky 10.2: the
+        // INFO metadata-age line lands on stdout (dnf 4.20 routes it there
+        // for install), `Operation aborted.` alone on stderr, exit 1 — the
+        // exact contract the stderr allowlist models for dnf 4.14.
+        let out = "Last metadata expiration check: 0:44:34 ago on Thu Sep 17 20:41:18 2026.\n\
+Dependencies resolved.\n\
+================================================================================\n\
+ Package        Architecture     Version                 Repository        Size\n\
+================================================================================\n\
+Installing:\n\
+ tree           x86_64           2.1.0-8.el10            baseos            56 k\n\
+\n\
+Transaction Summary\n\
+================================================================================\n\
+Install  1 Package\n\
+\n\
+Total download size: 56 k\n\
+Installed size: 108 k\n";
+        let rows = parse_dnf_install_set(out).expect("real Rocky 10 transaction table must parse");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "tree");
+        assert_eq!(rows[0].verrel, "2.1.0-8.el10");
+        assert_eq!(rows[0].arch, "x86_64");
+        assert_eq!(rows[0].repoid, "baseos");
+    }
+
+    #[test]
+    fn rocky10_payload_location_doubled_separator_is_native() {
+        // Real `repoquery --location tree` on Rocky 10.2: the resolved
+        // mirror baseurl ends in `/`, so the joined path carries `//` —
+        // native output (already covered for Rocky 9 by R5-F04), and the
+        // el10 payload name validates.
+        let url = "https://rocky-linux-asia-northeast1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//10.2/BaseOS/x86_64/os/Packages/t/tree-2.1.0-8.el10.x86_64.rpm";
+        assert!(validate_payload_url(url).is_ok());
+    }
+
+    #[test]
+    fn rocky10_metadata_expiration_line_is_native() {
+        // dnf 4.20 emits the same INFO line; under the pinned C locale the
+        // date is `Www Mmm D D HH:MM:SS YYYY` with a space-padded day.
+        assert!(is_metadata_expiration_line(
+            "Last metadata expiration check: 0:44:34 ago on Thu Sep 17 20:41:18 2026."
+        ));
+        assert!(is_metadata_expiration_line(
+            "Last metadata expiration check: 1 day, 2:03:04 ago on Tue Sep  1 07:41:40 2026."
+        ));
+        // A locale-rendered date is not the C-locale form this tool forces.
+        assert!(!is_metadata_expiration_line(
+            "Last metadata expiration check: 0:44:34 ago on Thu Sep 17 08:41:18 PM UTC."
+        ));
     }
 }

@@ -1,19 +1,21 @@
 ---
 title: Ubuntu
-description: Ubuntu 24.04 LTS amd64 managed-target guide — apt backend.
+description: Ubuntu 24.04 and 26.04 LTS amd64 managed-target guide — apt backend.
 ---
 
-Ubuntu 24.04 LTS amd64 is the original Sinter reference target and remains
-fully supported in v0.2.1.
+Ubuntu 24.04 LTS amd64 is the original Sinter reference target, and Ubuntu
+26.04 LTS amd64 is supported with the same `apt` backend. Both remain fully
+supported in v0.2.1.
 
 ## Requirements
 
 | Requirement | Notes |
 |-------------|-------|
-| Ubuntu 24.04 LTS | amd64 |
+| Ubuntu 24.04 or 26.04 LTS | amd64 |
 | OpenSSH server | Strict `known_hosts` verification; no auto-enrollment |
 | systemd | Required for `service` resources and handlers |
 | `/bin/sh` | Target-side shell |
+| `attr` package | `/usr/bin/getfattr`; stock cloud images ship without it — run `sudo apt install attr` once |
 | `sudo -n` | Passwordless sudo when using `--sudo` |
 
 ## Package management

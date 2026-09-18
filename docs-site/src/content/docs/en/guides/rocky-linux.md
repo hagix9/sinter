@@ -1,24 +1,27 @@
 ---
 title: Rocky Linux
-description: Rocky Linux 9 x86_64 managed-target guide — dnf backend.
+description: Rocky Linux 9 and 10 x86_64 managed-target guide — dnf backend.
 ---
 
-Rocky Linux 9 x86_64 is supported as of v0.2.0 and uses the **dnf** package
-backend.
+Rocky Linux 9 x86_64 is supported as of v0.2.0 and Rocky Linux 10 x86_64 as
+of v0.2.1; both use the **dnf** package backend.
 
-**Acceptance reference:** Rocky Linux 9.8 x86_64 with DNF 4.14.0 — verified
+**Acceptance references:** Rocky Linux 9.8 x86_64 with DNF 4.14.0 — verified
 for package install/remove/idempotency, file, service, and command resources
-over real SSH with `sudo -n`. Other Rocky 9 minor releases share the same
-interfaces; 9.8 is the verified reference.
+over real SSH with `sudo -n` — and Rocky Linux 10.2 x86_64 with DNF 4.20.0
+and rpm 4.19, verified for the same five resource types plus converge-back
+purge idempotency. Other Rocky 9/10 minor releases share the same
+interfaces; 9.8 and 10.2 are the verified references.
 
 ## Requirements
 
 | Requirement | Notes |
 |-------------|-------|
-| Rocky Linux 9 | x86_64 |
+| Rocky Linux 9 or 10 | x86_64 |
 | OpenSSH server | Strict `known_hosts` verification |
 | systemd | Required for `service` resources |
 | `/bin/sh` | Target-side shell |
+| `attr` package | `/usr/bin/getfattr`; included in Rocky's default install |
 | `sudo -n` | Passwordless sudo when using `--sudo` |
 | dnf | Package backend |
 

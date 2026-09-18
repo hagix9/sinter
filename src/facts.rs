@@ -149,4 +149,34 @@ mod tests {
         assert_eq!(id, "ubuntu");
         assert_eq!(v, "24.04");
     }
+
+    /// Real `/etc/os-release` of an Ubuntu 26.04.1 LTS target (verified
+    /// on-target). Family derivation must resolve to `debian` exactly as it
+    /// does for 24.04 — no version gate exists anywhere in detection.
+    #[test]
+    fn parse_ubuntu2604_release() {
+        let c = "PRETTY_NAME=\"Ubuntu 26.04.1 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"26.04\"\n\
+                 VERSION=\"26.04.1 LTS (Resolute Raccoon)\"\nVERSION_CODENAME=resolute\n\
+                 ID=ubuntu\nID_LIKE=debian\nUBUNTU_CODENAME=resolute\nLOGO=ubuntu-logo\n";
+        let (name, id, version) = parse_os_release(c);
+        assert_eq!(name, "Ubuntu");
+        assert_eq!(id, "ubuntu");
+        assert_eq!(version, "26.04");
+        assert_eq!(derive_family(&id, "debian"), "debian");
+    }
+
+    /// Real `/etc/os-release` of a Rocky Linux 10.2 target (verified
+    /// on-target), including `PLATFORM_ID="platform:el10"` and the RHEL
+    /// `ID_LIKE` chain. Family derivation must resolve to `redhat`.
+    #[test]
+    fn parse_rocky10_release() {
+        let c = "NAME=\"Rocky Linux\"\nVERSION=\"10.2 (Red Quartz)\"\nRELEASE_TYPE=\"stable\"\n\
+                 ID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"10.2\"\n\
+                 PLATFORM_ID=\"platform:el10\"\nCPE_NAME=\"cpe:/o:rocky:rocky:10::baseos\"\n";
+        let (name, id, version) = parse_os_release(c);
+        assert_eq!(name, "Rocky Linux");
+        assert_eq!(id, "rocky");
+        assert_eq!(version, "10.2");
+        assert_eq!(derive_family(&id, "rhel centos fedora"), "redhat");
+    }
 }

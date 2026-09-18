@@ -574,6 +574,27 @@ impl TargetFs {
         }
     }
 
+    /// The actionable reason extended-attribute inspection is unavailable on
+    /// this target, when it is. `/usr/bin/getfattr` is a hard target
+    /// requirement for managing filesystem paths: without it Sinter cannot
+    /// enumerate the access metadata that proves a path is safe to write
+    /// (DESIGN §24.4), so every filesystem resource must fail closed. Stock
+    /// Ubuntu cloud images ship no `attr` package, so the message names the
+    /// program and the package instead of leaving the refusal unexplained.
+    /// `None` means inspection is available; a refusal then means a genuine
+    /// inspection failure, not a missing tool.
+    pub fn xattr_inspection_unavailable(&self) -> Option<String> {
+        if self.has_getfattr {
+            return None;
+        }
+        Some(
+            "; the target has no /usr/bin/getfattr, so access metadata cannot \
+             be inspected (install the 'attr' package: apt install attr on \
+             Debian/Ubuntu, dnf install attr on RHEL family)"
+                .to_string(),
+        )
+    }
+
     /// Enumerate extended attributes and POSIX ACLs. Values are returned in
     /// getfattr base64 form (`0s...`) so arbitrary bytes round-trip exactly.
     /// `inspected` is true only when the required inspections completed; an
@@ -1191,8 +1212,9 @@ impl TargetFs {
             };
             if !x.inspected {
                 return Err(SinterError::apply(format!(
-                    "cannot inspect access metadata of parent path {}; refusing unsafe path",
-                    dir
+                    "cannot inspect access metadata of parent path {}; refusing unsafe path{}",
+                    dir,
+                    self.xattr_inspection_unavailable().unwrap_or_default()
                 )));
             }
             if x.unsafe_attr().is_some() {
@@ -1467,5 +1489,52 @@ mod tests {
         assert!(!is_valid_xattr_encoded("garbage"));
         assert!(!is_valid_xattr_encoded("0s!!!"));
         assert!(!is_valid_xattr_encoded("0xzz"));
+    }
+
+    /// A target without `/usr/bin/getfattr` cannot prove a path is safe to
+    /// write, so the refusal must name the program and the package that
+    /// provides it. Stock Ubuntu cloud images ship no `attr` package, which
+    /// is why the hint is the only difference between an actionable error
+    /// and an unexplained one (DESIGN §24.4 stays fail-closed either way).
+    #[test]
+    fn missing_getfattr_yields_an_actionable_refusal_reason() {
+        let with = TargetFs::new_for(
+            Executor::Fake(Box::new(crate::executor::FakeExecutor::new(
+                crate::executor::FakeTarget::rocky9(),
+                false,
+            ))),
+            false,
+            1000,
+            1000,
+            "/home/fake".to_string(),
+            Some(crate::platform::PackageBackend::Dnf),
+            true,
+            true,
+            true,
+            None,
+        );
+        assert!(with.xattr_inspection_unavailable().is_none());
+
+        // Ubuntu 26.04 stock image: no attr package, no inspection.
+        let without = TargetFs::new_for(
+            Executor::Fake(Box::new(crate::executor::FakeExecutor::new(
+                crate::executor::FakeTarget::ubuntu2604(),
+                false,
+            ))),
+            false,
+            1000,
+            1000,
+            "/home/fake".to_string(),
+            Some(crate::platform::PackageBackend::Apt),
+            false,
+            false,
+            true,
+            None,
+        );
+        let reason = without
+            .xattr_inspection_unavailable()
+            .expect("a getfattr-less target must explain the refusal");
+        assert!(reason.contains("/usr/bin/getfattr"));
+        assert!(reason.contains("attr"));
     }
 }

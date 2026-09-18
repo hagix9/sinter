@@ -2,6 +2,60 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+Platform extension: Ubuntu 26.04 LTS and Rocky Linux 10 support, plus a
+unified Linux x86_64 release artifact.
+
+### Added
+
+- **Ubuntu 26.04 LTS amd64** managed-target support. Detection is unchanged
+  in substance: `src/facts.rs` derives the family from `/etc/os-release`
+  `ID`/`ID_LIKE` with no version gate, so 26.04 resolves to `debian` and the
+  `apt` backend exactly like 24.04. Real-host acceptance on Ubuntu 26.04.1
+  x86_64 passed for command, file, template, package, and service resources,
+  plan/apply idempotency, and converge-back purge idempotency.
+- **Rocky Linux 10 x86_64** managed-target support (family resolves to
+  `redhat`, `dnf` backend). The dnf snapshot-install contract built for dnf
+  4.14 on Rocky 9 holds unchanged on dnf 4.20 / rpm 4.19, verified by
+  on-target output captures (`repolist -v`, `install --assumeno`,
+  `repoquery --location`) and a full real-host acceptance matrix on
+  Rocky Linux 10.2 x86_64.
+- Actionable error when the target lacks `/usr/bin/getfattr`: filesystem
+  resources still fail closed (DESIGN §24.4), but the refusal now names the
+  missing program and the `attr` package that provides it. Stock Ubuntu
+  cloud images ship no `attr` package, so this is a documented target
+  prerequisite.
+- `tests/platform_next.rs`: backend selection, apt argv, dnf snapshot
+  contract, and rpm 4.19 absent-marker classification for the two new
+  targets, plus real `/etc/os-release` parser fixtures for both.
+- Integration suites are now family- and unit-name-agnostic (they discover
+  the controller's `ssh`/`sshd` unit and OS family), so they execute
+  truthfully on both Debian- and RHEL-family controllers.
+
+### Changed
+
+- Linux x86_64 release artifacts are unified into one
+  `sinter-v${VERSION}-linux-x86_64.tar.gz` built on the oldest supported
+  baseline (Rocky Linux 9 x86_64, glibc 2.34) and verified, byte-identical,
+  on Ubuntu 24.04, Ubuntu 26.04, Rocky Linux 9, and Rocky Linux 10. The
+  previous per-target `ubuntu24.04-amd64` and `rocky9-x86_64` artifacts are
+  superseded for future releases; published v0.2.0/v0.2.1 assets are not
+  renamed or re-released. See `RELEASE.md` Phase D for the required
+  per-target extraction/run verification.
+
+### Validation
+
+- Linux-native `cargo test` executed on Ubuntu 26.04.1 x86_64, Ubuntu 24.04.4
+  x86_64, and Rocky Linux 9.8 x86_64, including the previously compile-only
+  Linux-gated integration suites and the SSH suite against a real loopback
+  target. `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
+  clean.
+- Exact-binary experiment: one Rocky-9-built binary (SHA-256
+  `af6b3384025c7033b16b26a664e11b73dd527156cd5e1d81d79d835a92f73fc2`)
+  executed on all four supported Linux x86_64 platforms with identical
+  checksums, `ldd` resolution, and a non-mutating `plan` on each.
+
 ## [0.2.1] - 2026-09-17
 
 Maintenance release adding explicit per-operation environment variables to

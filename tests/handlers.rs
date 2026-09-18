@@ -36,9 +36,10 @@ resources:
     notify: [restart_ssh]
 handlers:
   - id: restart_ssh
-    service: ssh
+    service: {svc}
     action: restart
 "#,
+            svc = local_ssh_unit(),
             out = out.display()
         ),
     );
@@ -88,9 +89,10 @@ resources:
     notify: [restart_ssh]
 handlers:
   - id: restart_ssh
-    service: ssh
+    service: {svc}
     action: restart
 "#,
+            svc = local_ssh_unit(),
             a = a.display(),
             b = b.display()
         ),
@@ -127,9 +129,10 @@ resources:
     notify: [restart_ssh]
 handlers:
   - id: restart_ssh
-    service: ssh
+    service: {svc}
     action: restart
 "#,
+            svc = local_ssh_unit(),
             out = out.display()
         ),
     );
@@ -166,9 +169,10 @@ resources:
       program: /bin/false
 handlers:
   - id: restart_ssh
-    service: ssh
+    service: {svc}
     action: restart
 "#,
+            svc = local_ssh_unit(),
             out = out.display()
         ),
     );
@@ -211,9 +215,10 @@ resources:
     notify: [restart_ssh]
 handlers:
   - id: restart_ssh
-    service: ssh
+    service: {svc}
     action: restart
 "#,
+            svc = local_ssh_unit(),
             other = dir.join("other").display(),
             out = out.display()
         ),
@@ -372,18 +377,22 @@ fn service_mutation_then_reobserve_failure_keeps_changed() {
     let recipe = write_recipe(
         &dir,
         "r.yaml",
-        r#"version: 1
+        &format!(
+            r#"version: 1
 resources:
   - id: s
     type: service
     with:
-      name: ssh
+      name: {svc}
       enabled: false
 "#,
+            svc = local_ssh_unit()
+        ),
     );
     // Capture enabled state before.
-    let before = std::process::Command::new("systemctl")
-        .args(["is-enabled", "ssh"])
+    let svc = local_ssh_unit();
+    let before = std::process::Command::new("/usr/bin/systemctl")
+        .args(["is-enabled", &svc])
         .output()
         .unwrap();
     let before = String::from_utf8_lossy(&before.stdout).trim().to_string();
@@ -403,10 +412,10 @@ resources:
     }
     // Restore
     let _ = std::process::Command::new("sudo")
-        .args(["-n", "systemctl", "enable", "ssh"])
+        .args(["-n", "systemctl", "enable", &svc])
         .status();
     let _ = std::process::Command::new("sudo")
-        .args(["-n", "systemctl", "start", "ssh"])
+        .args(["-n", "systemctl", "start", &svc])
         .status();
 }
 
@@ -508,9 +517,10 @@ handlers:
     service: sinter-definitely-not-a-unit
     action: restart
   - id: good
-    service: ssh
+    service: {svc}
     action: restart
 "#,
+            svc = local_ssh_unit(),
             out = out.display()
         ),
     );
@@ -576,9 +586,10 @@ resources:
     notify: [reload_ssh]
 handlers:
   - id: reload_ssh
-    service: ssh
+    service: {svc}
     action: reload
 "#,
+            svc = local_ssh_unit(),
             out = out.display()
         ),
     );

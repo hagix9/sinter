@@ -156,11 +156,20 @@ GO only when every check passes; otherwise NO-GO.
 
 ### Build environments and provenance
 
-Each supported target gets a **native build on a valid environment for that
-target** (e.g. the Ubuntu artifact built on Ubuntu 24.04 amd64, the Rocky
-artifact on Rocky 9 x86_64). Never substitute: no macOS binary shipped as a
-Linux artifact, no rename-based target spoofing, no stale or unknown-provenance
-binaries.
+Linux x86_64 publishes **one** artifact, built on the oldest supported
+baseline (Rocky Linux 9 x86_64, glibc 2.34) and then extracted and executed,
+byte-identical, on every supported Linux x86_64 target before release. This
+is justified — not assumed — by evidence: the Rocky-9-built binary requires
+no glibc symbol newer than `GLIBC_2.34`, needs only
+`libssl.so.3`/`libcrypto.so.3`/`libgcc_s.so.1`/`libc.so.6` (no RPATH), and
+the exact same bytes were verified to run on Ubuntu 24.04, Ubuntu 26.04,
+Rocky Linux 9, and Rocky Linux 10. Never substitute: no macOS binary shipped
+as a Linux artifact, no rename-based target spoofing, no stale or
+unknown-provenance binaries.
+
+A build on a newer baseline (Ubuntu 26.04 or Rocky 10) is **not** an
+acceptable substitute for this artifact: those builds require `GLIBC_2.39`
+and will not run on Rocky Linux 9 (glibc 2.34).
 
 Preferred source transport:
 
@@ -179,28 +188,35 @@ find . -type f | sort | xargs sha256sum > sums.txt   # on each side, then diff
 A real `git worktree`/clone at `RC_COMMIT` is equally acceptable. Uncertain
 provenance → do not publish.
 
-Record on each build host:
+Record on the build host:
 
 ```sh
 cat /etc/os-release; uname -m; rustc --version; cargo --version
 cargo build --locked --release        # -j1 on low-memory hosts
 file target/release/sinter
+readelf -d target/release/sinter | grep -E 'NEEDED|RPATH|RUNPATH'
+readelf -V target/release/sinter | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail -1
 ldd target/release/sinter
 target/release/sinter --version       # sinter ${VERSION}
 sha256sum target/release/sinter
 ```
 
+Then, on **every** supported Linux x86_64 target, extract that exact binary
+and re-verify `sha256sum` (must be identical), `ldd`, `--version`, and a
+safe non-mutating `plan` before publishing. Record the per-target results.
+
 ### Artifact naming
 
-Match the supported-platform matrix one-to-one:
-
 ```text
-sinter-v${VERSION}-ubuntu24.04-amd64.tar.gz
-sinter-v${VERSION}-rocky9-x86_64.tar.gz
+sinter-v${VERSION}-linux-x86_64.tar.gz
 SHA256SUMS
 ```
 
-New targets extend the matrix and the artifact list together.
+The name records the architecture class and the build baseline, not any one
+managed-target distribution: the same binary manages all supported Linux
+x86_64 targets. New targets that keep the same dependency interface extend
+the verification matrix, not the artifact list; a target needing a different
+interface gets its own artifact.
 
 ### Archive layout
 

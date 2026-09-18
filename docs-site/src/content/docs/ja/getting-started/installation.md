@@ -4,10 +4,12 @@ description: リリース tarball から Sinter をインストールするか�
 ---
 
 Sinter は**コントローラ**（`sinter` を実行するマシン）上で動作します。
-管理対象ホストに必要なのは SSH アクセスだけです。現在のリリースは、
-サポートされる 2 つの管理対象プラットフォーム（Ubuntu 24.04 LTS amd64 と
-Rocky Linux 9 x86_64）向けのバイナリを公開しています。macOS など他の OS の
-コントローラは、ソースからビルドできます。
+管理対象ホストに必要なのは SSH アクセスだけです。Linux x86_64 向けの
+リリースバイナリは 1 つだけ公開され、最も古いサポート基準環境
+（Rocky Linux 9 x86_64、glibc 2.34）でビルドされており、
+サポートされるすべての Linux x86_64 ターゲット
+（Ubuntu 24.04、Ubuntu 26.04、Rocky Linux 9、Rocky Linux 10）で
+実行できます。macOS など他の OS のコントローラは、ソースからビルドできます。
 
 ## リリース tarball から（Linux では推奨）
 
@@ -17,22 +19,20 @@ Rocky Linux 9 x86_64）向けのバイナリを公開しています。macOS な
 ライセンスファイルが含まれます。
 
 ```sh
-# 例: Ubuntu 24.04 amd64 コントローラ
-curl -LO https://github.com/hagix9/sinter/releases/download/v0.2.1/sinter-v0.2.1-ubuntu24.04-amd64.tar.gz
+# Linux x86_64 コントローラ（Rocky Linux 9 でビルド、サポートされる任意の Linux x86_64 ターゲットで実行可能）
+curl -LO https://github.com/hagix9/sinter/releases/download/v0.2.1/sinter-v0.2.1-linux-x86_64.tar.gz
 curl -LO https://github.com/hagix9/sinter/releases/download/v0.2.1/SHA256SUMS
 
 sha256sum -c SHA256SUMS    # 期待される出力: ... OK
 
-tar -xzf sinter-v0.2.1-ubuntu24.04-amd64.tar.gz
-sudo install -m 0755 sinter-v0.2.1-ubuntu24.04-amd64/sinter /usr/local/bin/sinter
+tar -xzf sinter-v0.2.1-linux-x86_64.tar.gz
+sudo install -m 0755 sinter-v0.2.1-linux-x86_64/sinter /usr/local/bin/sinter
 sinter --version   # sinter 0.2.1
 ```
 
-Rocky Linux 9 x86_64 コントローラの場合は、代わりに
-`sinter-v0.2.1-rocky9-x86_64.tar.gz` を使ってください。バイナリを `PATH`
-の通った場所（上の例では `/usr/local/bin`）に置くと、どのディレクトリからも
-`sinter` を実行できます。レシピの隣に置いて `./sinter` として実行しても
-かまいません。
+バイナリを `PATH` の通った場所（上の例では `/usr/local/bin`）に置くと、
+どのディレクトリからも `sinter` を実行できます。レシピの隣に置いて
+`./sinter` として実行してもかまいません。
 
 :::note
 新しいリリースはこれらのダウンロードを置き換えます。v0.2.1 以外の
@@ -43,10 +43,12 @@ Rocky Linux 9 x86_64 コントローラの場合は、代わりに
 
 :::note
 リリースアーカイブ名は、そのバイナリを生成したツールチェーンの
-プラットフォームを示します。同じバイナリは他の Linux ターゲットに対する
-コントローラとしても動作します。プラットフォーム表記はビルド・検証
-された環境を表すものであり、管理できるターゲットを表すものでは
-ありません。Linux 向けリリースバイナリは macOS 上では動作しません。
+プラットフォームを示します。Linux x86_64 アーティファクトは
+Rocky Linux 9 上で 1 回だけビルドされ、サポートされるすべての
+Linux x86_64 ターゲットで展開と実行の検証が行われています。
+プラットフォーム表記はビルド・検証された環境を表すものであり、
+管理できるターゲットを表すものではありません。Linux 向け
+リリースバイナリは macOS 上では動作しません。
 :::
 
 ## macOS（または他の環境）のコントローラ
@@ -77,6 +79,11 @@ cargo build --locked --release
 - ホスト鍵が `known_hosts` に登録済みの OpenSSH サーバ
 - systemd
 - `/bin/sh`
+- `attr` パッケージ（`/usr/bin/getfattr`）— Sinter はパスを書き込む前に
+  拡張属性と POSIX ACL を確認し、安全だと証明できないパスは拒否します。
+  Ubuntu の標準クラウドイメージには `attr` が含まれないため、
+  `sudo apt install attr` を 1 回実行してください。Rocky Linux の
+  イメージには含まれています
 - `--sudo` を使う場合はパスワードなしの `sudo -n`
 - 公開鍵をあらかじめ authorized_keys に登録済みのユーザーアカウント
   （SSH エージェントまたは鍵ファイルで到達できること）

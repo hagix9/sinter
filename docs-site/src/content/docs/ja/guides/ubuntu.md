@@ -1,19 +1,21 @@
 ---
 title: Ubuntu
-description: Ubuntu 24.04 LTS amd64 管理対象ガイド — apt バックエンド。
+description: Ubuntu 24.04 / 26.04 LTS amd64 管理対象ガイド — apt バックエンド。
 ---
 
 Ubuntu 24.04 LTS amd64 は Sinter 最初のリファレンスターゲットであり、
-v0.2.1 でも完全にサポートされています。
+Ubuntu 26.04 LTS amd64 も同じ `apt` バックエンドでサポートされます。
+両方とも v0.2.1 で完全にサポートされています。
 
 ## 要件
 
 | 要件 | 補足 |
 |------|------|
-| Ubuntu 24.04 LTS | amd64 |
+| Ubuntu 24.04 または 26.04 LTS | amd64 |
 | OpenSSH サーバ | 厳格な `known_hosts` 検証。自動登録なし |
 | systemd | `service` リソースとハンドラに必要 |
 | `/bin/sh` | ターゲット側シェル |
+| `attr` パッケージ | `/usr/bin/getfattr`。標準クラウドイメージには含まれないため `sudo apt install attr` を 1 回実行 |
 | `sudo -n` | `--sudo` 使用時はパスワードなし sudo |
 
 ## パッケージ管理

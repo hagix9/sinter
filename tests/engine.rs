@@ -469,7 +469,7 @@ resources:
   - id: svc
     type: service
     with:
-      name: ssh
+      name: {svc}
       state: running
   - id: cmd
     type: command
@@ -480,6 +480,7 @@ resources:
             out2 = dir.join("f2").display(),
             d = d.display(),
             link = dir.join("l").display(),
+            svc = local_ssh_unit(),
         ),
     );
     let r = run_recipe(&recipe, Mode::Plan, false);
@@ -575,6 +576,15 @@ mode = "0644"
 fn when_uses_facts() {
     let dir = trusted_root("when-facts");
     let out = dir.join("f");
+    // The recipe is written for both families; the branch that runs is the
+    // local host's own family, so the assertions follow it rather than
+    // assuming the controller happens to be Debian-family.
+    let family = local_os_family();
+    let (run_id, skip_id) = if family == "redhat" {
+        ("no", "yes")
+    } else {
+        ("yes", "no")
+    };
     let recipe = write_recipe(
         &dir,
         "r.yaml",
@@ -586,8 +596,11 @@ fn when_uses_facts() {
     );
     let r = run_recipe(&recipe, Mode::Apply, false);
     assert_success(&r);
-    assert_eq!(find(&r, "yes").execution, Execution::Succeeded);
-    assert_eq!(find(&r, "no").disposition, Disposition::SkippedByCondition);
+    assert_eq!(find(&r, run_id).execution, Execution::Succeeded);
+    assert_eq!(
+        find(&r, skip_id).disposition,
+        Disposition::SkippedByCondition
+    );
 }
 
 #[test]
@@ -770,10 +783,11 @@ resources:
     notify: [restart_ssh]
 handlers:
   - id: restart_ssh
-    service: ssh
+    service: {svc}
     action: restart
 "#,
-            out = out.display()
+            out = out.display(),
+            svc = local_ssh_unit(),
         ),
     );
     let r = run_recipe(&recipe, Mode::Plan, false);

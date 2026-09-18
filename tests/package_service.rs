@@ -95,7 +95,8 @@ fn package_apply_then_service_reobservation() {
     let recipe = write_recipe(
         &dir,
         "r.yaml",
-        r#"version: 1
+        &format!(
+            r#"version: 1
 resources:
   - id: p
     type: package
@@ -105,11 +106,13 @@ resources:
   - id: s
     type: service
     with:
-      name: ssh
+      name: {svc}
       state: running
       enabled: true
     depends_on: [p]
 "#,
+            svc = local_ssh_unit()
+        ),
     );
     let r = run_recipe(&recipe, Mode::Apply, true);
     assert_success(&r);
@@ -143,10 +146,11 @@ resources:
   - id: s
     type: service
     with:
-      name: ssh
+      name: {svc}
       state: {state}
       enabled: {enabled}
-"#
+"#,
+                svc = local_ssh_unit()
             ),
         );
         let r = run_recipe(&recipe, Mode::Apply, true);
@@ -155,32 +159,39 @@ resources:
         // Restore to running/enabled. ssh is socket-activated: `enable` alone
         // can leave the unit inactive, so first request a clean stop then
         // running so the product is allowed to issue start.
+        let svc_name = local_ssh_unit();
         let restore_stop = write_recipe(
             &dir,
             "r1.yaml",
-            r#"version: 1
+            &format!(
+                r#"version: 1
 resources:
   - id: s
     type: service
     with:
-      name: ssh
+      name: {svc}
       state: stopped
       enabled: true
 "#,
+                svc = svc_name
+            ),
         );
         let _ = run_recipe(&restore_stop, Mode::Apply, true);
         let restore = write_recipe(
             &dir,
             "r2.yaml",
-            r#"version: 1
+            &format!(
+                r#"version: 1
 resources:
   - id: s
     type: service
     with:
-      name: ssh
+      name: {svc}
       state: running
       enabled: true
 "#,
+                svc = svc_name
+            ),
         );
         let rr = run_recipe(&restore, Mode::Apply, true);
         assert_success(&rr);

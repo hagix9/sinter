@@ -174,21 +174,29 @@ Managed targets:
 | Platform | Architecture | Package backend | Status |
 |----------|--------------|-----------------|--------|
 | Ubuntu 24.04 LTS | amd64 | apt | Supported |
+| Ubuntu 26.04 LTS | amd64 | apt | Supported |
 | Rocky Linux 9 | x86_64 | dnf | Supported |
+| Rocky Linux 10 | x86_64 | dnf | Supported |
 
 Package recipes are platform-neutral: the same `type: package` / `state:
 present` resource is handled by `apt` on Ubuntu and `dnf` on RHEL-family
 targets, selected from the detected `/etc/os-release` identity.
 
-The Rocky Linux 9 acceptance reference is Rocky Linux 9.8 x86_64 with DNF
-4.14.0 — verified for package install/remove/idempotency, file, service, and
-command resources over real SSH with `sudo -n`. Other Rocky 9 minor releases
-share the same interfaces; 9.8 is the verified reference.
+Acceptance references: Rocky Linux 9.8 x86_64 with DNF 4.14.0 (verified for
+package install/remove/idempotency, file, service, and command resources over
+real SSH with `sudo -n`), Rocky Linux 10.2 x86_64 with DNF 4.20.0 and rpm 4.19
+(the same five resource types plus converge-back purge idempotency), and
+Ubuntu 26.04.1 LTS amd64 (the same matrix; Ubuntu 24.04.4 amd64 is the
+reference build/validation host). Other minor releases of the same major
+version share the same interfaces.
 
-All managed targets require systemd, an OpenSSH server, `/bin/sh`, and
-passwordless `sudo -n` when privilege escalation is required. The controller
-reference environments are macOS, Ubuntu 24.04 LTS, and other environments
-where the binary builds.
+All managed targets require systemd, an OpenSSH server, `/bin/sh`, the `attr`
+package (`/usr/bin/getfattr`, used to inspect extended attributes and POSIX
+ACLs before any write — stock Ubuntu cloud images ship without it and must
+have `apt install attr`), and passwordless `sudo -n` when privilege escalation
+is required. The controller reference environments are macOS, Ubuntu 24.04
+LTS, Ubuntu 26.04 LTS, Rocky Linux 9, Rocky Linux 10, and other x86_64 Linux
+environments where the binary builds.
 
 ## Testing
 

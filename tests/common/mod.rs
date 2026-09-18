@@ -225,6 +225,47 @@ pub fn assert_success(report: &sinter::engine::RunReport) {
     );
 }
 
+/// The SSH daemon's systemd unit name on this controller's local host:
+/// Debian/Ubuntu ships `ssh.service`, the RHEL family ships `sshd.service`.
+/// Tests that observe a real unit must not hardcode one family's spelling —
+/// both are supported targets, and a wrong name fails the recipe instead of
+/// the behavior under test.
+pub fn local_ssh_unit() -> String {
+    for name in ["ssh", "sshd"] {
+        let loaded = std::process::Command::new("/usr/bin/systemctl")
+            .args(["show", &format!("{name}.service"), "--property=LoadState"])
+            .output();
+        if let Ok(o) = loaded {
+            if String::from_utf8_lossy(&o.stdout).trim() == "LoadState=loaded" {
+                return name.to_string();
+            }
+        }
+    }
+    "ssh".to_string()
+}
+
+/// The OS family this controller's local host reports, so a test can assert
+/// the family-appropriate branch of a `when: facts.os.family` recipe instead
+/// of assuming the family it happens to run on.
+pub fn local_os_family() -> String {
+    match std::fs::read_to_string("/etc/os-release") {
+        Ok(c) => {
+            let id = c
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("ID="))
+                .map(|v| v.trim().trim_matches('"').to_ascii_lowercase())
+                .unwrap_or_default();
+            let id_like = c
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("ID_LIKE="))
+                .map(|v| v.trim().trim_matches('"').to_ascii_lowercase())
+                .unwrap_or_default();
+            sinter::facts::derive_family(&id, &id_like)
+        }
+        Err(_) => String::new(),
+    }
+}
+
 /// Build an SSH target spec from environment variables. Returns None when
 /// SINTER_TEST_SSH_HOST is unset, so SSH tests can be skipped on controllers
 /// without a disposable target.

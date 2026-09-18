@@ -1544,11 +1544,100 @@ impl FakeTarget {
         }
     }
 
+    /// A Rocky Linux 10 x86_64 target: dnf 4.20 backend, rpm 4.19 query,
+    /// systemd 257. Ships no `acl` package (`getfacl` absent), which is
+    /// safe: `getfattr` still reports `system.posix_acl_*` itself, so an
+    /// ACL-bearing object is disqualified rather than silently copied over.
+    pub fn rocky10() -> Self {
+        FakeTarget {
+            os_release: "NAME=\"Rocky Linux\"\nVERSION=\"10.2 (Red Quartz)\"\nRELEASE_TYPE=\"stable\"\nID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"10.2\"\nPLATFORM_ID=\"platform:el10\"\n".to_string(),
+            hostname: "rocky10.test".to_string(),
+            arch: "x86_64".to_string(),
+            uid: 1000,
+            gid: 1000,
+            home: "/home/fake".to_string(),
+            executables: [
+                "/usr/bin/dnf",
+                "/usr/bin/rpm",
+                "/usr/bin/systemctl",
+                "/usr/bin/curl",
+                "/usr/bin/getfattr",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            packages: std::collections::BTreeSet::new(),
+            services: BTreeMap::new(),
+            manager_completion: None,
+            probe_completion: None,
+            dnf_probe_output: None,
+            query_completion: None,
+            query_results: std::collections::VecDeque::new(),
+            dnf_repos: vec![DnfRepo {
+                id: "baseos".to_string(),
+                mirrors: true,
+                repodata_cached: true,
+                mirrorlist_cached: true,
+            }],
+            dnf_no_locations: false,
+            dnf_repolist_output: None,
+            dnf_dry_run_output: None,
+            dnf_location_output: None,
+            snapshot_listing: None,
+            live_cache_find_output: None,
+            mktemp_output: None,
+            snapshot_mode: "700".to_string(),
+            snapshot_mode_after_copy: None,
+            snapshot_chmod_fails: false,
+            snapshot_stat_fails: false,
+            snapshot_rm_fails: false,
+        }
+    }
+
     /// An Ubuntu 24.04 amd64 target: apt backend, dpkg-query, systemd.
     pub fn ubuntu2404() -> Self {
         FakeTarget {
             os_release: "NAME=\"Ubuntu\"\nVERSION=\"24.04 LTS\"\nID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"24.04\"\n".to_string(),
             hostname: "ubuntu2404.test".to_string(),
+            arch: "x86_64".to_string(),
+            uid: 1000,
+            gid: 1000,
+            home: "/home/fake".to_string(),
+            executables: ["/usr/bin/apt-get", "/usr/bin/dpkg-query", "/usr/bin/systemctl"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            packages: std::collections::BTreeSet::new(),
+            services: BTreeMap::new(),
+            manager_completion: None,
+            probe_completion: None,
+            dnf_probe_output: None,
+            query_completion: None,
+            query_results: std::collections::VecDeque::new(),
+            dnf_repos: Vec::new(),
+            dnf_no_locations: false,
+            dnf_repolist_output: None,
+            dnf_dry_run_output: None,
+            dnf_location_output: None,
+            snapshot_listing: None,
+            live_cache_find_output: None,
+            mktemp_output: None,
+            snapshot_mode: "700".to_string(),
+            snapshot_mode_after_copy: None,
+            snapshot_chmod_fails: false,
+            snapshot_stat_fails: false,
+            snapshot_rm_fails: false,
+        }
+    }
+
+    /// An Ubuntu 26.04 amd64 target: apt backend, dpkg-query, systemd.
+    /// `attr`/`acl` are absent from the default install (the stock Ubuntu
+    /// cloud image ships neither), so a stock target cannot inspect xattrs
+    /// and filesystem resources must fail closed — modeled exactly.
+    pub fn ubuntu2604() -> Self {
+        FakeTarget {
+            os_release: "NAME=\"Ubuntu\"\nVERSION=\"26.04.1 LTS (Resolute Raccoon)\"\nID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"26.04\"\nVERSION_CODENAME=resolute\nUBUNTU_CODENAME=resolute\n".to_string(),
+            hostname: "ubuntu2604.test".to_string(),
             arch: "x86_64".to_string(),
             uid: 1000,
             gid: 1000,

@@ -178,22 +178,29 @@ managed target:
 | Platform | Architecture | Package backend | Status |
 |----------|--------------|-----------------|--------|
 | Ubuntu 24.04 LTS | amd64 | apt | Supported |
+| Ubuntu 26.04 LTS | amd64 | apt | Supported |
 | Rocky Linux 9 | x86_64 | dnf | Supported |
+| Rocky Linux 10 | x86_64 | dnf | Supported |
 
 package recipeはplatform-neutralです。同じ`type: package` / `state:
 present` resourceを、Ubuntuでは`apt`、RHEL系では`dnf`が処理します。
 backendは検出した`/etc/os-release`のidentityから選択されます。
 
-Rocky Linux 9のacceptance referenceは、Rocky Linux 9.8 x86_64 /
-DNF 4.14.0です。実SSHと`sudo -n`経由でpackageの
-install/remove/冪等性、file、service、command resourceを検証済みです。
-Rocky 9の他のminor releaseも同じinterfaceを共有しますが、
-検証済みreferenceは9.8です。
+acceptance reference: Rocky Linux 9.8 x86_64 / DNF 4.14.0（実SSHと
+`sudo -n`経由でpackageのinstall/remove/冪等性、file、service、command
+resourceを検証済み）、Rocky Linux 10.2 x86_64 / DNF 4.20.0・rpm 4.19
+（同じ5種類のresourceに加えpurgeの収束/冪等性を検証済み）、および
+Ubuntu 26.04.1 LTS amd64（同じmatrix。Ubuntu 24.04.4 amd64は
+参照ビルド/検証ホスト）。同じmajor versionの他のminor releaseも
+同じinterfaceを共有します。
 
-すべてのmanaged targetには、systemd、OpenSSH server、`/bin/sh`、および
-権限昇格が必要な場合のpasswordless `sudo -n`が必要です。
-controllerのreference environmentはmacOS、Ubuntu 24.04 LTS、および
-バイナリをbuildできるその他の環境です。
+すべてのmanaged targetには、systemd、OpenSSH server、`/bin/sh`、
+`attr` package（`/usr/bin/getfattr`。書き込み前に拡張属性とPOSIX ACLを
+確認するために使用。Ubuntuの標準クラウドイメージには含まれないため
+`apt install attr`が必要です）、および権限昇格が必要な場合の
+passwordless `sudo -n`が必要です。controllerのreference environmentは
+macOS、Ubuntu 24.04 LTS、Ubuntu 26.04 LTS、Rocky Linux 9、
+Rocky Linux 10、およびバイナリをbuildできるその他のx86_64 Linux環境です。
 
 ## テスト
 

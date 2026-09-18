@@ -1212,12 +1212,13 @@ resources:
     notify: [h1, h2]
 handlers:
   - id: h1
-    service: ssh
+    service: {svc}
     action: restart
   - id: h2
-    service: ssh
+    service: {svc}
     action: restart
 "#,
+            svc = local_ssh_unit(),
             out = out.display()
         ),
     );
@@ -1930,9 +1931,10 @@ resources:
     notify: [h]
 handlers:
   - id: h
-    service: ssh
+    service: {svc}
     action: restart
 "#,
+            svc = local_ssh_unit(),
             out = out.display()
         ),
     );
@@ -2114,15 +2116,18 @@ fn sensitive_service_command_record_redacted() {
     let recipe = write_recipe(
         &dir,
         "r.yaml",
-        r#"version: 1
+        &format!(
+            r#"version: 1
 resources:
   - id: s
     type: service
     sensitive: true
     with:
-      name: ssh
+      name: {svc}
       enabled: true
 "#,
+            svc = local_ssh_unit()
+        ),
     );
     let model = sinter::model::load_model(&recipe).unwrap();
     let opts = sinter::engine::RunOptions {

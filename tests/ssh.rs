@@ -117,15 +117,27 @@ fn ssh_changed_host_key_fails() {
     assert_eq!(res.err().unwrap().kind, sinter::error::ErrorKind::Connect);
 }
 
+/// The non-default port a `[host]:port` identity test needs. Only a real
+/// secondary sshd qualifies: the DESIGN §19 identity for port 22 is the bare
+/// `host`, so silently falling back to the default port would make these tests
+/// assert the wrong identity (and pass or fail for reasons unrelated to the
+/// `[host]:port` form they exist to cover).
+fn non_default_port() -> Option<u16> {
+    if std::net::TcpStream::connect(("127.0.0.1", 2222u16)).is_ok() {
+        Some(2222u16)
+    } else {
+        None
+    }
+}
+
 /// Non-default/qualified port identity: an explicit `[host]:port` Mismatch must
 /// reject even when a portless host entry matches (Astra-reproduced defect).
 #[test]
 fn ssh_host_port_mismatch_rejects_despite_portless_match() {
     let _s = require_ssh!();
-    let port = if std::net::TcpStream::connect(("127.0.0.1", 2222u16)).is_ok() {
-        2222u16
-    } else {
-        ssh().unwrap().port
+    let Some(port) = non_default_port() else {
+        skip("requires secondary sshd on non-default port 2222");
+        return;
     };
     let mut s = ssh().unwrap();
     s.port = port;
@@ -197,10 +209,9 @@ fn ssh_host_port_mismatch_rejects_despite_portless_match() {
 #[test]
 fn ssh_host_port_match_accepts() {
     let _s = require_ssh!();
-    let port = if std::net::TcpStream::connect(("127.0.0.1", 2222u16)).is_ok() {
-        2222u16
-    } else {
-        ssh().unwrap().port
+    let Some(port) = non_default_port() else {
+        skip("requires secondary sshd on non-default port 2222");
+        return;
     };
     let mut s = ssh().unwrap();
     s.port = port;
@@ -256,9 +267,7 @@ fn ssh_host_port_match_accepts() {
 #[test]
 fn ssh_portless_only_non_default_port_rejects() {
     let _s = require_ssh!();
-    let port = if std::net::TcpStream::connect(("127.0.0.1", 2222u16)).is_ok() {
-        2222u16
-    } else {
+    let Some(port) = non_default_port() else {
         skip("requires secondary sshd on non-default port 2222");
         return;
     };
