@@ -22,7 +22,7 @@ purge の収束/冪等性について検証済みです。他の Rocky 9/10 マ�
 | OpenSSH サーバ | 厳格な `known_hosts` 検証 |
 | systemd | `service` リソースに必要 |
 | `/bin/sh` | ターゲット側シェル |
-| `attr` パッケージ | `/usr/bin/getfattr`。Rocky のデフォルトインストールに含まれる |
+| `attr` パッケージ | `/usr/bin/getfattr`。ターゲットで確認し、不在なら dnf で `attr` をインストール |
 | `sudo -n` | `--sudo` 使用時はパスワードなし sudo |
 | dnf | パッケージバックエンド |
 

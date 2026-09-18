@@ -21,7 +21,7 @@ interfaces; 9.8 and 10.2 are the verified references.
 | OpenSSH server | Strict `known_hosts` verification |
 | systemd | Required for `service` resources |
 | `/bin/sh` | Target-side shell |
-| `attr` package | `/usr/bin/getfattr`; included in Rocky's default install |
+| `attr` package | `/usr/bin/getfattr`; check on the target; install `attr` with dnf if missing |
 | `sudo -n` | Passwordless sudo when using `--sudo` |
 | dnf | Package backend |
 

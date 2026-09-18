@@ -3,13 +3,12 @@ title: インストール
 description: リリース tarball から Sinter をインストールするか、ソースからビルドする。
 ---
 
-Sinter は**コントローラ**（`sinter` を実行するマシン）上で動作します。
-管理対象ホストに必要なのは SSH アクセスだけです。Linux x86_64 向けの
-リリースバイナリは 1 つだけ公開され、最も古いサポート基準環境
-（Rocky Linux 9 x86_64、glibc 2.34）でビルドされており、
-サポートされるすべての Linux x86_64 ターゲット
-（Ubuntu 24.04、Ubuntu 26.04、Rocky Linux 9、Rocky Linux 10）で
-実行できます。macOS など他の OS のコントローラは、ソースからビルドできます。
+Sinter は**コントローラ**上で動作します。管理対象ホストには下記の要件が
+必要ですが、Sinter のインストールは不要です。公開済み v0.2.1 の Linux
+アーティファクトはディストリビューション別です。Rocky Linux 9 を基準に
+ビルドする統一 Linux x86_64 アーティファクトは、全サポート対象で同一
+バイナリを検証することを条件とした将来リリースの方針であり、v0.2.1 の
+公開アセットではありません。macOS のコントローラはソースからビルドできます。
 
 ## リリース tarball から（Linux では推奨）
 
@@ -19,14 +18,15 @@ Sinter は**コントローラ**（`sinter` を実行するマシン）上で動
 ライセンスファイルが含まれます。
 
 ```sh
-# Linux x86_64 コントローラ（Rocky Linux 9 でビルド、サポートされる任意の Linux x86_64 ターゲットで実行可能）
-curl -LO https://github.com/hagix9/sinter/releases/download/v0.2.1/sinter-v0.2.1-linux-x86_64.tar.gz
-curl -LO https://github.com/hagix9/sinter/releases/download/v0.2.1/SHA256SUMS
+# コントローラに合わせて Ubuntu 24.04 または Rocky Linux 9 を選択します。
+ASSET=sinter-v0.2.1-ubuntu24.04-amd64.tar.gz
+# ASSET=sinter-v0.2.1-rocky9-x86_64.tar.gz
+curl -fLO "https://github.com/hagix9/sinter/releases/download/v0.2.1/$ASSET"
+curl -fLO https://github.com/hagix9/sinter/releases/download/v0.2.1/SHA256SUMS
 
-sha256sum -c SHA256SUMS    # 期待される出力: ... OK
-
-tar -xzf sinter-v0.2.1-linux-x86_64.tar.gz
-sudo install -m 0755 sinter-v0.2.1-linux-x86_64/sinter /usr/local/bin/sinter
+grep -F "  $ASSET" SHA256SUMS | sha256sum -c -
+tar -xzf "$ASSET"
+sudo install -m 0755 "${ASSET%.tar.gz}/sinter" /usr/local/bin/sinter
 sinter --version   # sinter 0.2.1
 ```
 
@@ -42,13 +42,9 @@ sinter --version   # sinter 0.2.1
 :::
 
 :::note
-リリースアーカイブ名は、そのバイナリを生成したツールチェーンの
-プラットフォームを示します。Linux x86_64 アーティファクトは
-Rocky Linux 9 上で 1 回だけビルドされ、サポートされるすべての
-Linux x86_64 ターゲットで展開と実行の検証が行われています。
-プラットフォーム表記はビルド・検証された環境を表すものであり、
-管理できるターゲットを表すものではありません。Linux 向け
-リリースバイナリは macOS 上では動作しません。
+v0.2.1 の名称はビルド環境を示します。公開済みアセットの名前を変更したり、
+v0.2.1 の URL に将来の統一名称を使用したりしないでください。Linux の
+バイナリは macOS では動作しません。
 :::
 
 ## macOS（または他の環境）のコントローラ
@@ -81,9 +77,9 @@ cargo build --locked --release
 - `/bin/sh`
 - `attr` パッケージ（`/usr/bin/getfattr`）— Sinter はパスを書き込む前に
   拡張属性と POSIX ACL を確認し、安全だと証明できないパスは拒否します。
-  Ubuntu の標準クラウドイメージには `attr` が含まれないため、
-  `sudo apt install attr` を 1 回実行してください。Rocky Linux の
-  イメージには含まれています
+  各ターゲットで `test -x /usr/bin/getfattr` を確認してください。
+  不在なら Ubuntu は `sudo apt install attr`、Rocky は
+  `sudo dnf install attr` でインストールしてください
 - `--sudo` を使う場合はパスワードなしの `sudo -n`
 - 公開鍵をあらかじめ authorized_keys に登録済みのユーザーアカウント
   （SSH エージェントまたは鍵ファイルで到達できること）

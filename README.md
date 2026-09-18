@@ -192,8 +192,8 @@ version share the same interfaces.
 
 All managed targets require systemd, an OpenSSH server, `/bin/sh`, the `attr`
 package (`/usr/bin/getfattr`, used to inspect extended attributes and POSIX
-ACLs before any write — stock Ubuntu cloud images ship without it and must
-have `apt install attr`), and passwordless `sudo -n` when privilege escalation
+ACLs before any write — check `test -x /usr/bin/getfattr` on each target;
+install `attr` with apt or dnf if missing), and passwordless `sudo -n` when privilege escalation
 is required. The controller reference environments are macOS, Ubuntu 24.04
 LTS, Ubuntu 26.04 LTS, Rocky Linux 9, Rocky Linux 10, and other x86_64 Linux
 environments where the binary builds.

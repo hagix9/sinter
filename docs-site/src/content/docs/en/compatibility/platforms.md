@@ -41,7 +41,7 @@ writes (or whose parent it must trust) before touching it, so a path whose
 security metadata cannot be proved safe is refused rather than copied over.
 Enumeration uses `/usr/bin/getfattr`, provided by the `attr` package.
 
-Stock Ubuntu cloud images ship **no** `attr` package. On such a target every
+Check `test -x /usr/bin/getfattr` on each target. If it is missing, every
 `file`, `template`, `directory`, and `link` resource fails closed with an
 error that names the missing program and how to install it:
 
@@ -59,8 +59,7 @@ sudo apt install attr          # Debian / Ubuntu
 sudo dnf install attr          # RHEL family (Rocky, etc.)
 ```
 
-Rocky Linux images ship `attr` in the default install, so no action is needed
-there.
+Do not assume image defaults: install `attr` only if the required tool is missing.
 
 ## Controller
 

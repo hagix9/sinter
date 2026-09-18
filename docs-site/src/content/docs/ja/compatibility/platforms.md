@@ -41,8 +41,8 @@ Sinter はパスを書き込む（または信頼すべき親ディレクトリ�
 セキュリティメタデータを持つパスは上書きせずに拒否します。この列挙は
 `/usr/bin/getfattr`（`attr` パッケージが提供）を使用します。
 
-Ubuntu の標準クラウドイメージには `attr` パッケージが**含まれません**。
-そのようなターゲットでは、`file`・`template`・`directory`・`link` の
+各ターゲットで `test -x /usr/bin/getfattr` を確認してください。
+このツールが不在のターゲットでは、`file`・`template`・`directory`・`link` の
 各リソースはすべてフェイルクローズし、不足しているプログラムとその
 インストール方法を示すエラーを返します:
 
@@ -61,8 +61,8 @@ sudo apt install attr          # Debian / Ubuntu
 sudo dnf install attr          # RHEL 系（Rocky など）
 ```
 
-Rocky Linux のイメージでは `attr` がデフォルトでインストールされている
-ため、追加作業は不要です。
+イメージの既定値を仮定せず、必要なツールが不在の場合だけ `attr` を
+インストールしてください。
 
 ## コントローラ
 

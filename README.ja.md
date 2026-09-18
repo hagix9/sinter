@@ -196,8 +196,8 @@ Ubuntu 26.04.1 LTS amd64（同じmatrix。Ubuntu 24.04.4 amd64は
 
 すべてのmanaged targetには、systemd、OpenSSH server、`/bin/sh`、
 `attr` package（`/usr/bin/getfattr`。書き込み前に拡張属性とPOSIX ACLを
-確認するために使用。Ubuntuの標準クラウドイメージには含まれないため
-`apt install attr`が必要です）、および権限昇格が必要な場合の
+確認するために使用。各ターゲットで `test -x /usr/bin/getfattr` を確認し、
+不在なら apt または dnf で `attr` をインストールしてください）、および権限昇格が必要な場合の
 passwordless `sudo -n`が必要です。controllerのreference environmentは
 macOS、Ubuntu 24.04 LTS、Ubuntu 26.04 LTS、Rocky Linux 9、
 Rocky Linux 10、およびバイナリをbuildできるその他のx86_64 Linux環境です。

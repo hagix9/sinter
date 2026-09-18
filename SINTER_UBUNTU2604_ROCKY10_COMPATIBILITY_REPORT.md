@@ -1,3 +1,5 @@
+> Evidence correction (Round 2): the original PASS/READY conclusions below are superseded. B1 and B2 remain OPEN until the missing acceptance/provenance evidence is established. See the new r2 review bundle closure table.
+
 # Sinter — Ubuntu 26.04 / Rocky Linux 10 Compatibility Report
 
 Report date: 2026-09-18. Evidence-driven; no claim below was performed without
@@ -155,7 +157,8 @@ fallback: all three tests now skip with the exact reason
 `requires secondary sshd on non-default port 2222` via the shared
 `non_default_port()` helper. Post-fix, the full ssh suite was re-run on two
 hosts that **do** provide port 2222 (Ubuntu 24.04.4 and Rocky 9.8 x86_64):
-**23 passed, 0 failed, 0 ignored** on both — so the tests execute and pass
+**23 harness passes, 0 failed, 0 ignored** on both; each log records
+22 exercised cases and one explicit nosudo-premise skip. The three port-2222 tests execute and pass
 when their premise holds, and skip truthfully when it does not.
 
 No test was faked or force-passed. On macOS the ssh suite reports 23 skips
@@ -214,7 +217,7 @@ confirmed non-mutating re-confirmation on the live host.
 
 - Full Linux-native `cargo test` on Ubuntu 24.04.4 x86_64: **463 executed,
   0 failed, 0 ignored** — including every Linux-gated suite and the ssh
-  suite against a real loopback target (23/23 ssh tests, with the port-2222
+  suite against a real loopback target (22 exercised SSH cases plus one explicit nosudo-premise skip; the port-2222
   `[host]:port` identity tests executing for real).
 - `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` clean.
 - Exact-binary: the Rocky-9-built binary ran on 24.04.4 with identical
@@ -365,7 +368,7 @@ every changed page. Published v0.2.0/v0.2.1 artifacts are not renamed.
   `gcloud compute instances reset` were unavailable; per instruction, no
   further SSH/socket modifications were attempted on that host. **All
   Ubuntu 26.04 acceptance and Linux-test evidence in this report was
-  captured before the incident.** Remediation for the owner: reboot the
+  captured before the incident.** Unverified recovery suggestion for the owner (not a demonstrated procedure): reboot the
   instance (the `ssh.socket` unit should bind port 22 again), then remove
   `/etc/systemd/system/ssh.socket.d/override.conf` and
   `/etc/ssh/sshd_config.d/22-sinter-test-port.conf`.

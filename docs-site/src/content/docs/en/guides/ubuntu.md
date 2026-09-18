@@ -15,7 +15,7 @@ supported in v0.2.1.
 | OpenSSH server | Strict `known_hosts` verification; no auto-enrollment |
 | systemd | Required for `service` resources and handlers |
 | `/bin/sh` | Target-side shell |
-| `attr` package | `/usr/bin/getfattr`; stock cloud images ship without it — run `sudo apt install attr` once |
+| `attr` package | `/usr/bin/getfattr`; check on the target; run `sudo apt install attr` if missing |
 | `sudo -n` | Passwordless sudo when using `--sudo` |
 
 ## Package management

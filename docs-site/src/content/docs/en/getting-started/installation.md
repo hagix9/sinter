@@ -3,12 +3,12 @@ title: Installation
 description: Install Sinter from release tarballs or build from source.
 ---
 
-Sinter runs on the **controller** — the machine you run `sinter` on. The
-managed host only needs SSH access. One Linux x86_64 release binary is
-published; it is built on the oldest supported baseline (Rocky Linux 9
-x86_64, glibc 2.34) and runs on every supported Linux x86_64 target
-(Ubuntu 24.04, Ubuntu 26.04, Rocky Linux 9, Rocky Linux 10). Controllers on
-other operating systems, such as macOS, can build Sinter from source.
+Sinter runs on the **controller**. The managed host needs the prerequisites
+listed below, but does not need Sinter installed. Published v0.2.1 Linux
+artifacts are distribution-specific. A unified Linux x86_64 artifact built
+on the Rocky Linux 9 baseline is planned for a future release, subject to
+exact-binary verification on every supported target; it is not a v0.2.1 asset.
+Controllers on macOS can build from source.
 
 ## From release tarballs (recommended on Linux)
 
@@ -17,14 +17,15 @@ The current release is **v0.2.1**. Release assets are published on the
 archive contains the `sinter` binary, both READMEs, and the license files.
 
 ```sh
-# Linux x86_64 controller (built on Rocky Linux 9, runs on any supported Linux x86_64 target)
-curl -LO https://github.com/hagix9/sinter/releases/download/v0.2.1/sinter-v0.2.1-linux-x86_64.tar.gz
-curl -LO https://github.com/hagix9/sinter/releases/download/v0.2.1/SHA256SUMS
+# Choose the asset for your controller: Ubuntu 24.04 or Rocky Linux 9.
+ASSET=sinter-v0.2.1-ubuntu24.04-amd64.tar.gz
+# ASSET=sinter-v0.2.1-rocky9-x86_64.tar.gz
+curl -fLO "https://github.com/hagix9/sinter/releases/download/v0.2.1/$ASSET"
+curl -fLO https://github.com/hagix9/sinter/releases/download/v0.2.1/SHA256SUMS
 
-sha256sum -c SHA256SUMS    # expect: ... OK
-
-tar -xzf sinter-v0.2.1-linux-x86_64.tar.gz
-sudo install -m 0755 sinter-v0.2.1-linux-x86_64/sinter /usr/local/bin/sinter
+grep -F "  $ASSET" SHA256SUMS | sha256sum -c -
+tar -xzf "$ASSET"
+sudo install -m 0755 "${ASSET%.tar.gz}/sinter" /usr/local/bin/sinter
 sinter --version   # sinter 0.2.1
 ```
 
@@ -40,11 +41,9 @@ the same.
 :::
 
 :::note
-The release archive names the platform whose toolchain produced the binary.
-The Linux x86_64 artifact is built once on Rocky Linux 9 and is verified by
-extraction and a run on every supported Linux x86_64 target; the platform
-label reflects where it was built and validated, not which targets it can
-manage. Linux release binaries do not run on macOS.
+The v0.2.1 names record the build platform. Do not rename published assets
+or substitute the future unified naming in v0.2.1 URLs. Linux binaries do
+not run on macOS.
 :::
 
 ## Controller on macOS (or other environments)
@@ -76,8 +75,8 @@ The target does not need Sinter installed. It needs:
 - `/bin/sh`
 - the `attr` package (`/usr/bin/getfattr`) — Sinter inspects extended
   attributes and POSIX ACLs before writing any path and refuses paths it
-  cannot prove safe. Stock Ubuntu cloud images ship without `attr`, so run
-  `sudo apt install attr` once; Rocky Linux images include it
+  cannot prove safe. Check `test -x /usr/bin/getfattr` on each target. If missing, install
+  `attr` with `sudo apt install attr` (Ubuntu) or `sudo dnf install attr` (Rocky)
 - passwordless `sudo -n` if you use `--sudo`
 - a user account whose public key you have authorized, reachable with your
   SSH agent or a key file

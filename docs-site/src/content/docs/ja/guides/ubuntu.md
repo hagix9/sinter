@@ -15,7 +15,7 @@ Ubuntu 26.04 LTS amd64 も同じ `apt` バックエンドでサポートされ�
 | OpenSSH サーバ | 厳格な `known_hosts` 検証。自動登録なし |
 | systemd | `service` リソースとハンドラに必要 |
 | `/bin/sh` | ターゲット側シェル |
-| `attr` パッケージ | `/usr/bin/getfattr`。標準クラウドイメージには含まれないため `sudo apt install attr` を 1 回実行 |
+| `attr` パッケージ | `/usr/bin/getfattr`。ターゲットで確認し、不在なら `sudo apt install attr` を実行 |
 | `sudo -n` | `--sudo` 使用時はパスワードなし sudo |
 
 ## パッケージ管理
