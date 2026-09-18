@@ -25,7 +25,7 @@ description: このサイトが WebMCP 経由で公開する読み取り専用�
 | `sinter_list_resources` | 現在のリリースのレシピリソースタイプを 1 行の要約とドキュメント URL 付きで一覧表示します。 |
 | `sinter_get_resource` | 1 つのリソースタイプ（`file`、`directory`、`link`、`template`、`command`、`package`、`service`）の完全なパラメータリファレンス。 |
 | `sinter_get_compatibility` | 対応プラットフォームマトリクス、受入基準環境、管理対象の要件。 |
-| `sinter_get_installation` | プラットフォーム（`ubuntu24.04-amd64`、`rocky9-x86_64`、`source`）ごとのインストール手順。 |
+| `sinter_get_installation` | プラットフォーム（`linux-x86_64`、`source`。旧Ubuntu/Rocky識別子は別名として維持）ごとのインストール手順。 |
 
 同じ機械可読データは `/sinter/webmcp/en.json` と
 `/sinter/webmcp/ja.json` でも JSON として直接提供されています。

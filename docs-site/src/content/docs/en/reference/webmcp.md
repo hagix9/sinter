@@ -26,7 +26,7 @@ automatically when viewing the site.
 | `sinter_list_resources` | Lists all recipe resource types of the current release with one-line summaries and doc URLs. |
 | `sinter_get_resource` | Full parameter reference for one resource type (`file`, `directory`, `link`, `template`, `command`, `package`, `service`). |
 | `sinter_get_compatibility` | Supported-platform matrix, acceptance reference, and managed-target requirements. |
-| `sinter_get_installation` | Installation steps for a platform (`ubuntu24.04-amd64`, `rocky9-x86_64`, or `source`). |
+| `sinter_get_installation` | Installation steps for a platform (`linux-x86_64` or `source`; old Ubuntu/Rocky identifiers remain aliases). |
 
 The same machine-readable data is also served directly as JSON at
 `/sinter/webmcp/en.json` and `/sinter/webmcp/ja.json`.

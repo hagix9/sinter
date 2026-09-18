@@ -68,23 +68,24 @@ v0.2はv0.1のcontractにRHEL系platform対応（Rocky Linux 9、`dnf`）を
 追加しています。roles、plugins、inventory、orchestration、
 embedded scriptingは依然として実装対象に含めません。
 
-準備中のリリース候補は **v0.3.0**（初の統一 Linux x86_64 配布）です。
-まだ公開しておらず、現在の公開版は v0.2.1 です。v0.3.0 の実行ファイルは
-独自の同一成果物検証が必要です。
+## インストール
 
-## 統一 Linux x86_64 配布
+Sinter **v0.3.0 は公開済み**です。対応する Ubuntu 24.04 / 26.04、
+Rocky Linux 9 / 10 向けに1つの Linux x86_64 アーティファクトを配布します。
 
-今後のリリースでは、対応する Ubuntu 24.04 / 26.04、Rocky Linux 9 / 10
-の x86_64 向けに `sinter-v<VERSION>-linux-x86_64.tar.gz` を1つ配布します。
-実行ファイルは共通ですが、実行時の検出により Ubuntu は APT、Rocky は
-DNF を使います。任意の Linux や他のアーキテクチャへの対応を意味しません。
+```sh
+curl -fsSL https://hagix9.github.io/sinter/install.sh | sh
+$HOME/.local/bin/sinter --version
+```
 
-凍結候補は Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、Rocky Linux 9.8、
-Rocky Linux 10.2（すべて x86_64）の4実ホストで受入検証済みです。
-他の各point releaseや将来のリリースを個別に検証したという意味ではありません。
-公開済み v0.2.1 は従来のディストリビューション別アセットのままです。
-現在のダウンロードは[インストール](https://hagix9.github.io/sinter/ja/getting-started/installation/)
-を参照してください。統一候補はまだ公開アセットではありません。
+検証したpoint releaseは Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、
+Rocky Linux 9.8、Rocky Linux 10.2（すべてx86_64）です。
+他の各point releaseを個別に受入検証したという意味ではありません。
+
+インストーラは公式GitHubの最新安定版を選び、展開前にSHA256SUMSを検証し、
+sudoを使わず `$HOME/.local/bin` に配置します。必要なら自分でPATHへ追加して
+ください。シェル設定は変更しません。実行前の内容確認と手動ダウンロードは
+[インストール](https://hagix9.github.io/sinter/ja/getting-started/installation/)を参照してください。
 
 ## ビルド
 
@@ -204,7 +205,7 @@ package recipeはplatform-neutralです。同じ`type: package` / `state:
 present` resourceを、Ubuntuでは`apt`、RHEL系では`dnf`が処理します。
 backendは検出した`/etc/os-release`のidentityから選択されます。
 
-最新の統一候補の受入基準環境は上記の4実ホストのpoint releaseです。
+公開済みv0.3.0の受入基準環境は上記の4実ホストのpoint releaseです。
 以前のVM検証とリリース証跡は履歴として保持します。
 
 すべてのmanaged targetには、systemd、OpenSSH server、`/bin/sh`、

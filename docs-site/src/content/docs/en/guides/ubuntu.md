@@ -4,23 +4,22 @@ description: Ubuntu 24.04 and 26.04 LTS amd64 managed-target guide — apt backe
 ---
 
 Ubuntu 24.04 LTS amd64 is the original Sinter reference target, and Ubuntu
-26.04 LTS amd64 is supported with the same `apt` backend. The repository support policy covers both version lines; the new 26.04
-qualification belongs to Unreleased, not the published v0.2.1 support claim.
+26.04 LTS amd64 is supported with the same `apt` backend. The repository support policy covers both version lines; 26.04 qualification is included in the released v0.3.0.
 
 ## Unified Linux x86_64 distribution
 
-Future releases use one `sinter-v<VERSION>-linux-x86_64.tar.gz` for the
+Sinter v0.3.0 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for the
 supported Ubuntu 24.04 / 26.04 and Rocky Linux 9 / 10 x86_64 version lines.
 The executable is unified; runtime platform detection still selects APT on
 Ubuntu and DNF on Rocky. This is not a claim of support for arbitrary Linux
 systems or architectures.
 
-The frozen candidate passed four-real-host acceptance on Ubuntu 24.04.5 LTS,
+The released v0.3.0 executable passed four-real-host acceptance on Ubuntu 24.04.5 LTS,
 Ubuntu 26.04.1 LTS, Rocky Linux 9.8, and Rocky Linux 10.2, all x86_64.
 Other and future point releases have not each been independently validated.
-Published v0.2.1 still has its original distro-specific assets; see
+Historical v0.2.1 retains its distro-specific assets; see
 [Installation](https://hagix9.github.io/sinter/en/getting-started/installation/)
-for current downloads. The unified candidate is not yet a published asset.
+for current downloads. The unified v0.3.0 artifact is published.
 
 
 ## Requirements

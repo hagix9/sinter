@@ -285,8 +285,8 @@
         platform: {
           type: 'string',
           description:
-            'Target platform identifier: ubuntu24.04-amd64, rocky9-x86_64, or source.',
-          enum: ['ubuntu24.04-amd64', 'rocky9-x86_64', 'source'],
+            'Target platform identifier: linux-x86_64 or source (legacy Ubuntu/Rocky identifiers remain aliases).',
+          enum: ['linux-x86_64', 'ubuntu24.04-amd64', 'rocky9-x86_64', 'source'],
         },
         locale: localeProp,
       },
@@ -295,7 +295,7 @@
     execute: function (input) {
       var loc = resolveLocale(input);
       if (loc.error) return Promise.resolve(loc.error);
-      var valid = ['ubuntu24.04-amd64', 'rocky9-x86_64', 'source'];
+      var valid = ['linux-x86_64', 'ubuntu24.04-amd64', 'rocky9-x86_64', 'source'];
       if (!input || valid.indexOf(input.platform) === -1) {
         return Promise.resolve(
           text({
@@ -309,7 +309,7 @@
           'sinter-v' +
           d.installation.release.replace(/^v/, '') +
           '-' +
-          input.platform +
+          (input.platform === 'source' ? 'source' : 'linux-x86_64') +
           '.tar.gz';
         var steps =
           input.platform === 'source'

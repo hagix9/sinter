@@ -14,18 +14,18 @@ description: Platform, architecture, and package-backend support matrix.
 
 ## Unified Linux x86_64 distribution
 
-Future releases use one `sinter-v<VERSION>-linux-x86_64.tar.gz` for the
+Sinter v0.3.0 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for the
 supported Ubuntu 24.04 / 26.04 and Rocky Linux 9 / 10 x86_64 version lines.
 The executable is unified; runtime platform detection still selects APT on
 Ubuntu and DNF on Rocky. This is not a claim of support for arbitrary Linux
 systems or architectures.
 
-The frozen candidate passed four-real-host acceptance on Ubuntu 24.04.5 LTS,
+The released v0.3.0 executable passed four-real-host acceptance on Ubuntu 24.04.5 LTS,
 Ubuntu 26.04.1 LTS, Rocky Linux 9.8, and Rocky Linux 10.2, all x86_64.
 Other and future point releases have not each been independently validated.
-Published v0.2.1 still has its original distro-specific assets; see
+Historical v0.2.1 retains its distro-specific assets; see
 [Installation](https://hagix9.github.io/sinter/en/getting-started/installation/)
-for current downloads. The unified candidate is not yet a published asset.
+for current downloads. The unified v0.3.0 artifact is published.
 
 All managed targets require:
 
@@ -66,7 +66,7 @@ Do not assume image defaults: install `attr` only if the required tool is missin
 
 The controller (where `sinter` runs) is supported on macOS, Ubuntu 24.04 LTS,
 Ubuntu 26.04 LTS, Rocky Linux 9, Rocky Linux 10, and other x86_64 Linux
-environments where the binary builds. Future release binaries use a
+environments where the binary builds. Sinter v0.3.0 release binaries use a
 single Linux x86_64 artifact; published v0.2.1 retains distro-specific assets (see
 [Installation](/sinter/en/getting-started/installation/)).
 
@@ -80,7 +80,7 @@ single Linux x86_64 artifact; published v0.2.1 retains distro-specific assets (s
 
 ## Scope
 
-v0.2.1 scope does not include inventory, roles, plugins, orchestration, or
+Sinter scope does not include inventory, roles, plugins, orchestration, or
 embedded scripting. See the
 [CHANGELOG](https://github.com/hagix9/sinter/blob/main/CHANGELOG.md) for
 release history.

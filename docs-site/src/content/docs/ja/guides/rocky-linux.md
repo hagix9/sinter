@@ -4,8 +4,7 @@ description: Rocky Linux 9 / 10 x86_64 管理対象ガイド — dnf バック�
 ---
 
 Rocky Linux 9 x86_64 は v0.2.0 からサポートされています。Rocky Linux 10
-x86_64 の資格確認は Unreleased に記録し、公開済み v0.2.1 の範囲を
-変更しません。どちらも **dnf** パッケージバックエンドを使います。
+x86_64 の資格確認は公開済み v0.3.0 に含まれます。どちらも **dnf** パッケージバックエンドを使います。
 
 **受入基準環境:** Rocky Linux 9.8 x86_64（DNF 4.14.0）— 実際の SSH と
 `sudo -n` 越しに、パッケージのインストール/削除/冪等性、file、
@@ -16,17 +15,17 @@ purge の収束/冪等性について検証済みです。Rocky 9/10 は対応�
 
 ## 統一 Linux x86_64 配布
 
-今後のリリースでは、対応する Ubuntu 24.04 / 26.04、Rocky Linux 9 / 10
+公開済み v0.3.0 では、対応する Ubuntu 24.04 / 26.04、Rocky Linux 9 / 10
 の x86_64 向けに `sinter-v<VERSION>-linux-x86_64.tar.gz` を1つ配布します。
 実行ファイルは共通ですが、実行時の検出により Ubuntu は APT、Rocky は
 DNF を使います。任意の Linux や他のアーキテクチャへの対応を意味しません。
 
-凍結候補は Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、Rocky Linux 9.8、
+公開済み v0.3.0 の実行ファイルは Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、Rocky Linux 9.8、
 Rocky Linux 10.2（すべて x86_64）の4実ホストで受入検証済みです。
 他の各point releaseや将来のリリースを個別に検証したという意味ではありません。
-公開済み v0.2.1 は従来のディストリビューション別アセットのままです。
+過去の v0.2.1 は従来のディストリビューション別アセットのままです。
 現在のダウンロードは[インストール](https://hagix9.github.io/sinter/ja/getting-started/installation/)
-を参照してください。統一候補はまだ公開アセットではありません。
+を参照してください。統一 v0.3.0 アーティファクトは公開済みです。
 
 
 ## 要件

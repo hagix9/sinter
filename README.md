@@ -67,24 +67,25 @@ contract with RHEL-family platform support (Rocky Linux 9, `dnf`). The
 implementation still adds no features beyond that scope: no roles, plugins,
 inventory, orchestration, or embedded scripting.
 
-Prepared release candidate: **v0.3.0**, the first unified Linux x86_64
-release. It is not published; v0.2.1 remains the current published release.
-The v0.3.0 executable requires its own exact-artifact validation.
+## Install
 
-## Unified Linux x86_64 distribution
+Sinter **v0.3.0 is released** with one Linux x86_64 artifact for the supported
+Ubuntu 24.04 / 26.04 and Rocky Linux 9 / 10 version lines.
 
-Future releases use one `sinter-v<VERSION>-linux-x86_64.tar.gz` for the
-supported Ubuntu 24.04 / 26.04 and Rocky Linux 9 / 10 x86_64 version lines.
-The executable is unified; runtime platform detection still selects APT on
-Ubuntu and DNF on Rocky. This is not a claim of support for arbitrary Linux
-systems or architectures.
+```sh
+curl -fsSL https://hagix9.github.io/sinter/install.sh | sh
+$HOME/.local/bin/sinter --version
+```
 
-The frozen candidate passed four-real-host acceptance on Ubuntu 24.04.5 LTS,
-Ubuntu 26.04.1 LTS, Rocky Linux 9.8, and Rocky Linux 10.2, all x86_64.
-Other and future point releases have not each been independently validated.
-Published v0.2.1 still has its original distro-specific assets; see
-[Installation](https://hagix9.github.io/sinter/en/getting-started/installation/)
-for current downloads. The unified candidate is not yet a published asset.
+Validated point releases: Ubuntu 24.04.5 LTS, Ubuntu 26.04.1 LTS,
+Rocky Linux 9.8 and Rocky Linux 10.2, all x86_64. Other point releases have
+not each been independently accepted.
+
+The installer selects the latest stable official GitHub release, verifies
+SHA256SUMS before extraction, and installs without sudo into `$HOME/.local/bin`.
+If needed, add that directory to PATH yourself; shell profiles are not edited.
+For inspect-before-run and manual downloads, see
+[Installation](https://hagix9.github.io/sinter/en/getting-started/installation/).
 
 ## Build
 
@@ -201,7 +202,7 @@ Package recipes are platform-neutral: the same `type: package` / `state:
 present` resource is handled by `apt` on Ubuntu and `dnf` on RHEL-family
 targets, selected from the detected `/etc/os-release` identity.
 
-The latest unified-candidate acceptance references are the four real-host
+The latest released-v0.3.0 acceptance references are the four real-host
 point releases listed above. Earlier VM and release evidence remains historical.
 
 All managed targets require systemd, an OpenSSH server, `/bin/sh`, the `attr`

@@ -3,63 +3,58 @@ title: インストール
 description: リリース tarball から Sinter をインストールするか、ソースからビルドする。
 ---
 
-Sinter は**コントローラ**上で動作します。管理対象ホストには下記の要件が
-必要ですが、Sinter のインストールは不要です。公開済み v0.2.1 の Linux
-アーティファクトはディストリビューション別です。Rocky Linux 9 を基準に
-ビルドする統一 Linux x86_64 アーティファクトは、4実ホストで同一
-バイナリの受入検証を終えた将来リリースの標準であり、v0.2.1 の
-公開アセットではありません。macOS のコントローラはソースからビルドできます。
+## インストール
 
-## 統一 Linux x86_64 配布
-
-今後のリリースでは、対応する Ubuntu 24.04 / 26.04、Rocky Linux 9 / 10
-の x86_64 向けに `sinter-v<VERSION>-linux-x86_64.tar.gz` を1つ配布します。
-実行ファイルは共通ですが、実行時の検出により Ubuntu は APT、Rocky は
-DNF を使います。任意の Linux や他のアーキテクチャへの対応を意味しません。
-
-凍結候補は Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、Rocky Linux 9.8、
-Rocky Linux 10.2（すべて x86_64）の4実ホストで受入検証済みです。
-他の各point releaseや将来のリリースを個別に検証したという意味ではありません。
-公開済み v0.2.1 は従来のディストリビューション別アセットのままです。
-現在のダウンロードは[インストール](https://hagix9.github.io/sinter/ja/getting-started/installation/)
-を参照してください。統一候補はまだ公開アセットではありません。
-
-## リリース tarball から（Linux では推奨）
-
-現在のリリースは **v0.2.1** です。リリースアセットは
-[GitHub Releases](https://github.com/hagix9/sinter/releases) ページで
-公開されています。各アーカイブには `sinter` バイナリ、2 つの README、
-ライセンスファイルが含まれます。
+Sinter **v0.3.0 は公開済み**です。対応する Ubuntu 24.04 / 26.04、
+Rocky Linux 9 / 10 向けに1つの Linux x86_64 アーティファクトを配布します。
 
 ```sh
-# コントローラに合わせて Ubuntu 24.04 または Rocky Linux 9 を選択します。
-ASSET=sinter-v0.2.1-ubuntu24.04-amd64.tar.gz
-# ASSET=sinter-v0.2.1-rocky9-x86_64.tar.gz
-curl -fLO "https://github.com/hagix9/sinter/releases/download/v0.2.1/$ASSET"
-curl -fLO https://github.com/hagix9/sinter/releases/download/v0.2.1/SHA256SUMS
+curl -fsSL https://hagix9.github.io/sinter/install.sh | sh
+$HOME/.local/bin/sinter --version
+```
 
+インストーラは公式GitHubの最新安定版を選び、展開前にSHA256SUMSを検証し、
+sudoを使わず `$HOME/.local/bin` に配置します。必要なら自分でPATHへ追加して
+ください。シェル設定は変更しません。実行前の内容確認と手動ダウンロードは
+[インストール](https://hagix9.github.io/sinter/ja/getting-started/installation/)を参照してください。
+
+### 実行前に内容を確認
+
+```sh
+curl -fsSLo install.sh https://hagix9.github.io/sinter/install.sh
+less install.sh
+sh install.sh
+```
+
+### バージョンと配置先
+
+```sh
+SINTER_VERSION=v0.3.0 sh install.sh
+SINTER_INSTALL_DIR="$HOME/bin" sh install.sh
+```
+
+インストーラは Linux x86_64/amd64 専用です。curl、GNU tar、sha256sumを
+含むcoreutilsが必要です。未対応OS・アーキテクチャは拒否し、ARMアセットは
+ありません。配置先は絶対パスの信頼できるディレクトリに限定します。
+既存のユーザー所有の通常ファイルは原子的に置換できますが、symlinkや
+非通常オブジェクトは拒否します。ネットワーク・checksum・構造検証の失敗では
+既存実行ファイルを保持します。sudo、PATH、シェル設定の自動変更はありません。
+checksumは破損・配布整合性を確認し、GitHub侵害への完全な防御ではありません。
+
+### リリースから手動インストール
+
+```sh
+ASSET=sinter-v0.3.0-linux-x86_64.tar.gz
+curl -fLO "https://github.com/hagix9/sinter/releases/download/v0.3.0/$ASSET"
+curl -fLO https://github.com/hagix9/sinter/releases/download/v0.3.0/SHA256SUMS
 grep -F "  $ASSET" SHA256SUMS | sha256sum -c -
 tar -xzf "$ASSET"
 sudo install -m 0755 "${ASSET%.tar.gz}/sinter" /usr/local/bin/sinter
-sinter --version   # sinter 0.2.1
+/usr/local/bin/sinter --version
 ```
 
-バイナリを `PATH` の通った場所（上の例では `/usr/local/bin`）に置くと、
-どのディレクトリからも `sinter` を実行できます。レシピの隣に置いて
-`./sinter` として実行してもかまいません。
-
-:::note
-新しいリリースはこれらのダウンロードを置き換えます。v0.2.1 以外の
-バージョンをインストールするには、そのリリースのファイル名を Releases
-ページから取り、URL 内のタグを読み替えてください。ダウンロード、
-チェックサム検証、展開、確認の手順は同じです。
-:::
-
-:::note
-v0.2.1 の名称はビルド環境を示します。公開済みアセットの名前を変更したり、
-v0.2.1 の URL に将来の統一名称を使用したりしないでください。Linux の
-バイナリは macOS では動作しません。
-:::
+環境変数はインストールにだけ適用し、永続的なホスト設定にはしません。
+過去のv0.2.1アセットは従来のディストリビューション別名称を維持します。
 
 ## macOS（または他の環境）のコントローラ
 
@@ -116,8 +111,3 @@ Sinter は SSH を転送と認証の両方に使います。関わる識別情�
 Sinter は未知または変更された SSH ホスト鍵を拒否します。デフォルト
 以外の SSH ポートを使う場合は、`known_hosts` に `[host]:port` 形式の
 明示的なエントリが必要です。
-
-:::caution[将来の改善点]
-現在、`curl | sh` 形式のインストーラはありません。ダウンロードと
-チェックサム検証が、サポートされるインストール方法です。
-:::

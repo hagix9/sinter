@@ -31,12 +31,14 @@ const requirementsI18n: Record<Locale, string[]> = {
     'systemd',
     'OpenSSH server',
     '/bin/sh',
+    'attr (/usr/bin/getfattr)',
     'passwordless sudo -n when privilege escalation is required',
   ],
   ja: [
     'systemd',
     'OpenSSH サーバ',
     '/bin/sh',
+    'attr (/usr/bin/getfattr)',
     '権限昇格が必要な場合はパスワードなしの sudo -n',
   ],
 };
@@ -79,14 +81,15 @@ export function buildWebmcp(locale: Locale) {
           status: 'supported',
           acceptanceReference: 'Rocky Linux 9.8 x86_64, DNF 4.14.0',
         },
+        { name: 'Ubuntu 26.04 LTS', arch: 'x86_64', packageBackend: 'apt', status: 'supported' },
+        { name: 'Rocky Linux 10', arch: 'x86_64', packageBackend: 'dnf', status: 'supported' },
       ],
       requirements: requirementsI18n[locale],
     },
     installation: {
-      release: 'v0.2.1',
+      release: 'v0.3.0',
       artifacts: [
-        'sinter-v0.2.1-ubuntu24.04-amd64.tar.gz',
-        'sinter-v0.2.1-rocky9-x86_64.tar.gz',
+        'sinter-v0.3.0-linux-x86_64.tar.gz',
         'SHA256SUMS',
       ],
       releaseUrl: 'https://github.com/hagix9/sinter/releases',
