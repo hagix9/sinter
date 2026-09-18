@@ -59,7 +59,7 @@ chmod 755 "$binary"
 exe_hash=$(sha256sum "$binary"); exe_hash=${exe_hash%% *}
 [ "${SINTER_INSTALL_DIR+x}" != x ] || [ -n "$SINTER_INSTALL_DIR" ] || fail 'install directory must not be empty'
 dest=${SINTER_INSTALL_DIR:-${HOME:?HOME must be set}/.local/bin}
-printf '%s\n' "$dest" | awk '/[[:cntrl:]]/ {bad=1} END {exit bad}' || fail 'control characters in install directory'
+printf '%s\n' "$dest" | awk 'NR != 1 || /[[:cntrl:]]/ {bad=1} END {exit bad}' || fail 'control characters in install directory'
 case $dest in /*) ;; *) fail 'install directory must be absolute' ;; esac
 case $dest in /|*/|*//*|*/./*|*/../*|*/.|*/..) fail 'unsafe install directory' ;; esac
 uid=$(id -u)

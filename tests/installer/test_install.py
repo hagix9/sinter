@@ -128,7 +128,9 @@ esac
 
     def test_invalid_destination(self):
         for p in ['', '/', 'relative', str(self.dest)+'/../bad', str(self.dest)+'\n']:
+            before=set(self.root.iterdir())
             self.env['SINTER_INSTALL_DIR']=p;self.run_script()
+            self.assertEqual(set(self.root.iterdir()),before)
 
     def test_network_failure_preserves_install(self):
         self.run_script(True);self.env['TEST_NETWORK_FAIL']='1';self.run_script()
