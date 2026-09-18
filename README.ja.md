@@ -190,9 +190,11 @@ acceptance reference: Rocky Linux 9.8 x86_64 / DNF 4.14.0（実SSHと
 `sudo -n`経由でpackageのinstall/remove/冪等性、file、service、command
 resourceを検証済み）、Rocky Linux 10.2 x86_64 / DNF 4.20.0・rpm 4.19
 （同じ5種類のresourceに加えpurgeの収束/冪等性を検証済み）、および
-Ubuntu 26.04.1 LTS amd64（同じmatrix。Ubuntu 24.04.4 amd64は
-参照ビルド/検証ホスト）。同じmajor versionの他のminor releaseも
-同じinterfaceを共有します。
+Ubuntu 26.04.1 LTS x86_64（fresh host `ubuntu02-b2` で同一candidateの
+package・file・service・command guard・拒否/秘匿・独立状態確認を実施）。
+Ubuntu 24.04.4 と Rocky 9.8 は x86_64 回帰検証VMで、統一バイナリの
+ビルド基準はRocky 9です。他の各point releaseを個別に受入検証した
+という意味ではありません。
 
 すべてのmanaged targetには、systemd、OpenSSH server、`/bin/sh`、
 `attr` package（`/usr/bin/getfattr`。書き込み前に拡張属性とPOSIX ACLを

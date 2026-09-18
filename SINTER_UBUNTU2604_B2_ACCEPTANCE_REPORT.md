@@ -1,3 +1,5 @@
+> Current provenance: this historical acceptance used production baseline `237547124e5ea675bfa1295f487ffa871a77f306`, candidate `af6b3384025c7033b16b26a664e11b73dd527156cd5e1d81d79d835a92f73fc2`, fresh GCP host `ubuntu02-b2`. Documentation-only finalization does not rerun or replace this evidence.
+
 # Sinter — Ubuntu 26.04 B2 Fresh Acceptance Report
 
 Report date: 2026-09-18 (UTC). B2-only pass. Evidence-driven; every claim below is
@@ -76,7 +78,7 @@ on this host for the first time, with the SHA verified on-host immediately prior
 
 ## 7. Host preparation
 
-Stock Ubuntu 26.04 cloud images ship **without** the `attr` package, so
+The fresh Ubuntu 26.04.1 host used here initially lacked the `attr` package, so
 `getfattr`/`setfattr` were absent. Per the established runtime contract this is
 explicit, allowed host preparation:
 
@@ -87,7 +89,9 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y attr
 after:  ii  attr  1:2.5.2-4ubuntu0.1 amd64  ;  getfattr 2.5.2
 ```
 
-No other packages were installed and no system service was reconfigured. The
+This prerequisite step installed `attr`; the matrix separately installed and
+removed its temporary `tree` package and managed a dedicated temporary service.
+No primary SSH service was reconfigured. The
 noted actionable Sinter refusal for a target lacking `/usr/bin/getfattr` was
 **not** bypassed or weakened — the tooling was installed, matching how the R3
 matrix unblocked the same cases.
@@ -174,12 +178,13 @@ Bounded cleanup ran and was independently verified:
   `sinter-candidate`). These are acceptance infrastructure — collector, raw
   evidence, runner, and candidate copy — **not** failed Sinter-managed
   resources, and their presence at capture time is not evidence of a cleanup
-  failure of the acceptance contract. They were removed in a later bounded
-  step; the historical raw evidence is preserved exactly and has not been
-  rewritten to imply they were absent during the captured check.
+  failure of the managed-resource acceptance contract. This raw capture does
+  not independently establish later removal of collector/candidate files;
+  no such removal is asserted by this finalization. The original evidence
+  is preserved exactly, including the recorded infrastructure files.
 
-Only the intentionally-installed `attr` host-preparation package remains, as
-recorded in §7.
+The intentionally-installed `attr` host-preparation package is retained, as
+recorded in §7; the test package and managed fixtures are independently absent.
 
 ## 13. Sensitive-output verification
 

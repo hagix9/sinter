@@ -1,9 +1,43 @@
-> Evidence correction (Round 2): the original PASS/READY conclusions below are superseded. B1 and B2 remain OPEN until the missing acceptance/provenance evidence is established. See the new r2 review bundle closure table.
-
 # Sinter — Ubuntu 26.04 / Rocky Linux 10 Compatibility Report
 
 Report date: 2026-09-18. Evidence-driven; no claim below was performed without
 the stated environment. Follows the phase plan of the compatibility task.
+
+## Current acceptance and provenance (finalization)
+
+**B1 CLOSED; B2 CLOSED.** Production baseline: `237547124e5ea675bfa1295f487ffa871a77f306`.
+Documentation-only descendants do not change the accepted Rust source/tests.
+Accepted candidate: `af6b3384025c7033b16b26a664e11b73dd527156cd5e1d81d79d835a92f73fc2` (3,270,160 bytes, `sinter 0.2.1`).
+
+- Rocky Linux 10 support was validated on **Rocky Linux 10.2 x86_64**.
+  R3 adds native exact-candidate execution with independent rpm, file metadata,
+  SELinux label/xattr, service, guard, refusal/redaction and cleanup evidence.
+- Ubuntu 26.04 support was validated on **Ubuntu 26.04.1 LTS x86_64**,
+  fresh GCP host **`ubuntu02-b2`**, hostname hash
+  `51b7997364747f486c211218db54255bbe04a0886af0f4e77a42f9e67c5f48bf`.
+  Its raw run (2026-09-18 12:03:08–12:03:24 UTC) records 19/19 checks passing;
+  this count includes the redaction-method record, not 19 Rust tests.
+  See [B2 acceptance report](SINTER_UBUNTU2604_B2_ACCEPTANCE_REPORT.md).
+- Ubuntu 24.04.4 and Rocky 9.8 regression/exact-binary evidence is existing
+  Lima x86_64 VM evidence, not newly executed real-host acceptance.
+- The fresh Ubuntu run supersedes the old host's ambiguous probe/incident
+  chronology for final qualification. The old host was not repaired or reused.
+- These point releases are the demonstrated references. No claim is made that
+  every other or future point release was independently acceptance-tested.
+
+The final combined review bundle is
+`Sinter-Ubuntu2604-Rocky10-final-review-r4.zip`. It preserves R3 and B2 raw
+records without rewriting them, includes the candidate and a per-file checksum
+manifest, and separates final status from historical OPEN/NO-GO conclusions.
+R3's source comparisons demonstrate production-source identity; its known
+build-input `tests/ssh.rs` difference remains recorded rather than hidden.
+
+Current v0.2.1 public assets remain distro-specific and unchanged. Unified
+Linux x86_64 naming is a future release strategy, subject to the exact-artifact
+Phase D gates in RELEASE.md; it is not an already-published v0.2.1 asset.
+
+The sections below retain the initial investigation and historical test results.
+Current qualification is the evidence above, not the inaccessible old host.
 
 ## 1. Executive summary
 
@@ -86,7 +120,7 @@ with dpkg-query re-observation as the only source of truth. Verified on the
 real host: plan, install, idempotent second apply, remove, service
 observation, and truthful failure on an unresolvable package.
 
-The one genuine behavior change is the actionable xattr refusal. On a stock
+The one genuine behavior change is the actionable xattr refusal. On the tested
 26.04 cloud image (no `attr` package), filesystem resources fail closed:
 
 ```text
@@ -164,7 +198,7 @@ when their premise holds, and skip truthfully when it does not.
 No test was faked or force-passed. On macOS the ssh suite reports 23 skips
 with `SINTER_TEST_SSH_HOST not set`.
 
-## 8. Ubuntu 26.04 real-host acceptance
+## 8. Historical Ubuntu 26.04 original-host acceptance
 
 Host: Ubuntu 26.04.1 LTS x86_64 (real host, GCP). Prerequisites verified:
 `getfattr` absent during the earlier partial run (refusal captured), then
@@ -272,8 +306,9 @@ Why the older conclusion changed: builds on Ubuntu 26.04 / Rocky 10 require
 `GLIBC_2.39` and cannot run on Rocky 9's glibc 2.34. Building on the oldest
 baseline inverts that: `GLIBC_2.34` is satisfied by all four targets via
 glibc forward compatibility, and the OpenSSL 3 SONAME is common to all four
-(3.0.x on 24.04/Rocky 9, 3.5.x on 26.04/Rocky 10). This was proved by
-execution, not inferred from SONAME presence.
+as observed in the captured dependency-resolution and runtime probes. This
+claim is limited to the tested environments, not inferred from SONAME presence
+alone or generalized to every library build.
 
 ## 13. Exact candidate binary SHA-256
 
@@ -281,17 +316,19 @@ execution, not inferred from SONAME presence.
 af6b3384025c7033b16b26a664e11b73dd527156cd5e1d81d79d835a92f73fc2
 ```
 
-Verified identical on every target with `sha256sum` after transfer. The
+Historical probes record matching hashes; fresh-host B2 independently rechecks
+the same candidate before its final acceptance. The old-host probe chronology
+is not used to qualify the final Ubuntu target. The
 binary was never rebuilt per target; the same bytes were copied and
 executed.
 
-## 14. Per-platform exact-binary runtime results
+## 14. Historical per-platform exact-binary runtime results
 
 | Target | Type | SHA-256 matches | `ldd` resolves | `--version` | plan rc | plan result |
 |---|---|---|---|---|---|---|
 | Rocky Linux 9.8 x86_64 | Lima VM (qemu) | yes | yes | `sinter 0.2.1` | 0 | 0 changed |
 | Ubuntu 24.04.4 x86_64 | Lima VM (qemu) | yes | yes | `sinter 0.2.1` | 0 | 0 changed |
-| Ubuntu 26.04.1 x86_64 | **REAL HOST** | yes | yes | `sinter 0.2.1` | 0 | 0 changed |
+| Ubuntu 26.04.1 x86_64 (original host; historical) | **REAL HOST** | yes | yes | `sinter 0.2.1` | 0 | 0 changed |
 | Rocky Linux 10.2 x86_64 | **REAL HOST** | yes | yes | `sinter 0.2.1` | 0 | 0 changed |
 
 Each `plan` ran `validate` then a non-mutating recipe (package `bash`
@@ -348,8 +385,9 @@ every changed page. Published v0.2.0/v0.2.1 artifacts are not renamed.
   real hosts. Real-host evidence exists only for Ubuntu 26.04.1 and Rocky
   10.2. The VMs are genuine Rocky 9.8 / Ubuntu 24.04.4 x86_64 environments
   (not containers), but this asymmetry is recorded rather than hidden.
-- **Ubuntu 26.04 test host unrecovered** (see §18): the post-`ssh.rs`-fix
-  suite was re-verified on 24.04 and 9, but not on 26.04.
+- **Original Ubuntu 26.04 test host unrecovered** (see §18): post-fix Rust
+  SSH tests were re-verified on 24.04 and 9. Fresh-host B2 supplies final
+  native candidate acceptance, not a new full Rust-suite run.
 - **aarch64**: not validated; presence of a build does not imply support.
 - **Static/musl builds**: out of scope; no vendored-OpenSSL or static
   feature exists in `Cargo.toml`.
@@ -358,21 +396,19 @@ every changed page. Published v0.2.0/v0.2.1 artifacts are not renamed.
 - OpenSSL compatibility across 3.0.x/3.5.x is evidenced by execution
   (the exact binary ran on all four), not by an ABI audit.
 
-## 18. Remaining blockers
+## 18. Historical operational incident (not a current B1/B2 blocker)
 
-- **ubuntu01 (Ubuntu 26.04.1 real host) is unreachable.** While provisioning
-  a secondary sshd on port 2222 for the `[host]:port` known_hosts tests, an
-  `ssh.socket` restart on that socket-activated host left no listener on
-  port 22. The host still answers ICMP but refuses TCP/22. The local gcloud
-  credentials are expired (`invalid_grant`), so the serial console and
-  `gcloud compute instances reset` were unavailable; per instruction, no
-  further SSH/socket modifications were attempted on that host. **All
-  Ubuntu 26.04 acceptance and Linux-test evidence in this report was
-  captured before the incident.** Unverified recovery suggestion for the owner (not a demonstrated procedure): reboot the
-  instance (the `ssh.socket` unit should bind port 22 again), then remove
-  `/etc/systemd/system/ssh.socket.d/override.conf` and
-  `/etc/ssh/sshd_config.d/22-sinter-test-port.conf`.
-- No other unresolved implementation blocker remains.
+The original Ubuntu host lost TCP/22 access during secondary-sshd provisioning
+and an `ssh.socket` restart. This is recorded as a provisioning incident, not
+an established Sinter product defect. Its exact incident/probe chronology was
+not recovered. Original logs and verdicts are retained in the review bundle;
+no retrospective chronology is asserted.
+
+No repair or reuse of that host was attempted in the fresh B2 pass. Recovery
+suggestions in earlier reports remain unverified operational history. Successful
+final Ubuntu qualification instead comes from `ubuntu02-b2`, with the same
+candidate hash and independently verified state. There are no remaining B1/B2
+acceptance blockers.
 
 ## 19. Explicit final gate statuses
 
@@ -385,7 +421,10 @@ LINUX-NATIVE TEST EXECUTION: PASS
 LINUX X86_64 PACKAGE UNIFICATION: READY
 DOCUMENTATION: COMPLETE
 COMPATIBILITY REPORT: COMPLETE
-COMMIT: <see FINAL_STATUS.txt>
+PRODUCTION BASELINE: 237547124e5ea675bfa1295f487ffa871a77f306
+B1: CLOSED
+B2: CLOSED
+UBUNTU B2 HOST: ubuntu02-b2
 ```
 
 Overall:

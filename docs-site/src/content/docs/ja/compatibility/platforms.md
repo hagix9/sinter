@@ -14,17 +14,21 @@ description: プラットフォーム、アーキテクチャ、パッケージ�
 
 **受入基準環境:**
 
-- Ubuntu 24.04.4 amd64（Linux x86_64 アーティファクトの参照ビルド/検証環境）
-  および Ubuntu 26.04.1 LTS amd64（実ホスト受入: command・file・template・
-  package・service の各リソース、plan/apply の冪等性、クリーンアップの
-  収束）。
+- Ubuntu 24.04.4 amd64（回帰・同一バイナリ確認の参照VM環境）
+  および Ubuntu 26.04.1 LTS amd64（fresh hostの最終受入: command・file・
+  package・service・guard・拒否/秘匿・冪等性と独立状態確認。
+  旧ホストのtemplate証跡は履歴）。
 - Rocky Linux 9.8 x86_64（DNF 4.14.0）— v0.2.0 のターゲット受入環境であり、
   Linux x86_64 アーティファクトのビルド基準環境。
 - Rocky Linux 10.2 x86_64（DNF 4.20.0・rpm 4.19）— 5 種類のリソースすべてと
   purge の冪等性に関する実ホスト受入。
 
-同じメジャーバージョンの他のマイナーリリースも同じインターフェースを
-共有しますが、上記のバージョンが検証済みの基準環境です。
+上記は検証済みpoint releaseの基準環境であり、他の各point releaseや
+将来のリリースを個別に受入検証したという意味ではありません。
+Ubuntu 26.04の最終資格確認はfresh GCP host `ubuntu02-b2` で、同じ
+Rocky 9基準candidateを用い、独立状態確認と19件の記録済みチェック成功を
+確認しました。旧ホストのincidentは履歴であり最終証跡ではありません。
+Ubuntu 24.04.4とRocky 9.8の同一バイナリ回帰確認はx86_64 VMで実施しました。
 
 すべての管理対象に必要なもの:
 

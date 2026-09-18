@@ -186,9 +186,11 @@ Acceptance references: Rocky Linux 9.8 x86_64 with DNF 4.14.0 (verified for
 package install/remove/idempotency, file, service, and command resources over
 real SSH with `sudo -n`), Rocky Linux 10.2 x86_64 with DNF 4.20.0 and rpm 4.19
 (the same five resource types plus converge-back purge idempotency), and
-Ubuntu 26.04.1 LTS amd64 (the same matrix; Ubuntu 24.04.4 amd64 is the
-reference build/validation host). Other minor releases of the same major
-version share the same interfaces.
+Ubuntu 26.04.1 LTS x86_64 (fresh host `ubuntu02-b2`: exact-candidate package,
+file, service, command guard, refusal/redaction and independent state checks).
+Ubuntu 24.04.4 and Rocky 9.8 are the x86_64 regression VM references; Rocky 9
+is the unified-binary build baseline. Other point releases have not each been
+independently acceptance-tested.
 
 All managed targets require systemd, an OpenSSH server, `/bin/sh`, the `attr`
 package (`/usr/bin/getfattr`, used to inspect extended attributes and POSIX

@@ -14,17 +14,20 @@ description: Platform, architecture, and package-backend support matrix.
 
 **Acceptance references:**
 
-- Ubuntu 24.04.4 amd64 (reference build/validation for the Linux x86_64
-  artifact) and Ubuntu 26.04.1 LTS amd64 (real-host acceptance: command, file,
-  template, package, and service resources, plan/apply idempotency, and
-  converge-back cleanup).
+- Ubuntu 24.04.4 amd64 (regression/exact-binary VM reference) and Ubuntu 26.04.1 LTS amd64 (fresh-host final acceptance: command, file,
+  package, service, guard/refusal/redaction, idempotency and independent
+  state verification; original-host template evidence is historical).
 - Rocky Linux 9.8 x86_64 with DNF 4.14.0 — the v0.2.0 target acceptance
   environment and the build baseline for the Linux x86_64 artifact.
 - Rocky Linux 10.2 x86_64 with DNF 4.20.0 and rpm 4.19 — real-host acceptance
   for all five resource types plus purge idempotency.
 
-Other minor releases of the same major version share the same interfaces;
-the versions above are the verified references.
+The versions above are the validated point-release references; other and
+future point releases have not each been independently acceptance-tested.
+Final Ubuntu 26.04 qualification used fresh GCP host `ubuntu02-b2` with the
+same Rocky-9-baseline candidate, independent state verification and 19 recorded
+checks passing. The old host incident is historical, not the final evidence.
+Ubuntu 24.04.4 and Rocky 9.8 exact-binary regression checks used x86_64 VMs.
 
 All managed targets require:
 
