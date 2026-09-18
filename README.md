@@ -67,6 +67,10 @@ contract with RHEL-family platform support (Rocky Linux 9, `dnf`). The
 implementation still adds no features beyond that scope: no roles, plugins,
 inventory, orchestration, or embedded scripting.
 
+Prepared release candidate: **v0.3.0**, the first unified Linux x86_64
+release. It is not published; v0.2.1 remains the current published release.
+The v0.3.0 executable requires its own exact-artifact validation.
+
 ## Unified Linux x86_64 distribution
 
 Future releases use one `sinter-v<VERSION>-linux-x86_64.tar.gz` for the

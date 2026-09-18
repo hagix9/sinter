@@ -4,6 +4,8 @@ All notable changes to Sinter are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-19
+
 Platform extension: Ubuntu 26.04 LTS and Rocky Linux 10 support, plus a
 unified Linux x86_64 release artifact.
 

@@ -68,6 +68,10 @@ v0.2はv0.1のcontractにRHEL系platform対応（Rocky Linux 9、`dnf`）を
 追加しています。roles、plugins、inventory、orchestration、
 embedded scriptingは依然として実装対象に含めません。
 
+準備中のリリース候補は **v0.3.0**（初の統一 Linux x86_64 配布）です。
+まだ公開しておらず、現在の公開版は v0.2.1 です。v0.3.0 の実行ファイルは
+独自の同一成果物検証が必要です。
+
 ## 統一 Linux x86_64 配布
 
 今後のリリースでは、対応する Ubuntu 24.04 / 26.04、Rocky Linux 9 / 10
