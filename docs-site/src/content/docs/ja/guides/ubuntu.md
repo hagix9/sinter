@@ -5,7 +5,23 @@ description: Ubuntu 24.04 / 26.04 LTS amd64 管理対象ガイド — apt バッ
 
 Ubuntu 24.04 LTS amd64 は Sinter 最初のリファレンスターゲットであり、
 Ubuntu 26.04 LTS amd64 も同じ `apt` バックエンドでサポートされます。
-両方とも v0.2.1 で完全にサポートされています。
+リポジトリでは両version lineを対象とします。26.04の新しい資格確認は
+Unreleasedに属し、公開済みv0.2.1の対応範囲を変更しません。
+
+## 統一 Linux x86_64 配布
+
+今後のリリースでは、対応する Ubuntu 24.04 / 26.04、Rocky Linux 9 / 10
+の x86_64 向けに `sinter-v<VERSION>-linux-x86_64.tar.gz` を1つ配布します。
+実行ファイルは共通ですが、実行時の検出により Ubuntu は APT、Rocky は
+DNF を使います。任意の Linux や他のアーキテクチャへの対応を意味しません。
+
+凍結候補は Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、Rocky Linux 9.8、
+Rocky Linux 10.2（すべて x86_64）の4実ホストで受入検証済みです。
+他の各point releaseや将来のリリースを個別に検証したという意味ではありません。
+公開済み v0.2.1 は従来のディストリビューション別アセットのままです。
+現在のダウンロードは[インストール](https://hagix9.github.io/sinter/ja/getting-started/installation/)
+を参照してください。統一候補はまだ公開アセットではありません。
+
 
 ## 要件
 

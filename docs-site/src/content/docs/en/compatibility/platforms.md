@@ -12,22 +12,20 @@ description: Platform, architecture, and package-backend support matrix.
 | Rocky Linux 9 | x86_64 | dnf | Supported |
 | Rocky Linux 10 | x86_64 | dnf | Supported |
 
-**Acceptance references:**
+## Unified Linux x86_64 distribution
 
-- Ubuntu 24.04.4 amd64 (regression/exact-binary VM reference) and Ubuntu 26.04.1 LTS amd64 (fresh-host final acceptance: command, file,
-  package, service, guard/refusal/redaction, idempotency and independent
-  state verification; original-host template evidence is historical).
-- Rocky Linux 9.8 x86_64 with DNF 4.14.0 — the v0.2.0 target acceptance
-  environment and the build baseline for the Linux x86_64 artifact.
-- Rocky Linux 10.2 x86_64 with DNF 4.20.0 and rpm 4.19 — real-host acceptance
-  for all five resource types plus purge idempotency.
+Future releases use one `sinter-v<VERSION>-linux-x86_64.tar.gz` for the
+supported Ubuntu 24.04 / 26.04 and Rocky Linux 9 / 10 x86_64 version lines.
+The executable is unified; runtime platform detection still selects APT on
+Ubuntu and DNF on Rocky. This is not a claim of support for arbitrary Linux
+systems or architectures.
 
-The versions above are the validated point-release references; other and
-future point releases have not each been independently acceptance-tested.
-Final Ubuntu 26.04 qualification used fresh GCP host `ubuntu02-b2` with the
-same Rocky-9-baseline candidate, independent state verification and 19 recorded
-checks passing. The old host incident is historical, not the final evidence.
-Ubuntu 24.04.4 and Rocky 9.8 exact-binary regression checks used x86_64 VMs.
+The frozen candidate passed four-real-host acceptance on Ubuntu 24.04.5 LTS,
+Ubuntu 26.04.1 LTS, Rocky Linux 9.8, and Rocky Linux 10.2, all x86_64.
+Other and future point releases have not each been independently validated.
+Published v0.2.1 still has its original distro-specific assets; see
+[Installation](https://hagix9.github.io/sinter/en/getting-started/installation/)
+for current downloads. The unified candidate is not yet a published asset.
 
 All managed targets require:
 
@@ -68,8 +66,8 @@ Do not assume image defaults: install `attr` only if the required tool is missin
 
 The controller (where `sinter` runs) is supported on macOS, Ubuntu 24.04 LTS,
 Ubuntu 26.04 LTS, Rocky Linux 9, Rocky Linux 10, and other x86_64 Linux
-environments where the binary builds. Release binaries are published as a
-single Linux x86_64 artifact (see
+environments where the binary builds. Future release binaries use a
+single Linux x86_64 artifact; published v0.2.1 retains distro-specific assets (see
 [Installation](/sinter/en/getting-started/installation/)).
 
 ## Explicitly not supported

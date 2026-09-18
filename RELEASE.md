@@ -205,6 +205,31 @@ Then, on **every** supported Linux x86_64 target, extract that exact binary
 and re-verify `sha256sum` (must be identical), `ldd`, `--version`, and a
 safe non-mutating `plan` before publishing. Record the per-target results.
 
+### Build, freeze, package, and accept — mandatory identity gate
+
+Build exactly once on **Rocky Linux 9 x86_64** with
+`cargo build --locked --release` (`-j1` is permitted). Record source HEAD,
+per-file build-input comparison, OS/version, architecture, rustc/cargo,
+`ldd --version` (glibc), and `openssl version`. A different build baseline,
+architecture, or maximum required GLIBC above **GLIBC_2.34** is a **STOP**.
+Do not substitute Ubuntu 24/26 or Rocky 10 builds.
+
+Immediately freeze the executable SHA-256. Record ELF headers/interpreter,
+all symbol-version requirements, DT_NEEDED, and RPATH/RUNPATH. Expected native
+interfaces are `libssl.so.3`, `libcrypto.so.3`, `libgcc_s.so.1`, `libc.so.6`,
+and `ld-linux-x86-64.so.2`, with `OPENSSL_3.0.0` and no RPATH/RUNPATH.
+Unexpected dependencies or unresolved linkage are a STOP pending review.
+Do not strip, patch, or otherwise alter the frozen bytes.
+
+Package one canonical archive, record its SHA-256, and prove a fresh
+extraction has the frozen executable SHA. Build validation (source/ABI/hash/
+smoke) is distinct from runtime acceptance: execute that exact extracted
+artifact on every supported target and retain the Phase A matrix evidence
+and independent OS-state checks tied to the source/hash. Source or test
+changes invalidate acceptance under the golden rule; no release without
+final production lineage. Record exact tested point releases separately
+from supported version lines. No claim that future point releases were tested.
+
 ### Artifact naming
 
 ```text
@@ -212,8 +237,8 @@ sinter-v${VERSION}-linux-x86_64.tar.gz
 SHA256SUMS
 ```
 
-The name records the architecture class and the build baseline, not any one
-managed-target distribution: the same binary manages all supported Linux
+The name records Linux and the architecture class, not a managed-target
+distribution. The manifest records the build baseline: the same binary manages all supported Linux
 x86_64 targets. New targets that keep the same dependency interface extend
 the verification matrix, not the artifact list; a target needing a different
 interface gets its own artifact.
@@ -427,7 +452,7 @@ Prerequisites — all required:
 
 - zero production diff after acceptance
 - exact RC fixed
-- all target build environments available and builds verified
+- baseline build environment available and exact-artifact verification complete on all targets
 - extraction/run and checksum verification green
 - release notes generated and validated
 - clean repository state; no unexpected remote tag/release

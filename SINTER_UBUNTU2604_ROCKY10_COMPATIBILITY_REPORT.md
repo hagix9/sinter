@@ -1,5 +1,33 @@
 # Sinter — Ubuntu 26.04 / Rocky Linux 10 Compatibility Report
 
+## Latest qualification — frozen unified candidate, Phase 3
+
+This section supersedes older qualification summaries below for the unified
+candidate only; original experiments, failures, and incidents remain historical.
+Source HEAD: `acbca6f8c726b4aed94c0b0b87c8a5506a4795af`.
+Executable SHA-256: `af6b3384025c7033b16b26a664e11b73dd527156cd5e1d81d79d835a92f73fc2`.
+Archive: `sinter-v0.2.1-linux-x86_64.tar.gz`, SHA-256
+`99ecf69088cd0f002c4e34dcc955f5eded44b65f30bd35f3786e675c564d9a90`.
+
+The full matrix passed on four real GCE hosts: Ubuntu 24.04.5 LTS,
+Ubuntu 26.04.1 LTS, Rocky Linux 9.8, and Rocky Linux 10.2, all x86_64.
+Rows cover identity, ABI/runtime, package, file, xattr, applicable SELinux,
+service, command guard, refusal/non-mutation, redaction, idempotency, cleanup,
+and final SHA verification, with independent state checks.
+Evidence bundle: `Sinter-Unified-Linux-x86_64-Phase3-review-r1.zip`, SHA-256
+`ba84bcb7857bcd76c079fce954729b26c8cdcb28330ce8f22a2c19490d70f9bf`.
+
+One executable does not mean distribution-independent runtime: Ubuntu uses
+APT, Rocky uses DNF. Version lines are supported; the exact point releases
+above are the acceptance references, not a guarantee that every future point
+release was separately tested. The canonical future artifact is
+`sinter-v<VERSION>-linux-x86_64.tar.gz`. Published v0.2.1 retains its original
+distro-specific assets; this candidate is not published. See RELEASE.md for
+baseline build, freeze, extraction-hash and per-target release gates.
+
+## Historical compatibility work
+
+
 Report date: 2026-09-18. Evidence-driven; no claim below was performed without
 the stated environment. Follows the phase plan of the compatibility task.
 

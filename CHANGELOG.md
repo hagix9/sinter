@@ -56,6 +56,12 @@ unified Linux x86_64 release artifact.
   executed on all four supported Linux x86_64 platforms with identical
   checksums, `ldd` resolution, and a non-mutating `plan` on each.
 
+- Frozen unified candidate from source `acbca6f8c726b4aed94c0b0b87c8a5506a4795af`
+  passed the full four-real-host matrix on Ubuntu 24.04.5 LTS, Ubuntu 26.04.1
+  LTS, Rocky Linux 9.8, and Rocky Linux 10.2 (all x86_64), including xattrs,
+  applicable SELinux preservation, guard/refusal/redaction, idempotency and
+  cleanup. This qualifies the candidate, not an already-published unified asset.
+
 ## [0.2.1] - 2026-09-17
 
 Maintenance release adding explicit per-operation environment variables to

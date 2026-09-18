@@ -67,6 +67,21 @@ contract with RHEL-family platform support (Rocky Linux 9, `dnf`). The
 implementation still adds no features beyond that scope: no roles, plugins,
 inventory, orchestration, or embedded scripting.
 
+## Unified Linux x86_64 distribution
+
+Future releases use one `sinter-v<VERSION>-linux-x86_64.tar.gz` for the
+supported Ubuntu 24.04 / 26.04 and Rocky Linux 9 / 10 x86_64 version lines.
+The executable is unified; runtime platform detection still selects APT on
+Ubuntu and DNF on Rocky. This is not a claim of support for arbitrary Linux
+systems or architectures.
+
+The frozen candidate passed four-real-host acceptance on Ubuntu 24.04.5 LTS,
+Ubuntu 26.04.1 LTS, Rocky Linux 9.8, and Rocky Linux 10.2, all x86_64.
+Other and future point releases have not each been independently validated.
+Published v0.2.1 still has its original distro-specific assets; see
+[Installation](https://hagix9.github.io/sinter/en/getting-started/installation/)
+for current downloads. The unified candidate is not yet a published asset.
+
 ## Build
 
 ```sh
@@ -182,15 +197,8 @@ Package recipes are platform-neutral: the same `type: package` / `state:
 present` resource is handled by `apt` on Ubuntu and `dnf` on RHEL-family
 targets, selected from the detected `/etc/os-release` identity.
 
-Acceptance references: Rocky Linux 9.8 x86_64 with DNF 4.14.0 (verified for
-package install/remove/idempotency, file, service, and command resources over
-real SSH with `sudo -n`), Rocky Linux 10.2 x86_64 with DNF 4.20.0 and rpm 4.19
-(the same five resource types plus converge-back purge idempotency), and
-Ubuntu 26.04.1 LTS x86_64 (fresh host `ubuntu02-b2`: exact-candidate package,
-file, service, command guard, refusal/redaction and independent state checks).
-Ubuntu 24.04.4 and Rocky 9.8 are the x86_64 regression VM references; Rocky 9
-is the unified-binary build baseline. Other point releases have not each been
-independently acceptance-tested.
+The latest unified-candidate acceptance references are the four real-host
+point releases listed above. Earlier VM and release evidence remains historical.
 
 All managed targets require systemd, an OpenSSH server, `/bin/sh`, the `attr`
 package (`/usr/bin/getfattr`, used to inspect extended attributes and POSIX

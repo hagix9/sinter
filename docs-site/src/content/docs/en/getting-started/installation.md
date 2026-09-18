@@ -6,9 +6,24 @@ description: Install Sinter from release tarballs or build from source.
 Sinter runs on the **controller**. The managed host needs the prerequisites
 listed below, but does not need Sinter installed. Published v0.2.1 Linux
 artifacts are distribution-specific. A unified Linux x86_64 artifact built
-on the Rocky Linux 9 baseline is planned for a future release, subject to
-exact-binary verification on every supported target; it is not a v0.2.1 asset.
+on the Rocky Linux 9 baseline has passed four-real-host candidate acceptance and is the canonical model
+for future releases; it is not a v0.2.1 asset.
 Controllers on macOS can build from source.
+
+## Unified Linux x86_64 distribution
+
+Future releases use one `sinter-v<VERSION>-linux-x86_64.tar.gz` for the
+supported Ubuntu 24.04 / 26.04 and Rocky Linux 9 / 10 x86_64 version lines.
+The executable is unified; runtime platform detection still selects APT on
+Ubuntu and DNF on Rocky. This is not a claim of support for arbitrary Linux
+systems or architectures.
+
+The frozen candidate passed four-real-host acceptance on Ubuntu 24.04.5 LTS,
+Ubuntu 26.04.1 LTS, Rocky Linux 9.8, and Rocky Linux 10.2, all x86_64.
+Other and future point releases have not each been independently validated.
+Published v0.2.1 still has its original distro-specific assets; see
+[Installation](https://hagix9.github.io/sinter/en/getting-started/installation/)
+for current downloads. The unified candidate is not yet a published asset.
 
 ## From release tarballs (recommended on Linux)
 

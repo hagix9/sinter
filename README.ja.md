@@ -68,6 +68,20 @@ v0.2はv0.1のcontractにRHEL系platform対応（Rocky Linux 9、`dnf`）を
 追加しています。roles、plugins、inventory、orchestration、
 embedded scriptingは依然として実装対象に含めません。
 
+## 統一 Linux x86_64 配布
+
+今後のリリースでは、対応する Ubuntu 24.04 / 26.04、Rocky Linux 9 / 10
+の x86_64 向けに `sinter-v<VERSION>-linux-x86_64.tar.gz` を1つ配布します。
+実行ファイルは共通ですが、実行時の検出により Ubuntu は APT、Rocky は
+DNF を使います。任意の Linux や他のアーキテクチャへの対応を意味しません。
+
+凍結候補は Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、Rocky Linux 9.8、
+Rocky Linux 10.2（すべて x86_64）の4実ホストで受入検証済みです。
+他の各point releaseや将来のリリースを個別に検証したという意味ではありません。
+公開済み v0.2.1 は従来のディストリビューション別アセットのままです。
+現在のダウンロードは[インストール](https://hagix9.github.io/sinter/ja/getting-started/installation/)
+を参照してください。統一候補はまだ公開アセットではありません。
+
 ## ビルド
 
 ```sh
@@ -186,15 +200,8 @@ package recipeはplatform-neutralです。同じ`type: package` / `state:
 present` resourceを、Ubuntuでは`apt`、RHEL系では`dnf`が処理します。
 backendは検出した`/etc/os-release`のidentityから選択されます。
 
-acceptance reference: Rocky Linux 9.8 x86_64 / DNF 4.14.0（実SSHと
-`sudo -n`経由でpackageのinstall/remove/冪等性、file、service、command
-resourceを検証済み）、Rocky Linux 10.2 x86_64 / DNF 4.20.0・rpm 4.19
-（同じ5種類のresourceに加えpurgeの収束/冪等性を検証済み）、および
-Ubuntu 26.04.1 LTS x86_64（fresh host `ubuntu02-b2` で同一candidateの
-package・file・service・command guard・拒否/秘匿・独立状態確認を実施）。
-Ubuntu 24.04.4 と Rocky 9.8 は x86_64 回帰検証VMで、統一バイナリの
-ビルド基準はRocky 9です。他の各point releaseを個別に受入検証した
-という意味ではありません。
+最新の統一候補の受入基準環境は上記の4実ホストのpoint releaseです。
+以前のVM検証とリリース証跡は履歴として保持します。
 
 すべてのmanaged targetには、systemd、OpenSSH server、`/bin/sh`、
 `attr` package（`/usr/bin/getfattr`。書き込み前に拡張属性とPOSIX ACLを

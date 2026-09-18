@@ -12,23 +12,19 @@ description: プラットフォーム、アーキテクチャ、パッケージ�
 | Rocky Linux 9 | x86_64 | dnf | サポート |
 | Rocky Linux 10 | x86_64 | dnf | サポート |
 
-**受入基準環境:**
+## 統一 Linux x86_64 配布
 
-- Ubuntu 24.04.4 amd64（回帰・同一バイナリ確認の参照VM環境）
-  および Ubuntu 26.04.1 LTS amd64（fresh hostの最終受入: command・file・
-  package・service・guard・拒否/秘匿・冪等性と独立状態確認。
-  旧ホストのtemplate証跡は履歴）。
-- Rocky Linux 9.8 x86_64（DNF 4.14.0）— v0.2.0 のターゲット受入環境であり、
-  Linux x86_64 アーティファクトのビルド基準環境。
-- Rocky Linux 10.2 x86_64（DNF 4.20.0・rpm 4.19）— 5 種類のリソースすべてと
-  purge の冪等性に関する実ホスト受入。
+今後のリリースでは、対応する Ubuntu 24.04 / 26.04、Rocky Linux 9 / 10
+の x86_64 向けに `sinter-v<VERSION>-linux-x86_64.tar.gz` を1つ配布します。
+実行ファイルは共通ですが、実行時の検出により Ubuntu は APT、Rocky は
+DNF を使います。任意の Linux や他のアーキテクチャへの対応を意味しません。
 
-上記は検証済みpoint releaseの基準環境であり、他の各point releaseや
-将来のリリースを個別に受入検証したという意味ではありません。
-Ubuntu 26.04の最終資格確認はfresh GCP host `ubuntu02-b2` で、同じ
-Rocky 9基準candidateを用い、独立状態確認と19件の記録済みチェック成功を
-確認しました。旧ホストのincidentは履歴であり最終証跡ではありません。
-Ubuntu 24.04.4とRocky 9.8の同一バイナリ回帰確認はx86_64 VMで実施しました。
+凍結候補は Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、Rocky Linux 9.8、
+Rocky Linux 10.2（すべて x86_64）の4実ホストで受入検証済みです。
+他の各point releaseや将来のリリースを個別に検証したという意味ではありません。
+公開済み v0.2.1 は従来のディストリビューション別アセットのままです。
+現在のダウンロードは[インストール](https://hagix9.github.io/sinter/ja/getting-started/installation/)
+を参照してください。統一候補はまだ公開アセットではありません。
 
 すべての管理対象に必要なもの:
 
@@ -72,8 +68,9 @@ sudo dnf install attr          # RHEL 系（Rocky など）
 
 コントローラ（`sinter` を実行する側）は macOS、Ubuntu 24.04 LTS、
 Ubuntu 26.04 LTS、Rocky Linux 9、Rocky Linux 10、その他バイナリがビルド
-できる x86_64 Linux 環境でサポートされます。リリースバイナリは
-単一の Linux x86_64 アーティファクトとして公開されます
+できる x86_64 Linux 環境でサポートされます。今後のリリースバイナリは
+単一の Linux x86_64 アーティファクトになります。公開済み v0.2.1 は
+ディストリビューション別アセットを維持します
 （[インストール](/sinter/ja/getting-started/installation/)を参照）。
 
 ## 明示的に非対応のもの
