@@ -80,4 +80,4 @@ sinter plan \
 | `--verbose` | Verbose output. |
 
 Next: [First Recipe](/sinter/en/getting-started/first-recipe/) adds files,
-services, and handlers.
+directories, links, and services.

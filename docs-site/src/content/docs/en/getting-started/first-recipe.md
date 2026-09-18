@@ -49,6 +49,26 @@ Template sources are resolved relative to the recipe file. Template-local
 values may also be passed via `with.vars` and referenced as
 `{{ template.name }}`.
 
+## Running against a target
+
+`plan` and `apply` need a target — a machine whose state they observe. This
+example uses a remote host, which Sinter reaches over SSH:
+
+- `--host web01.example.com` — the SSH hostname (or address) of the target
+  machine. Sinter connects to it over SSH and runs every observation and
+  change there; nothing is installed on the target. Omit `--host` to target
+  the machine you are running `sinter` on instead.
+- `--sudo` — run every target-side operation as root via non-interactive
+  `sudo -n`. It is needed here because writing under `/etc` normally
+  requires root privileges for a non-root user.
+  The target account must have passwordless sudo configured; without
+  `--sudo`, permission failures are reported, not retried with elevation.
+
+`validate` takes no `--host`: it checks only the recipe's structure and
+semantics on the controller and never connects to any target. `plan` and
+`apply` do need a target in this example because they observe (and `apply`
+also changes) the actual state of `/etc/sinter-motd` on a specific machine.
+
 ## Run it
 
 ```sh
@@ -88,6 +108,65 @@ documented `when` expression:
 
 To restart a service only when a resource changes, add a handler — see
 [Recipes](/sinter/en/concepts/recipes/) for the full handler model.
+
+## Two more resources to try
+
+Sinter implements seven resource types — the
+[Resource Reference](/sinter/en/reference/resources/) lists them all. Two
+small variations on this recipe exercise two more of them.
+
+### Inline content with `file`
+
+A `file` resource writes inline content without a template file. This is a
+complete recipe — copy it exactly as shown:
+
+```yaml
+version: 1
+
+resources:
+  - id: motd
+    type: file
+    with:
+      path: /etc/sinter-motd
+      content: "managed by sinter\n"
+      mode: "0644"
+```
+
+Like the template version, the content is published atomically and re-applies
+mutate nothing. Inline `content` is interpolated too — for example
+`content: "token={{ vars.token }}"` works. The difference is the source:
+`file` writes a literal string (or copies a `source` file verbatim), while
+`template` renders an external template file and can also use template-local
+values from `with.vars` as `{{ template.name }}`.
+
+### A directory and a symbolic link
+
+```yaml
+version: 1
+
+resources:
+  - id: appdir
+    type: directory
+    with:
+      path: /etc/myapp
+      mode: "0755"
+
+  - id: current_config
+    type: link
+    with:
+      path: /etc/myapp/config
+      target: /etc/sinter-motd
+    depends_on: [appdir]
+```
+
+A `directory` creates exactly one directory — the parent (`/etc`) must
+already exist; there is no recursive creation. A `link` ensures the symlink
+at `path` points to `target`. `depends_on` orders the link after the
+directory.
+
+All of these run with the same commands shown above. For larger building
+blocks — guarded `command` resources, `package`/`service` baselines, and
+handlers — see [Recipe Overview](/sinter/en/recipes/overview/).
 
 Continue to [Recipes](/sinter/en/concepts/recipes/) for the full model, or jump
 to the [Resource Reference](/sinter/en/reference/resources/).

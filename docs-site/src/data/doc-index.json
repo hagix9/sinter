@@ -4,7 +4,7 @@
     { "title": "What is Sinter?", "path": "getting-started/what-is-sinter", "description": "Product overview, design goals, and scope.", "keywords": "overview introduction agentless configuration management" },
     { "title": "Installation", "path": "getting-started/installation", "description": "Install Sinter from release tarballs or build from source.", "keywords": "install download tarball sha256 release source cargo build" },
     { "title": "Quick Start", "path": "getting-started/quick-start", "description": "Validate, plan, and apply a first recipe against a target.", "keywords": "quickstart tutorial plan apply validate" },
-    { "title": "First Recipe", "path": "getting-started/first-recipe", "description": "Write and run a minimal Sinter recipe.", "keywords": "recipe yaml example first" },
+    { "title": "First Recipe", "path": "getting-started/first-recipe", "description": "Write and run a first recipe with templates, files, directories, and links against a target host.", "keywords": "recipe yaml example first template file directory link host sudo ssh" },
     { "title": "Recipes", "path": "concepts/recipes", "description": "Recipe structure: version, vars, resources, handlers, includes.", "keywords": "recipe yaml toml vars handlers include" },
     { "title": "Resources", "path": "concepts/resources", "description": "Resource model, common fields, when/loop/depends_on/notify.", "keywords": "resource depends_on when loop notify sensitive" },
     { "title": "Idempotency", "path": "concepts/idempotency", "description": "How Sinter guarantees repeat runs perform zero mutations.", "keywords": "idempotent second apply unchanged" },

@@ -51,6 +51,28 @@ resources:
 `with.vars` でテンプレートローカルな値を渡し、`{{ template.name }}`
 として参照することもできます。
 
+## ターゲットに対して実行する
+
+`plan` と `apply` にはターゲット — 状態を観測する対象のマシン — が
+必要です。この例ではリモートホストを使い、Sinter は SSH 経由でそこに
+接続します:
+
+- `--host web01.example.com` — ターゲットマシンの SSH ホスト名（または
+  アドレス）。Sinter は SSH で接続し、すべての観測と変更をそのホスト上で
+  実行します。ターゲットには何もインストールされません。`--host` を
+  省略すると、`sinter` を実行しているマシン自身がターゲットになります。
+- `--sudo` — ターゲット側のすべての操作を非対話型の `sudo -n` 経由で
+  root として実行します。この例では `/etc` 配下への書き込みに、
+  非 root ユーザーに対して通常 root 権限が必要となるためです。
+  ターゲット側のアカウントにパスワードなし sudo が
+  設定されている必要があります。`--sudo` なしでは、パーミッションの
+  失敗は昇格されず、そのまま失敗として報告されます。
+
+`validate` には `--host` がありません。レシピの構造と意味だけを
+コントローラ上でチェックし、どのターゲットにも接続しないためです。
+この例で `plan` と `apply` にターゲットが必要なのは、特定のマシン上の
+`/etc/sinter-motd` の実際の状態を観測し（`apply` は変更も行い）ます。
+
 ## 実行する
 
 ```sh
@@ -94,6 +116,69 @@ SSH デーモンは Ubuntu では `ssh.service`、Rocky Linux では
 リソースが変更されたときにだけサービスを再起動したい場合はハンドラを
 追加します。完全なハンドラモデルは[レシピ](/sinter/ja/concepts/recipes/)
 を参照してください。
+
+## もう 2 つのリソースを試す
+
+Sinter は 7 つのリソースタイプを実装しています。一覧は
+[リソースリファレンス](/sinter/ja/reference/resources/)を参照して
+ください。このレシピの小さなバリエーション 2 つで、さらに 2 つの
+タイプを試せます。
+
+### `file` でインラインコンテンツ
+
+`file` リソースはテンプレートファイルなしでインラインの内容を
+書き込みます。これは完全なレシピです — 表示されているとおりに
+そのままコピーしてください:
+
+```yaml
+version: 1
+
+resources:
+  - id: motd
+    type: file
+    with:
+      path: /etc/sinter-motd
+      content: "managed by sinter\n"
+      mode: "0644"
+```
+
+テンプレート版と同様に、内容はアトミックに公開され、再 apply では
+何も変更されません。インラインの `content` も補間されます — たとえば
+`content: "token={{ vars.token }}"` は動作します。違いはソースに
+あります: `file` はリテラルな文字列を書き込み（または `source`
+ファイルをそのままコピーし）ます。一方 `template` は外部の
+テンプレートファイルをレンダリングし、`with.vars` のテンプレート
+ローカルな値を `{{ template.name }}` として使うこともできます。
+
+### ディレクトリとシンボリックリンク
+
+```yaml
+version: 1
+
+resources:
+  - id: appdir
+    type: directory
+    with:
+      path: /etc/myapp
+      mode: "0755"
+
+  - id: current_config
+    type: link
+    with:
+      path: /etc/myapp/config
+      target: /etc/sinter-motd
+    depends_on: [appdir]
+```
+
+`directory` は指定した 1 つのディレクトリだけを作成します — 親
+（`/etc`）がすでに存在している必要があり、再帰的な作成はありません。
+`link` は `path` のシンボリックリンクが `target` を指すことを保証
+します。`depends_on` によってリンクはディレクトリの後に実行されます。
+
+これらはすべて上で示したのと同じコマンドで実行できます。より大きな
+構成要素 — ガード付きの `command` リソース、`package`/`service` の
+ベースライン、ハンドラ — については
+[レシピ概要](/sinter/ja/recipes/overview/)を参照してください。
 
 完全なモデルは[レシピ](/sinter/ja/concepts/recipes/)へ、各リソースの
 詳細は[リソースリファレンス](/sinter/ja/reference/resources/)へ進んで

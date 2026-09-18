@@ -5,7 +5,7 @@
     { "title": "Sinter とは", "path": "getting-started/what-is-sinter", "description": "プロダクト概要、設計目標、スコープ。", "keywords": "概要 紹介 エージェントレス 構成管理" },
     { "title": "インストール", "path": "getting-started/installation", "description": "リリース tarball からのインストール、またはソースからのビルド。", "keywords": "インストール ダウンロード tarball sha256 リリース ソース cargo ビルド" },
     { "title": "クイックスタート", "path": "getting-started/quick-start", "description": "最初のレシピをターゲットに対して validate・plan・apply する。", "keywords": "クイックスタート チュートリアル plan apply validate" },
-    { "title": "はじめてのレシピ", "path": "getting-started/first-recipe", "description": "最小限の Sinter レシピを書いて実行する。", "keywords": "レシピ yaml 例 はじめて" },
+    { "title": "はじめてのレシピ", "path": "getting-started/first-recipe", "description": "テンプレート、ファイル、ディレクトリ、リンクを使った最初のレシピを書き、ターゲットホストに対して実行する。", "keywords": "レシピ yaml 例 はじめて template file directory link host sudo ssh" },
     { "title": "レシピ", "path": "concepts/recipes", "description": "レシピの構造: version、vars、resources、handlers、includes。", "keywords": "レシピ yaml toml vars handlers include" },
     { "title": "リソース", "path": "concepts/resources", "description": "リソースモデル、共通フィールド、when/loop/depends_on/notify。", "keywords": "リソース depends_on when loop notify sensitive" },
     { "title": "冪等性", "path": "concepts/idempotency", "description": "繰り返し実行で変更が行われないことを Sinter がどう保証するか。", "keywords": "冪等 2回目 apply 変更なし" },

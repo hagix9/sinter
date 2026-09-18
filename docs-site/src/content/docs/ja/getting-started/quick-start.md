@@ -79,4 +79,4 @@ sinter plan \
 | `--verbose` | 詳細な出力。 |
 
 次は [はじめてのレシピ](/sinter/ja/getting-started/first-recipe/) で
-ファイル、サービス、ハンドラを追加します。
+ファイル、ディレクトリ、リンク、サービスを追加します。
