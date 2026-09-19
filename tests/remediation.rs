@@ -1020,10 +1020,12 @@ fn package_inconsistent_state_fails_without_repair() {
         sinter::resources::classify_dpkg_status("install ok installed").unwrap(),
         sinter::resources::PackageState::Installed
     );
-    assert_eq!(
-        sinter::resources::classify_dpkg_status("").unwrap(),
-        sinter::resources::PackageState::Absent
-    );
+    // An empty record is not a dpkg answer: exit 0 with no status record is
+    // protocol-invalid and must never normalize into a clean absent state
+    // (RA2-01). Real absence is proven by the exit-1 diagnostic contract.
+    assert!(sinter::resources::classify_dpkg_status("").is_err());
+    assert!(sinter::resources::classify_dpkg_status("install ok installed\n").is_err());
+    assert!(sinter::resources::classify_dpkg_status(" install ok installed").is_err());
 }
 
 #[test]
@@ -2547,6 +2549,10 @@ fn derived_sensitive_template_body_number_no_leak() {
 /// Sensitive package name must not appear in CommandRecord or apt diagnostics.
 #[test]
 fn sensitive_package_name_not_in_command_log_or_reason() {
+    // Serialize against every other test that invokes real apt-get: the
+    // recipe below reaches the genuine package-manager path, so the shared
+    // advisory lock must be held for the whole critical section (RA2-02).
+    let _pkg_db = lock_package_database();
     let dir = trusted_root("r9-pkg-sens");
     let sentinel = "R9_PKG_LOG_SENT_c5d6";
     let recipe = write_recipe(

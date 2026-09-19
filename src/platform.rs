@@ -171,9 +171,11 @@ impl PackageBackend {
     ///
     /// Both backends distinguish a positively-confirmed "not installed" from
     /// an ambiguous/errored query: anything that cannot be interpreted is an
-    /// observation error, never silently "absent" (DESIGN §27). `name_disp`
-    /// is the presentation form of the package name (already redacted when
-    /// the resource is sensitive); the raw name is only matched internally.
+    /// observation error, never silently "absent" (DESIGN §27), and a Present
+    /// answer likewise requires a complete, unambiguous record — exit 0 alone
+    /// is not proof of installation (IA-01). `name_disp` is the presentation
+    /// form of the package name (already redacted when the resource is
+    /// sensitive); the raw name is only matched internally.
     pub fn classify_observation(
         &self,
         out: &Output,
@@ -184,11 +186,35 @@ impl PackageBackend {
         match self {
             Self::Apt => match &out.completion {
                 Completion::Exited(0) => {
-                    let status = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                    crate::resources::classify_dpkg_status(&status)
+                    // Present contract: a complete, single-record, valid
+                    // capture whose record is one dpkg status line.
+                    require_package_record(out, name_disp)?;
+                    let status = utf8_package_stream(out, name_disp, sensitive)?;
+                    // dpkg-query -f=${Status} emits exactly one status record with
+                    // no terminator, so the complete capture is the record. The
+                    // bytes are never trimmed or otherwise normalized: leading or
+                    // trailing whitespace the protocol does not emit, a blank
+                    // record, or a second record is output the contract does not
+                    // define and must not be rounded to a state (RA2-01).
+                    if status.is_empty() {
+                        return Err(SinterError::apply(format!(
+                            "package observation for {} produced no status record",
+                            name_disp
+                        )));
+                    }
+                    if status.contains('\n') || status.contains('\r') {
+                        return Err(SinterError::apply(format!(
+                            "package observation for {} produced multiple result records",
+                            name_disp
+                        )));
+                    }
+                    crate::resources::classify_dpkg_status(status)
                 }
-                // Confirmed absent: dpkg-query found no matching package.
-                Completion::Exited(1) => Ok(PackageState::Absent),
+                // Confirmed absent: dpkg-query found no matching package. Only
+                // the narrow absence contract applies — an exit-1 capture that
+                // carries stdout, extra diagnostics, truncation, or an
+                // unrecognized message leaves the state undetermined.
+                Completion::Exited(1) if dpkg_reports_absent(out, name) => Ok(PackageState::Absent),
                 Completion::Exited(c) => {
                     Err(observation_error(*self, name_disp, *c, out, sensitive))
                 }
@@ -204,7 +230,42 @@ impl PackageBackend {
                 }
             },
             Self::Dnf => match &out.completion {
-                Completion::Exited(0) => Ok(PackageState::Installed),
+                Completion::Exited(0) => {
+                    // Present contract: exit 0 alone does not prove installation.
+                    // The capture must be complete and contain exactly one
+                    // identity record — the package NAME field, emitted by the
+                    // fixed `--queryformat` — with no diagnostic alongside it.
+                    require_package_record(out, name_disp)?;
+                    let record = utf8_package_stream(out, name_disp, sensitive)?;
+                    // The fixed queryformat emits no separator or terminator, so
+                    // the complete capture is the single record. Any line
+                    // terminator is a second matched package or an extra record,
+                    // which the identity comparison below cannot accept.
+                    if record.is_empty() {
+                        return Err(SinterError::apply(format!(
+                            "package observation for {} produced no package identity record",
+                            name_disp
+                        )));
+                    }
+                    if record.contains('\n') || record.contains('\r') {
+                        return Err(SinterError::apply(format!(
+                            "package observation for {} produced multiple result records",
+                            name_disp
+                        )));
+                    }
+                    // The record must prove the installed package *is* the
+                    // requested package: whole-record equality on the NAME field.
+                    // A prefix such as `<name>-garbage`, a record about another
+                    // package, or a bare malformed fragment is rejected, so exit 0
+                    // alone never establishes installation (RA2-01).
+                    if record != name {
+                        return Err(SinterError::apply(format!(
+                            "package observation for {} named a different package",
+                            name_disp
+                        )));
+                    }
+                    Ok(PackageState::Installed)
+                }
                 // rpm -q exits 1 for "not installed" but also for other
                 // failures (e.g. a broken rpmdb). Only a positive
                 // "is not installed" marker counts as absent.
@@ -225,6 +286,38 @@ impl PackageBackend {
             },
         }
     }
+}
+
+/// A package answer must come from a complete capture: a truncated stream
+/// cannot prove the record is the whole answer (IA-01). A diagnostic on stderr
+/// alongside an apparent success makes the result ambiguous.
+fn require_package_record(out: &Output, name_disp: &str) -> Result<()> {
+    if out.stdout_truncated || out.stderr_truncated {
+        return Err(SinterError::apply(format!(
+            "package observation for {} captured truncated output: the result is incomplete",
+            name_disp
+        )));
+    }
+    if !out.stderr.is_empty() {
+        return Err(SinterError::apply(format!(
+            "package observation for {} carried an unexpected diagnostic",
+            name_disp
+        )));
+    }
+    Ok(())
+}
+
+/// Strictly decode the package record stream as UTF-8. Both backends emit
+/// textual records; lossy decoding could repair malformed bytes into a
+/// syntactically valid record (IA-01 §10).
+fn utf8_package_stream<'a>(out: &'a Output, name_disp: &str, sensitive: bool) -> Result<&'a str> {
+    std::str::from_utf8(&out.stdout).map_err(|_| {
+        SinterError::apply(format!(
+            "package observation for {} captured invalid UTF-8 output{}",
+            name_disp,
+            if sensitive { " (value redacted)" } else { "" }
+        ))
+    })
 }
 
 /// Whether an `rpm -q` exit-1 result positively and unambiguously reports
@@ -249,6 +342,33 @@ fn rpm_reports_absent(out: &Output, name: &str) -> bool {
     // Byte-exact comparison also rejects non-UTF-8 output.
     let marker = format!("package {} is not installed\n", name);
     out.stdout == marker.as_bytes() && out.stderr.is_empty()
+}
+
+/// Whether a `dpkg-query -W -f=${Status} -- <name>` exit-1 result positively
+/// and unambiguously reports the package as not installed.
+///
+/// Reference behavior (dpkg 1.21/1.22, Debian and Ubuntu, verified
+/// on-target): the query exits 1, writes nothing to stdout, and writes
+/// exactly `dpkg-query: no packages found matching <name>\n` to stderr.
+///
+/// Fail closed (IA-01/RA2-01): exit 1 is *also* what a broken query reports, so
+/// the absence answer must be the complete, exact, single-line diagnostic with
+/// empty stdout, no truncation, and valid bytes. Byte-exact comparison with
+/// the defined marker also rejects non-UTF-8 output, a missing terminator, an
+/// extra blank record, and leading/trailing whitespace. A marker mixed with
+/// another diagnostic, a truncated stream, a marker on the wrong stream, or an
+/// exit-1 with an unrecognized message is an observation error, never
+/// `Absent`.
+fn dpkg_reports_absent(out: &Output, name: &str) -> bool {
+    if out.stdout_truncated || out.stderr_truncated {
+        return false;
+    }
+    if !out.stdout.is_empty() {
+        return false;
+    }
+    let canonical = format!("dpkg-query: no packages found matching {}\n", name);
+    let bare = format!("no packages found matching {}\n", name);
+    out.stderr == canonical.as_bytes() || out.stderr == bare.as_bytes()
 }
 
 fn observation_error(
@@ -366,7 +486,9 @@ mod tests {
 
     #[test]
     fn rpm_classification() {
-        let installed = exited(0, "nano-7.2-2.el9.x86_64\n", "");
+        // The fixed `--queryformat %{NAME}` contract: exit 0 with exactly the
+        // package NAME on stdout proves the requested package is installed.
+        let installed = exited(0, "nano", "");
         assert_eq!(
             PackageBackend::Dnf
                 .classify_observation(&installed, "nano", "nano", false)
@@ -385,6 +507,12 @@ mod tests {
         let ambiguous = exited(1, "", "error: rpmdb open failed");
         assert!(PackageBackend::Dnf
             .classify_observation(&ambiguous, "nano", "nano", false)
+            .is_err());
+        // A NEVRA-shaped record is not the defined identity record: the old
+        // prefix-based acceptance (`<name>-<anything>`) is gone (RA2-01).
+        let nevra = exited(0, "nano-7.2-2.el9.x86_64\n", "");
+        assert!(PackageBackend::Dnf
+            .classify_observation(&nevra, "nano", "nano", false)
             .is_err());
         // other non-zero exits are errors.
         let err = exited(2, "", "");
@@ -520,6 +648,296 @@ mod tests {
             .classify_observation(&out, "secretpkg", "[redacted]", true)
             .unwrap_err();
         assert!(!e.message.contains("secret pkg name"));
+        assert!(e.message.contains("[redacted]"));
+    }
+
+    // -----------------------------------------------------------------
+    // IA-01: fail-closed package observation contracts. Each case asserts
+    // the semantic outcome (Installed / Absent / observation failure), never
+    // merely that a string was rejected.
+    // -----------------------------------------------------------------
+
+    fn trunc(mut o: Output, stdout: bool, stderr: bool) -> Output {
+        o.stdout_truncated = stdout;
+        o.stderr_truncated = stderr;
+        o
+    }
+
+    #[test]
+    fn apt_present_contract_requires_a_complete_clean_record() {
+        // Clean present answer: dpkg-query -f=${Status} emits exactly one
+        // unterminated status record.
+        let o = exited(0, "install ok installed", "");
+        assert_eq!(
+            PackageBackend::Apt
+                .classify_observation(&o, "nano", "nano", false)
+                .unwrap(),
+            PackageState::Installed
+        );
+        // Clean absent answer (reference dpkg form).
+        let o = exited(1, "", "dpkg-query: no packages found matching nano\n");
+        assert_eq!(
+            PackageBackend::Apt
+                .classify_observation(&o, "nano", "nano", false)
+                .unwrap(),
+            PackageState::Absent
+        );
+        // Legacy/bare absence form is still a complete, exact record.
+        let o = exited(1, "", "no packages found matching nano\n");
+        assert_eq!(
+            PackageBackend::Apt
+                .classify_observation(&o, "nano", "nano", false)
+                .unwrap(),
+            PackageState::Absent
+        );
+    }
+
+    #[test]
+    fn apt_present_record_never_normalizes_whitespace() {
+        // Leading/trailing whitespace the protocol never emits, or a second
+        // record, must not be trimmed into a trusted state (RA2-01).
+        for bad in [
+            " install ok installed",
+            "install ok installed ",
+            "install ok installed\n",
+            "install ok installed\n\n",
+            "install ok installed\ninstall ok installed",
+        ] {
+            let o = exited(0, bad, "");
+            assert!(
+                PackageBackend::Apt
+                    .classify_observation(&o, "nano", "nano", false)
+                    .is_err(),
+                "dpkg record {:?} must not classify as a clean state",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn apt_exit_zero_with_truncated_stdout_is_not_installed() {
+        let o = trunc(exited(0, "install ok installed", ""), true, false);
+        assert!(PackageBackend::Apt
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+        let o = trunc(exited(0, "install ok installed", ""), false, true);
+        assert!(PackageBackend::Apt
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+    }
+
+    #[test]
+    fn apt_exit_zero_with_malformed_status_output_is_not_installed() {
+        // Half-configured is a real dpkg state: it is not "installed" and the
+        // observation must fail rather than be rounded either way.
+        let o = exited(0, "install ok half-configured", "");
+        assert!(PackageBackend::Apt
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+        // An empty status with a successful exit is not an answer.
+        let o = exited(0, "", "");
+        assert!(PackageBackend::Apt
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+    }
+
+    #[test]
+    fn apt_exit_zero_with_unexpected_diagnostic_is_not_installed() {
+        let o = exited(
+            0,
+            "install ok installed",
+            "dpkg-query: warning: database unreadable\n",
+        );
+        assert!(PackageBackend::Apt
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+    }
+
+    #[test]
+    fn apt_exit_one_with_an_unrelated_error_is_not_absent() {
+        let o = exited(1, "", "dpkg-query: error: cannot open dpkg status file\n");
+        assert!(PackageBackend::Apt
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+    }
+
+    #[test]
+    fn apt_exit_one_with_an_ambiguous_absence_diagnostic_is_not_absent() {
+        // The marker plus a second diagnostic line is ambiguous.
+        let o = exited(
+            1,
+            "",
+            "dpkg-query: no packages found matching nano\nwarning: db corrupt\n",
+        );
+        assert!(PackageBackend::Apt
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+        // Truncated absence diagnostic.
+        let o = trunc(
+            exited(1, "", "dpkg-query: no packages found matchin"),
+            true,
+            false,
+        );
+        assert!(PackageBackend::Apt
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+        // Marker on the wrong stream.
+        let o = exited(1, "dpkg-query: no packages found matching nano\n", "");
+        assert!(PackageBackend::Apt
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+        // A different package's marker does not prove this one absent.
+        let o = exited(1, "", "dpkg-query: no packages found matching other\n");
+        assert!(PackageBackend::Apt
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+        // A substring of unrelated output is not the exact record.
+        let o = exited(
+            1,
+            "",
+            "note: no packages found matching nano in this build root\n",
+        );
+        assert!(PackageBackend::Apt
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+    }
+
+    #[test]
+    fn apt_invalid_utf8_never_becomes_a_state() {
+        let o = Output {
+            completion: Completion::Exited(0),
+            stdout: b"install ok installed".to_vec(),
+            stderr: vec![0xff, 0xfe],
+            stdout_truncated: false,
+            stderr_truncated: false,
+        };
+        assert!(PackageBackend::Apt
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+    }
+
+    #[test]
+    fn rpm_present_contract_requires_a_complete_single_record() {
+        // Clean installed answer: exactly the package NAME, no terminator.
+        let o = exited(0, "nano", "");
+        assert_eq!(
+            PackageBackend::Dnf
+                .classify_observation(&o, "nano", "nano", false)
+                .unwrap(),
+            PackageState::Installed
+        );
+        // Clean absent answer (reference rpm 4.16 form).
+        let o = exited(1, "package nano is not installed\n", "");
+        assert_eq!(
+            PackageBackend::Dnf
+                .classify_observation(&o, "nano", "nano", false)
+                .unwrap(),
+            PackageState::Absent
+        );
+    }
+
+    #[test]
+    fn rpm_present_record_rejects_prefix_garbage_and_wrong_identity() {
+        // The reproduced false PASS: `<name>-garbage` used to be accepted as
+        // proof `nano` was installed. Whole-record NAME equality rejects it
+        // (RA2-01).
+        let o = exited(0, "nano-garbage", "");
+        assert!(PackageBackend::Dnf
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+        // A bare malformed prefix is not an identity record.
+        let o = exited(0, "nan", "");
+        assert!(PackageBackend::Dnf
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+        // A record about another package proves nothing about this one.
+        let o = exited(0, "other", "");
+        assert!(PackageBackend::Dnf
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+    }
+
+    #[test]
+    fn rpm_exit_zero_with_truncated_output_is_not_installed() {
+        let o = trunc(exited(0, "nano", ""), true, false);
+        assert!(PackageBackend::Dnf
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+        let o = trunc(exited(0, "nano", ""), false, true);
+        assert!(PackageBackend::Dnf
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+    }
+
+    #[test]
+    fn rpm_exit_zero_with_malformed_output_is_not_installed() {
+        // No record at all: exit 0 proves nothing on its own.
+        let o = exited(0, "", "");
+        assert!(PackageBackend::Dnf
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+    }
+
+    #[test]
+    fn rpm_exit_zero_with_contradictory_diagnostic_is_not_installed() {
+        // An installed answer printed alongside an rpmdb error is not a
+        // trustworthy observation.
+        let o = exited(
+            0,
+            "nano",
+            "error: cannot open Packages database in /var/lib/rpm\n",
+        );
+        assert!(PackageBackend::Dnf
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+    }
+
+    #[test]
+    fn rpm_exit_zero_with_multiple_result_records_is_not_installed() {
+        // Two matched packages concatenate under the fixed queryformat; the
+        // result cannot equal the single requested name.
+        let o = exited(0, "nanonano", "");
+        assert!(PackageBackend::Dnf
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+        // A trailing blank record is equally disqualifying.
+        let o = exited(0, "nano\n", "");
+        assert!(PackageBackend::Dnf
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+    }
+
+    #[test]
+    fn rpm_exit_zero_naming_another_package_is_not_installed() {
+        let o = exited(0, "other", "");
+        assert!(PackageBackend::Dnf
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+    }
+
+    #[test]
+    fn rpm_invalid_utf8_never_becomes_a_state() {
+        let o = Output {
+            completion: Completion::Exited(0),
+            stdout: vec![0xff, 0xfe],
+            stderr: Vec::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        };
+        assert!(PackageBackend::Dnf
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+    }
+
+    #[test]
+    fn sensitive_package_errors_never_include_raw_stderr() {
+        // A sensitive resource's observation error must not echo captured
+        // output that could carry secret-derived material.
+        let o = exited(2, "", "secret value in stderr");
+        let e = PackageBackend::Apt
+            .classify_observation(&o, "secretpkg", "[redacted]", true)
+            .unwrap_err();
+        assert!(!e.message.contains("secret value in stderr"));
         assert!(e.message.contains("[redacted]"));
     }
 }

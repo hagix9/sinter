@@ -20,6 +20,11 @@ fn package_install_remove_verify_idempotent() {
         skip_or_fail("requires apt and sudo");
         return;
     }
+    // The whole test performs real apt-get mutations (install, remove, and
+    // their verification re-observations), which take the shared dpkg
+    // frontend lock. Serialize against every other such test so the default
+    // parallel test runner cannot make them contend (RA2-02).
+    let _pkg_db = lock_package_database();
     let dir = trusted_root("package");
     // Use a small package that is commonly absent then removable.
     let pkg = std::env::var("SINTER_TEST_PACKAGE").unwrap_or_else(|_| "cowsay".to_string());
@@ -89,6 +94,11 @@ fn package_apply_then_service_reobservation() {
     }
     // Verify that after installing a package providing a unit, the service
     // observation reflects the fresh state rather than a stale plan observation.
+    // `openssh-server` is guaranteed present, but the Apply path could
+    // install it if it were missing, so this test is inside the package
+    // mutation critical section too (RA2-02). Lock order is package database
+    // before service.
+    let _pkg_db = lock_package_database();
     let _svc = lock_service();
     let dir = trusted_root("pkg-svc");
     // Use ssh as a guaranteed-present service/package pair.
@@ -276,6 +286,11 @@ fn package_install_success_then_reobserve_indeterminate_keeps_changed() {
         skip_or_fail("requires apt and sudo");
         return;
     }
+    // The pre-test `apt-get remove`, the install mutation, and the post-test
+    // cleanup all take the shared dpkg frontend lock, so the advisory guard is
+    // acquired before the first apt-get call and held to the end of the test
+    // (RA2-02).
+    let _pkg_db = lock_package_database();
     let dir = trusted_root("r7-pkg-indet");
     let pkg = std::env::var("SINTER_TEST_PACKAGE").unwrap_or_else(|_| "cowsay".to_string());
     // Ensure package is absent so the mutation path is reached.
@@ -333,6 +348,9 @@ fn package_install_success_then_reobserve_fail_keeps_changed() {
         skip_or_fail("requires apt and sudo");
         return;
     }
+    // Same critical section as the indeterminate variant: cleanup, mutation,
+    // and final cleanup all touch the shared dpkg frontend lock (RA2-02).
+    let _pkg_db = lock_package_database();
     let dir = trusted_root("r7-pkg-reobs-fail");
     let pkg = std::env::var("SINTER_TEST_PACKAGE").unwrap_or_else(|_| "cowsay".to_string());
     let _ = std::process::Command::new("sudo")

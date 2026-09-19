@@ -13,21 +13,21 @@ use std::collections::BTreeMap;
 
 /// Metadata desired for a filesystem object.
 #[derive(Debug, Clone)]
-struct MetaSpec {
-    owner_uid: Option<u32>,
-    group_gid: Option<u32>,
-    mode: Option<u32>,
+pub(crate) struct MetaSpec {
+    pub(crate) owner_uid: Option<u32>,
+    pub(crate) group_gid: Option<u32>,
+    pub(crate) mode: Option<u32>,
     /// Whether each dimension is explicitly managed (from the recipe).
-    manage_owner: bool,
-    manage_group: bool,
-    manage_mode: bool,
+    pub(crate) manage_owner: bool,
+    pub(crate) manage_group: bool,
+    pub(crate) manage_mode: bool,
 }
 
-fn ev_str(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<Option<(String, bool)>> {
+pub(crate) fn ev_str(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<Option<(String, bool)>> {
     match m.get(key) {
         None => Ok(None),
         Some(v) => match &v.val {
-            None => Err(SinterError::apply(format!(
+            None => Err(SinterError::unknown(format!(
                 "with.{} could not be evaluated (unknown)",
                 key
             ))),
@@ -42,7 +42,7 @@ fn ev_str(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<Option<(String, bo
     }
 }
 
-fn ev_bool(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<Option<bool>> {
+pub(crate) fn ev_bool(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<Option<bool>> {
     match m.get(key) {
         None => Ok(None),
         Some(v) => match &v.val {
@@ -237,7 +237,8 @@ impl Engine {
                         res.id, path
                     )));
                 }
-                self.fs.remove_file(path)?;
+                let permit = self.fs.mutation_permit()?;
+                self.fs.remove_file(&permit, path)?;
                 self.verify_absent(res, path)
             }
             other => Err(SinterError::apply(format!(
@@ -284,7 +285,7 @@ impl Engine {
         }
     }
 
-    fn resolve_content(
+    pub(crate) fn resolve_content(
         &mut self,
         res: &FrozenResource,
         vals: &BTreeMap<String, EvalVal>,
@@ -337,7 +338,7 @@ impl Engine {
         }
     }
 
-    fn file_meta(
+    pub(crate) fn file_meta(
         &mut self,
         res: &FrozenResource,
         vals: &BTreeMap<String, EvalVal>,
@@ -723,15 +724,16 @@ impl Engine {
             // reported as change:none. Typed error state is preserved.
             let mut mutated = false;
             let mut failure: Option<SinterError> = None;
+            let permit = self.fs.mutation_permit()?;
 
             if stat.uid != enforce_uid || stat.gid != enforce_gid {
-                match self.fs.chown(path, enforce_uid, enforce_gid) {
+                match self.fs.chown(&permit, path, enforce_uid, enforce_gid) {
                     Ok(()) => mutated = true,
                     Err(e) => failure = Some(e),
                 }
             }
             if failure.is_none() && (stat.mode & 0o7777) != enforce_mode {
-                match self.fs.chmod(path, enforce_mode) {
+                match self.fs.chmod(&permit, path, enforce_mode) {
                     Ok(()) => mutated = true,
                     Err(e) => failure = Some(e),
                 }
@@ -838,14 +840,15 @@ impl Engine {
         // Staging lives in a fresh, private 0700 directory with a
         // non-predictable name, so it can never be pre-created or replaced by a
         // non-privileged user between creation and publication.
+        let permit = self.fs.mutation_permit()?;
         let stage_dir = self.fs.make_staging_dir(&dir)?;
         let staging = format!("{}/payload", stage_dir);
 
         let prepare: Result<()> = (|| -> Result<()> {
-            self.fs.write_bytes(&staging, bytes)?;
+            self.fs.write_bytes(&permit, &staging, bytes)?;
             self.fs.set_metadata(&staging, mode, uid, gid)?;
             for (name, value) in xattrs.preserved_attrs() {
-                self.fs.set_xattr(name, value, &staging)?;
+                self.fs.set_xattr(&permit, name, value, &staging)?;
             }
             Ok(())
         })();
@@ -900,7 +903,7 @@ impl Engine {
             )));
         }
 
-        match self.fs.rename(&staging, path) {
+        match self.fs.rename(&permit, &staging, path) {
             Ok(()) => {}
             Err(e) => {
                 // Classify publication completion BEFORE any cleanup. An
@@ -957,16 +960,24 @@ impl Engine {
         }
         // Remove the staging payload if present, then the directory.
         let payload = format!("{}/payload", stage_dir);
+        let permit = self.fs.mutation_permit().ok();
         match self.fs.inspect(&payload) {
             Ok(stat) if stat.kind == ObjKind::Absent => {}
             Ok(_) => {
-                if self.fs.remove_file(&payload).is_err() {
+                let permit = match &permit {
+                    Some(p) => p,
+                    None => return false,
+                };
+                if self.fs.remove_file(permit, &payload).is_err() {
                     return false;
                 }
             }
             Err(_) => return false,
         }
-        self.fs.rmdir(stage_dir).is_ok()
+        match &permit {
+            Some(p) => self.fs.rmdir(p, stage_dir).is_ok(),
+            None => false,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1070,7 +1081,8 @@ impl Engine {
                         )));
                     }
                     // Only empty directories may be removed.
-                    match self.fs.rmdir(&path) {
+                    let permit = self.fs.mutation_permit()?;
+                    match self.fs.rmdir(&permit, &path) {
                         Ok(()) => self.verify_absent(res, &path),
                         Err(e) => {
                             let mut r = changed_result(res);
@@ -1116,7 +1128,8 @@ impl Engine {
                     return Ok(r);
                 }
                 self.fs.check_trusted_parents(&path)?;
-                if let Err(e) = self.fs.mkdir(&path) {
+                let permit = self.fs.mutation_permit()?;
+                if let Err(e) = self.fs.mkdir(&permit, &path) {
                     let mut r = changed_result(res);
                     r.execution = if e.kind == crate::error::ErrorKind::Indeterminate {
                         Execution::Indeterminate
@@ -1142,6 +1155,7 @@ impl Engine {
                 if let Err(e) = self.fs.set_metadata(&path, mode, uid, gid) {
                     // mkdir already succeeded. Later metadata uncertainty must
                     // not erase the known directory creation.
+                    let _ = &permit;
                     return Ok(metadata_failure(res, e, true));
                 }
                 match self.verify_directory(res, &path, uid, gid, mode) {
@@ -1195,11 +1209,12 @@ impl Engine {
                 }
                 self.fs.check_trusted_parents(&path)?;
                 let mut mutated = false;
-                if let Err(e) = self.fs.chown(&path, uid, gid) {
+                let permit = self.fs.mutation_permit()?;
+                if let Err(e) = self.fs.chown(&permit, &path, uid, gid) {
                     return Ok(metadata_failure(res, e, mutated));
                 }
                 mutated = true;
-                if let Err(e) = self.fs.chmod(&path, mode) {
+                if let Err(e) = self.fs.chmod(&permit, &path, mode) {
                     return Ok(metadata_failure(res, e, mutated));
                 }
                 match self.verify_directory(res, &path, uid, gid, mode) {
@@ -1226,7 +1241,7 @@ impl Engine {
         }
     }
 
-    fn dir_meta(
+    pub(crate) fn dir_meta(
         &mut self,
         res: &FrozenResource,
         vals: &BTreeMap<String, EvalVal>,
@@ -1389,7 +1404,8 @@ impl Engine {
                         return Ok(r);
                     }
                     self.fs.check_trusted_parents(&path)?;
-                    self.fs.remove_symlink(&path)?;
+                    let permit = self.fs.mutation_permit()?;
+                    self.fs.remove_symlink(&permit, &path)?;
                     self.verify_absent(res, &path)
                 }
                 other => Err(SinterError::apply(format!(
@@ -1431,7 +1447,8 @@ impl Engine {
                     return Ok(r);
                 }
                 self.fs.check_trusted_parents(&path)?;
-                self.fs.symlink(&target_val, &path)?;
+                let permit = self.fs.mutation_permit()?;
+                self.fs.symlink(&permit, &target_val, &path)?;
                 match self.verify_link(res, &path, &target_val, link_sensitive) {
                     Ok(v) => {
                         // Required verification mismatch is a failed resource
@@ -1475,7 +1492,9 @@ impl Engine {
                     return Ok(r);
                 }
                 self.fs.check_trusted_parents(&path)?;
-                self.fs.symlink_replace(&target_val, &path, &stat)?;
+                let permit = self.fs.mutation_permit()?;
+                self.fs
+                    .symlink_replace(&permit, &target_val, &path, &stat)?;
                 match self.verify_link(res, &path, &target_val, link_sensitive) {
                     Ok(v) => {
                         // Required verification mismatch is a failed resource
@@ -1748,7 +1767,8 @@ impl Engine {
         req.env.insert("LC_ALL".to_string(), "C.UTF-8".to_string());
         req.env.insert("HOME".to_string(), self.fs.home_env());
 
-        let out = self.fs.exec(&req)?;
+        let permit = self.fs.mutation_permit()?;
+        let out = self.fs.exec(&permit, &req)?;
         let _ = (args_sens, cwd_sens);
         let _ = cwd_sens;
         match out.completion {
@@ -2102,6 +2122,7 @@ impl Engine {
         // attached to the propagated error so it is never discarded by a
         // bare `?` — but the mutation itself never ran, so there is no
         // mutation truth to preserve.
+        let permit = self.fs.mutation_permit()?;
         let out = if self.fs.fault() == Some("package_mutation_dispatch_fail") {
             Err(SinterError::apply(format!(
                 "injected {} {} dispatch failure",
@@ -2109,7 +2130,7 @@ impl Engine {
                 action
             )))
         } else {
-            self.fs.exec(&req)
+            self.fs.exec(&permit, &req)
         };
         // R2-02: the mutation completion state must be classified BEFORE any
         // further command is sent to the target. When the mutation's
@@ -2549,10 +2570,11 @@ impl Engine {
     ) -> Result<DnfSnapshot> {
         let name_disp = if sensitive { "[redacted]" } else { name };
         // 1. Private snapshot directory.
+        let permit = self.fs.mutation_permit()?;
         let mut req = ExecRequest::new("/usr/bin/mktemp");
         req.args = vec!["-d".to_string(), "/var/tmp/sinter-dnf.XXXXXXXX".to_string()];
         req.env = baseline_env(self.fs.home_env());
-        let out = self.fs.exec(&req)?;
+        let out = self.fs.exec(&permit, &req)?;
         // The snapshot path is helper output: it is only interpretable when the
         // whole capture completed and mktemp wrote nothing but the path, and
         // the path must be proven to be Sinter's own private snapshot
@@ -3133,13 +3155,14 @@ impl Engine {
         what: &str,
         fault: &str,
     ) -> Result<Output> {
+        let permit = self.fs.mutation_permit()?;
         let out = if !fault.is_empty() && self.fs.fault() == Some(fault) {
             Err(SinterError::apply(format!(
                 "injected {} dispatch failure",
                 what
             )))
         } else {
-            self.fs.exec(req)
+            self.fs.exec(&permit, req)
         };
         match out {
             Ok(o) => Ok(o),
@@ -3235,10 +3258,14 @@ impl Engine {
         if !is_valid_snapshot_path(snap) {
             return Some("snapshot path is outside the expected private namespace".to_string());
         }
+        let permit = match self.fs.mutation_permit() {
+            Ok(p) => p,
+            Err(_) => return Some("snapshot cleanup refused: no mutation authority".to_string()),
+        };
         let mut req = ExecRequest::new("/usr/bin/rm");
         req.args = vec!["-rf".to_string(), snap.to_string()];
         req.env = baseline_env(self.fs.home_env());
-        match self.fs.exec(&req) {
+        match self.fs.exec(&permit, &req) {
             Ok(out) => match out.completion {
                 Completion::Exited(0) => None,
                 Completion::Exited(c) => Some(format!("rm -rf exited {}", c)),
@@ -3249,7 +3276,7 @@ impl Engine {
         }
     }
 
-    fn observe_package_sensitive(
+    pub(crate) fn observe_package_sensitive(
         &mut self,
         backend: crate::platform::PackageBackend,
         name: &str,
@@ -3410,11 +3437,12 @@ impl Engine {
         // systemctl start/stop/enable/disable can change unit state even when
         // the command exits nonzero (e.g. start transitions inactive -> failed).
         let runit = |e: &mut Self, args: &[&str]| -> Result<()> {
+            let permit = e.fs.mutation_permit()?;
             let mut req = ExecRequest::new("/usr/bin/systemctl");
             req.args = args.iter().map(|s| s.to_string()).collect();
             req.env = baseline_env(e.fs.home_env());
             req.sensitive = sensitive;
-            let out = e.fs.exec(&req)?;
+            let out = e.fs.exec(&permit, &req)?;
             let action = if sensitive {
                 "[redacted]".to_string()
             } else {
@@ -3555,11 +3583,12 @@ impl Engine {
     }
 
     fn stop_and_reset(&mut self, name: &str, sensitive: bool) -> Result<()> {
+        let permit = self.fs.mutation_permit()?;
         let mut req = ExecRequest::new("/usr/bin/systemctl");
         req.args = vec!["stop".to_string(), name.to_string()];
         req.env = baseline_env(self.fs.home_env());
         req.sensitive = sensitive;
-        let out = self.fs.exec(&req)?;
+        let out = self.fs.exec(&permit, &req)?;
         let unit_disp = if sensitive { "[redacted]" } else { name };
         match out.completion {
             Completion::Exited(0) => {}
@@ -3591,7 +3620,7 @@ impl Engine {
         req.args = vec!["reset-failed".to_string(), name.to_string()];
         req.env = baseline_env(self.fs.home_env());
         req.sensitive = sensitive;
-        let reset = match self.fs.exec(&req) {
+        let reset = match self.fs.exec(&permit, &req) {
             Ok(out) => out,
             Err(e) => {
                 // API-level failure before CommandResult: stop already mutated.
@@ -3612,9 +3641,12 @@ impl Engine {
         }
     }
 
-    fn observe_service_sensitive(&mut self, name: &str, sensitive: bool) -> Result<ServiceObs> {
+    pub(crate) fn observe_service_sensitive(
+        &mut self,
+        name: &str,
+        sensitive: bool,
+    ) -> Result<ServiceObs> {
         let out = self.fs.systemctl_show_sensitive(name, sensitive)?;
-        let text = String::from_utf8_lossy(&out.stdout);
         match out.completion {
             Completion::Indeterminate { reason, .. } => {
                 return Err(SinterError::indeterminate(format!(
@@ -3652,18 +3684,46 @@ impl Engine {
                 if sensitive { "[redacted]" } else { name }
             )));
         }
+        // The request asks for exactly three properties, so the answer is
+        // exactly three property records. Extra output makes the capture
+        // ambiguous: it is not silently ignored (IA-01).
+        let text = std::str::from_utf8(&out.stdout).map_err(|_| {
+            SinterError::apply(format!(
+                "service observation for {} captured invalid UTF-8 output{}",
+                if sensitive { "[redacted]" } else { name },
+                if sensitive { " (value redacted)" } else { "" }
+            ))
+        })?;
+        let mut lines = text.lines();
         let mut load_state = String::new();
         let mut active_state = String::new();
         let mut unit_file_state = String::new();
-        for line in text.lines() {
-            if let Some((k, v)) = line.split_once('=') {
-                match k {
-                    "LoadState" => load_state = v.to_string(),
-                    "ActiveState" => active_state = v.to_string(),
-                    "UnitFileState" => unit_file_state = v.to_string(),
-                    _ => {}
+        let mut seen = 0usize;
+        for line in lines.by_ref() {
+            let Some((k, v)) = line.split_once('=') else {
+                return Err(SinterError::apply(format!(
+                    "service observation for {} captured a malformed property record",
+                    if sensitive { "[redacted]" } else { name }
+                )));
+            };
+            match k {
+                "LoadState" if load_state.is_empty() => load_state = v.to_string(),
+                "ActiveState" if active_state.is_empty() => active_state = v.to_string(),
+                "UnitFileState" if unit_file_state.is_empty() => unit_file_state = v.to_string(),
+                _ => {
+                    return Err(SinterError::apply(format!(
+                        "service observation for {} captured an unexpected property record",
+                        if sensitive { "[redacted]" } else { name }
+                    )));
                 }
             }
+            seen += 1;
+        }
+        if seen != 3 {
+            return Err(SinterError::apply(format!(
+                "service observation for {} was incomplete",
+                if sensitive { "[redacted]" } else { name }
+            )));
         }
         if load_state.is_empty()
             || active_state.is_empty()
@@ -3756,11 +3816,12 @@ impl Engine {
         if self.fs.fault() == Some("handler_outer_error") {
             return Err(SinterError::apply("injected handler outer error"));
         }
+        let permit = self.fs.mutation_permit()?;
         let mut req = ExecRequest::new("/usr/bin/systemctl");
         req.args = vec![action.to_string(), name.to_string()];
         req.env = baseline_env(self.fs.home_env());
         req.sensitive = sensitive;
-        let out = self.fs.exec(&req)?;
+        let out = self.fs.exec(&permit, &req)?;
         match out.completion {
             Completion::Indeterminate { .. } => Ok(HandlerOutcomeState::Indeterminate),
             Completion::Signaled(_) => Ok(HandlerOutcomeState::Failed),
@@ -5253,9 +5314,9 @@ impl std::fmt::Display for DnfFetchTool {
 }
 
 #[derive(Debug, Clone)]
-struct ContentSpec {
-    bytes: Option<Vec<u8>>,
-    sensitive: bool,
+pub(crate) struct ContentSpec {
+    pub(crate) bytes: Option<Vec<u8>>,
+    pub(crate) sensitive: bool,
 }
 
 /// The outcome of a file publication attempt, preserving whether a mutation
@@ -5387,10 +5448,10 @@ pub enum PackageState {
     Absent,
 }
 
-struct ServiceObs {
-    load_state: String,
-    active_state: String,
-    unit_file_state: String,
+pub(crate) struct ServiceObs {
+    pub(crate) load_state: String,
+    pub(crate) active_state: String,
+    pub(crate) unit_file_state: String,
 }
 
 fn unchanged_result(res: &FrozenResource, reason: &str) -> ResourceResult {
@@ -5457,7 +5518,7 @@ pub(crate) fn baseline_env(home: String) -> BTreeMap<String, String> {
     env
 }
 
-fn sha256_hex(data: &[u8]) -> String {
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(data);
@@ -5471,17 +5532,21 @@ fn sha256_hex(data: &[u8]) -> String {
 
 /// Classify a dpkg-query status string into a clean package state. Any broken,
 /// half-configured, or otherwise non-clean state is an error (DESIGN §27).
+///
+/// The string must be the exact record `dpkg-query -f=${Status}` emits: it is
+/// never trimmed or normalized by this function, and an empty record is not a
+/// status at all (a real exit-0 answer always carries one). Callers validate
+/// the record framing before reaching this point (RA2-01).
 pub fn classify_dpkg_status(status: &str) -> Result<PackageState> {
-    let s = status.trim();
-    if s.is_empty() {
-        return Ok(PackageState::Absent);
-    }
-    match s {
+    match status {
         "install ok installed" => Ok(PackageState::Installed),
         "deinstall ok config-files"
         | "deinstall ok not-installed"
         | "purge ok not-installed"
         | "purge ok config-files" => Ok(PackageState::Absent),
+        "" => Err(SinterError::apply(
+            "package observation produced an empty status record",
+        )),
         other => Err(SinterError::apply(format!(
             "package is in an unsupported or non-clean state: {}",
             other
@@ -5499,11 +5564,27 @@ mod package_tests {
             classify_dpkg_status("install ok installed").unwrap(),
             PackageState::Installed
         );
-        assert_eq!(classify_dpkg_status("").unwrap(), PackageState::Absent);
         assert_eq!(
             classify_dpkg_status("deinstall ok config-files").unwrap(),
             PackageState::Absent
         );
+    }
+
+    #[test]
+    fn empty_status_is_an_error_not_absence() {
+        // An empty record is not a dpkg answer: it must not be normalized into
+        // a clean absent state (RA2-01).
+        assert!(classify_dpkg_status("").is_err());
+    }
+
+    #[test]
+    fn whitespace_is_not_normalized_into_a_status() {
+        // The record must be the exact bytes dpkg-query emits; surrounding
+        // whitespace is protocol-invalid and must not be trimmed into a
+        // trusted state.
+        assert!(classify_dpkg_status(" install ok installed").is_err());
+        assert!(classify_dpkg_status("install ok installed ").is_err());
+        assert!(classify_dpkg_status("install ok installed\n").is_err());
     }
 
     #[test]

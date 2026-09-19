@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod diff;
 pub mod document;
 pub mod engine;

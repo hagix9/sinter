@@ -1482,6 +1482,13 @@ pub struct FakeTarget {
     /// When true, the snapshot-root `rm -rf` fails (R2-05 cleanup-truth
     /// tests).
     pub snapshot_rm_fails: bool,
+    /// Adversarial observation overrides, keyed by program basename
+    /// (`stat`, `readlink`, `sha256sum`, ...). Each invocation pops the front
+    /// queued result for that program, so a test can feed a truncated,
+    /// malformed, or contradictory capture straight into the production
+    /// observation contract (IA-01 false-PASS regression suite).
+    pub observation_overrides:
+        std::collections::BTreeMap<String, std::collections::VecDeque<Output>>,
 }
 
 /// One enabled dnf repository in the fake model.
@@ -1541,6 +1548,7 @@ impl FakeTarget {
             snapshot_chmod_fails: false,
             snapshot_stat_fails: false,
             snapshot_rm_fails: false,
+            observation_overrides: Default::default(),
         }
     }
 
@@ -1591,6 +1599,7 @@ impl FakeTarget {
             snapshot_chmod_fails: false,
             snapshot_stat_fails: false,
             snapshot_rm_fails: false,
+            observation_overrides: Default::default(),
         }
     }
 
@@ -1627,6 +1636,7 @@ impl FakeTarget {
             snapshot_chmod_fails: false,
             snapshot_stat_fails: false,
             snapshot_rm_fails: false,
+            observation_overrides: Default::default(),
         }
     }
 
@@ -1666,6 +1676,7 @@ impl FakeTarget {
             snapshot_chmod_fails: false,
             snapshot_stat_fails: false,
             snapshot_rm_fails: false,
+            observation_overrides: Default::default(),
         }
     }
 
@@ -1699,6 +1710,7 @@ impl FakeTarget {
             snapshot_chmod_fails: false,
             snapshot_stat_fails: false,
             snapshot_rm_fails: false,
+            observation_overrides: Default::default(),
         }
     }
 
@@ -1732,6 +1744,17 @@ impl FakeTarget {
                 state.2.to_string(),
             ),
         );
+        self
+    }
+
+    /// Queue adversarial captures for an observation program (`stat`,
+    /// `readlink`, `sha256sum`, ...). Each queued result is served verbatim,
+    /// in order, to the next invocation of that program, so a test can drive
+    /// a truncated, malformed, or contradictory capture through the real
+    /// observation contract instead of a mock of it (IA-01).
+    pub fn with_observations(mut self, program: &str, results: Vec<Output>) -> Self {
+        self.observation_overrides
+            .insert(program.to_string(), results.into());
         self
     }
 }
@@ -1782,6 +1805,13 @@ impl FakeExecutor {
             .next()
             .unwrap_or(&req.program)
             .to_string();
+        // An adversarial override for an observation program wins over the
+        // modeled behavior; the queued capture is served verbatim.
+        if let Some(o) = self.target.observation_overrides.get_mut(&prog) {
+            if let Some(o) = o.pop_front() {
+                return o;
+            }
+        }
         match prog.as_str() {
             "test" => self.run_test(&req.args),
             "hostname" => Self::exited(0, format!("{}\n", self.target.hostname), String::new()),
@@ -1966,11 +1996,12 @@ impl FakeExecutor {
         if let Some(o) = self.next_query_result() {
             return o;
         }
-        // rpm -q -- <name>: reference rpm 4.16 prints the absent marker to
-        // stdout (not stderr) and exits 1.
+        // The fixed `--queryformat %{NAME}` contract: exit 0 with exactly the
+        // package NAME on stdout when installed; otherwise reference rpm 4.16
+        // prints the absent marker to stdout (not stderr) and exits 1.
         let name = args.last().cloned().unwrap_or_default();
         if self.target.packages.contains(&name) {
-            Self::exited(0, format!("{}-1.0-1.el9.x86_64\n", name), String::new())
+            Self::exited(0, name, String::new())
         } else {
             Self::exited(
                 1,
@@ -1986,9 +2017,17 @@ impl FakeExecutor {
         }
         let name = args.last().cloned().unwrap_or_default();
         if self.target.packages.contains(&name) {
+            // Reference dpkg 1.21/1.22: one status record on stdout, nothing
+            // on stderr, exit 0.
             Self::exited(0, "install ok installed".to_string(), String::new())
         } else {
-            Self::exited(1, String::new(), "no packages found".to_string())
+            // Reference dpkg: the absence answer is exactly one diagnostic
+            // line on stderr naming the package, with stdout empty, exit 1.
+            Self::exited(
+                1,
+                String::new(),
+                format!("dpkg-query: no packages found matching {}\n", name),
+            )
         }
     }
 

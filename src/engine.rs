@@ -705,7 +705,9 @@ fn run_text(ex: &mut Executor, program: &str, args: &[&str]) -> Result<String> {
 
 /// Deterministic execution order: dependencies first, ties broken by
 /// declaration order (Kahn's algorithm with a min-heap on declaration index).
-fn execution_order(model: &Model) -> Result<Vec<usize>> {
+/// Also used by the Audit runner to preserve dependency ordering in reports
+/// without inheriting Apply's gating.
+pub(crate) fn execution_order(model: &Model) -> Result<Vec<usize>> {
     let index: BTreeMap<&str, usize> = model
         .resources
         .iter()

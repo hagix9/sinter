@@ -567,3 +567,45 @@ pub fn lock_service() -> ServiceGuard {
     assert_eq!(rc, 0, "could not acquire service lock");
     ServiceGuard { file }
 }
+
+/// A cross-process advisory lock protecting tests that mutate the shared
+/// apt/dpkg package database. Real `apt-get` invocations take
+/// `/var/lib/dpkg/lock-frontend`: two such tests running in parallel (within
+/// one test binary or across binaries) contend on that lock, and apt then
+/// fails the loser. This is test infrastructure only (RA2-02) — it serializes
+/// the tests and never alters product behavior.
+pub struct PackageDatabaseGuard {
+    file: std::fs::File,
+}
+
+impl Drop for PackageDatabaseGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.file), libc::LOCK_UN);
+        }
+    }
+}
+
+/// Acquire the shared apt/dpkg mutation lock, blocking until available.
+///
+/// The guard must be held for the *whole* critical section: every real
+/// apt-get invocation a test performs — pre-test `apt-get remove` cleanup,
+/// the install/remove mutation itself, and post-test cleanup — takes the dpkg
+/// frontend lock, so the advisory guard has to outlive all of them. Acquire it
+/// first, before any apt-get call, and let it drop only at the end of the
+/// test. Do not acquire the service lock while holding this one in reverse
+/// order elsewhere (lock ordering is package-database, then service).
+pub fn lock_package_database() -> PackageDatabaseGuard {
+    use std::os::fd::AsRawFd;
+    let path = std::env::temp_dir().join(".sinter-test-package-db.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .expect("could not open package database lock file");
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    assert_eq!(rc, 0, "could not acquire package database lock");
+    PackageDatabaseGuard { file }
+}
