@@ -2394,3 +2394,270 @@ fn audit_sensitive_package_observation_error_does_not_leak() {
         text
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 1C: CLI-facing exit-code contract and deterministic public output
+// ---------------------------------------------------------------------------
+
+fn audit_cli_text(report: &AuditReport) -> String {
+    let mut buf = Vec::new();
+    sinter::output::render_audit(
+        report,
+        &sinter::output::RenderOptions {
+            verbose: false,
+            format: sinter::output::OutputFormat::Text,
+        },
+        &mut buf,
+    )
+    .unwrap();
+    String::from_utf8(buf).unwrap()
+}
+
+fn audit_cli_json(report: &AuditReport) -> serde_json::Value {
+    let mut buf = Vec::new();
+    sinter::output::render_audit(
+        report,
+        &sinter::output::RenderOptions {
+            verbose: false,
+            format: sinter::output::OutputFormat::Json,
+        },
+        &mut buf,
+    )
+    .unwrap();
+    serde_json::from_slice(&buf).expect("audit output must be valid JSON")
+}
+
+/// A recipe with two plain file resources plus a command resource, so a
+/// single recipe can produce Compliant/Drift/Error/NotAuditable mixes.
+const TWO_FILES_AND_CMD: &str = "version: 1\nresources:\n  - id: f1\n    type: file\n    with:\n      path: /opt/f1\n      content: hello\n  - id: f2\n    type: file\n    with:\n      path: /opt/f2\n      content: hello\n  - id: cmd\n    type: command\n    with:\n      program: /bin/true\n";
+
+fn two_files_audit(stats: Vec<Output>, shas: Vec<Output>) -> AuditReport {
+    let dir = trusted_root("audit-1c-exit");
+    let recipe = write_recipe(&dir, "r.yaml", TWO_FILES_AND_CMD);
+    let fake = FakeTarget::ubuntu2404()
+        .with_observations("stat", stats)
+        .with_observations("sha256sum", shas);
+    audit_fake(&recipe, fake)
+}
+
+#[test]
+fn audit_exit_code_compliant_is_zero() {
+    let r = two_files_audit(
+        vec![
+            exited(0, &format!("{}\n", STAT_REGULAR), ""),
+            exited(0, &format!("{}\n", STAT_REGULAR), ""),
+        ],
+        vec![
+            exited(0, &format!("{}  /opt/f1\n", sha256_of("hello")), ""),
+            exited(0, &format!("{}  /opt/f2\n", sha256_of("hello")), ""),
+        ],
+    );
+    assert_eq!(afind(&r, "f1").status, AuditResourceStatus::Compliant);
+    assert_eq!(afind(&r, "cmd").status, AuditResourceStatus::NotAuditable);
+    assert_eq!(r.summary.not_auditable, 1);
+    assert_eq!(r.aggregate_label(), "no_drift");
+    assert_eq!(r.exit_code(), 0);
+}
+
+#[test]
+fn audit_exit_code_not_applicable_and_not_auditable_only_is_zero() {
+    let dir = trusted_root("audit-1c-na");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nresources:\n  - id: skip\n    type: package\n    with:\n      name: nano\n      state: present\n    when: \"false\"\n  - id: cmd\n    type: command\n    with:\n      program: /bin/true\n",
+    );
+    let r = audit_fake(&recipe, FakeTarget::ubuntu2404());
+    assert_eq!(afind(&r, "skip").status, AuditResourceStatus::NotApplicable);
+    assert_eq!(afind(&r, "cmd").status, AuditResourceStatus::NotAuditable);
+    // Neither NOT_APPLICABLE nor NOT_AUDITABLE is drift.
+    assert_eq!(r.exit_code(), 0);
+}
+
+#[test]
+fn audit_exit_code_drift_is_seven() {
+    let r = two_files_audit(
+        vec![
+            exited(0, &format!("{}\n", STAT_REGULAR), ""),
+            exited(0, &format!("{}\n", STAT_REGULAR), ""),
+        ],
+        vec![
+            exited(0, &format!("{}  /opt/f1\n", sha256_of("other")), ""),
+            exited(0, &format!("{}  /opt/f2\n", sha256_of("hello")), ""),
+        ],
+    );
+    assert_eq!(afind(&r, "f1").status, AuditResourceStatus::Drift);
+    assert_eq!(r.aggregate_label(), "drift");
+    assert_eq!(r.exit_code(), 7);
+}
+
+#[test]
+fn audit_exit_code_error_dominates_drift() {
+    // f1 drifts, f2's digest observation fails: ERROR must dominate DRIFT.
+    let r = two_files_audit(
+        vec![
+            exited(0, &format!("{}\n", STAT_REGULAR), ""),
+            exited(0, &format!("{}\n", STAT_REGULAR), ""),
+        ],
+        vec![
+            exited(0, &format!("{}  /opt/f1\n", sha256_of("other")), ""),
+            exited(1, "", "sha256sum: /opt/f2: Permission denied"),
+        ],
+    );
+    assert_eq!(afind(&r, "f1").status, AuditResourceStatus::Drift);
+    assert_eq!(afind(&r, "f2").status, AuditResourceStatus::Error);
+    assert_eq!(r.aggregate_label(), "indeterminate");
+    assert_eq!(r.exit_code(), 6);
+}
+
+#[test]
+fn audit_text_output_is_deterministic_and_shows_all_statuses() {
+    let r = two_files_audit(
+        vec![
+            exited(0, &format!("{}\n", STAT_REGULAR), ""),
+            exited(0, &format!("{}\n", STAT_REGULAR), ""),
+        ],
+        vec![
+            exited(0, &format!("{}  /opt/f1\n", sha256_of("other")), ""),
+            exited(0, &format!("{}  /opt/f2\n", sha256_of("hello")), ""),
+        ],
+    );
+    let text = audit_cli_text(&r);
+    let text2 = audit_cli_text(&r);
+    assert_eq!(text, text2, "audit text output must be deterministic");
+    assert!(text.starts_with("== Sinter AUDIT ==\n"), "{}", text);
+    assert!(text.contains("DRIFT f1 [file]"), "{}", text);
+    assert!(text.contains("PASS f2 [file]"), "{}", text);
+    assert!(text.contains("NOT_AUDITABLE cmd [command]"), "{}", text);
+    // Resource order follows dependency/execution order (which coincides
+    // with declaration order here because no dependencies are declared).
+    assert!(
+        text.find("f1").unwrap() < text.find("f2").unwrap()
+            && text.find("f2").unwrap() < text.find("cmd").unwrap(),
+        "{}",
+        text
+    );
+    assert!(
+        text.contains(
+            "summary: 3 total, 1 compliant, 1 drifted, 1 not_auditable, 0 not_applicable, 0 errors"
+        ),
+        "{}",
+        text
+    );
+    assert!(text.contains("status: drift"), "{}", text);
+    // No raw command instrumentation reaches user output.
+    assert!(!text.contains("sha256sum"), "{}", text);
+}
+
+#[test]
+fn audit_json_output_structure() {
+    let r = two_files_audit(
+        vec![
+            exited(0, &format!("{}\n", STAT_REGULAR), ""),
+            exited(0, &format!("{}\n", STAT_REGULAR), ""),
+        ],
+        vec![
+            exited(0, &format!("{}  /opt/f1\n", sha256_of("other")), ""),
+            exited(0, &format!("{}  /opt/f2\n", sha256_of("hello")), ""),
+        ],
+    );
+    let v = audit_cli_json(&r);
+    assert_eq!(v["mode"], "audit");
+    assert_eq!(v["status"], "drift");
+    let s = &v["summary"];
+    assert_eq!(s["total"], 3);
+    assert_eq!(s["compliant"], 1);
+    assert_eq!(s["drifted"], 1);
+    assert_eq!(s["not_auditable"], 1);
+    assert_eq!(s["not_applicable"], 0);
+    assert_eq!(s["errors"], 0);
+    let rs = v["resources"].as_array().unwrap();
+    assert_eq!(rs.len(), 3);
+    assert_eq!(rs[0]["id"], "f1");
+    assert_eq!(rs[0]["type"], "file");
+    assert_eq!(rs[0]["status"], "drift");
+    assert_eq!(rs[0]["sensitive"], false);
+    assert!(rs[0]["loop_index"].is_null());
+    assert_eq!(rs[0]["details"][0]["dimension"], "content");
+    assert_eq!(rs[1]["id"], "f2");
+    assert_eq!(rs[1]["status"], "compliant");
+    assert_eq!(rs[2]["id"], "cmd");
+    assert_eq!(rs[2]["status"], "not_auditable");
+    // Deterministic: rendering twice yields identical documents.
+    assert_eq!(v, audit_cli_json(&r));
+}
+
+#[test]
+fn audit_cli_outputs_never_leak_sensitive_values() {
+    let secret = "SINTER_1C_SECRET_c9e2";
+    let dir = trusted_root("audit-1c-sens");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: s\n    type: file\n    sensitive: true\n    with:\n      path: /opt/secret\n      content: {}\n",
+            secret
+        ),
+    );
+    let fake = FakeTarget::ubuntu2404()
+        .with_observations("stat", vec![exited(0, &format!("{}\n", STAT_REGULAR), "")])
+        .with_observations(
+            "sha256sum",
+            vec![exited(
+                0,
+                &format!("{}  /opt/secret\n", sha256_of("different")),
+                "",
+            )],
+        );
+    let r = audit_fake(&recipe, fake);
+    assert_eq!(afind(&r, "s").status, AuditResourceStatus::Drift);
+    let text = audit_cli_text(&r);
+    let json = audit_cli_json(&r).to_string();
+    for out in [&text, &json] {
+        assert_eq!(out.matches(secret).count(), 0, "secret leaked:\n{}", out);
+    }
+    assert!(text.contains("details: redacted"), "{}", text);
+    assert_eq!(json.contains("[redacted]"), true, "{}", json);
+}
+
+#[test]
+fn audit_output_order_is_deterministic_dependency_order() {
+    // P1C-01 regression: `consumer` is declared before `producer` but depends
+    // on it — audit reports dependency/execution order, not declaration
+    // order, deterministically.
+    let dir = trusted_root("audit-1c-dep-order");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nresources:\n  - id: consumer\n    type: file\n    with:\n      path: /opt/dep-c\n      content: hello\n    depends_on: [producer]\n  - id: producer\n    type: file\n    with:\n      path: /opt/dep-p\n      content: hello\n",
+    );
+    let run = || {
+        let fake = FakeTarget::ubuntu2404()
+            .with_observations(
+                "stat",
+                vec![
+                    exited(0, &format!("{}\n", STAT_REGULAR), ""),
+                    exited(0, &format!("{}\n", STAT_REGULAR), ""),
+                ],
+            )
+            .with_observations(
+                "sha256sum",
+                vec![
+                    exited(0, &format!("{}  /opt/dep-p\n", sha256_of("hello")), ""),
+                    exited(0, &format!("{}  /opt/dep-c\n", sha256_of("hello")), ""),
+                ],
+            );
+        audit_fake(&recipe, fake)
+            .resources
+            .iter()
+            .map(|r| r.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let first = run();
+    assert_eq!(first, run(), "audit result order must be deterministic");
+    assert_eq!(
+        first,
+        vec!["producer".to_string(), "consumer".to_string()],
+        "dependency must be reported before its dependent"
+    );
+}

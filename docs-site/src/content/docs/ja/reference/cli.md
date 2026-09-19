@@ -1,6 +1,6 @@
 ---
 title: CLI リファレンス
-description: sinter validate、plan、apply — フラグと終了コード。
+description: sinter validate、plan、apply、audit — フラグと終了コード。
 ---
 
 ```text
@@ -10,6 +10,7 @@ Commands:
   validate  Validate a recipe without connecting to a target
   plan      Preview changes against a target without mutating it
   apply     Apply a recipe to a target
+  audit     Audit whether a target already satisfies a recipe. Read-only.
 ```
 
 `sinter --version` はバージョンを表示します（例: `sinter 0.2.1`）。
@@ -41,7 +42,23 @@ sinter apply <RECIPE> [target options]
 状態を再観測し、変更を適用し、結果を検証し、通知されたハンドラを
 実行します。
 
-## ターゲットオプション（plan / apply）
+## audit
+
+```sh
+sinter audit <RECIPE> [target options] [--format text|json]
+```
+
+ターゲットがすでにレシピを満たしているかを検証します。audit は
+完全に読み取り専用です：`plan` と同じ観測経路を使い、変更は一切
+行わず、`command` リソースを実行せず、ハンドラも実行しません。
+
+レシピが唯一の desired-state の権威です — audit はレシピが記述する
+状態を検査し、別途のポリシーベースラインには依存しません。
+`/etc/ssh/sshd_config` を管理するレシピは `file`/`template`
+リソースを通じて監査され、sshd の稼働状態は `service` リソースで
+監査されます。SSH 固有の監査ロジックはありません。
+
+## ターゲットオプション（plan / apply / audit）
 
 | フラグ | デフォルト | 説明 |
 |--------|-----------|------|
@@ -100,16 +117,58 @@ CHANGED  motd [template] known/normal
 ハンドラは常に pending として報告されます。plan がハンドラを実行することは
 ありません。
 
+## audit の出力を読む
+
+`audit` は `== Sinter AUDIT ==` で始まります。各リソースは決定的な
+依存関係／実行順（依存先のリソースが先に報告される）で 1 行の
+ステータスを出力し、該当する場合は drift の詳細や理由を出力します:
+
+```text
+DRIFT  motd [file]
+    content: observed=[redacted] desired=[redacted]
+```
+
+コンテンツ関連の drift 詳細は保守的に redacted されます：audit は
+コンテンツが「異なる」ことだけを報告し、内容やハッシュは出力しません。
+
+| ステータス | 意味 |
+|-----------|------|
+| `PASS` | 観測された状態が目的の状態を満たしています。 |
+| `DRIFT` | 観測により、目的の状態を満たしていないことが確定しました。 |
+| `NOT_AUDITABLE` | audit が決して行わない操作を伴わないと検証できないリソース — `command` リソースは常に `NOT_AUDITABLE` で、実行されません。 |
+| `NOT_APPLICABLE` | リソースの `when` 条件が false と評価されました。 |
+| `ERROR` | 必要な観測を完了できませんでした。drift としては報告されません。 |
+
+実行の末尾には `summary:` 行（total、compliant、drifted、
+not_auditable、not_applicable、errors）と `status:` 行
+（`no_drift`、`drift`、`indeterminate`）が出力されます。
+
+終了コード `0` は「drift も観測エラーも検出されなかった」ことを
+意味します — すべてのリソースが検証されたことを意味するわけでは
+**ありません**。`NOT_AUDITABLE` は出力と summary に表示され続けるため、
+未検証のリソースが暗黙に PASS になることはありません。
+
+`--format json` では、audit は `{"mode", "status", "summary",
+"resources"}` を出力します。リソースごとの `status` は `compliant`、
+`drift`、`not_auditable`、`not_applicable`、`error` のいずれかです。
+この JSON 構造は意図的に最小限であり、v0.x では安定・バージョン管理
+されたスキーマでは**ありません**。
+
+sensitive リソースは生の値を一切出力しません：drift の詳細は
+`redacted` と表示され、シークレットは text、JSON、reason、stderr の
+いずれにも現れません。
+
 ## 終了コード
 
 | コード | 意味 |
 |--------|------|
-| 0 | 実行が完了（plan の差分があっても 0 で終了） |
+| 0 | 実行が完了（plan の差分があっても 0 で終了。audit は drift もエラーもなし） |
 | 2 | バリデーション/スキーマエラー |
 | 3 | ターゲット接続/capability/セキュリティエラー |
 | 4 | plan を安全に完了できなかった |
 | 5 | apply が失敗 |
-| 6 | apply が indeterminate になった |
+| 6 | indeterminate — apply が indeterminate、または audit で 1 件以上の `ERROR` が記録された（エラーは drift より優先） |
+| 7 | audit が drift を検出（観測エラーなし） |
 
 ## SSH アイデンティティのルール
 

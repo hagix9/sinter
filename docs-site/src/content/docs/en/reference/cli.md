@@ -1,6 +1,6 @@
 ---
 title: CLI Reference
-description: sinter validate, plan, apply — flags and exit codes.
+description: sinter validate, plan, apply, audit — flags and exit codes.
 ---
 
 ```text
@@ -10,6 +10,7 @@ Commands:
   validate  Validate a recipe without connecting to a target
   plan      Preview changes against a target without mutating it
   apply     Apply a recipe to a target
+  audit     Audit whether a target already satisfies a recipe. Read-only.
 ```
 
 `sinter --version` prints the version (e.g. `sinter 0.2.1`).
@@ -41,7 +42,23 @@ sinter apply <RECIPE> [target options]
 Re-observes state, applies changes, verifies outcomes, runs notified
 handlers.
 
-## Target options (plan / apply)
+## audit
+
+```sh
+sinter audit <RECIPE> [target options] [--format text|json]
+```
+
+Verifies whether the target already satisfies the recipe. Audit is strictly
+read-only: it uses the same observation paths as `plan`, never mutates,
+never executes `command` resources, and never runs handlers.
+
+The recipe is the sole desired-state authority — audit checks the state your
+recipe describes, not a separate policy baseline. A recipe that manages
+`/etc/ssh/sshd_config` is audited through its `file`/`template` resource
+declarations; sshd run state is audited through the `service` resource.
+There is no SSH-specific audit logic.
+
+## Target options (plan / apply / audit)
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -100,16 +117,55 @@ Quick answers:
 notified handlers are always reported as pending — a plan never executes
 handlers.
 
+## Reading audit output
+
+An `audit` starts with `== Sinter AUDIT ==`. Each resource prints one status
+line in deterministic dependency/execution order — a resource's dependencies
+are reported before it — plus drift details or a reason where applicable:
+
+```text
+DRIFT  motd [file]
+    content: observed=[redacted] desired=[redacted]
+```
+
+Content-related drift detail is conservatively redacted: audit reports
+*that* content differs, never the content or its hashes.
+
+| Status | Meaning |
+|--------|---------|
+| `PASS` | Observed state satisfies the desired state. |
+| `DRIFT` | Observation established the desired state is not satisfied. |
+| `NOT_AUDITABLE` | Cannot be verified without an action audit never performs — `command` resources are always `NOT_AUDITABLE` and are never executed. |
+| `NOT_APPLICABLE` | The resource's `when` condition evaluated to false. |
+| `ERROR` | A required observation could not be completed. Never reported as drift. |
+
+The run ends with a `summary:` line (total, compliant, drifted,
+not_auditable, not_applicable, errors) and a `status:` line
+(`no_drift`, `drift`, or `indeterminate`).
+
+Exit code `0` means "no detected drift and no observation errors" — it does
+**not** mean every resource was verified. `NOT_AUDITABLE` stays visible in
+the output and summary so unverified resources cannot silently pass.
+
+With `--format json`, audit emits `{"mode", "status", "summary",
+"resources"}` where per-resource `status` is one of `compliant`, `drift`,
+`not_auditable`, `not_applicable`, `error`. This JSON shape is intentionally
+minimal and is **not** a stable, versioned schema in v0.x.
+
+Sensitive resources never print raw values: drift details render as
+`redacted` and secrets never appear in text, JSON, reasons, or stderr.
+
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
-| 0 | Invocation completed (plan differences still exit 0) |
+| 0 | Invocation completed (plan differences still exit 0; audit found no drift and no errors) |
 | 2 | Validation/schema error |
 | 3 | Target connection/capability/security error |
 | 4 | Plan could not be completed safely |
 | 5 | Apply failed |
-| 6 | Apply became indeterminate |
+| 6 | Indeterminate — apply became indeterminate, or audit recorded one or more `ERROR` results (errors dominate drift) |
+| 7 | Audit detected drift with no observation errors |
 
 ## SSH identity rules
 

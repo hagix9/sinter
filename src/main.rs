@@ -1,9 +1,10 @@
 use clap::{Args, Parser, Subcommand};
+use sinter::audit::run_audit;
 use sinter::diff::sanitize_line;
 use sinter::engine::{Engine, Mode, RunOptions, SshSpec, TargetSpec};
 use sinter::error::{ErrorKind, SinterError};
 use sinter::model::load_model;
-use sinter::output::{render_apply, render_plan, OutputFormat, RenderOptions};
+use sinter::output::{render_apply, render_audit, render_plan, OutputFormat, RenderOptions};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -26,6 +27,8 @@ enum Command {
     Plan(TargetArgs),
     /// Apply a recipe to a target.
     Apply(TargetArgs),
+    /// Audit whether a target already satisfies a recipe. Read-only.
+    Audit(TargetArgs),
 }
 
 #[derive(Args, Debug)]
@@ -129,6 +132,24 @@ fn run(cli: Cli) -> Result<u8, SinterError> {
             let mut lock = stdout.lock();
             render_apply(&report, &ro, &mut lock).map_err(io_error)?;
             Ok(report_status_code(&report.status))
+        }
+        Command::Audit(a) => {
+            let format = parse_format(&a.format)?;
+            let model = load_model(&a.recipe)?;
+            // Plan-mode construction yields a read-only TargetFs; run_audit
+            // additionally refuses any engine that can produce a mutation
+            // permit, so audit is mutation-free by construction twice over.
+            let opts = build_opts(&a, Mode::Plan)?;
+            let engine = Engine::new(model, opts)?;
+            let report = run_audit(engine)?;
+            let ro = RenderOptions {
+                verbose: a.verbose,
+                format,
+            };
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
+            render_audit(&report, &ro, &mut lock).map_err(io_error)?;
+            Ok(report.exit_code())
         }
     }
 }

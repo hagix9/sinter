@@ -365,3 +365,239 @@ fn nonsensitive_interpolation_error_stays_descriptive() {
     assert!(err.contains("BARETOKEN"), "{}", err);
     assert!(!err.contains("redacted"), "{}", err);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 1C: `sinter audit` CLI
+// ---------------------------------------------------------------------------
+
+#[test]
+fn audit_compliant_exits_zero() {
+    let dir = trusted_root("cli-audit-ok");
+    let target = dir.join("f");
+    std::fs::write(&target, "x").unwrap();
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: f\n    type: file\n    with:\n      path: {}\n      content: x\n",
+            target.display()
+        ),
+    );
+    let out = Command::new(bin())
+        .args(["audit", recipe.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("== Sinter AUDIT =="), "{}", stdout);
+    assert!(stdout.contains("PASS f [file]"), "{}", stdout);
+    assert!(stdout.contains("status: no_drift"), "{}", stdout);
+}
+
+#[test]
+fn audit_drift_exits_seven() {
+    let dir = trusted_root("cli-audit-drift");
+    let target = dir.join("f");
+    std::fs::write(&target, "other").unwrap();
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: f\n    type: file\n    with:\n      path: {}\n      content: x\n",
+            target.display()
+        ),
+    );
+    let out = Command::new(bin())
+        .args(["audit", recipe.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(7), "{:?}", out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("DRIFT f [file]"), "{}", stdout);
+    assert!(stdout.contains("status: drift"), "{}", stdout);
+}
+
+#[test]
+fn audit_observation_error_exits_six_and_dominates_drift() {
+    // A drifted file plus a template that fails to render: error dominates.
+    let dir = trusted_root("cli-audit-err");
+    write_recipe(&dir, "t.tmpl", "value={{ vars.nope }}\n");
+    let target = dir.join("f");
+    std::fs::write(&target, "other").unwrap();
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: f\n    type: file\n    with:\n      path: {}\n      content: x\n  - id: t\n    type: template\n    with:\n      path: {}/out\n      source: t.tmpl\n",
+            target.display(),
+            dir.display()
+        ),
+    );
+    let out = Command::new(bin())
+        .args(["audit", recipe.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(6), "{:?}", out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("ERROR t [template]"), "{}", stdout);
+    assert!(stdout.contains("status: indeterminate"), "{}", stdout);
+}
+
+#[test]
+fn audit_not_auditable_exits_zero_and_stays_visible() {
+    let dir = trusted_root("cli-audit-na");
+    let marker = dir.join("sentinel-mutated");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: c\n    type: command\n    with:\n      program: /bin/sh\n      args: [\"-c\", \"touch {}\"]\n",
+            marker.display()
+        ),
+    );
+    let out = Command::new(bin())
+        .args(["audit", recipe.to_str().unwrap()])
+        .output()
+        .unwrap();
+    // NOT_AUDITABLE alone is not drift, but must stay visible.
+    assert_eq!(out.status.code(), Some(0), "{:?}", out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("NOT_AUDITABLE c [command]"), "{}", stdout);
+    assert!(stdout.contains("1 not_auditable"), "{}", stdout);
+    // The command must never have run.
+    assert!(!marker.exists());
+}
+
+#[test]
+fn audit_never_mutates_desired_state() {
+    // Desired file is absent on the target: audit must report DRIFT and
+    // leave the filesystem untouched.
+    let dir = trusted_root("cli-audit-ro");
+    let target = dir.join("must-not-be-created");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: f\n    type: file\n    with:\n      path: {}\n      content: x\n",
+            target.display()
+        ),
+    );
+    let out = Command::new(bin())
+        .args(["audit", recipe.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(7), "{:?}", out);
+    assert!(!target.exists(), "audit created the desired file");
+}
+
+#[test]
+fn audit_json_output_is_machine_readable() {
+    let dir = trusted_root("cli-audit-json");
+    let target = dir.join("f");
+    std::fs::write(&target, "other").unwrap();
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: f\n    type: file\n    with:\n      path: {}\n      content: x\n",
+            target.display()
+        ),
+    );
+    let out = Command::new(bin())
+        .args(["audit", recipe.to_str().unwrap(), "--format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(7), "{:?}", out);
+    let v: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).expect("valid json");
+    assert_eq!(v["mode"], "audit");
+    assert_eq!(v["status"], "drift");
+    assert_eq!(v["summary"]["drifted"], 1);
+    assert_eq!(v["summary"]["errors"], 0);
+    assert_eq!(v["resources"][0]["id"], "f");
+    assert_eq!(v["resources"][0]["status"], "drift");
+}
+
+#[test]
+fn audit_schema_and_connection_errors_keep_existing_codes() {
+    let dir = trusted_root("cli-audit-errs");
+    let bad = write_recipe(&dir, "bad.yaml", "version: 2\n");
+    let out = Command::new(bin())
+        .args(["audit", bad.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+
+    let good = write_recipe(
+        &dir,
+        "good.yaml",
+        "version: 1\nresources:\n  - id: c\n    type: command\n    with:\n      program: /bin/true\n",
+    );
+    let known = dir.join("kh");
+    std::fs::write(&known, "").unwrap();
+    let out = Command::new(bin())
+        .args([
+            "audit",
+            good.to_str().unwrap(),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "1",
+            "--user",
+            "nobody",
+            "--known-hosts",
+            known.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{:?}", out);
+}
+
+#[test]
+fn audit_sensitive_values_never_appear_in_output() {
+    let dir = trusted_root("cli-audit-sens");
+    let target = dir.join("secret");
+    std::fs::write(&target, "old-secret-content").unwrap();
+    let secret = "AUDIT-SUPER-SECRET-6789";
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            r#"version: 1
+vars:
+  token:
+    value: {secret}
+    sensitive: true
+resources:
+  - id: f
+    type: file
+    sensitive: true
+    with:
+      path: {p}
+      content: "token={{{{ vars.token }}}}"
+"#,
+            secret = secret,
+            p = target.display()
+        ),
+    );
+    for args in [
+        vec!["audit", recipe.to_str().unwrap()],
+        vec!["audit", recipe.to_str().unwrap(), "--verbose"],
+        vec!["audit", recipe.to_str().unwrap(), "--format", "json"],
+    ] {
+        let out = Command::new(bin()).args(&args).output().unwrap();
+        assert_eq!(out.status.code(), Some(7), "{:?}", args);
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !combined.contains(secret),
+            "secret leaked in {:?}: {}",
+            args,
+            combined
+        );
+        assert!(!combined.contains("old-secret-content"));
+    }
+}

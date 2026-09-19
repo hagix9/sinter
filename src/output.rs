@@ -1,3 +1,4 @@
+use crate::audit::AuditReport;
 use crate::diff::sanitize_line;
 use crate::engine::{AggregateStatus, RunReport};
 use crate::result::DiffBody;
@@ -35,6 +36,79 @@ pub fn render_apply(
         OutputFormat::Text => render_text(report, opts, "APPLY", out),
         OutputFormat::Json => render_json(report, "apply", out),
     }
+}
+
+/// Render an Audit report. The text form is [`AuditReport::render_text`]
+/// with every line sanitized before it reaches the terminal; the JSON form is
+/// an explicitly built, minimal machine-readable document — no `Serialize` is
+/// derived on the internal audit model, so it stays free to evolve.
+pub fn render_audit(
+    report: &AuditReport,
+    opts: &RenderOptions,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    match opts.format {
+        OutputFormat::Text => {
+            for line in report.render_text().lines() {
+                writeln!(out, "{}", sanitize_line(line))?;
+            }
+            Ok(())
+        }
+        OutputFormat::Json => render_audit_json(report, out),
+    }
+}
+
+fn render_audit_json(report: &AuditReport, out: &mut dyn Write) -> std::io::Result<()> {
+    use serde_json::json;
+    let resources: Vec<serde_json::Value> = report
+        .resources
+        .iter()
+        .map(|r| {
+            let details: Vec<serde_json::Value> = r
+                .details
+                .iter()
+                .map(|d| {
+                    json!({
+                        "dimension": d.dimension,
+                        "observed": d.observed,
+                        "desired": d.desired,
+                    })
+                })
+                .collect();
+            json!({
+                "id": r.id,
+                "type": r.type_,
+                "origin": r.origin,
+                "status": match r.status {
+                    crate::audit::AuditResourceStatus::Compliant => "compliant",
+                    crate::audit::AuditResourceStatus::Drift => "drift",
+                    crate::audit::AuditResourceStatus::NotAuditable => "not_auditable",
+                    crate::audit::AuditResourceStatus::NotApplicable => "not_applicable",
+                    crate::audit::AuditResourceStatus::Error => "error",
+                },
+                "sensitive": r.sensitive,
+                "loop_index": r.loop_index,
+                "reason": r.reason,
+                "details": details,
+            })
+        })
+        .collect();
+    let s = &report.summary;
+    let doc = json!({
+        "mode": "audit",
+        "status": report.aggregate_label(),
+        "summary": {
+            "total": s.total,
+            "compliant": s.compliant,
+            "drifted": s.drifted,
+            "not_auditable": s.not_auditable,
+            "not_applicable": s.not_applicable,
+            "errors": s.errors,
+        },
+        "resources": resources,
+    });
+    writeln!(out, "{}", serde_json::to_string_pretty(&doc).unwrap())?;
+    Ok(())
 }
 
 fn render_text(

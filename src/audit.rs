@@ -187,8 +187,8 @@ impl AuditSummary {
     }
 }
 
-/// An internal Audit report. Not a public serialized schema: no `Serialize`
-/// is derived and no JSON compatibility is promised yet.
+/// An Audit report. The JSON form is built explicitly by the output layer
+/// (no `Serialize` is derived here), so this structure stays free to evolve.
 #[derive(Debug, Clone)]
 pub struct AuditReport {
     pub resources: Vec<AuditResourceResult>,
@@ -199,8 +199,8 @@ pub struct AuditReport {
 }
 
 impl AuditReport {
-    /// Minimal internal human renderer (Phase 1A foundation). Not wired to a
-    /// public CLI command. Sensitive resources never print raw values.
+    /// Deterministic human renderer backing `sinter audit --format text`.
+    /// Sensitive resources never print raw values.
     pub fn render_text(&self) -> String {
         let mut out = String::from("== Sinter AUDIT ==\n");
         for r in &self.resources {
@@ -223,7 +223,38 @@ impl AuditReport {
             "summary: {} total, {} compliant, {} drifted, {} not_auditable, {} not_applicable, {} errors\n",
             s.total, s.compliant, s.drifted, s.not_auditable, s.not_applicable, s.errors
         ));
+        out.push_str(&format!("status: {}\n", self.aggregate_label()));
         out
+    }
+
+    /// Aggregate label describing the audit outcome:
+    /// `no_drift` (no drift and no errors), `drift` (drift, no errors), or
+    /// `indeterminate` (at least one observation error — a verdict computed
+    /// from failed observations is untrustworthy, so errors dominate drift).
+    pub fn aggregate_label(&self) -> &'static str {
+        if self.summary.errors > 0 {
+            "indeterminate"
+        } else if self.summary.drifted > 0 {
+            "drift"
+        } else {
+            "no_drift"
+        }
+    }
+
+    /// CLI exit code for this audit outcome. `0` means the audit completed
+    /// with no detected drift and no observation errors — NOT_AUDITABLE and
+    /// NOT_APPLICABLE resources do not affect it and stay visible in output.
+    /// `7` means drift with a fully determined result; `6`
+    /// ([`ErrorKind::Indeterminate`](crate::error::ErrorKind)) means at least
+    /// one observation error, which always dominates drift.
+    pub fn exit_code(&self) -> u8 {
+        if self.summary.errors > 0 {
+            crate::error::ErrorKind::Indeterminate.exit_code() as u8
+        } else if self.summary.drifted > 0 {
+            7
+        } else {
+            0
+        }
     }
 }
 
@@ -241,9 +272,10 @@ use crate::value::Value;
 /// The engine's `TargetFs` must be in read-only mode (Plan/Audit construction)
 /// so no mutation permit can be produced; every observation below uses only
 /// the observation API surface. The Audit runner has its own control strategy
-/// (RA-05): it visits resources in recipe order, never applies Apply's
-/// fail-fast/dependency gating, and collects as much safely observable drift
-/// as possible in one run.
+/// (RA-05): it visits resources in deterministic dependency/execution order —
+/// dependencies are visited before resources that depend on them — never
+/// applies Apply's fail-fast/dependency gating, and collects as much safely
+/// observable drift as possible in one run.
 pub fn run_audit(mut engine: Engine) -> Result<AuditReport> {
     // Fail closed: Audit must never run on a mutation-enabled TargetFs. If a
     // caller built the engine with Apply authority, a MutationPermit would be
