@@ -7,12 +7,13 @@ description: よくある Sinter の失敗とその意味。
 
 | コード | 意味 | 典型的な原因 |
 |--------|------|--------------|
-| 0 | 成功 | — |
+| 0 | 成功 | audit: DRIFT も ERROR もなし — `NOT_AUDITABLE`/`NOT_APPLICABLE` のリソースが存在してもよい |
 | 2 | バリデーション/スキーマエラー | レシピの構文誤り、未知のフィールド、不正な値 |
 | 3 | 接続/capability/セキュリティエラー | SSH、ホスト鍵、非対応プラットフォーム |
 | 4 | plan 未完了 | plan を安全に生成できない |
 | 5 | apply 失敗 | リソースが失敗した |
-| 6 | apply indeterminate | ディスパッチ後のタイムアウト、応答の喪失、シグナルの不確実性 |
+| 6 | apply indeterminate / audit の ERROR | apply: ディスパッチ後のタイムアウト、応答の喪失、シグナルの不確実性。audit: 1 件以上の ERROR — エラーは DRIFT より優先 |
+| 7 | audit の DRIFT | 1 件以上の DRIFT、ERROR なし |
 
 ## SSH / known_hosts
 

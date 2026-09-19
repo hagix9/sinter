@@ -1,6 +1,6 @@
 ---
 title: クイックスタート
-description: レシピをターゲットホストに対して validate・plan・apply する。
+description: レシピをターゲットホストに対して validate・plan・apply・audit する。
 ---
 
 このチュートリアルでは管理対象ホストに `tree` パッケージをインストール
@@ -54,6 +54,20 @@ sinter apply --host web01.example.com --sudo recipe.yaml
 ```
 
 2 回目の実行では変更はゼロです。目的の状態はすでに満たされています。
+
+## 6. Audit
+
+```sh
+sinter audit --host web01.example.com --sudo recipe.yaml
+```
+
+`audit` は `plan` と同じく読み取り専用ですが、問いが異なります：
+ターゲットがすでにレシピと一致しているかを確認します。apply 成功後、
+監査可能で適合したリソースを `PASS` と報告して終了コード `0` で
+終了します。drift なら `7`、観測エラーなら `6` です。`command`
+リソースは常に `NOT_AUDITABLE` で実行されず、`when` でスキップされた
+リソースは `NOT_APPLICABLE` になるため、終了コード 0 でも未検証の
+リソースが含まれ得ます。`summary:` 行で全体を確認してください。
 
 ## SSH オプション
 

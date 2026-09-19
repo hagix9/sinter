@@ -1,6 +1,6 @@
 ---
 title: Execution Model
-description: plan vs apply — observation, verification, fail-fast, indeterminate states.
+description: plan vs apply vs audit — observation, verification, fail-fast, indeterminate states.
 ---
 
 Sinter separates observation from mutation and keeps the outcome dimensions
@@ -31,6 +31,21 @@ authority.
 to mutate. After a mutation it verifies the outcome. Mutations that cannot be
 confirmed are reported as **indeterminate**, never retried automatically
 (timeout after dispatch, lost response, signal uncertainty).
+
+## audit — read-only verification
+
+`sinter audit` answers a different question than `plan`. Plan asks *what
+would an apply change?*; audit asks *does the target already match the
+recipe?* It uses the same read-only observation paths, never mutates, and
+reports each resource as `PASS`, `DRIFT`, `NOT_AUDITABLE`,
+`NOT_APPLICABLE`, or `ERROR` in deterministic dependency/execution order.
+
+- Command resources are always `NOT_AUDITABLE` — audit never executes them.
+- Exit codes encode the verdict: `0` when nothing drifted and no observation
+  errors occurred, `7` on drift, `6` when any observation errored — errors
+  dominate drift. An exit-0 audit may still contain `NOT_AUDITABLE` or
+  `NOT_APPLICABLE` resources, so check the summary rather than assuming
+  every resource was verified.
 
 ## Result dimensions
 

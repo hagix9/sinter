@@ -60,6 +60,7 @@ resources:
 sinter validate recipe.yaml
 sinter plan --host server.example.com recipe.yaml
 sinter apply --host server.example.com --sudo recipe.yaml
+sinter audit --host server.example.com --sudo recipe.yaml
 ```
 
 このリポジトリは、`GOALS.md`と`DESIGN.md`で定義された
@@ -100,13 +101,20 @@ cargo build --release
 sinter validate recipe.yaml
 sinter plan --host host.example recipe.yaml
 sinter apply --host host.example recipe.yaml
+sinter audit --host host.example recipe.yaml
 ```
 
 - `validate` は対象ホストへ接続せず、recipeの構造と意味を検証します。
-- `plan` は観測のみを行い、非権威的なpreviewを生成します。
-  ファイル書き込み、stagingデータのアップロード、権限・所有者変更、
-  パッケージやサービスの変更、commandリソースの実行は行いません。
+- `plan` は観測のみを行い、`apply` が何を変更するかの非権威的な
+  previewを生成します。ファイル書き込み、stagingデータのアップロード、
+  権限・所有者変更、パッケージやサービスの変更、commandリソースの
+  実行は行いません。
 - `apply` はstateful resourceを変更するか判断する直前に再観測します。
+- `audit` も読み取り専用ですが、問いが異なります：ターゲットが現在
+  レシピと一致しているかを報告します。リソースごとに `PASS`/`DRIFT`/
+  `NOT_AUDITABLE`/`NOT_APPLICABLE`/`ERROR` を報告し — `command`
+  リソースは常に `NOT_AUDITABLE` で実行されません — drift 時は
+  終了コード 7、観測エラー時は 6 で終了します。
 
 `--host`を省略した場合はローカルホストが対象になります。
 SSHおよびpasswordless `sudo -n`は`--host … --sudo`で利用できます。
@@ -115,12 +123,13 @@ SSHおよびpasswordless `sudo -n`は`--host … --sudo`で利用できます。
 
 | Code | 意味 |
 |------|------|
-| 0 | 正常終了。planで差分が存在しても0 |
+| 0 | 正常終了。planで差分が存在しても0。auditではDRIFTもERRORもなし（`NOT_AUDITABLE`/`NOT_APPLICABLE`のリソースが存在してもよい） |
 | 2 | validation/schema error |
 | 3 | target connection/capability/security error |
 | 4 | planを安全に完了できなかった |
 | 5 | apply failed |
-| 6 | apply became indeterminate |
+| 6 | apply became indeterminate。auditでは1件以上のERRORが記録された（ERRORはDRIFTより優先） |
+| 7 | auditがDRIFTを検出（ERRORなし） |
 
 ## Recipeモデル
 
@@ -271,6 +280,7 @@ src/
   targetfs.rs      target filesystem trust checks and atomic publication
   resources.rs     resource implementations
   engine.rs        plan/apply engine, ordering, dependencies, handlers, fail-fast
+  audit.rs         read-only audit engine (per-resource compliance/drift)
   result.rs        result dimensions (execution/change/verification/disposition)
   diff.rs          truthful, sanitized diff rendering
   output.rs        human and JSON rendering with sensitive redaction

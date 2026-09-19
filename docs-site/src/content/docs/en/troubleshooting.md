@@ -7,12 +7,13 @@ description: Common Sinter failures and what they mean.
 
 | Code | Meaning | Typical cause |
 |------|---------|---------------|
-| 0 | Success | — |
+| 0 | Success | Audit: no DRIFT and no ERROR — `NOT_AUDITABLE`/`NOT_APPLICABLE` resources may still be present |
 | 2 | Validation/schema error | Bad recipe syntax, unknown field, invalid value |
 | 3 | Connection/capability/security error | SSH, host key, or unsupported platform |
 | 4 | Plan incomplete | Unsafe to produce a plan |
 | 5 | Apply failed | A resource failed |
-| 6 | Apply indeterminate | Timeout after dispatch, lost response, signal uncertainty |
+| 6 | Apply indeterminate / audit ERROR | Apply: timeout after dispatch, lost response, signal uncertainty. Audit: one or more ERROR results — errors dominate DRIFT |
+| 7 | Audit DRIFT | One or more DRIFT results and no ERROR |
 
 ## SSH / known_hosts
 

@@ -1,6 +1,6 @@
 ---
 title: Quick Start
-description: Validate, plan, and apply a recipe against a target host.
+description: Validate, plan, apply, and audit a recipe against a target host.
 ---
 
 This walkthrough installs the `tree` package on a managed host. The same
@@ -55,6 +55,20 @@ sinter apply --host web01.example.com --sudo recipe.yaml
 
 The second run performs zero mutations — the desired state is already
 satisfied.
+
+## 6. Audit
+
+```sh
+sinter audit --host web01.example.com --sudo recipe.yaml
+```
+
+`audit` is read-only like `plan`, but answers a different question: does the
+target already match the recipe? After a successful apply it reports `PASS`
+for auditable resources that now conform and exits `0`; drift exits `7` and
+observation errors exit `6`. `command` resources always report
+`NOT_AUDITABLE` — audit never executes them — and `when`-skipped resources
+report `NOT_APPLICABLE`, so an exit-0 audit can still contain unverified
+resources. Check the `summary:` line for the full picture.
 
 ## SSH options
 

@@ -36,6 +36,7 @@ resources:
 sinter validate recipe.yaml
 sinter plan --host server.example.com recipe.yaml
 sinter apply --host server.example.com --sudo recipe.yaml
+sinter audit --host server.example.com --sudo recipe.yaml
 ```
 
 ## Key characteristics
@@ -45,8 +46,9 @@ sinter apply --host server.example.com --sudo recipe.yaml
     Managed hosts need only OpenSSH, `/bin/sh`, systemd, and `sudo -n` — no
     Sinter runtime is installed on the target.
   </Card>
-  <Card title="Plan means observation only" icon="magnifier">
-    `sinter plan` never writes files, changes permissions, installs packages,
+  <Card title="Read-only plan and audit" icon="magnifier">
+    `sinter plan` previews what an apply would change; `sinter audit`
+    reports whether the target already matches the recipe — neither mutates
     or executes command resources.
   </Card>
   <Card title="Idempotent by design" icon="approve-check">
@@ -78,7 +80,7 @@ requirements.
 - [Installation](/sinter/en/getting-started/installation/) — release tarballs,
   checksum verification, source builds.
 - [Quick Start](/sinter/en/getting-started/quick-start/) — validate → plan →
-  apply in five minutes.
+  apply → audit in five minutes.
 - [Recipe Format](/sinter/en/reference/recipe-format/) — the complete recipe
   schema.
 - [CLI Reference](/sinter/en/reference/cli/) — commands, flags, and exit codes.

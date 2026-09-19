@@ -59,6 +59,7 @@ resources:
 sinter validate recipe.yaml
 sinter plan --host server.example.com recipe.yaml
 sinter apply --host server.example.com --sudo recipe.yaml
+sinter audit --host server.example.com --sudo recipe.yaml
 ```
 
 This repository implements **Sinter v0.2** as specified by `GOALS.md` and
@@ -100,14 +101,21 @@ cargo build --release
 sinter validate recipe.yaml
 sinter plan --host host.example recipe.yaml
 sinter apply --host host.example recipe.yaml
+sinter audit --host host.example recipe.yaml
 ```
 
 - `validate` checks recipe structure and semantics without connecting to a target.
-- `plan` performs observation only and produces a non-authoritative preview.
-  It never writes files, uploads staging data, changes permissions/ownership,
-  changes packages or services, or executes command resources.
+- `plan` performs observation only and produces a non-authoritative preview
+  of what `apply` would change. It never writes files, uploads staging data,
+  changes permissions/ownership, changes packages or services, or executes
+  command resources.
 - `apply` re-observes every stateful resource immediately before deciding
   whether to mutate it.
+- `audit` is also read-only, but answers a different question: whether the
+  target currently matches the recipe. It reports `PASS`/`DRIFT`/
+  `NOT_AUDITABLE`/`NOT_APPLICABLE`/`ERROR` per resource — `command`
+  resources are always `NOT_AUDITABLE` and never executed — and exits 7 on
+  drift or 6 on observation errors.
 
 Local targets are used when `--host` is omitted. SSH and passwordless `sudo -n`
 are supported with `--host … --sudo`.
@@ -116,12 +124,13 @@ are supported with `--host … --sudo`.
 
 | Code | Meaning |
 |------|---------|
-| 0 | invocation completed successfully (plan differences still exit 0) |
+| 0 | invocation completed successfully (plan differences still exit 0; audit: no DRIFT and no ERROR — `NOT_AUDITABLE`/`NOT_APPLICABLE` resources may still be present) |
 | 2 | validation/schema error |
 | 3 | target connection/capability/security error |
 | 4 | plan could not be completed safely |
 | 5 | apply failed |
-| 6 | apply became indeterminate |
+| 6 | apply became indeterminate; audit recorded one or more ERROR results (errors dominate DRIFT) |
+| 7 | audit detected DRIFT with no ERROR results |
 
 ## Recipe model
 
@@ -269,6 +278,7 @@ src/
   targetfs.rs      target filesystem trust checks and atomic publication
   resources.rs     resource implementations
   engine.rs        plan/apply engine, ordering, dependencies, handlers, fail-fast
+  audit.rs         read-only audit engine (per-resource compliance/drift)
   result.rs        result dimensions (execution/change/verification/disposition)
   diff.rs          truthful, sanitized diff rendering
   output.rs        human and JSON rendering with sensitive redaction

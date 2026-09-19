@@ -1,6 +1,6 @@
 ---
 title: 実行モデル
-description: plan と apply — 観測、検証、fail-fast、indeterminate 状態。
+description: plan と apply と audit — 観測、検証、fail-fast、indeterminate 状態。
 ---
 
 Sinter は観測と変更を分離し、結果の各次元を区別して扱います。
@@ -31,6 +31,22 @@ plan はプレビューであり、承認の根拠となる成果物ではあり
 **indeterminate** として報告され、自動でリトライされることは
 ありません（ディスパッチ後のタイムアウト、応答の喪失、シグナルの
 不確実性）。
+
+## audit — 読み取り専用の検証
+
+`sinter audit` は `plan` とは異なる問いに答えます。plan は「apply が
+何を変更するか？」を問い、audit は「ターゲットはすでにレシピと一致
+しているか？」を問います。同じ読み取り専用の観測経路を使い、変更は
+一切行わず、各リソースを `PASS`、`DRIFT`、`NOT_AUDITABLE`、
+`NOT_APPLICABLE`、`ERROR` として決定的な依存関係／実行順で報告します。
+
+- command リソースは常に `NOT_AUDITABLE` です — audit が実行することは
+  ありません。
+- 終了コードは判定を表します: drift も観測エラーもなければ `0`、
+  drift があれば `7`、観測エラーがあれば `6`（エラーは drift より
+  優先）。終了コード 0 の audit にも `NOT_AUDITABLE` や
+  `NOT_APPLICABLE` のリソースが含まれ得るため、全リソースが検証
+  されたと想定せず summary を確認してください。
 
 ## 結果の次元
 
