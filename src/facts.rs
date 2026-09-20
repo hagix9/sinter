@@ -133,6 +133,9 @@ mod tests {
         // A derivative declaring only ID_LIKE=rhel still resolves.
         assert_eq!(derive_family("someel", "rhel"), "redhat");
         assert_eq!(derive_family("fedora", ""), "redhat");
+        // Oracle Linux (ID=ol) classifies as RHEL-family: expected
+        // compatible, not acceptance-tested.
+        assert_eq!(derive_family("ol", "fedora"), "redhat");
     }
 
     #[test]
