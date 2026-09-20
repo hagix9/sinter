@@ -1579,11 +1579,18 @@ pub(crate) fn classify_absence(out: &Output, path: &str, program: &str) -> Absen
         _ => return AbsenceVerdict::Ambiguous,
     };
     for subject in subjects {
-        for message in ["No such file or directory", "Not a directory"] {
-            // Whole-field equality: a permission diagnostic such as
+        // Whole-field equality, with one narrow extension: Rust coreutils
+        // (uutils, the default on Ubuntu 26.04) renders OS errors through
+        // Rust's io::Error Display, which appends ` (os error N)` where N is
+        // the errno. Accept that suffix only when N is the errno the message
+        // itself names — never an arbitrary error number or trailing text.
+        for (message, errno) in [("No such file or directory", 2), ("Not a directory", 20)] {
+            // A permission diagnostic such as
             // `...: Permission denied: no such file or directory` does not
             // match, because its subject field is longer.
-            if rest == format!("{}: {}", subject, message) {
+            if rest == format!("{}: {}", subject, message)
+                || rest == format!("{}: {} (os error {})", subject, message, errno)
+            {
                 return AbsenceVerdict::Absent;
             }
         }
@@ -2207,6 +2214,115 @@ mod tests {
             classify_absence(&o, "/tmp/a: b", "/usr/bin/stat"),
             AbsenceVerdict::Absent
         );
+    }
+
+    #[test]
+    fn absence_contract_accepts_the_uutils_errno_suffixed_missing_result() {
+        // Rust coreutils (uutils, default on Ubuntu 26.04) renders the OS
+        // error through io::Error Display: the same missing-path diagnostic
+        // with a ` (os error N)` suffix where N is the errno. The exact form
+        // observed on the Ubuntu 26.04 acceptance target.
+        let o = out_exit(
+            1,
+            b"",
+            b"stat: cannot stat '/gone': No such file or directory (os error 2)\n",
+        );
+        assert_eq!(
+            classify_absence(&o, "/gone", "/usr/bin/stat"),
+            AbsenceVerdict::Absent
+        );
+        // The full dispatched argv[0] and the statx verb form obey the same
+        // contract.
+        let o = out_exit(
+            1,
+            b"",
+            b"/usr/bin/stat: cannot statx '/gone': No such file or directory (os error 2)\n",
+        );
+        assert_eq!(
+            classify_absence(&o, "/gone", "/usr/bin/stat"),
+            AbsenceVerdict::Absent
+        );
+        // ENOTDIR pairs with its own errno, 20.
+        let o = out_exit(
+            1,
+            b"",
+            b"stat: cannot statx '/etc/hosts/x': Not a directory (os error 20)\n",
+        );
+        assert_eq!(
+            classify_absence(&o, "/etc/hosts/x", "/usr/bin/stat"),
+            AbsenceVerdict::Absent
+        );
+        // The readlink operand form under the readlink dispatch.
+        let o = out_exit(
+            1,
+            b"",
+            b"readlink: /gone: No such file or directory (os error 2)\n",
+        );
+        assert_eq!(
+            classify_absence(&o, "/gone", "/usr/bin/readlink"),
+            AbsenceVerdict::Absent
+        );
+        // End to end: the observation boundary reports the object absent.
+        let o = out_exit(
+            1,
+            b"",
+            b"stat: cannot stat '/gone': No such file or directory (os error 2)\n",
+        );
+        assert_eq!(interpret_stat(&o, "/gone").unwrap().kind, ObjKind::Absent);
+    }
+
+    #[test]
+    fn absence_contract_rejects_a_wrong_errno_suffix() {
+        // The suffix must carry the errno the message names: ENOENT is 2.
+        for errno in [1, 5, 13, 20, 22] {
+            let o = out_exit(
+                1,
+                b"",
+                format!(
+                    "stat: cannot stat '/gone': No such file or directory (os error {})\n",
+                    errno
+                )
+                .as_bytes(),
+            );
+            assert_eq!(
+                classify_absence(&o, "/gone", "/usr/bin/stat"),
+                AbsenceVerdict::Ambiguous
+            );
+        }
+        // ENOTDIR's errno is 20, not 2.
+        let o = out_exit(
+            1,
+            b"",
+            b"stat: cannot statx '/etc/hosts/x': Not a directory (os error 2)\n",
+        );
+        assert_eq!(
+            classify_absence(&o, "/etc/hosts/x", "/usr/bin/stat"),
+            AbsenceVerdict::Ambiguous
+        );
+    }
+
+    #[test]
+    fn absence_contract_rejects_a_malformed_or_extended_errno_suffix() {
+        for stderr in [
+            // Missing close paren.
+            "stat: cannot stat '/gone': No such file or directory (os error 2\n",
+            // Non-numeric errno field.
+            "stat: cannot stat '/gone': No such file or directory (os error x)\n",
+            // Duplicated suffix.
+            "stat: cannot stat '/gone': No such file or directory (os error 2) (os error 2)\n",
+            // Trailing text after the valid suffix.
+            "stat: cannot stat '/gone': No such file or directory (os error 2) extra\n",
+            // Suffix attached to different wording.
+            "stat: cannot stat '/gone': No such file or directories (os error 2)\n",
+            // Missing space before the suffix.
+            "stat: cannot stat '/gone': No such file or directory(os error 2)\n",
+        ] {
+            let o = out_exit(1, b"", stderr.as_bytes());
+            assert_eq!(
+                classify_absence(&o, "/gone", "/usr/bin/stat"),
+                AbsenceVerdict::Ambiguous
+            );
+        }
     }
 
     #[test]
