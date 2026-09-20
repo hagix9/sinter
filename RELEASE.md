@@ -4,7 +4,7 @@ Operational procedure for cutting a Sinter release. Written so a human or a
 coding agent can execute it top to bottom. Placeholders used throughout:
 
 ```sh
-VERSION=0.3.0            # version being released (no "v" prefix)
+VERSION=0.4.0            # version being released (no "v" prefix)
 TAG=v${VERSION}          # release tag
 RC_COMMIT=<full hash>    # exact release-candidate commit
 ```

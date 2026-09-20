@@ -5,7 +5,7 @@ description: リリース tarball から Sinter をインストールするか�
 
 ## インストール
 
-Sinter **v0.3.0 は公開済み**です。対応する Ubuntu 24.04 / 26.04、
+Sinter **v0.4.0 は公開済み**です。対応する Ubuntu 24.04 / 26.04、
 Rocky Linux 9 / 10 向けに1つの Linux x86_64 アーティファクトを配布します。
 
 ```sh
@@ -29,7 +29,7 @@ sh install.sh
 ### バージョンと配置先
 
 ```sh
-SINTER_VERSION=v0.3.0 sh install.sh
+SINTER_VERSION=v0.4.0 sh install.sh
 SINTER_INSTALL_DIR="$HOME/bin" sh install.sh
 ```
 
@@ -44,9 +44,9 @@ checksumは破損・配布整合性を確認し、GitHub侵害への完全な防
 ### リリースから手動インストール
 
 ```sh
-ASSET=sinter-v0.3.0-linux-x86_64.tar.gz
-curl -fLO "https://github.com/hagix9/sinter/releases/download/v0.3.0/$ASSET"
-curl -fLO https://github.com/hagix9/sinter/releases/download/v0.3.0/SHA256SUMS
+ASSET=sinter-v0.4.0-linux-x86_64.tar.gz
+curl -fLO "https://github.com/hagix9/sinter/releases/download/v0.4.0/$ASSET"
+curl -fLO https://github.com/hagix9/sinter/releases/download/v0.4.0/SHA256SUMS
 grep -F "  $ASSET" SHA256SUMS | sha256sum -c -
 tar -xzf "$ASSET"
 sudo install -m 0755 "${ASSET%.tar.gz}/sinter" /usr/local/bin/sinter

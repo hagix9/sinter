@@ -71,7 +71,7 @@ embedded scriptingは依然として実装対象に含めません。
 
 ## インストール
 
-Sinter **v0.3.0 は公開済み**です。対応する Ubuntu 24.04 / 26.04、
+Sinter **v0.4.0 は公開済み**です。対応する Ubuntu 24.04 / 26.04、
 Rocky Linux 9 / 10 向けに1つの Linux x86_64 アーティファクトを配布します。
 
 ```sh
@@ -214,7 +214,7 @@ package recipeはplatform-neutralです。同じ`type: package` / `state:
 present` resourceを、Ubuntuでは`apt`、RHEL系では`dnf`が処理します。
 backendは検出した`/etc/os-release`のidentityから選択されます。
 
-公開済みv0.3.0の受入基準環境は上記の4実ホストのpoint releaseです。
+公開済みv0.4.0の受入基準環境は上記の4実ホストのpoint releaseです。
 以前のVM検証とリリース証跡は履歴として保持します。
 
 すべてのmanaged targetには、systemd、OpenSSH server、`/bin/sh`、

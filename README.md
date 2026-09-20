@@ -70,7 +70,7 @@ inventory, orchestration, or embedded scripting.
 
 ## Install
 
-Sinter **v0.3.0 is released** with one Linux x86_64 artifact for the supported
+Sinter **v0.4.0 is released** with one Linux x86_64 artifact for the supported
 Ubuntu 24.04 / 26.04 and Rocky Linux 9 / 10 version lines.
 
 ```sh
@@ -211,7 +211,7 @@ Package recipes are platform-neutral: the same `type: package` / `state:
 present` resource is handled by `apt` on Ubuntu and `dnf` on RHEL-family
 targets, selected from the detected `/etc/os-release` identity.
 
-The latest released-v0.3.0 acceptance references are the four real-host
+The latest released-v0.4.0 acceptance references are the four real-host
 point releases listed above. Earlier VM and release evidence remains historical.
 
 All managed targets require systemd, an OpenSSH server, `/bin/sh`, the `attr`

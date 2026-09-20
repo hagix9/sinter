@@ -4,6 +4,49 @@ All notable changes to Sinter are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-20
+
+Read-only audit workflow, a verified Linux x86_64 installer, and Ubuntu
+26.04 coreutils compatibility.
+
+### Added
+
+- `sinter audit <recipe>`: read-only audit mode answering whether the
+  target currently matches the recipe. Reports `PASS`/`DRIFT`/
+  `NOT_AUDITABLE`/`NOT_APPLICABLE`/`ERROR` per resource — `command`
+  resources are always `NOT_AUDITABLE` and never executed, `when`-skipped
+  resources are `NOT_APPLICABLE` — with deterministic dependency order,
+  text and JSON output, and sensitive-value redaction. Exit codes: 0 when
+  clean (non-auditable/skipped resources may still be present), 7 on drift,
+  6 when one or more observation errors dominate.
+- Hardened remote observation contracts in `src/targetfs.rs`: `stat`
+  diagnostics are accepted only on exact program identity, exact quoted
+  path, and whole-field message text on a single newline-terminated line
+  with empty stdout; truncation, multiline output, wrong errno suffixes,
+  and unrelated diagnostics remain ambiguous and fail closed.
+- `install.sh`: verified Linux x86_64 installer that selects the latest
+  stable GitHub release (or a `SINTER_VERSION` pin), verifies SHA256SUMS
+  before extraction, and installs into `$HOME/.local/bin` (or
+  `SINTER_INSTALL_DIR`) without sudo — atomically replacing an existing
+  user-owned executable and refusing symlinks and non-regular objects.
+  Covered by `tests/installer/test_install.py` against a mocked release
+  server, including rejection of traversal, `;`, and multiline versions.
+
+### Fixed
+
+- Ubuntu 26.04 Rust coreutils emit errno-suffixed `stat` diagnostics
+  (`No such file or directory (os error 2)`); the absence classifier now
+  accepts the exact `No such file or directory`/errno-2 and
+  `Not a directory`/errno-20 pairs and stays fail-closed for any other
+  suffix, message, or shape.
+- The installer rejects multiline destination values before any mutation.
+
+### Changed
+
+- Documentation integrates `audit` into the validate → plan → apply →
+  audit workflow across README EN/JA and the documentation site, and
+  improves first-recipe guidance.
+
 ## [0.3.0] - 2026-09-19
 
 Platform extension: Ubuntu 26.04 LTS and Rocky Linux 10 support, plus a

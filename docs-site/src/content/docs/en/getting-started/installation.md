@@ -5,7 +5,7 @@ description: Install Sinter from release tarballs or build from source.
 
 ## Install
 
-Sinter **v0.3.0 is released** with one Linux x86_64 artifact for the supported
+Sinter **v0.4.0 is released** with one Linux x86_64 artifact for the supported
 Ubuntu 24.04 / 26.04 and Rocky Linux 9 / 10 version lines.
 
 ```sh
@@ -30,7 +30,7 @@ sh install.sh
 ### Version and destination
 
 ```sh
-SINTER_VERSION=v0.3.0 sh install.sh
+SINTER_VERSION=v0.4.0 sh install.sh
 SINTER_INSTALL_DIR="$HOME/bin" sh install.sh
 ```
 
@@ -45,9 +45,9 @@ Checksums detect corruption and release consistency, not compromise of GitHub.
 ### Manual release installation
 
 ```sh
-ASSET=sinter-v0.3.0-linux-x86_64.tar.gz
-curl -fLO "https://github.com/hagix9/sinter/releases/download/v0.3.0/$ASSET"
-curl -fLO https://github.com/hagix9/sinter/releases/download/v0.3.0/SHA256SUMS
+ASSET=sinter-v0.4.0-linux-x86_64.tar.gz
+curl -fLO "https://github.com/hagix9/sinter/releases/download/v0.4.0/$ASSET"
+curl -fLO https://github.com/hagix9/sinter/releases/download/v0.4.0/SHA256SUMS
 grep -F "  $ASSET" SHA256SUMS | sha256sum -c -
 tar -xzf "$ASSET"
 sudo install -m 0755 "${ASSET%.tar.gz}/sinter" /usr/local/bin/sinter

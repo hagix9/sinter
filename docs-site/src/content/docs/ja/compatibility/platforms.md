@@ -14,17 +14,17 @@ description: プラットフォーム、アーキテクチャ、パッケージ�
 
 ## 統一 Linux x86_64 配布
 
-公開済み v0.3.0 では、対応する Ubuntu 24.04 / 26.04、Rocky Linux 9 / 10
+公開済み v0.4.0 では、対応する Ubuntu 24.04 / 26.04、Rocky Linux 9 / 10
 の x86_64 向けに `sinter-v<VERSION>-linux-x86_64.tar.gz` を1つ配布します。
 実行ファイルは共通ですが、実行時の検出により Ubuntu は APT、Rocky は
 DNF を使います。任意の Linux や他のアーキテクチャへの対応を意味しません。
 
-公開済み v0.3.0 の実行ファイルは Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、Rocky Linux 9.8、
+公開済み v0.4.0 の実行ファイルは Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、Rocky Linux 9.8、
 Rocky Linux 10.2（すべて x86_64）の4実ホストで受入検証済みです。
 他の各point releaseや将来のリリースを個別に検証したという意味ではありません。
 過去の v0.2.1 は従来のディストリビューション別アセットのままです。
 現在のダウンロードは[インストール](https://hagix9.github.io/sinter/ja/getting-started/installation/)
-を参照してください。統一 v0.3.0 アーティファクトは公開済みです。
+を参照してください。統一 v0.4.0 アーティファクトは公開済みです。
 
 すべての管理対象に必要なもの:
 
@@ -68,7 +68,7 @@ sudo dnf install attr          # RHEL 系（Rocky など）
 
 コントローラ（`sinter` を実行する側）は macOS、Ubuntu 24.04 LTS、
 Ubuntu 26.04 LTS、Rocky Linux 9、Rocky Linux 10、その他バイナリがビルド
-できる x86_64 Linux 環境でサポートされます。v0.3.0 のリリースバイナリは
+できる x86_64 Linux 環境でサポートされます。v0.4.0 のリリースバイナリは
 単一の Linux x86_64 アーティファクトです。公開済み v0.2.1 は
 ディストリビューション別アセットを維持します
 （[インストール](/sinter/ja/getting-started/installation/)を参照）。
