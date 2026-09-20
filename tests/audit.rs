@@ -1650,7 +1650,7 @@ fn audit_package_clean_present_and_absent_still_classify() {
 
 fn link_recipe(dir: &Path, path: &str, target: &str) -> std::path::PathBuf {
     write_recipe(
-        &dir,
+        dir,
         "r.yaml",
         &format!(
             "version: 1\nresources:\n  - id: l\n    type: link\n    with:\n      path: {}\n      target: {}\n",
@@ -1661,7 +1661,7 @@ fn link_recipe(dir: &Path, path: &str, target: &str) -> std::path::PathBuf {
 
 fn pkg_recipe_one(dir: &Path, name: &str, state: &str) -> std::path::PathBuf {
     write_recipe(
-        &dir,
+        dir,
         "r.yaml",
         &format!(
             "version: 1\nresources:\n  - id: p\n    type: package\n    with:\n      name: {}\n      state: {}\n",
@@ -2617,7 +2617,7 @@ fn audit_cli_outputs_never_leak_sensitive_values() {
         assert_eq!(out.matches(secret).count(), 0, "secret leaked:\n{}", out);
     }
     assert!(text.contains("details: redacted"), "{}", text);
-    assert_eq!(json.contains("[redacted]"), true, "{}", json);
+    assert!(json.contains("[redacted]"), "{}", json);
 }
 
 #[test]
