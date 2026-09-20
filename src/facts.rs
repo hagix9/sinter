@@ -182,4 +182,123 @@ mod tests {
         assert_eq!(version, "10.2");
         assert_eq!(derive_family(&id, "rhel centos fedora"), "redhat");
     }
+
+    /// Real `/etc/os-release` of a RHEL 9.8 x86_64 GCE target (captured
+    /// on-target, `rhel-9-v20260908`). Family derivation must resolve to
+    /// `redhat` and select the Dnf backend.
+    #[test]
+    fn parse_rhel9_release() {
+        let c = "NAME=\"Red Hat Enterprise Linux\"\nVERSION=\"9.8 (Plow)\"\nID=\"rhel\"\n\
+                 ID_LIKE=\"fedora\"\nVERSION_ID=\"9.8\"\nPLATFORM_ID=\"platform:el9\"\n\
+                 PRETTY_NAME=\"Red Hat Enterprise Linux 9.8 (Plow)\"\nANSI_COLOR=\"0;31\"\n\
+                 LOGO=\"fedora-logo-icon\"\nCPE_NAME=\"cpe:/o:redhat:enterprise_linux:9::baseos\"\n\
+                 HOME_URL=\"https://www.redhat.com/\"\n\
+                 DOCUMENTATION_URL=\"https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/9\"\n\
+                 BUG_REPORT_URL=\"https://issues.redhat.com/\"\n\n\
+                 REDHAT_BUGZILLA_PRODUCT=\"Red Hat Enterprise Linux 9\"\n\
+                 REDHAT_BUGZILLA_PRODUCT_VERSION=9.8\n\
+                 REDHAT_SUPPORT_PRODUCT=\"Red Hat Enterprise Linux\"\n\
+                 REDHAT_SUPPORT_PRODUCT_VERSION=\"9.8\"\n";
+        let (name, id, version) = parse_os_release(c);
+        assert_eq!(name, "Red Hat Enterprise Linux");
+        assert_eq!(id, "rhel");
+        assert_eq!(version, "9.8");
+        let family = derive_family(&id, "fedora");
+        assert_eq!(family, "redhat");
+        assert_eq!(
+            crate::platform::PackageBackend::for_os_family(&family),
+            Some(crate::platform::PackageBackend::Dnf)
+        );
+    }
+
+    /// Real `/etc/os-release` of a RHEL 10.2 x86_64 GCE target (captured
+    /// on-target, `rhel-10-v20260908`). Family derivation must resolve to
+    /// `redhat` and select the Dnf backend.
+    #[test]
+    fn parse_rhel10_release() {
+        let c = "NAME=\"Red Hat Enterprise Linux\"\nVERSION=\"10.2 (Coughlan)\"\n\
+                 RELEASE_TYPE=stable\nID=\"rhel\"\nID_LIKE=\"centos fedora\"\n\
+                 VERSION_ID=\"10.2\"\nPLATFORM_ID=\"platform:el10\"\n\
+                 PRETTY_NAME=\"Red Hat Enterprise Linux 10.2 (Coughlan)\"\n\
+                 ANSI_COLOR=\"0;31\"\nLOGO=\"fedora-logo-icon\"\n\
+                 CPE_NAME=\"cpe:/o:redhat:enterprise_linux:10.2\"\n\
+                 HOME_URL=\"https://www.redhat.com/\"\nVENDOR_NAME=\"Red Hat\"\n\
+                 VENDOR_URL=\"https://www.redhat.com/\"\n\
+                 DOCUMENTATION_URL=\"https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/10\"\n\
+                 BUG_REPORT_URL=\"https://issues.redhat.com/\"\n\n\
+                 REDHAT_BUGZILLA_PRODUCT=\"Red Hat Enterprise Linux 10\"\n\
+                 REDHAT_BUGZILLA_PRODUCT_VERSION=10.2\n\
+                 REDHAT_SUPPORT_PRODUCT=\"Red Hat Enterprise Linux\"\n\
+                 REDHAT_SUPPORT_PRODUCT_VERSION=\"10.2\"\n";
+        let (name, id, version) = parse_os_release(c);
+        assert_eq!(name, "Red Hat Enterprise Linux");
+        assert_eq!(id, "rhel");
+        assert_eq!(version, "10.2");
+        let family = derive_family(&id, "centos fedora");
+        assert_eq!(family, "redhat");
+        assert_eq!(
+            crate::platform::PackageBackend::for_os_family(&family),
+            Some(crate::platform::PackageBackend::Dnf)
+        );
+    }
+
+    /// Real `/etc/os-release` of an AlmaLinux 9.8 x86_64 GCE target
+    /// (captured on-target, `almalinux-9-v20260811`). Family derivation
+    /// must resolve to `redhat` and select the Dnf backend.
+    #[test]
+    fn parse_almalinux9_release() {
+        let c = "NAME=\"AlmaLinux\"\nVERSION=\"9.8 (Olive Jaguar)\"\nID=\"almalinux\"\n\
+                 ID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"9.8\"\n\
+                 PLATFORM_ID=\"platform:el9\"\nPRETTY_NAME=\"AlmaLinux 9.8 (Olive Jaguar)\"\n\
+                 ANSI_COLOR=\"0;34\"\nLOGO=\"fedora-logo-icon\"\n\
+                 CPE_NAME=\"cpe:/o:almalinux:almalinux:9::baseos\"\n\
+                 HOME_URL=\"https://almalinux.org/\"\n\
+                 DOCUMENTATION_URL=\"https://wiki.almalinux.org/\"\n\
+                 BUG_REPORT_URL=\"https://bugs.almalinux.org/\"\n\n\
+                 ALMALINUX_MANTISBT_PROJECT=\"AlmaLinux-9\"\n\
+                 ALMALINUX_MANTISBT_PROJECT_VERSION=\"9.8\"\n\
+                 REDHAT_SUPPORT_PRODUCT=\"AlmaLinux\"\n\
+                 REDHAT_SUPPORT_PRODUCT_VERSION=\"9.8\"\nSUPPORT_END=2032-06-01\n";
+        let (name, id, version) = parse_os_release(c);
+        assert_eq!(name, "AlmaLinux");
+        assert_eq!(id, "almalinux");
+        assert_eq!(version, "9.8");
+        let family = derive_family(&id, "rhel centos fedora");
+        assert_eq!(family, "redhat");
+        assert_eq!(
+            crate::platform::PackageBackend::for_os_family(&family),
+            Some(crate::platform::PackageBackend::Dnf)
+        );
+    }
+
+    /// Real `/etc/os-release` of an AlmaLinux 10.2 x86_64 GCE target
+    /// (captured on-target, `almalinux-10-v20260811`). Family derivation
+    /// must resolve to `redhat` and select the Dnf backend.
+    #[test]
+    fn parse_almalinux10_release() {
+        let c = "NAME=\"AlmaLinux\"\nVERSION=\"10.2 (Lavender Lion)\"\n\
+                 RELEASE_TYPE=stable\nID=\"almalinux\"\n\
+                 ID_LIKE=\"rhel centos fedora\"\nVERSION_ID=\"10.2\"\n\
+                 PLATFORM_ID=\"platform:el10\"\n\
+                 PRETTY_NAME=\"AlmaLinux 10.2 (Lavender Lion)\"\n\
+                 ANSI_COLOR=\"0;34\"\nLOGO=\"fedora-logo-icon\"\n\
+                 CPE_NAME=\"cpe:/o:almalinux:almalinux:10.2\"\n\
+                 HOME_URL=\"https://almalinux.org/\"\nVENDOR_NAME=\"AlmaLinux\"\n\
+                 VENDOR_URL=\"https://almalinux.org/\"\n\
+                 BUG_REPORT_URL=\"https://bugs.almalinux.org/\"\n\n\
+                 ALMALINUX_MANTISBT_PROJECT=\"AlmaLinux-10\"\n\
+                 ALMALINUX_MANTISBT_PROJECT_VERSION=\"10.2\"\n\
+                 REDHAT_SUPPORT_PRODUCT=\"AlmaLinux\"\n\
+                 REDHAT_SUPPORT_PRODUCT_VERSION=\"10.2\"\nSUPPORT_END=2035-06-01\n";
+        let (name, id, version) = parse_os_release(c);
+        assert_eq!(name, "AlmaLinux");
+        assert_eq!(id, "almalinux");
+        assert_eq!(version, "10.2");
+        let family = derive_family(&id, "rhel centos fedora");
+        assert_eq!(family, "redhat");
+        assert_eq!(
+            crate::platform::PackageBackend::for_os_family(&family),
+            Some(crate::platform::PackageBackend::Dnf)
+        );
+    }
 }
