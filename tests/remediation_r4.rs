@@ -54,14 +54,21 @@ fn dnf_mutations(report: &sinter::engine::RunReport) -> usize {
     report
         .commands
         .iter()
-        .filter(|c| c.program == "/usr/bin/dnf" && c.args.iter().any(|a| a == "-y"))
+        .filter(|c| {
+            c.program == "/usr/bin/dnf"
+                && c.args.iter().any(|a| a == "-y")
+                && !c.args.iter().any(|a| a == "--downloadonly")
+        })
         .count()
 }
 
+/// Payload-transport dispatches: the native `dnf install --downloadonly`
+/// invocation that fills the snapshot package cache. Explicit fetchers
+/// (curl/wget) are gone — librepo owns the transfer.
 fn downloads(report: &sinter::engine::RunReport) -> usize {
-    commands_with(report, "/usr/bin/curl")
+    commands_with(report, "/usr/bin/dnf")
         .into_iter()
-        .chain(commands_with(report, "/usr/bin/wget"))
+        .filter(|c| c.args.iter().any(|a| a == "--downloadonly"))
         .count()
 }
 
@@ -98,14 +105,6 @@ fn dnf_transaction_table(name: &str, repoid: &str) -> String {
          Installed size: 2 k\n",
         n = name,
         r = repoid
-    )
-}
-
-/// The payload URL the scripted target resolves for one package.
-fn dnf_payload_url(name: &str, repoid: &str) -> String {
-    format!(
-        "https://mirror.example/{}/Packages/{}-1.0-1.el9.x86_64.rpm",
-        repoid, name
     )
 }
 
@@ -148,6 +147,23 @@ fn assert_blocked_no_mutation(r: &sinter::engine::RunReport) -> &sinter::result:
         "blocked reason must name the metadata contract: {:?}",
         p.reason
     );
+    p
+}
+
+/// Assert the resource was blocked after payload transport but before the
+/// cache-only mutation: the download-only call legitimately ran, yet no
+/// mutation may be dispatched and no change or verification claimed.
+fn assert_payload_rejected(r: &sinter::engine::RunReport) -> &sinter::result::ResourceResult {
+    let p = find(r, "p");
+    assert_eq!(p.execution, Execution::Failed, "rejected payload must fail");
+    assert_eq!(p.change, Change::None, "no mutation means no change claim");
+    assert_eq!(
+        p.verification,
+        Verification::NotPerformed,
+        "verification must not be claimed"
+    );
+    assert_eq!(downloads(r), 1, "the payload transport did run");
+    assert_eq!(dnf_mutations(r), 0, "no mutation may be dispatched");
     p
 }
 
@@ -487,144 +503,166 @@ fn r4_a01_valid_fractional_size_installs() {
 }
 
 // ===========================================================================
-// R3-A02 — payload URL authority validation. The location must be
-// syntactically valid absolute http(s) URL before it reaches a downloader.
+// R3-A02 — downloaded payload verification. The transport's own output is
+// never evidence: the payload set that landed in the snapshot is proven
+// against the frozen transaction — path, file name and rpm-verified
+// identity — before any installation runs.
 // ===========================================================================
 
-/// Each malformed location must be rejected before any download or mutation.
+/// An rpm whose header identity is not the transaction row's is not this
+/// transaction's payload — even when its file name matches.
 #[test]
-fn r4_a02_malformed_authority_rejected() {
-    let bad = [
-        "https://mirror.example:abc/pkg.rpm",
-        "https://[invalid/pkg.rpm",
-        "https://user@/pkg.rpm",
-        "https://:443/pkg.rpm",
-        "file:///tmp/pkg.rpm",
-        "/tmp/pkg.rpm",
-        "relative/pkg.rpm",
-        "https:///pkg.rpm",
-        // whitespace, newline and control characters inside the location
-        "https://mirror.example/p kg.rpm",
-        "https://mirror.example/pk\ng.rpm",
-        "https://mirror.example/pk\tg.rpm",
-        "https://mirror.example/pk\x7fg.rpm",
-        // invalid port range
-        "https://mirror.example:0/pkg.rpm",
-        "https://mirror.example:65536/pkg.rpm",
-        // malformed IPv6 literals
-        "https://[1:2:3:4:5:6:7:8:9]/pkg.rpm",
-        "https://[:::]/pkg.rpm",
-        "https://[]/pkg.rpm",
-        "https://[12345::1]/pkg.rpm",
-        // malformed userinfo / host structure
-        "https://mirror.example:443:443/pkg.rpm",
-        "https://@mirror.example/pkg.rpm",
-        // an ambiguous character a URL grammar cannot carry
-        "https://mirror.example\\pkg.rpm",
-        // a trailing slash names a directory, not a payload
-        "https://mirror.example/Packages/",
-        // a scheme relative string and an unsupported scheme
-        "//mirror.example/pkg.rpm",
-        "gopher://mirror.example/pkg.rpm",
-    ];
-    for (i, url) in bad.iter().enumerate() {
-        let dir = trusted_root(&format!("r4-a02-reject-{}", i));
-        let recipe = pkg_recipe(&dir, "nano", "present");
-        let mut t = FakeTarget::rocky9();
-        // The location carries the expected basename so the rejection can
-        // only come from URL structure, not from a name mismatch.
-        let url_with_name = url.replace("pkg.rpm", "nano-1.0-1.el9.x86_64.rpm");
-        t.dnf_location_output = Some(override_output(
-            Completion::Exited(0),
-            &format!("{}\n", url_with_name),
-            "",
-        ));
-        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
-        let p = assert_blocked_no_mutation(&r);
-        assert!(
-            p.reason
-                .as_deref()
-                .unwrap_or("")
-                .contains("payload location"),
-            "a malformed payload location must be reported: {:?} ({:?})",
-            p.reason,
-            url
-        );
-        assert_snapshot_cleaned(&r);
-    }
-}
-
-/// A location whose basename does not exactly agree with the transaction row
-/// is not this transaction's payload.
-#[test]
-fn r4_a02_basename_mismatch_rejected() {
-    let dir = trusted_root("r4-a02-basename");
+fn r4_a02_payload_identity_mismatch_rejected() {
+    let dir = trusted_root("r4-a02-id-mismatch");
     let recipe = pkg_recipe(&dir, "nano", "present");
     let mut t = FakeTarget::rocky9();
-    t.dnf_location_output = Some(override_output(
+    // The file sits at the expected path, but rpm reports a different
+    // version — the header, not the name, decides.
+    t.rpm_qp_results.push_back(override_output(
         Completion::Exited(0),
-        "https://mirror.example/baseos/Packages/other-1.0-1.el9.x86_64.rpm\n",
+        "nano|(none)|9.9|1.el9|x86_64\n",
         "",
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
-    assert_blocked_no_mutation(&r);
-    assert_snapshot_cleaned(&r);
-}
-
-/// Two valid locations matching the same payload basename are ambiguous.
-#[test]
-fn r4_a02_duplicate_matching_url_rejected() {
-    let dir = trusted_root("r4-a02-dup-url");
-    let recipe = pkg_recipe(&dir, "nano", "present");
-    let mut t = FakeTarget::rocky9();
-    let url = dnf_payload_url("nano", "baseos");
-    t.dnf_location_output = Some(override_output(
-        Completion::Exited(0),
-        &format!(
-            "{}\n{}\n",
-            url,
-            url.replace("mirror.example", "mirror2.example")
-        ),
-        "",
-    ));
-    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
-    let p = assert_blocked_no_mutation(&r);
+    let p = assert_payload_rejected(&r);
     assert!(
-        p.reason.as_deref().unwrap_or("").contains("not unique"),
-        "an ambiguous payload location must be reported: {:?}",
+        p.reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("payload identity mismatch"),
+        "a mismatched payload identity must be reported: {:?}",
         p.reason
     );
     assert_snapshot_cleaned(&r);
 }
 
-/// Positive controls: each well-formed absolute URL is accepted and the
-/// install completes.
+/// Every mismatching identity dimension is rejected: wrong name, wrong
+/// epoch, wrong release, wrong architecture.
 #[test]
-fn r4_a02_valid_urls_accepted() {
-    let good = [
-        "https://mirror.example/baseos/Packages/nano-1.0-1.el9.x86_64.rpm",
-        "http://mirror.example/baseos/Packages/nano-1.0-1.el9.x86_64.rpm",
-        "https://mirror.example:443/baseos/Packages/nano-1.0-1.el9.x86_64.rpm",
-        "https://10.0.0.1/baseos/Packages/nano-1.0-1.el9.x86_64.rpm",
-        "https://[2001:db8::1]/baseos/Packages/nano-1.0-1.el9.x86_64.rpm",
-        "https://[::1]/baseos/Packages/nano-1.0-1.el9.x86_64.rpm",
-    ];
-    for (i, url) in good.iter().enumerate() {
-        let dir = trusted_root(&format!("r4-a02-accept-{}", i));
+fn r4_a02_every_identity_field_is_checked() {
+    for (i, record) in [
+        "other|(none)|1.0|1.el9|x86_64\n", // wrong name
+        "nano|1|1.0|1.el9|x86_64\n",       // wrong epoch
+        "nano|(none)|1.0|9.el9|x86_64\n",  // wrong release
+        "nano|(none)|1.0|1.el9|aarch64\n", // wrong architecture
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dir = trusted_root(&format!("r4-a02-field-{}", i));
         let recipe = pkg_recipe(&dir, "nano", "present");
         let mut t = FakeTarget::rocky9();
-        t.dnf_location_output = Some(override_output(
-            Completion::Exited(0),
-            &format!("{}\n", url),
-            "",
-        ));
+        t.rpm_qp_results
+            .push_back(override_output(Completion::Exited(0), record, ""));
         let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
-        assert_full_install(&r);
+        assert_payload_rejected(&r);
         assert_snapshot_cleaned(&r);
     }
 }
 
-// ===========================================================================
+/// A payload rpm cannot read is not a usable payload — malformed metadata
+/// output and a failed query both fail closed.
+#[test]
+fn r4_a02_malformed_or_unreadable_payload_rejected() {
+    for (i, (completion, stdout, stderr)) in [
+        // garbage that is not a five-field identity record
+        (Completion::Exited(0), "not-an-identity\n", ""),
+        // two records for one file
+        (
+            Completion::Exited(0),
+            "nano|(none)|1.0|1.el9|x86_64\nnano|(none)|1.0|1.el9|x86_64\n",
+            "",
+        ),
+        // rpm could not parse the file at all
+        (Completion::Exited(1), "", "error: not an rpm package\n"),
+        // a diagnostic on stderr is not an empty-stderr answer
+        (
+            Completion::Exited(0),
+            "nano|(none)|1.0|1.el9|x86_64\n",
+            "warning: something\n",
+        ),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dir = trusted_root(&format!("r4-a02-badrpm-{}", i));
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.rpm_qp_results
+            .push_back(override_output(completion.clone(), stdout, stderr));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_payload_rejected(&r);
+        assert_snapshot_cleaned(&r);
+    }
+}
+
+/// A payload placed in a different repository's cache dir cannot satisfy
+/// the row — the expected path pins the repository identity.
+#[test]
+fn r4_a02_payload_in_wrong_repo_dir_rejected() {
+    let dir = trusted_root("r4-a02-wrong-repodir");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_repos.push(DnfRepo {
+        id: "appstream".to_string(),
+        mirrors: true,
+        repodata_cached: true,
+        mirrorlist_cached: true,
+    });
+    // The payload landed under appstream's dir — not baseos's.
+    t.snap_rpm_listing = Some(format!(
+        "{snap}/appstream-cafebabecafebabe/packages/nano-1.0-1.el9.x86_64.rpm\n",
+        snap = FAKE_SNAP
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = assert_payload_rejected(&r);
+    assert!(
+        p.reason.as_deref().unwrap_or("").contains("missing"),
+        "a payload in the wrong repository dir must be reported: {:?}",
+        p.reason
+    );
+    assert_snapshot_cleaned(&r);
+}
+
+/// Positive control: a payload whose rpm identity matches the row exactly
+/// — including an epoch — completes the install.
+#[test]
+fn r4_a02_epoch_identity_accepted() {
+    let dir = trusted_root("r4-a02-epoch");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_dry_run_output = Some(override_output(
+        Completion::Exited(1),
+        "Dependencies resolved.\n\
+         ================================================================================\n \
+         Package                Arch        Version                Repository      Size\n\
+         ================================================================================\n\
+         Installing:\n \
+         nano                   x86_64      2:1.0-1.el9            baseos          1 k\n\n\
+         Transaction Summary\n\
+         ================================================================================\n\
+         Install  1 Package\n\n\
+         Total download size: 1 k\n\
+         Installed size: 2 k\n",
+        "Operation aborted.\n",
+    ));
+    t.rpm_qp_results.push_back(override_output(
+        Completion::Exited(0),
+        "nano|2|1.0|1.el9|x86_64\n",
+        "",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_full_install(&r);
+    // The epoch is part of the NEVRA operand handed to the transport —
+    // but never part of the payload file name.
+    let dl = commands_with(&r, "/usr/bin/dnf")
+        .into_iter()
+        .find(|c| c.args.iter().any(|a| a == "--downloadonly"))
+        .expect("a payload transport call");
+    assert!(dl.args.iter().any(|a| a == "nano-2:1.0-1.el9.x86_64"));
+    assert_snapshot_cleaned(&r);
+}
+
 // R3-A03 — repository/cache directory identity. A repo id and its DNF cache
 // directory are related by proof, never by a name prefix.
 // ===========================================================================
@@ -1011,29 +1049,45 @@ fn r4_a04_destination_root_is_never_a_copy_target() {
 }
 
 // ===========================================================================
-// Command/path safety boundary checks for the copy and URL paths.
+// Command/path safety boundary checks for the copy and payload paths.
 // ===========================================================================
 
-/// A payload URL is handed to the downloader as one argv element; no shell
-/// metacharacter, newline or leading dash can alter the command structure.
+/// Transaction-derived identifiers reach the payload-transport call as
+/// single argv elements; no shell metacharacter, newline or leading dash
+/// can alter the command structure.
 #[test]
 fn r4_argv_boundaries_hold_for_payload_and_paths() {
     let dir = trusted_root("r4-argv-boundary");
     let recipe = pkg_recipe(&dir, "nano", "present");
     let r = run_recipe_fake(&recipe, Mode::Apply, false, FakeTarget::rocky9());
     assert_success(&r);
-    for curl in commands_with(&r, "/usr/bin/curl") {
-        // -g -fsSL -o <dest> <url>: URL globbing is disabled (-g) so one
-        // validated URL is exactly one request, and the URL is the final,
-        // single argv element.
-        assert_eq!(curl.args.len(), 5);
-        assert_eq!(curl.args[0], "-g");
-        assert_eq!(curl.args[1], "-fsSL");
-        assert_eq!(curl.args[2], "-o");
-        assert!(curl.args[3].starts_with(FAKE_SNAP));
-        assert!(curl.args[4].starts_with("https://"));
-        assert!(!curl.args[4].contains('\n'));
-        assert!(!curl.args[4].starts_with('-'));
+    // The payload transport is one dnf call carrying exact NEVRA operands —
+    // never a bare name, never an option-like value.
+    let dl = commands_with(&r, "/usr/bin/dnf")
+        .into_iter()
+        .find(|c| c.args.iter().any(|a| a == "--downloadonly"))
+        .expect("a payload transport call");
+    let pos = dl.args.iter().position(|a| a == "--downloadonly").unwrap();
+    for operand in &dl.args[pos + 1..] {
+        // Every operand is an exact NEVRA the frozen transaction resolved.
+        assert!(!operand.starts_with('-'), "operand: {:?}", operand);
+        assert!(!operand.contains('\n'), "operand: {:?}", operand);
+        assert!(!operand.contains('/'), "operand: {:?}", operand);
+        assert!(operand.ends_with(".x86_64"), "operand: {:?}", operand);
+    }
+    assert_eq!(dl.args[pos + 1..].len(), 1);
+    assert_eq!(dl.args[pos + 1], "nano-1.0-1.el9.x86_64");
+    // Each downloaded payload is rpm-queried by its snapshot path — one
+    // argv element, inside the private snapshot, ending in `.rpm`.
+    for qp in commands_with(&r, "/usr/bin/rpm")
+        .into_iter()
+        .filter(|c| c.args.iter().any(|a| a == "-qp"))
+    {
+        let path = qp.args.last().expect("a payload path operand");
+        assert!(path.starts_with(FAKE_SNAP));
+        assert!(path.ends_with(".rpm"));
+        assert!(!path.contains('\n'));
+        assert!(!path.starts_with('-'));
     }
     for mkdir in commands_with(&r, "/usr/bin/mkdir") {
         assert!(mkdir.args.iter().all(|a| a == "-p" || !a.starts_with('-')));

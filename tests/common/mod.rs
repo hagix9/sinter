@@ -204,9 +204,14 @@ pub fn is_mutation_command(program: &str, args: &[String]) -> bool {
                     || a.contains("base64 -d")
             })
         }
-        "apt-get" | "dnf" | "yum" => args
-            .iter()
-            .any(|a| a == "install" || a == "remove" || a == "purge"),
+        "apt-get" | "dnf" | "yum" => {
+            // `dnf install --downloadonly` transports payload files without
+            // mutating the rpmdb — only the later `dnf -C install` mutates.
+            !args.iter().any(|a| a == "--downloadonly")
+                && args
+                    .iter()
+                    .any(|a| a == "install" || a == "remove" || a == "purge")
+        }
         "systemctl" => args.iter().any(|a| {
             matches!(
                 a.as_str(),

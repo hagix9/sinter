@@ -79,7 +79,11 @@ fn dnf_mutations(report: &sinter::engine::RunReport) -> usize {
     report
         .commands
         .iter()
-        .filter(|c| c.program == "/usr/bin/dnf" && c.args.iter().any(|a| a == "-y"))
+        .filter(|c| {
+            c.program == "/usr/bin/dnf"
+                && c.args.iter().any(|a| a == "-y")
+                && !c.args.iter().any(|a| a == "--downloadonly")
+        })
         .count()
 }
 
@@ -116,14 +120,6 @@ fn dnf_transaction_table(name: &str, repoid: &str) -> String {
          Installed size: 2 k\n",
         n = name,
         r = repoid
-    )
-}
-
-/// The payload URL the scripted target resolves for one package.
-fn dnf_payload_url(name: &str, repoid: &str) -> String {
-    format!(
-        "https://mirror.example/{}/Packages/{}-1.0-1.el9.x86_64.rpm",
-        repoid, name
     )
 }
 
@@ -393,10 +389,14 @@ fn r2_02_indeterminate_mutation_forbids_further_target_commands() {
         commands_with(&r, "/usr/bin/rm").is_empty(),
         "snapshot cleanup must not be dispatched after an indeterminate mutation"
     );
-    // ...and no post-mutation re-observation — the single rpm record is the
-    // pre-mutation observation.
+    // ...and no post-mutation re-observation — the single `rpm -q` record
+    // is the pre-mutation observation (payload `-qp` verification queries
+    // are a separate step, before the mutation).
     assert_eq!(
-        commands_with(&r, "/usr/bin/rpm").len(),
+        commands_with(&r, "/usr/bin/rpm")
+            .into_iter()
+            .filter(|c| !c.args.iter().any(|a| a == "-qp"))
+            .count(),
         1,
         "re-observation must not be dispatched after an indeterminate mutation"
     );
@@ -416,7 +416,15 @@ fn r2_02_completed_mutation_cleans_up_and_reobserves() {
     assert_eq!(p.verification, Verification::Verified);
     assert_eq!(dnf_mutations(&r), 1);
     assert_snapshot_cleaned(&r);
-    assert_eq!(commands_with(&r, "/usr/bin/rpm").len(), 2);
+    // Two `rpm -q` observations (pre/post mutation); the `-qp` payload
+    // verification is a separate step.
+    assert_eq!(
+        commands_with(&r, "/usr/bin/rpm")
+            .into_iter()
+            .filter(|c| !c.args.iter().any(|a| a == "-qp"))
+            .count(),
+        2
+    );
 }
 
 // ===========================================================================
@@ -473,25 +481,29 @@ fn r2_03_unexpected_stderr_on_transaction_table_fails_closed() {
 }
 
 #[test]
-fn r2_03_truncated_payload_location_output_fails_closed() {
-    let dir = trusted_root("r2-03-trunc-loc");
+fn r2_03_payload_download_failure_fails_closed() {
+    let dir = trusted_root("r2-03-dlfail");
     let recipe = pkg_recipe(&dir, "nano", "present");
     let mut t = FakeTarget::rocky9();
-    let mut o = override_output(
-        Completion::Exited(0),
-        &dnf_payload_url("nano", "baseos"),
-        "partial",
-    );
-    o.stderr_truncated = true;
-    t.dnf_location_output = Some(o);
+    // The native payload transport failed: nothing may proceed to the
+    // cache-only mutation.
+    t.dnf_downloadonly_output = Some(override_output(
+        Completion::Exited(1),
+        "",
+        "Error: Transaction failed\n",
+    ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
-    let p = assert_blocked_no_mutation(&r);
+    let p = find(&r, "p");
+    assert_eq!(p.execution, Execution::Failed);
+    assert_eq!(dnf_mutations(&r), 0);
     assert!(
-        p.reason.as_deref().unwrap_or("").contains("incomplete"),
-        "truncated payload locations must be reported as incomplete: {:?}",
+        p.reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("payload download failed"),
+        "a failed payload download must be reported: {:?}",
         p.reason
     );
-    assert_no_download(&r);
     assert_snapshot_cleaned(&r);
 }
 
@@ -547,61 +559,58 @@ fn r2_03_transaction_body_summary_mismatch_fails_closed() {
     assert_snapshot_cleaned(&r);
 }
 
-/// R2-03-C: a payload location that is not a fetchable absolute http(s) URL
-/// must never be handed to the downloader, even when its basename matches.
+/// R2-03-C: a payload file that is not part of the frozen transaction set
+/// must never be accepted — the downloaded set is verified against the
+/// transaction, never trusted from the transport's own output.
 #[test]
-fn r2_03_invalid_payload_location_fails_closed() {
-    let dir = trusted_root("r2-03-bad-url");
+fn r2_03_unexpected_payload_fails_closed() {
+    let dir = trusted_root("r2-03-extra-payload");
     let recipe = pkg_recipe(&dir, "nano", "present");
     let mut t = FakeTarget::rocky9();
-    t.dnf_location_output = Some(override_output(
-        Completion::Exited(0),
-        "not-a-url/nano-1.0-1.el9.x86_64.rpm\n",
-        "",
+    // The expected payload plus a second `.rpm` the transaction never
+    // resolved — an unexpected payload cannot silently join the set.
+    t.snap_rpm_listing = Some(format!(
+        "{snap}/baseos-cafebabecafebabe/packages/nano-1.0-1.el9.x86_64.rpm\n\
+         {snap}/baseos-cafebabecafebabe/packages/other-9.9-1.el9.x86_64.rpm\n",
+        snap = FAKE_SNAP
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
-    let p = assert_blocked_no_mutation(&r);
+    let p = find(&r, "p");
+    assert_eq!(p.execution, Execution::Failed);
+    assert_eq!(dnf_mutations(&r), 0);
     assert!(
         p.reason
             .as_deref()
             .unwrap_or("")
-            .contains("payload location"),
-        "an invalid payload location must be reported: {:?}",
+            .contains("unexpected payload"),
+        "an unexpected payload must be reported: {:?}",
         p.reason
     );
-    assert_no_download(&r);
     assert_snapshot_cleaned(&r);
 }
 
 // ===========================================================================
 // R2-04 — structural ambiguity in the payload mapping must fail closed.
-//         Multiple candidate payload URLs for one transaction row, or
-//         multiple candidate repository cache dirs for one repository id,
-//         cannot be told apart, so neither is guessed.
+//         A payload that never lands, or multiple candidate repository
+//         cache dirs for one repository id, cannot be told apart or
+//         guessed, so neither is tolerated.
 // ===========================================================================
 
 #[test]
-fn r2_04_ambiguous_payload_url_fails_closed() {
-    let dir = trusted_root("r2-04-ambig-url");
+fn r2_04_missing_payload_fails_closed() {
+    let dir = trusted_root("r2-04-missing-payload");
     let recipe = pkg_recipe(&dir, "nano", "present");
     let mut t = FakeTarget::rocky9();
-    // Two distinct URLs share the payload basename: the transaction row
-    // cannot be mapped to exactly one location.
-    let url = dnf_payload_url("nano", "baseos");
-    t.dnf_location_output = Some(override_output(
-        Completion::Exited(0),
-        &format!(
-            "{}\n{}\n",
-            url,
-            url.replace("mirror.example", "mirror2.example")
-        ),
-        "",
-    ));
+    // The transport succeeded but the transaction's payload never landed
+    // in the snapshot — the frozen set is not satisfied.
+    t.snap_rpm_listing = Some(String::new());
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
-    let p = assert_blocked_no_mutation(&r);
+    let p = find(&r, "p");
+    assert_eq!(p.execution, Execution::Failed);
+    assert_eq!(dnf_mutations(&r), 0);
     assert!(
-        p.reason.as_deref().unwrap_or("").contains("not unique"),
-        "ambiguous payload location must be reported: {:?}",
+        p.reason.as_deref().unwrap_or("").contains("missing"),
+        "a missing payload must be reported: {:?}",
         p.reason
     );
     assert_snapshot_cleaned(&r);
@@ -703,15 +712,15 @@ fn assert_cleanup_attempted(r: &sinter::engine::RunReport) {
 /// must route a dispatch failure through the cleanup policy. A bare `?` on
 /// any of them would leave the private snapshot behind.
 #[test]
-fn r2_05_fetch_tool_detection_dispatch_failure_cleans_up() {
-    let dir = trusted_root("r2-05-fetchtool");
+fn r2_05_payload_verify_dispatch_failure_cleans_up() {
+    let dir = trusted_root("r2-05-verify");
     let recipe = pkg_recipe(&dir, "nano", "present");
     let r = run_recipe_fake_fault(
         &recipe,
         Mode::Apply,
         false,
         FakeTarget::rocky9(),
-        "payload_fetch_tool_fail",
+        "payload_verify_fail",
     );
     let p = find(&r, "p");
     assert_eq!(p.execution, Execution::Failed);
@@ -720,7 +729,7 @@ fn r2_05_fetch_tool_detection_dispatch_failure_cleans_up() {
             .as_deref()
             .unwrap_or("")
             .contains("failed to dispatch"),
-        "fetch-tool dispatch failure must be surfaced: {:?}",
+        "payload verification dispatch failure must be surfaced: {:?}",
         p.reason
     );
     assert_eq!(dnf_mutations(&r), 0);

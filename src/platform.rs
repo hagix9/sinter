@@ -147,18 +147,48 @@ impl PackageBackend {
         ]
     }
 
-    /// argv resolving full payload URLs for package names strictly from
-    /// the snapshot's cached metadata and mirror lists (no network).
-    pub fn dnf_payload_location_args(snap: &str, names: &[String]) -> Vec<String> {
+    /// argv that delegates payload transport to native dnf/librepo:
+    /// download — but never install — the exact resolved package set into
+    /// the snapshot's per-repository package caches. This is the one step
+    /// allowed to touch the network (DESIGN §27): repository transport,
+    /// mirror resolution and any per-repository client authentication are
+    /// librepo's, not Sinter's. `*.metadata_expire=-1` keeps the prepared
+    /// snapshot metadata authoritative — no refresh — and
+    /// `*.skip_if_unavailable=0` keeps every enabled repository a hard
+    /// requirement rather than a silent skip. `*.keepcache=1` retains the
+    /// downloaded payloads for the later `dnf -C install`. `-C` cannot be
+    /// used here because it would also block the payload transfer itself;
+    /// metadata freshness is pinned by `metadata_expire` instead, and the
+    /// earlier `-C` snapshot check has already proven every repository's
+    /// metadata is present. The requested operands are exact
+    /// `name-[epoch:]version-release.arch` identities from the frozen
+    /// transaction, never bare names dnf could re-resolve.
+    pub fn dnf_payload_download_args(snap: &str, nevras: &[String]) -> Vec<String> {
         let mut v = vec![
-            "-C".to_string(),
             format!("--setopt=cachedir={}", snap),
+            "--setopt=*.metadata_expire=-1".to_string(),
             "--setopt=*.skip_if_unavailable=0".to_string(),
-            "repoquery".to_string(),
-            "--location".to_string(),
+            "--setopt=*.keepcache=1".to_string(),
+            "-y".to_string(),
+            "install".to_string(),
+            "--downloadonly".to_string(),
         ];
-        v.extend(names.iter().cloned());
+        v.extend(nevras.iter().cloned());
         v
+    }
+
+    /// argv reading the identity metadata of one RPM payload file: one
+    /// `|`-separated `name|epoch|version|release|arch` record, verified
+    /// against the frozen transaction row before the payload may satisfy
+    /// it. A file name only locates a candidate; rpm's own parse of the
+    /// header is what proves the payload's identity.
+    pub fn rpm_package_file_args(path: &str) -> Vec<String> {
+        vec![
+            "-qp".to_string(),
+            "--queryformat".to_string(),
+            "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\\n".to_string(),
+            path.to_string(),
+        ]
     }
 
     /// argv listing enabled repositories verbosely (id plus mirror
@@ -458,6 +488,46 @@ mod tests {
     #[should_panic(expected = "verified metadata snapshot")]
     fn dnf_install_without_snapshot_is_rejected() {
         let _ = PackageBackend::Dnf.mutate_args(true, "httpd", None);
+    }
+
+    #[test]
+    fn dnf_payload_download_args_are_exact() {
+        // Native payload transport: exact NEVRA operands, the snapshot
+        // cachedir, metadata expiry pinned (never refreshed), payloads
+        // retained for the `-C` install — and never `-C` itself, which
+        // would block the transfer.
+        assert_eq!(
+            PackageBackend::dnf_payload_download_args(
+                "/var/tmp/snap",
+                &[
+                    "nano-1.0-1.el9.x86_64".to_string(),
+                    "libnano-2:3.0-1.el9.x86_64".to_string()
+                ]
+            ),
+            vec![
+                "--setopt=cachedir=/var/tmp/snap".to_string(),
+                "--setopt=*.metadata_expire=-1".to_string(),
+                "--setopt=*.skip_if_unavailable=0".to_string(),
+                "--setopt=*.keepcache=1".to_string(),
+                "-y".to_string(),
+                "install".to_string(),
+                "--downloadonly".to_string(),
+                "nano-1.0-1.el9.x86_64".to_string(),
+                "libnano-2:3.0-1.el9.x86_64".to_string()
+            ]
+        );
+        // The payload identity query is the fixed `|`-separated record.
+        assert_eq!(
+            PackageBackend::rpm_package_file_args(
+                "/var/tmp/snap/baseos-x/packages/a-1-1.x86_64.rpm"
+            ),
+            vec![
+                "-qp".to_string(),
+                "--queryformat".to_string(),
+                "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\\n".to_string(),
+                "/var/tmp/snap/baseos-x/packages/a-1-1.x86_64.rpm".to_string()
+            ]
+        );
     }
 
     #[test]

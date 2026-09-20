@@ -10,7 +10,7 @@
 //! The Astra reproductions are fed through the production decision path via
 //! explicit helper-output overrides (the live-cache `find -print0` answer, the
 //! `mktemp` answer, `repolist -v`, the `--assumeno` transaction table, the
-//! `repoquery --location` answer, and the snapshot cache listing), so the
+//! download-only answer, and the snapshot payload listing), so the
 //! boundary being hardened is the one that actually runs.
 
 mod common;
@@ -59,14 +59,21 @@ fn dnf_mutations(report: &sinter::engine::RunReport) -> usize {
     report
         .commands
         .iter()
-        .filter(|c| c.program == "/usr/bin/dnf" && c.args.iter().any(|a| a == "-y"))
+        .filter(|c| {
+            c.program == "/usr/bin/dnf"
+                && c.args.iter().any(|a| a == "-y")
+                && !c.args.iter().any(|a| a == "--downloadonly")
+        })
         .count()
 }
 
+/// Payload-transport dispatches: the native `dnf install --downloadonly`
+/// invocation that fills the snapshot package cache. Explicit fetchers
+/// (curl/wget) are gone — librepo owns the transfer.
 fn downloads(report: &sinter::engine::RunReport) -> usize {
-    commands_with(report, "/usr/bin/curl")
+    commands_with(report, "/usr/bin/dnf")
         .into_iter()
-        .chain(commands_with(report, "/usr/bin/wget"))
+        .filter(|c| c.args.iter().any(|a| a == "--downloadonly"))
         .count()
 }
 
@@ -498,255 +505,6 @@ fn r5_f01_legal_children_are_copied_and_root_stays_private() {
 }
 
 // ===========================================================================
-// R4-F02 — URL resource identity / curl semantics. One validated URL must be
-// exactly one intended request.
-// ===========================================================================
-
-/// The Astra reproduction: a validated string whose fetched resource differs
-/// from it. Query, fragment, glob syntax and malformed encoding are rejected
-/// before any download is dispatched.
-#[test]
-fn r5_f02_url_identity_mismatch_rejected() {
-    let bad_urls = [
-        // A fragment URL: curl fetches the path, ignoring the fragment.
-        "https://mirror.example/repodata/repomd.xml#/nano-1.0-1.el9.x86_64.rpm",
-        // A query whose value re-parses as a path.
-        "https://mirror.example/not-rpm?download=/nano-1.0-1.el9.x86_64.rpm",
-        // curl URL glob syntax: one string, two requests.
-        "https://mirror.example/[1-2]/nano-1.0-1.el9.x86_64.rpm",
-        // Malformed percent encoding.
-        "https://mirror.example/%GG/nano-1.0-1.el9.x86_64.rpm",
-        // Bare percent and a truncated escape.
-        "https://mirror.example/%/nano.rpm",
-        "https://mirror.example/%A/nano.rpm",
-        // An encoded slash / dot would make the identity ambiguous.
-        "https://mirror.example/a%2fb/nano.rpm",
-        "https://mirror.example/%2e/nano.rpm",
-        // A basename that is not the payload this transaction expects.
-        "https://mirror.example/baseos/Packages/other-1.0-1.el9.x86_64.rpm",
-        "https://mirror.example/baseos/Packages/",
-        "https://mirror.example/baseos/Packages/notrpm",
-    ];
-    for (i, url) in bad_urls.iter().enumerate() {
-        let dir = trusted_root(&format!("r5-f02-url-{}", i));
-        let recipe = pkg_recipe(&dir, "nano", "present");
-        let mut t = FakeTarget::rocky9();
-        t.dnf_location_output = Some(override_output(
-            Completion::Exited(0),
-            &format!("{}\n", url),
-            "",
-        ));
-        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
-        assert_blocked_no_mutation(&r);
-        assert_eq!(downloads(&r), 0, "no download for an ambiguous URL");
-        assert_snapshot_cleaned(&r);
-    }
-}
-
-/// Positive control: the URL shapes real mirrors use are accepted — HTTPS,
-/// HTTP, an explicit port, an IPv4 literal and an IPv6 literal — and exactly
-/// one download is dispatched for one validated URL.
-#[test]
-fn r5_f02_valid_urls_complete() {
-    let good_urls = [
-        "https://mirror.example/baseos/Packages/nano-1.0-1.el9.x86_64.rpm",
-        "http://mirror.example/baseos/Packages/nano-1.0-1.el9.x86_64.rpm",
-        "https://mirror.example:8443/baseos/Packages/nano-1.0-1.el9.x86_64.rpm",
-        "http://192.0.2.1/baseos/Packages/nano-1.0-1.el9.x86_64.rpm",
-        "https://[2001:db8::1]/baseos/Packages/nano-1.0-1.el9.x86_64.rpm",
-    ];
-    for (i, url) in good_urls.iter().enumerate() {
-        let dir = trusted_root(&format!("r5-f02-good-{}", i));
-        let recipe = pkg_recipe(&dir, "nano", "present");
-        let mut t = FakeTarget::rocky9();
-        t.dnf_location_output = Some(override_output(
-            Completion::Exited(0),
-            &format!("{}\n", url),
-            "",
-        ));
-        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
-        assert_full_install(&r);
-        assert_snapshot_cleaned(&r);
-    }
-}
-
-/// The downloader argv always disables URL glob expansion, so one validated
-/// URL can only ever be one request.
-#[test]
-fn r5_f02_curl_globbing_is_disabled_in_argv() {
-    let dir = trusted_root("r5-f02-globoff");
-    let recipe = pkg_recipe(&dir, "nano", "present");
-    let r = run_recipe_fake(&recipe, Mode::Apply, false, FakeTarget::rocky9());
-    assert_success(&r);
-    for curl in commands_with(&r, "/usr/bin/curl") {
-        assert!(
-            curl.args.iter().any(|a| a == "-g" || a == "--globoff"),
-            "curl URL globbing must be disabled: {:?}",
-            curl.args
-        );
-        // The URL is the final, single argv element and is not option-like.
-        let url = curl.args.last().expect("a URL operand");
-        assert!(url.starts_with("https://"));
-        assert!(!url.starts_with('-'));
-        assert!(!url.contains(['?', '#', '%', '[', ']', '{', '}']));
-    }
-}
-
-/// Real-downloader proof (loopback HTTP server + the real curl binary with
-/// the production argv): one validated URL is exactly one request, and the
-/// request path is the validated intended path. URL glob syntax does not fan
-/// out because `-g` is present. Self-skips when curl is unavailable.
-#[cfg(unix)]
-#[test]
-fn r5_f02_real_downloader_one_url_one_request() {
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::process::Command;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-
-    fn curl_path() -> Option<std::path::PathBuf> {
-        for cand in [
-            "/usr/bin/curl",
-            "/opt/homebrew/bin/curl",
-            "/usr/local/bin/curl",
-        ] {
-            if std::path::Path::new(cand).exists() {
-                return Some(std::path::PathBuf::from(cand));
-            }
-        }
-        // Respect PATH as a last resort.
-        which("curl").map(std::path::PathBuf::from)
-    }
-    fn which(prog: &str) -> Option<String> {
-        let out = Command::new("/usr/bin/which").arg(prog).output().ok()?;
-        if out.status.success() {
-            Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-        } else {
-            None
-        }
-    }
-    let curl = match curl_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("r5-f02-real-downloader: curl unavailable; self-skipping");
-            return;
-        }
-    };
-
-    // A loopback server that records every request path and answers 200 for
-    // any path, closing each connection so one request is one connection.
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let port = listener.local_addr().unwrap().port();
-    let recorded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let recorded_srv = recorded.clone();
-    let server = std::thread::spawn(move || {
-        listener.set_nonblocking(true).ok();
-        let deadline = std::time::Instant::now() + Duration::from_secs(15);
-        while std::time::Instant::now() < deadline {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    let mut buf = Vec::new();
-                    let mut chunk = [0u8; 4096];
-                    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-                    while let Ok(n) = stream.read(&mut chunk) {
-                        buf.extend_from_slice(&chunk[..n]);
-                        if buf.windows(4).any(|w| w == b"\r\n\r\n") || n == 0 {
-                            break;
-                        }
-                    }
-                    if let Ok(text) = std::str::from_utf8(&buf) {
-                        for line in text.lines() {
-                            if let Some(rest) = line.strip_prefix("GET ") {
-                                let path = rest.split_whitespace().next().unwrap_or("");
-                                recorded_srv.lock().unwrap().push(path.to_string());
-                            }
-                        }
-                    }
-                    let body = b"rpm-payload";
-                    let resp = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    );
-                    stream.write_all(resp.as_bytes()).ok();
-                    stream.write_all(body).ok();
-                    stream.flush().ok();
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    let base = format!("http://127.0.0.1:{}", port);
-    let dest = std::env::temp_dir().join(format!("r5-f02-dl-{}.rpm", std::process::id()));
-    let _ = std::fs::remove_file(&dest);
-
-    // The production argv shape for a payload download.
-    let run = |url: &str, globoff: bool| {
-        let mut args: Vec<&str> = Vec::new();
-        if globoff {
-            args.push("-g");
-        }
-        args.extend(["-fsSL", "-o", dest.to_str().unwrap(), url]);
-        Command::new(&curl)
-            .args(&args)
-            .output()
-            .expect("curl failed")
-    };
-
-    // 1. A plain validated URL: exactly one request at the intended path.
-    let plain = format!("{}/baseos/Packages/nano-1.0-1.el9.x86_64.rpm", base);
-    let out = run(&plain, true);
-    assert!(out.status.success(), "curl failed: {}", out.status);
-    let paths = recorded.lock().unwrap().clone();
-    assert_eq!(
-        paths.len(),
-        1,
-        "one validated URL must be one request: {:?}",
-        paths
-    );
-    assert_eq!(
-        paths[0], "/baseos/Packages/nano-1.0-1.el9.x86_64.rpm",
-        "the request path must be the validated intended path"
-    );
-
-    // 2. A glob URL with globbing disabled: still exactly one request, for
-    //    the literal validated path (no fan-out).
-    recorded.lock().unwrap().clear();
-    let glob = format!("{}/[1-2]/nano-1.0-1.el9.x86_64.rpm", base);
-    let _ = run(&glob, true);
-    let paths = recorded.lock().unwrap().clone();
-    assert_eq!(
-        paths.len(),
-        1,
-        "glob syntax must not fan out with -g: {:?}",
-        paths
-    );
-    assert_eq!(paths[0], "/[1-2]/nano-1.0-1.el9.x86_64.rpm");
-
-    // 3. The same glob URL WITHOUT globbing disabled proves the syntax is
-    //    load-bearing: curl expands it into two requests at other paths. This
-    //    is what the `-g` in the production argv prevents.
-    recorded.lock().unwrap().clear();
-    let _ = run(&glob, false);
-    let paths = recorded.lock().unwrap().clone();
-    assert!(
-        paths.len() >= 2,
-        "curl expands glob syntax into multiple requests without -g: {:?}",
-        paths
-    );
-    assert!(paths.iter().all(|p| !p.contains("[1-2]")));
-
-    let _ = std::fs::remove_file(&dest);
-    // Stop the server by dropping it after the thread's deadline; join best
-    // effort.
-    drop(server);
-}
-
-// ===========================================================================
 // R4-F03 / R4-F04 — a strict but native-compatible DNF grammar. Malformed
 // output fails closed; native valid output is accepted. Treated as two sides
 // of one grammar contract.
@@ -982,8 +740,8 @@ fn r5_f03_duplicate_summary_rejected() {
 }
 
 /// F03 positive control: a native-style upgrade transaction resolves and
-/// completes. The payload URL's basename must name the exact version the
-/// transaction row carries, so the location override matches `2.0-1.el9`.
+/// completes; the downloaded payload's identity is verified against the
+/// row's exact version.
 #[test]
 fn r5_f03_native_upgrade_transaction_accepted() {
     let dir = trusted_root("r5-f03-upgrade");
@@ -1003,11 +761,6 @@ fn r5_f03_native_upgrade_transaction_accepted() {
          Total download size: 1 k\n\
          Installed size: 2 k\n",
         DNF_ABORT_STDERR,
-    ));
-    t.dnf_location_output = Some(override_output(
-        Completion::Exited(0),
-        "https://mirror.example/baseos/Packages/nano-2.0-1.el9.x86_64.rpm\n",
-        "",
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_full_install(&r);
@@ -1038,13 +791,20 @@ fn r5_f03_native_dependency_install_accepted() {
          Installed size: 2 k\n",
         DNF_ABORT_STDERR,
     ));
-    // Two payload rows resolve to two downloads.
+    // Both payload rows are carried by one download-only transport call
+    // as exact NEVRA operands.
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     let p = find(&r, "p");
     assert_eq!(p.execution, Execution::Succeeded);
     assert_eq!(p.change, Change::Changed);
     assert_eq!(p.verification, Verification::Verified);
-    assert_eq!(downloads(&r), 2, "both transaction payloads are prefetched");
+    assert_eq!(downloads(&r), 1, "the payload transport runs once");
+    let dl = commands_with(&r, "/usr/bin/dnf")
+        .into_iter()
+        .find(|c| c.args.iter().any(|a| a == "--downloadonly"))
+        .expect("a payload transport call");
+    assert!(dl.args.iter().any(|a| a == "nano-1.0-1.el9.x86_64"));
+    assert!(dl.args.iter().any(|a| a == "libnano-1.0-1.el9.x86_64"));
     assert_eq!(dnf_mutations(&r), 1);
     assert_snapshot_cleaned(&r);
 }
@@ -1055,7 +815,7 @@ fn r5_f03_native_dependency_install_accepted() {
 // ===========================================================================
 
 /// A package name that is an option to the target CLI is rejected before it
-/// can become a `repoquery` operand (the Astra reproduction: `--refresh`).
+/// can become a download-only operand (the Astra reproduction: `--refresh`).
 #[test]
 fn r5_f05_option_like_package_name_rejected() {
     let dir = trusted_root("r5-f05-opt-pkg");
@@ -1068,19 +828,15 @@ fn r5_f05_option_like_package_name_rejected() {
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_blocked_no_mutation(&r);
-    // No payload-location repoquery may carry the option-like operand. (The
-    // snapshot completeness check is itself a `repoquery`, but it runs before
-    // the transaction table is parsed and carries the recipe's own validated
-    // name — only `--location` consumes transaction-derived identifiers.)
+    // No payload-transport call may be dispatched at all — the row failed
+    // validation before any download-only operand could be constructed.
     assert!(
         commands_with(&r, "/usr/bin/dnf")
             .into_iter()
-            .filter(|c| {
-                c.args.iter().any(|a| a == "repoquery") && c.args.iter().any(|a| a == "--location")
-            })
+            .filter(|c| c.args.iter().any(|a| a == "--downloadonly"))
             .count()
             == 0,
-        "no payload-location operand may carry an option-like value"
+        "no payload operand may carry an option-like value"
     );
     assert_snapshot_cleaned(&r);
 }
@@ -1480,11 +1236,6 @@ fn r51_assumeno_native_streams_accepted() {
          Installed size: 2.7 M\n",
         DNF_ABORT_STDERR,
     ));
-    t.dnf_location_output = Some(override_output(
-        Completion::Exited(0),
-        "https://rocky-linux-asia-northeast1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//9.8/BaseOS/x86_64/os/Packages/n/nano-5.6.1-7.el9.x86_64.rpm\n",
-        REAL_REPOQUERY_STDERR,
-    ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_full_install(&r);
     assert_snapshot_cleaned(&r);
@@ -1602,68 +1353,11 @@ fn r51_transaction_trailing_garbage_rejected() {
     }
 }
 
-// -- repoquery --location ----------------------------------------------------
-
-/// Positive: the real `repoquery --location` answer — a payload URL carrying
-/// the doubled path separator native Rocky mirrors emit — plus the benign
-/// expiration stderr resolves to exactly one prefetched payload.
-#[test]
-fn r51_location_native_url_and_stderr_accepted() {
-    let dir = trusted_root("r51-location-native");
-    let recipe = pkg_recipe(&dir, "nano", "present");
-    let mut t = FakeTarget::rocky9();
-    t.dnf_location_output = Some(override_output(
-        Completion::Exited(0),
-        "https://rocky-linux-asia-northeast1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//9.8/BaseOS/x86_64/os/Packages/n/nano-1.0-1.el9.x86_64.rpm\n",
-        REAL_REPOQUERY_STDERR,
-    ));
-    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
-    assert_full_install(&r);
-    // The download must request the URL byte-for-byte — the doubled
-    // separator is part of the resource identity.
-    let curls = commands_with(&r, "/usr/bin/curl");
-    assert_eq!(curls.len(), 1);
-    assert!(curls[0].args.iter().any(|a| a.contains("/pub/rocky//9.8/")));
-    assert_snapshot_cleaned(&r);
-}
-
-/// Negative: any other stderr on the location query fails closed, and a
-/// stdout line that is not a fetchable URL is unrecognized structure.
-#[test]
-fn r51_location_bad_streams_rejected() {
-    for (i, (stdout, stderr)) in [
-        (
-            "https://mirror.example/baseos/Packages/nano-1.0-1.el9.x86_64.rpm\n",
-            "Operation aborted.\n",
-        ),
-        (
-            "https://mirror.example/baseos/Packages/nano-1.0-1.el9.x86_64.rpm\n",
-            "Last metadata expiration check: 1:35:13 ago on Wed Sep 16 10:28:01 2026.\nextra\n",
-        ),
-        (
-            "https://mirror.example/baseos/Packages/nano-1.0-1.el9.x86_64.rpm\nnot-a-url\n",
-            "",
-        ),
-    ]
-    .iter()
-    .enumerate()
-    {
-        let dir = trusted_root(&format!("r51-location-bad-{}", i));
-        let recipe = pkg_recipe(&dir, "nano", "present");
-        let mut t = FakeTarget::rocky9();
-        t.dnf_location_output = Some(override_output(Completion::Exited(0), stdout, stderr));
-        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
-        assert_blocked_no_mutation(&r);
-        assert_snapshot_cleaned(&r);
-    }
-}
-
 /// F04 closure: the complete byte-exact `dnf -C repolist -v` capture from
 /// Rocky Linux 9.8 / dnf 4.14.0 (`LC_ALL=C.UTF-8`) — all six enabled
 /// repositories with their real field sets, the full plugin list, and the
 /// real footer — parses and drives a complete install, alongside the real
-/// `--assumeno` table and a real `--location` URL carrying the native
-/// doubled path separator.
+/// `--assumeno` table.
 #[test]
 fn r51_full_real_rocky_capture_replay() {
     let dir = trusted_root("r51-real-rocks-replay");
@@ -1810,11 +1504,12 @@ Installed size: 2.7 M
 "#,
         DNF_ABORT_STDERR,
     ));
-    // Byte-exact `dnf -C repoquery --location nano` answer.
-    t.dnf_location_output = Some(override_output(
-        Completion::Exited(0),
-        "https://rocky-linux-asia-northeast1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//9.8/BaseOS/x86_64/os/Packages/n/nano-5.6.1-7.el9.x86_64.rpm\n",
-        "Last metadata expiration check: 1:35:14 ago on Wed Sep 16 10:28:01 2026.\n",
+    // The row resolves from baseos, so the payload must land under
+    // baseos's snapshot cache dir — the fake's default first-repo
+    // placement would not match.
+    t.snap_rpm_listing = Some(format!(
+        "{}/baseos-cafebabecafebabe/packages/nano-5.6.1-7.el9.x86_64.rpm\n",
+        FAKE_SNAP
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_full_install(&r);

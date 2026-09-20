@@ -2878,8 +2878,17 @@ impl Engine {
     /// snapshot's per-repository package cache, so the subsequent
     /// `dnf -C install` is provably incapable of touching the network
     /// (DESIGN §27: payload downloads allowed, metadata downloads never).
-    /// URLs are resolved from the snapshot's own cached metadata and
-    /// mirror lists — no metadata is ever fetched to compute them.
+    ///
+    /// Payload transport is delegated to native dnf/librepo: the frozen
+    /// transaction's exact package identities are requested as NEVRA
+    /// operands against the snapshot cachedir, so repository transport —
+    /// mirror resolution, TLS, and any per-repository client
+    /// authentication — is handled by the package stack rather than
+    /// reimplemented here. dnf's own output is never trusted as evidence:
+    /// afterwards the snapshot is enumerated and every payload that
+    /// landed is proven to be exactly one frozen transaction row —
+    /// location, file name and rpm-verified identity — before any
+    /// installation runs.
     fn dnf_prefetch_payloads(
         &mut self,
         snap: &str,
@@ -2896,117 +2905,22 @@ impl Engine {
             }
             Ok(DnfSnapshot::Blocked(reason, indeterminate))
         };
-        // Resolve payload URLs from cached metadata alone (`-C`): one
-        // repoquery for every package in the transaction set.
-        let names: Vec<String> = {
-            let mut v: Vec<String> = rows.iter().map(|r| r.name.clone()).collect();
-            v.sort();
-            v.dedup();
-            v
-        };
-        let mut req = ExecRequest::new("/usr/bin/dnf");
-        req.args = PackageBackend::dnf_payload_location_args(snap, &names);
-        req.env = baseline_env(self.fs.home_env());
-        req.sensitive = sensitive;
-        req.timeout_secs = 120;
-        let loc_out = self.snap_exec(snap, &req, "payload location resolution", "")?;
-        let urls: Vec<String> = match loc_out.completion {
-            Completion::Exited(0) => {
-                // R2-03: payload locations are only trustworthy when the
-                // whole answer was captured and no stderr was produced.
-                if let Err(e) = self.dnf_output_guard(
-                    &loc_out,
-                    "payload location resolution",
-                    &[DnfStderr::MetadataExpiration],
-                ) {
-                    return blocked(self, e.message, false);
-                }
-                let mut urls: Vec<String> = Vec::new();
-                for l in String::from_utf8_lossy(&loc_out.stdout).lines() {
-                    let l = l.trim();
-                    if l.is_empty() {
-                        continue;
-                    }
-                    // R2-03-C: each location must be a URL the downloader can
-                    // actually fetch; anything else is unrecognized structure.
-                    if let Err(reason) = validate_payload_url(l) {
-                        return blocked(self, format!("{} for {}", reason, name_disp), false);
-                    }
-                    urls.push(l.to_string());
-                }
-                urls
-            }
-            Completion::Indeterminate { reason, .. } => {
-                return blocked(
-                    self,
-                    format!("payload location resolution did not complete: {}", reason),
-                    true,
-                )
-            }
-            _ => {
-                return blocked(
-                    self,
-                    format!("cannot resolve payload locations for {}", name_disp),
-                    false,
-                )
-            }
-        };
-        // A non-interactive payload fetcher on the target. curl is
-        // near-universal on RHEL-family systems; wget is the fallback.
-        // A dispatch failure here runs after the snapshot exists, so it goes
-        // through the same cleanup policy as every other preparation step
-        // (R2-05): a bare `?` would leak the private snapshot.
-        let fetcher = match self.dnf_fetch_tool(snap)? {
-            Ok(f) => f,
-            Err(reason) => return blocked(self, reason, true),
-        };
-        let fetcher = match fetcher {
-            Some(f) => f,
-            None => {
-                return blocked(
-                    self,
-                    "no payload fetch tool (curl/wget) available".to_string(),
-                    false,
-                )
-            }
-        };
-        for row in rows {
-            // rpm payload file names are <name>-<version-release>.<arch>.rpm
-            // with no epoch component; match the resolved URL by basename.
-            let want = format!("{}-{}.{}.rpm", row.name, row.verrel, row.arch);
-            // R2-04: the transaction row must map to exactly one payload
-            // location. Multiple URLs sharing a basename cannot be told
-            // apart, so the mapping is ambiguous and must fail closed
-            // instead of picking the first candidate.
-            let candidates: Vec<&String> = urls
-                .iter()
-                .filter(|u| u.rsplit('/').next() == Some(want.as_str()))
-                .collect();
-            let url = match candidates.len() {
-                0 => {
-                    return blocked(
-                        self,
-                        format!("no cached payload location for {}", name_disp),
-                        false,
-                    )
-                }
-                1 => candidates[0].clone(),
-                n => {
-                    return blocked(
-                        self,
-                        format!(
-                            "payload location for {} is not unique ({} candidate URLs)",
-                            name_disp, n
-                        ),
-                        false,
-                    )
-                }
-            };
-            // The repository's cache dir inside the snapshot. It must be
-            // provably and uniquely resolvable (R2-04, R4-A03): the directory
-            // name must prove it belongs to this transaction's repository —
-            // not merely share an id prefix with it — and only one such
-            // directory may exist.
+        // Only rows that add a package to the system carry a payload;
+        // removal and cleanup rows never do.
+        let payload_rows: Vec<&DnfInstallRow> = rows.iter().filter(|r| r.needs_payload).collect();
+        if payload_rows.is_empty() {
+            return Ok(DnfSnapshot::Ready(snap.to_string()));
+        }
+        // The repository cache dir inside the snapshot each payload must
+        // land in. It must be provably and uniquely resolvable (R2-04,
+        // R4-A03): the directory name must prove it belongs to this
+        // transaction's repository — not merely share an id prefix with
+        // it — and only one such directory may exist. Because the
+        // expected payload path pins the repository dir, a payload dnf
+        // sourced from a different repository can never silently satisfy
+        // the row.
+        let mut expected: Vec<(&DnfInstallRow, String)> = Vec::new();
+        for row in &payload_rows {
             let prefix = format!("{}/", snap);
             let dirs: Vec<&str> = listing
                 .lines()
@@ -3035,6 +2949,15 @@ impl Engine {
                     )
                 }
             };
+            expected.push((row, repodir));
+        }
+        // The package directories payloads must land in, created up front
+        // so a snapshot that cannot carry a payload fails before any
+        // network transfer.
+        let mut repodirs: Vec<&str> = expected.iter().map(|(_, d)| d.as_str()).collect();
+        repodirs.sort();
+        repodirs.dedup();
+        for repodir in repodirs {
             let pkgdir = format!("{}/packages", repodir);
             let mut req = ExecRequest::new("/usr/bin/mkdir");
             req.args = vec!["-p".to_string(), pkgdir.clone()];
@@ -3064,80 +2987,158 @@ impl Engine {
                     )
                 }
             }
-            let dest = format!("{}/{}", pkgdir, want);
-            let mut req = ExecRequest::new(fetcher.path());
-            req.args = fetcher
-                .payload_args(&dest, &url)
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
+        }
+        // Delegate payload transport to native dnf: the exact frozen
+        // identities only, against the snapshot cachedir, with metadata
+        // expiry disabled. The exit status is the contract — the payload
+        // set itself is proven from the filesystem below, never from
+        // dnf's human-readable output (R2-03).
+        let nevras: Vec<String> = payload_rows.iter().map(|r| r.nevra()).collect();
+        let mut req = ExecRequest::new("/usr/bin/dnf");
+        req.args = PackageBackend::dnf_payload_download_args(snap, &nevras);
+        req.env = baseline_env(self.fs.home_env());
+        req.env.extend(package_env.clone());
+        req.sensitive = sensitive;
+        req.timeout_secs = 600;
+        match self
+            .snap_exec(snap, &req, "payload download", "payload_download_fail")?
+            .completion
+        {
+            Completion::Exited(0) => {}
+            Completion::Indeterminate { reason, .. } => {
+                return blocked(
+                    self,
+                    format!("payload download did not complete: {}", reason),
+                    true,
+                );
+            }
+            _ => {
+                return blocked(
+                    self,
+                    format!("payload download failed for {}", name_disp),
+                    false,
+                )
+            }
+        }
+        // Enumerate the payloads that actually landed in the snapshot and
+        // require exact set equality with the frozen transaction: nothing
+        // expected may be missing, nothing unexpected may be present
+        // (R2-03, R2-04).
+        let mut req = ExecRequest::new("/usr/bin/find");
+        req.args = vec![
+            snap.to_string(),
+            "-type".to_string(),
+            "f".to_string(),
+            "-name".to_string(),
+            "*.rpm".to_string(),
+        ];
+        req.env = baseline_env(self.fs.home_env());
+        req.sensitive = sensitive;
+        let found_out = self.snap_exec(snap, &req, "payload enumeration", "payload_enum_fail")?;
+        let found: std::collections::BTreeSet<String> = match found_out.completion {
+            Completion::Exited(0) => {
+                if let Err(e) = self.dnf_output_guard(&found_out, "payload enumeration", &[]) {
+                    return blocked(self, e.message, false);
+                }
+                String::from_utf8_lossy(&found_out.stdout)
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect()
+            }
+            Completion::Indeterminate { reason, .. } => {
+                return blocked(
+                    self,
+                    format!("payload enumeration did not complete: {}", reason),
+                    true,
+                );
+            }
+            _ => {
+                return blocked(
+                    self,
+                    format!("cannot enumerate payloads in {}", snap),
+                    false,
+                )
+            }
+        };
+        let want: std::collections::BTreeSet<String> = expected
+            .iter()
+            .map(|(row, repodir)| format!("{}/packages/{}", repodir, row.payload_basename()))
+            .collect();
+        if want.len() != expected.len() {
+            return blocked(
+                self,
+                format!(
+                    "transaction payload identity is not unique for {}",
+                    name_disp
+                ),
+                false,
+            );
+        }
+        for w in &want {
+            if !found.contains(w) {
+                return blocked(
+                    self,
+                    format!("expected payload missing from snapshot for {}", name_disp),
+                    false,
+                );
+            }
+        }
+        for f in &found {
+            if !want.contains(f) {
+                return blocked(
+                    self,
+                    format!("unexpected payload in snapshot for {}", name_disp),
+                    false,
+                );
+            }
+        }
+        // Every payload's own rpm metadata must equal its transaction row:
+        // the file name located the candidate, the package header proves
+        // what it is (R2-03-C).
+        for (row, repodir) in &expected {
+            let path = format!("{}/packages/{}", repodir, row.payload_basename());
+            let mut req = ExecRequest::new("/usr/bin/rpm");
+            req.args = PackageBackend::rpm_package_file_args(&path);
             req.env = baseline_env(self.fs.home_env());
-            req.env.extend(package_env.clone());
             req.sensitive = sensitive;
-            req.timeout_secs = 300;
-            match self
-                .snap_exec(snap, &req, "payload download", "payload_download_fail")?
-                .completion
-            {
+            let id_out =
+                self.snap_exec(snap, &req, "payload verification", "payload_verify_fail")?;
+            match id_out.completion {
                 Completion::Exited(0) => {}
                 Completion::Indeterminate { reason, .. } => {
                     return blocked(
                         self,
-                        format!("payload fetch did not complete: {}", reason),
+                        format!("payload verification did not complete: {}", reason),
                         true,
                     );
                 }
                 _ => {
                     return blocked(
                         self,
-                        format!("payload fetch failed for {}", name_disp),
+                        format!("payload verification failed for {}", name_disp),
                         false,
                     )
                 }
             }
-        }
-        Ok(DnfSnapshot::Ready(snap.to_string()))
-    }
-
-    /// Pick a non-interactive payload fetch tool on the target. `Err` is
-    /// an indeterminate outcome (the capability probe could not complete).
-    /// The probe is a snapshot-preparation command: a dispatch failure is
-    /// routed through the cleanup policy so the private snapshot is never
-    /// leaked by a bare `?` (R2-05).
-    fn dnf_fetch_tool(
-        &mut self,
-        snap: &str,
-    ) -> Result<std::result::Result<Option<DnfFetchTool>, String>> {
-        for (path, tool) in [
-            ("/usr/bin/curl", DnfFetchTool::Curl),
-            ("/usr/bin/wget", DnfFetchTool::Wget),
-        ] {
-            let mut req = ExecRequest::new("/usr/bin/test");
-            req.args = vec!["-x".to_string(), path.to_string()];
-            req.env = baseline_env(self.fs.home_env());
-            match self
-                .snap_exec(
-                    snap,
-                    &req,
-                    "payload fetch tool detection",
-                    "payload_fetch_tool_fail",
-                )?
-                .completion
-            {
-                Completion::Exited(0) => return Ok(Ok(Some(tool))),
-                Completion::Exited(_) => {}
-                Completion::Indeterminate { reason, .. } => {
-                    return Ok(Err(format!(
-                        "payload fetch tool probe did not complete: {}",
-                        reason
-                    )));
-                }
-                Completion::Signaled(_) => {
-                    return Ok(Ok(None));
-                }
+            if let Err(e) = self.dnf_output_guard(&id_out, "payload verification", &[]) {
+                return blocked(self, e.message, false);
+            }
+            let text = String::from_utf8_lossy(&id_out.stdout);
+            let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+            let verified = lines.len() == 1
+                && parse_rpm_payload_identity(lines[0])
+                    .map(|id| rpm_identity_matches(row, &id))
+                    .unwrap_or(false);
+            if !verified {
+                return blocked(
+                    self,
+                    format!("payload identity mismatch for {}", name_disp),
+                    false,
+                );
             }
         }
-        Ok(Ok(None))
+        Ok(DnfSnapshot::Ready(snap.to_string()))
     }
 
     /// Run one snapshot-preparation command. A transport-level dispatch
@@ -4570,318 +4571,96 @@ fn listing_has_mirrorlist(listing: &str, snap: &str, repoid: &str) -> bool {
     })
 }
 
-/// Classify a resolved payload location as the one URL this tool actually and
-/// safely fetches (R2-03-C, R4-A02, R4-F02). The location is handed to a
-/// non-interactive downloader as one argv element, and the downloader must
-/// retrieve exactly the resource the validated string names — so the value is
-/// not merely a syntactically valid URL, but one whose resource identity is
-/// unambiguous:
-///
-///   * scheme `http` or `https`, a well-formed authority (optional userinfo,
-///     registered name or IPv4/IPv6 literal, optional in-range port), and an
-///     absolute path — relative paths, scheme-less strings, unsupported
-///     schemes, host-less URLs, malformed authorities, malformed IPv6 literals
-///     and invalid ports are all rejected;
-///   * **no query and no fragment** (Phase 1): a `?` or `#` anywhere would
-///     make the resource identity depend on downloader behavior this tool
-///     cannot prove, so both are rejected outright instead of normalized;
-///   * **no percent-encoding** (Phase 1): every `%` would have to be
-///     interpreted to know which resource it names (an encoded slash, dot or
-///     basename changes the identity), and a malformed one (`%`, `%A`, `%GG`)
-///     is not a location at all. RPM payload names never need encoding, so
-///     rejecting `%` outright keeps the identity byte-exact;
-///   * the path has no `.`/`..` segment, and its final segment is a
-///     well-formed RPM payload name — the exact resource the transaction
-///     row expects, matched by basename without ambiguity. An empty
-///     segment (a doubled `/`) is *not* rejected: native
-///     `repoquery --location` output legitimately contains it because the
-///     mirror baseurl ends in `/` and dnf joins the package path with
-///     another `/` (e.g. the real Rocky 9 mirror
-///     `.../pub/rocky//9.8/BaseOS/...`, R5-F04). A doubled separator is
-///     requested byte-for-byte by the downloader and still resolves to one
-///     resource — unlike a dot segment, nothing reinterprets it.
-///
-/// The value is never echoed in the returned reason: location text is
-/// repository data (R2-01).
-fn validate_payload_url(url: &str) -> std::result::Result<(), &'static str> {
-    if url.is_empty() {
-        return Err("empty payload location");
-    }
-    // Whitespace or a control character anywhere in a URL can only come from
-    // a malformed or hostile repository record. This is checked before any
-    // parsing because a URL parser may silently discard such characters
-    // instead of rejecting the URL, which would make the value ambiguous.
-    if url
-        .bytes()
-        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
-    {
-        return Err("payload location contains whitespace");
-    }
-    // The Phase 1 accepted character set: unreserved characters,
-    // sub-delimiters and the structural delimiters a URL authority/path needs.
-    // Query and fragment separators and the percent sigil are absent on
-    // purpose — see the function docs.
-    if !url.chars().all(is_payload_url_char) {
-        return Err("payload location is not a URL");
-    }
-    let (scheme, rest) = url
-        .split_once("://")
-        .ok_or("payload location is not a URL")?;
-    if scheme.is_empty() {
-        return Err("payload location is not a URL");
-    }
-    if scheme != "http" && scheme != "https" {
-        return Err("payload location uses an unsupported scheme");
-    }
-    // The authority component ends at the first '/' — a query or fragment
-    // separator cannot appear, so only '/' ends it here.
-    let (authority, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, ""),
-    };
-    if authority.is_empty() {
-        return Err("payload location has no host");
-    }
-    // `userinfo@host:port`; only the last '@' can separate them.
-    let host_port = match authority.rsplit_once('@') {
-        Some((userinfo, host)) => {
-            if userinfo.is_empty() || !userinfo.chars().all(is_url_userinfo_char) {
-                return Err("payload location has a malformed authority");
-            }
-            host
-        }
-        None => authority,
-    };
-    // The port, if any, and the host it belongs to. A bracketed host is an
-    // IPv6 literal; any other host is a registered name (which also covers
-    // IPv4 literals). The two forms are never mixed.
-    let port: Option<&str> = if let Some(inner) = host_port.strip_prefix('[') {
-        let Some(end) = inner.find(']') else {
-            return Err("payload location has a malformed host");
-        };
-        let (ipv6, tail) = (&inner[..end], &inner[end + 1..]);
-        if !is_ipv6_address(ipv6) {
-            return Err("payload location has a malformed host");
-        }
-        match tail.strip_prefix(':') {
-            Some(p) => Some(p),
-            None if tail.is_empty() => None,
-            None => return Err("payload location has a malformed host"),
-        }
-    } else {
-        match host_port.rsplit_once(':') {
-            Some((host, port)) => {
-                if host.is_empty() || !host.chars().all(is_url_reg_name_char) {
-                    return Err("payload location has a malformed host");
-                }
-                Some(port)
-            }
-            None => {
-                // An empty host (`user@/path`) names no host at all.
-                if host_port.is_empty() || !host_port.chars().all(is_url_reg_name_char) {
-                    return Err("payload location has a malformed host");
-                }
-                None
-            }
-        }
-    };
-    // A port is a plain decimal number in the valid TCP port range.
-    if let Some(port) = port {
-        let in_range = |n: u32| (1..=65535).contains(&n);
-        if port.is_empty()
-            || !port.bytes().all(|b| b.is_ascii_digit())
-            || !port.parse::<u32>().map(in_range).unwrap_or(false)
-        {
-            return Err("payload location has a malformed port");
-        }
-    }
-    // There must be an absolute path to fetch from: a URL that ends at the
-    // authority names no resource.
-    let path = path
-        .strip_prefix('/')
-        .ok_or("payload location has no path")?;
-    // Glob and bracket characters would let the downloader reinterpret the
-    // path (curl URL glob expansion of `[1-2]` or `{a,b}`); they are only
-    // meaningful inside an IPv6 authority, which the authority parsing above
-    // already consumed. Disabling globbing in the downloader plus rejecting
-    // the syntax here is the one-validated-URL-one-request contract (R4-F02).
-    if path.bytes().any(|b| matches!(b, b'[' | b']' | b'{' | b'}')) {
-        return Err("payload location uses URL glob syntax");
-    }
-    // Dot segments are rejected: URL normalization would reinterpret them
-    // and the resource the downloader actually receives could differ from
-    // the path as written. An empty segment (a doubled `/`) is *not* a dot
-    // segment and is not normalized away by the downloader — curl requests
-    // the path literally — and native `repoquery --location` output
-    // produces it whenever the mirror baseurl ends in `/` (the real Rocky
-    // mirrors do: `.../pub/rocky//9.8/...`, R5-F04).
-    for seg in path.split('/') {
-        if seg == "." || seg == ".." {
-            return Err("payload location has a dot path segment");
-        }
-    }
-    // The final path segment names the payload: an RPM file. Because no
-    // percent-encoding is accepted, this comparison is byte-exact against the
-    // payload name the transaction row expects, which is what proves the
-    // downloader fetches the intended resource.
-    if !is_rpm_payload_name(path.rsplit('/').next().unwrap_or("")) {
-        return Err("payload location has no payload name");
-    }
-    Ok(())
-}
-
-/// Whether a character may appear in a payload URL this tool fetches (Phase 1
-/// subset of RFC 3986): unreserved characters, sub-delimiters and the
-/// structural delimiters. Query/fragment separators (`?`, `#`) and the
-/// percent sigil are deliberately excluded — resource identity must stay
-/// byte-exact (R4-F02).
-fn is_payload_url_char(c: char) -> bool {
-    c.is_ascii_alphanumeric()
-        || matches!(
-            c,
-            '-' | '.'
-                | '_'
-                | '~'
-                | '!'
-                | '$'
-                | '&'
-                | '\''
-                | '('
-                | ')'
-                | '*'
-                | '+'
-                | ','
-                | ';'
-                | '='
-                | ':'
-                | '/'
-                | '['
-                | ']'
-                | '@'
-        )
-}
-
-/// Whether a path segment is a well-formed RPM payload file name: a non-empty
-/// stem over the characters rpm package names, versions and architectures use,
-/// followed by `.rpm`. A leading `-` is not a file name any repository prints
-/// and would be indistinguishable from a downloader option, so it is rejected.
-fn is_rpm_payload_name(seg: &str) -> bool {
-    let Some(stem) = seg.strip_suffix(".rpm") else {
-        return false;
-    };
-    !stem.is_empty()
-        && !seg.starts_with('-')
-        && stem
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'))
-}
-
-/// Whether a character may appear in the userinfo component of a URL
-/// (RFC 3986): unreserved characters, sub-delimiters, percent-encodings and
-/// the colon that separates a user from a password.
-fn is_url_userinfo_char(c: char) -> bool {
-    c.is_ascii_alphanumeric()
-        || matches!(
-            c,
-            '-' | '.' | '_' | '~' | '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ',' | ';'
-        )
-        || matches!(c, ':' | '%')
-}
-
-/// Whether a character may appear in a registered host name (RFC 3986):
-/// unreserved characters, sub-delimiters and percent-encodings. IPv4 literals
-/// are covered by this set as well.
-fn is_url_reg_name_char(c: char) -> bool {
-    c.is_ascii_alphanumeric()
-        || matches!(
-            c,
-            '-' | '.'
-                | '_'
-                | '~'
-                | '!'
-                | '$'
-                | '&'
-                | '\''
-                | '('
-                | ')'
-                | '*'
-                | '+'
-                | ','
-                | ';'
-                | '='
-        )
-        || c == '%'
-}
-
-/// Whether a text is a valid IPv6 address (RFC 4291): up to eight groups of
-/// one to four hexadecimal digits separated by ':', at most one '::'
-/// compression, optionally ending in an embedded IPv4 address (which occupies
-/// the final two groups). Anything else — too many groups, a group wider than
-/// four digits, a second compression, a stray empty group, an embedded IPv4
-/// anywhere but last — is not an address and fails closed.
-fn is_ipv6_address(t: &str) -> bool {
-    if t.is_empty() || t.matches("::").count() > 1 {
-        return false;
-    }
-    match t.split_once("::") {
-        Some((left, right)) => {
-            matches!(
-                (ipv6_half_groups(left, false), ipv6_half_groups(right, true)),
-                (Some(l), Some(r)) if l + r <= 7
-            )
-        }
-        None => ipv6_half_groups(t, true) == Some(8),
-    }
-}
-
-/// The number of groups in one half of an IPv6 text. An empty half holds zero
-/// groups. `ipv4_last` allows the final group of the half to be an embedded
-/// IPv4 address, which counts as two groups; it is only valid there.
-fn ipv6_half_groups(half: &str, ipv4_last: bool) -> Option<usize> {
-    if half.is_empty() {
-        return Some(0);
-    }
-    let parts: Vec<&str> = half.split(':').collect();
-    let mut groups = 0;
-    for (i, part) in parts.iter().enumerate() {
-        let last = i + 1 == parts.len();
-        if part.is_empty() {
-            return None;
-        }
-        if last && ipv4_last && is_ipv4_address(part) {
-            groups += 2;
-        } else if part.len() <= 4 && part.bytes().all(|b| b.is_ascii_hexdigit()) {
-            groups += 1;
-        } else {
-            return None;
-        }
-    }
-    Some(groups)
-}
-
-/// Whether a text is a valid IPv4 address: four decimal octets, each at most
-/// 255.
-fn is_ipv4_address(t: &str) -> bool {
-    let parts: Vec<&str> = t.split('.').collect();
-    parts.len() == 4
-        && parts.iter().all(|p| {
-            !p.is_empty()
-                && p.len() <= 3
-                && p.bytes().all(|b| b.is_ascii_digit())
-                && p.parse::<u16>().map(|n| n <= 255).unwrap_or(false)
-        })
-}
-
 /// One package payload the install transaction will need, parsed from a
 /// `dnf -C install --assumeno` transaction table.
 #[derive(Debug)]
 struct DnfInstallRow {
     name: String,
+    /// the epoch the version column carries (`<epoch>:` prefix), or `None`
+    /// when none is printed — including an explicit `0`, which rpm treats
+    /// as identical to no epoch at all.
+    epoch: Option<String>,
     /// version-release as displayed, with any leading `epoch:` stripped —
     /// rpm payload file names never carry the epoch.
     verrel: String,
     arch: String,
     repoid: String,
+    /// Whether the row names a package the transaction adds to the system,
+    /// so a payload must be fetched for it. Install, reinstall, upgrade
+    /// and downgrade rows do; removal and cleanup rows never carry a
+    /// payload.
+    needs_payload: bool,
+}
+
+impl DnfInstallRow {
+    /// The exact NEVRA operand dnf resolves to this one package:
+    /// `name-[epoch:]version-release.arch`.
+    fn nevra(&self) -> String {
+        match &self.epoch {
+            Some(ep) => format!("{}-{}:{}.{}", self.name, ep, self.verrel, self.arch),
+            None => format!("{}-{}.{}", self.name, self.verrel, self.arch),
+        }
+    }
+
+    /// The payload file name rpm writes for this row:
+    /// `name-version-release.arch.rpm` — never carries the epoch.
+    fn payload_basename(&self) -> String {
+        format!("{}-{}.{}.rpm", self.name, self.verrel, self.arch)
+    }
+}
+
+/// The identity `rpm -qp` reports for one payload file, parsed from the
+/// `name|epoch|version|release|arch` record the query format emits.
+struct RpmPayloadIdentity {
+    name: String,
+    /// `None` when rpm reports `(none)` or `0` — rpm never distinguishes
+    /// an explicit epoch 0 from no epoch at all.
+    epoch: Option<String>,
+    version: String,
+    release: String,
+    arch: String,
+}
+
+/// Parse one `rpm -qp --queryformat` record. `|` is the field separator:
+/// it cannot occur inside rpm metadata, so a field count other than five
+/// is a malformed answer and fails closed.
+fn parse_rpm_payload_identity(line: &str) -> Option<RpmPayloadIdentity> {
+    let f: Vec<&str> = line.split('|').collect();
+    if f.len() != 5 {
+        return None;
+    }
+    let epoch = match f[1] {
+        "(none)" | "" | "0" => None,
+        e if e.bytes().all(|b| b.is_ascii_digit()) => Some(e.to_string()),
+        _ => return None,
+    };
+    if f[0].is_empty() || f[2].is_empty() || f[4].is_empty() {
+        return None;
+    }
+    Some(RpmPayloadIdentity {
+        name: f[0].to_string(),
+        epoch,
+        version: f[2].to_string(),
+        release: f[3].to_string(),
+        arch: f[4].to_string(),
+    })
+}
+
+/// Whether an rpm-reported payload identity is exactly the frozen
+/// transaction row: name, epoch, version, release and arch must all
+/// agree. The row's version-release is split at its last `-` — rpm
+/// versions never contain one — and a row without a release separator
+/// matches only a payload whose own release is unset.
+fn rpm_identity_matches(row: &DnfInstallRow, id: &RpmPayloadIdentity) -> bool {
+    let (ver, rel) = match row.verrel.rsplit_once('-') {
+        Some((v, r)) => (v, r),
+        None => (row.verrel.as_str(), ""),
+    };
+    id.name == row.name
+        && id.epoch == row.epoch
+        && id.version == ver
+        && (id.release == rel || (rel.is_empty() && matches!(id.release.as_str(), "" | "(none)")))
+        && id.arch == row.arch
 }
 
 /// Recognized dnf transaction-table sections. Rows only ever appear under
@@ -4966,12 +4745,23 @@ fn parse_dnf_row(t: &str) -> Option<DnfInstallRow> {
         return None;
     }
     // rpm payload file names never carry the epoch the table may print, so the
-    // epoch is stripped before the version-release is validated as a payload
-    // file name component. A colon that is not a leading epoch is not a
-    // version-release dnf prints and is rejected by the validation below.
-    let verrel = match f[2].split_once(':') {
-        Some((ep, rest)) if !ep.is_empty() && ep.chars().all(|c| c.is_ascii_digit()) => rest,
-        _ => f[2],
+    // epoch is split off before the version-release is validated as a payload
+    // file name component — but it is kept for the row's exact NEVRA identity.
+    // A colon that is not a leading epoch is not a version-release dnf prints
+    // and is rejected by the validation below.
+    let (epoch, verrel) = match f[2].split_once(':') {
+        Some((ep, rest)) if !ep.is_empty() && ep.chars().all(|c| c.is_ascii_digit()) => {
+            // rpm never distinguishes an explicit epoch 0 from no epoch.
+            (
+                if ep == "0" {
+                    None
+                } else {
+                    Some(ep.to_string())
+                },
+                rest,
+            )
+        }
+        _ => (None, f[2]),
     };
     if !valid_version_release(verrel) {
         return None;
@@ -4988,9 +4778,11 @@ fn parse_dnf_row(t: &str) -> Option<DnfInstallRow> {
     }
     Some(DnfInstallRow {
         name: f[0].to_string(),
+        epoch,
         verrel: verrel.to_string(),
         arch: f[1].to_string(),
         repoid: f[3].to_string(),
+        needs_payload: false,
     })
 }
 
@@ -5304,42 +5096,17 @@ fn parse_dnf_install_set(text: &str) -> Option<Vec<DnfInstallRow>> {
     {
         return None;
     }
-    Some(rows.into_iter().map(|(_, r)| r).collect())
-}
-
-/// Non-interactive payload fetch tool used to place resolved payloads
-/// into the snapshot package cache.
-#[derive(Debug, Clone, Copy)]
-enum DnfFetchTool {
-    Curl,
-    Wget,
-}
-
-impl DnfFetchTool {
-    fn payload_args<'a>(&'a self, dest: &'a str, url: &'a str) -> Vec<&'a str> {
-        match self {
-            // -f: fail on HTTP errors; -sS: quiet but report errors;
-            // -L: follow mirror redirects; -g: disable URL glob expansion so
-            // one validated URL is exactly one intended request — a `[1-2]`
-            // or `{a,b}` in a URL must never fan out into several requests
-            // whose resource identity this tool did not validate (R4-F02).
-            DnfFetchTool::Curl => vec!["-g", "-fsSL", "-o", dest, url],
-            // wget has no URL glob expansion; the URL is a single operand.
-            DnfFetchTool::Wget => vec!["-q", "-O", dest, url],
-        }
-    }
-    fn path(&self) -> &'static str {
-        match self {
-            DnfFetchTool::Curl => "/usr/bin/curl",
-            DnfFetchTool::Wget => "/usr/bin/wget",
-        }
-    }
-}
-
-impl std::fmt::Display for DnfFetchTool {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.path())
-    }
+    Some(
+        rows.into_iter()
+            .map(|(section, mut r)| {
+                // A row whose verb adds the package to the system needs a
+                // payload fetched; `Remove` and uncounted `Cleanup` rows
+                // never do.
+                r.needs_payload = dnf_section_verb(section).is_some_and(|v| v != "Remove");
+                r
+            })
+            .collect(),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -5683,6 +5450,105 @@ mod package_tests {
         );
         let rows = parse_dnf_install_set(&out).unwrap();
         assert_eq!(rows[0].verrel, "8.32-38.el9");
+        // …but the epoch is preserved for the exact NEVRA identity handed
+        // to the native payload transport.
+        assert_eq!(rows[0].epoch.as_deref(), Some("1"));
+        assert_eq!(rows[0].nevra(), "coreutils-1:8.32-38.el9.x86_64");
+        assert_eq!(
+            rows[0].payload_basename(),
+            "coreutils-8.32-38.el9.x86_64.rpm"
+        );
+    }
+
+    #[test]
+    fn dnf_row_nevra_and_basename_without_epoch() {
+        let out = table_summary(
+            "Installing:\n \
+             tree                   x86_64      1.8.0-10.el9           baseos         59 k\n",
+            "Install  1 Package",
+        );
+        let rows = parse_dnf_install_set(&out).unwrap();
+        assert_eq!(rows[0].epoch, None);
+        assert_eq!(rows[0].nevra(), "tree-1.8.0-10.el9.x86_64");
+        assert_eq!(rows[0].payload_basename(), "tree-1.8.0-10.el9.x86_64.rpm");
+        assert!(rows[0].needs_payload);
+    }
+
+    #[test]
+    fn dnf_row_epoch_zero_is_no_epoch() {
+        // An explicit `0:` prefix is the same identity as no epoch.
+        let out = table_summary(
+            "Installing:\n \
+             tree                   x86_64      0:1.8.0-10.el9         baseos         59 k\n",
+            "Install  1 Package",
+        );
+        let rows = parse_dnf_install_set(&out).unwrap();
+        assert_eq!(rows[0].epoch, None);
+        assert_eq!(rows[0].nevra(), "tree-1.8.0-10.el9.x86_64");
+    }
+
+    #[test]
+    fn dnf_remove_and_cleanup_rows_need_no_payload() {
+        // A transaction that installs one package and removes another only
+        // needs the installing payload — the removed package is never a
+        // download target.
+        let out = table_summary(
+            "Installing:\n \
+             nano                   x86_64      1.0-1.el9              baseos         1 k\n\
+             Removing:\n \
+             oldnano                x86_64      0.9-1.el9              baseos         1 k\n",
+            "Install  1 Package\nRemove  1 Package",
+        );
+        let rows = parse_dnf_install_set(&out).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].needs_payload);
+        assert_eq!(rows[0].name, "nano");
+        assert!(!rows[1].needs_payload);
+        assert_eq!(rows[1].name, "oldnano");
+    }
+
+    #[test]
+    fn rpm_payload_identity_parses_and_matches() {
+        let id = parse_rpm_payload_identity("nano|(none)|1.0|1.el9|x86_64").unwrap();
+        assert_eq!(id.name, "nano");
+        assert_eq!(id.epoch, None);
+        assert_eq!(id.version, "1.0");
+        assert_eq!(id.release, "1.el9");
+        assert_eq!(id.arch, "x86_64");
+        // An explicit epoch and a release-less package form are covered.
+        let id = parse_rpm_payload_identity("coreutils|1|8.32|38.el9|x86_64").unwrap();
+        assert_eq!(id.epoch.as_deref(), Some("1"));
+        // rpm reports `(none)` for a missing epoch; `0` means the same.
+        assert_eq!(parse_rpm_payload_identity("n|0|1|1|a").unwrap().epoch, None);
+        // Malformed records fail closed.
+        assert!(parse_rpm_payload_identity("nano|1.0|1.el9|x86_64").is_none());
+        assert!(parse_rpm_payload_identity("a|b|c|d|e|f").is_none());
+        assert!(parse_rpm_payload_identity("nano|x|1.0|1.el9|x86_64").is_none());
+        assert!(parse_rpm_payload_identity("|(none)|1.0|1.el9|x86_64").is_none());
+        assert!(parse_rpm_payload_identity("").is_none());
+    }
+
+    #[test]
+    fn rpm_identity_must_equal_the_frozen_row() {
+        let out = table_summary(
+            "Installing:\n \
+             nano                   x86_64      1.0-1.el9              baseos         1 k\n",
+            "Install  1 Package",
+        );
+        let rows = parse_dnf_install_set(&out).unwrap();
+        let row = &rows[0];
+        let ok = parse_rpm_payload_identity("nano|(none)|1.0|1.el9|x86_64").unwrap();
+        assert!(rpm_identity_matches(row, &ok));
+        for bad in [
+            "other|(none)|1.0|1.el9|x86_64", // name
+            "nano|1|1.0|1.el9|x86_64",       // epoch
+            "nano|(none)|9.9|1.el9|x86_64",  // version
+            "nano|(none)|1.0|9.el9|x86_64",  // release
+            "nano|(none)|1.0|1.el9|aarch64", // arch
+        ] {
+            let id = parse_rpm_payload_identity(bad).unwrap();
+            assert!(!rpm_identity_matches(row, &id), "mismatch: {}", bad);
+        }
     }
 
     #[test]
@@ -5978,104 +5844,6 @@ mod package_tests {
         ))
         .unwrap();
         assert_eq!(rows.len(), 3);
-    }
-
-    #[test]
-    fn payload_location_must_be_a_fetchable_url() {
-        // R2-03-C: basename agreement is not enough — the value must be an
-        // absolute http(s) URL the downloader can actually fetch.
-        assert!(validate_payload_url("not-a-url/nano-1.0-1.el9.x86_64.rpm").is_err());
-        assert!(validate_payload_url("/local/path/nano-1.0-1.el9.x86_64.rpm").is_err());
-        assert!(validate_payload_url("file:///nano-1.0-1.el9.x86_64.rpm").is_err());
-        // A host-less absolute URL (`https:///path` names no host).
-        assert!(validate_payload_url("https:///nano-1.0-1.el9.x86_64.rpm").is_err());
-        // A URL with no path after the host.
-        assert!(validate_payload_url("https://mirror.example").is_err());
-        assert!(validate_payload_url("https://mirror /x.rpm").is_err());
-        assert!(validate_payload_url("").is_err());
-        assert!(validate_payload_url("HTTPS://mirror.example/x.rpm").is_err());
-        // A well-formed absolute URL is accepted — a single-label host is a
-        // legitimate LAN mirror name.
-        assert!(validate_payload_url(
-            "https://mirror.example/baseos/Packages/nano-1.0-1.el9.x86_64.rpm"
-        )
-        .is_ok());
-        assert!(validate_payload_url("http://mirror.example/x.rpm").is_ok());
-        assert!(validate_payload_url("https://lan-mirror/x.rpm").is_ok());
-    }
-
-    /// R4-F02: the validated string and the resource the downloader fetches
-    /// must be the same thing. Query and fragment separators, URL glob
-    /// syntax, and percent-encoding all make the resource identity ambiguous
-    /// or multipart, so Phase 1 rejects them outright.
-    #[test]
-    fn payload_url_resource_identity_is_unambiguous() {
-        // A fragment changes nothing about what is fetched, but it is not a
-        // resource this tool can prove it requested.
-        assert!(validate_payload_url(
-            "https://mirror.example/repodata/repomd.xml#/nano-1.0-1.el9.x86_64.rpm"
-        )
-        .is_err());
-        // A query likewise — and one whose value re-parses as a path.
-        assert!(validate_payload_url(
-            "https://mirror.example/not-rpm?download=/nano-1.0-1.el9.x86_64.rpm"
-        )
-        .is_err());
-        // curl URL glob syntax: `[1-2]` would fan out into two requests.
-        assert!(validate_payload_url("https://mirror.example/[1-2]/nano.rpm").is_err());
-        assert!(validate_payload_url("https://mirror.example/{a,b}/nano.rpm").is_err());
-        // Malformed percent encoding is never a location.
-        assert!(validate_payload_url("https://mirror.example/%/nano.rpm").is_err());
-        assert!(validate_payload_url("https://mirror.example/%A/nano.rpm").is_err());
-        assert!(validate_payload_url("https://mirror.example/%GG/nano.rpm").is_err());
-        // Any percent encoding at all is rejected in Phase 1: an encoded slash
-        // or dot would make the resource identity depend on interpretation.
-        assert!(validate_payload_url("https://mirror.example/a%2fb/nano.rpm").is_err());
-        assert!(validate_payload_url("https://mirror.example/a%2eb/nano.rpm").is_err());
-        assert!(validate_payload_url("https://mirror.example/%2e/nano.rpm").is_err());
-        assert!(validate_payload_url("https://m/%41/nano.rpm").is_err());
-        // A path that does not name an RPM payload.
-        assert!(validate_payload_url("https://mirror.example/baseos/Packages/").is_err());
-        assert!(validate_payload_url("https://mirror.example/baseos/Packages/notrpm").is_err());
-        assert!(validate_payload_url("https://mirror.example/baseos/Packages/.rpm").is_err());
-        // Dot-segments are not a normalized path.
-        assert!(validate_payload_url("https://mirror.example/./x.rpm").is_err());
-        assert!(validate_payload_url("https://mirror.example/../x.rpm").is_err());
-        // A doubled separator is native `repoquery --location` output — the
-        // mirror baseurl ends in `/` and the package path joins with another
-        // (the real Rocky 9 mirror serves `.../pub/rocky//9.8/...`, R5-F04).
-        // It is requested byte-for-byte and the basename still pins the
-        // payload identity.
-        assert!(validate_payload_url("https://mirror.example//x.rpm").is_ok());
-        assert!(validate_payload_url(
-            "https://mirror.example/pub/rocky//9.8/BaseOS/x86_64/os/Packages/n/nano-5.6.1-7.el9.x86_64.rpm"
-        )
-        .is_ok());
-        // A URL that would be an option to the downloader.
-        assert!(validate_payload_url("-g/x.rpm").is_err());
-        // Positive: the shapes real mirrors use, including an explicit port,
-        // an IPv4 literal and an IPv6 literal.
-        assert!(validate_payload_url(
-            "https://mirror.example:8443/baseos/Packages/nano-1.0-1.el9.x86_64.rpm"
-        )
-        .is_ok());
-        assert!(
-            validate_payload_url("http://192.0.2.1/baseos/Packages/nano-1.0-1.el9.x86_64.rpm")
-                .is_ok()
-        );
-        assert!(validate_payload_url(
-            "https://[2001:db8::1]/baseos/Packages/nano-1.0-1.el9.x86_64.rpm"
-        )
-        .is_ok());
-        assert!(validate_payload_url(
-            "https://[2001:db8::1]:8080/baseos/Packages/nano-1.0-1.el9.x86_64.rpm"
-        )
-        .is_ok());
-        // A package name with a `+` needs no encoding.
-        assert!(validate_payload_url(
-            "https://mirror.example/baseos/Packages/libstdc++-11.2.1-1.el9.x86_64.rpm"
-        )
-        .is_ok());
     }
 
     /// R4-F01: the `find -print0` answer is raw bytes whose framing and path
@@ -6497,16 +6265,6 @@ Installed size: 108 k\n";
         assert_eq!(rows[0].verrel, "2.1.0-8.el10");
         assert_eq!(rows[0].arch, "x86_64");
         assert_eq!(rows[0].repoid, "baseos");
-    }
-
-    #[test]
-    fn rocky10_payload_location_doubled_separator_is_native() {
-        // Real `repoquery --location tree` on Rocky 10.2: the resolved
-        // mirror baseurl ends in `/`, so the joined path carries `//` —
-        // native output (already covered for Rocky 9 by R5-F04), and the
-        // el10 payload name validates.
-        let url = "https://rocky-linux-asia-northeast1.production.gcp.mirrors.ctrliq.cloud/pub/rocky//10.2/BaseOS/x86_64/os/Packages/t/tree-2.1.0-8.el10.x86_64.rpm";
-        assert!(validate_payload_url(url).is_ok());
     }
 
     #[test]

@@ -1436,9 +1436,6 @@ pub struct FakeTarget {
     /// repo's repodata and resolved mirror list are present in the local
     /// metadata cache snapshot.
     pub dnf_repos: Vec<DnfRepo>,
-    /// When set, `repoquery --location` resolves no payload URLs — the
-    /// transaction payload set cannot be satisfied from the local cache.
-    pub dnf_no_locations: bool,
     /// Overrides the `dnf repolist -v` output, so tests can model truncated or
     /// malformed repository enumeration (R2-03).
     pub dnf_repolist_output: Option<Output>,
@@ -1446,9 +1443,19 @@ pub struct FakeTarget {
     /// so tests can model truncated, malformed, or ambiguous transactions
     /// (R2-03/R2-04).
     pub dnf_dry_run_output: Option<Output>,
-    /// Overrides the `repoquery --location` output, so tests can model
-    /// duplicate or ambiguous payload URLs (R2-04).
-    pub dnf_location_output: Option<Output>,
+    /// Overrides the `dnf install --downloadonly` payload-transport answer
+    /// as a whole, so tests can model a failed download — the payload set
+    /// the run leaves behind is then whatever `snap_rpm_listing` reports.
+    pub dnf_downloadonly_output: Option<Output>,
+    /// Overrides the `find <snap> -name '*.rpm'` payload listing, so tests
+    /// can model a missing, unexpected or misplaced payload file. When
+    /// unset, the listing is the payloads the fake's download-only
+    /// invocation placed in the snapshot.
+    pub snap_rpm_listing: Option<String>,
+    /// Ordered `rpm -qp` answers (payload identity queries). Each query
+    /// pops the front entry; when the queue is empty the identity is
+    /// derived from the queried file's own name.
+    pub rpm_qp_results: std::collections::VecDeque<Output>,
     /// Overrides the `find <snap> -mindepth 1 -maxdepth 2` listing, so tests
     /// can model similar repository IDs or multiple cached hash directories
     /// (R2-04).
@@ -1536,10 +1543,11 @@ impl FakeTarget {
                 repodata_cached: true,
                 mirrorlist_cached: true,
             }],
-            dnf_no_locations: false,
             dnf_repolist_output: None,
             dnf_dry_run_output: None,
-            dnf_location_output: None,
+            dnf_downloadonly_output: None,
+            snap_rpm_listing: None,
+            rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
             live_cache_find_output: None,
             mktemp_output: None,
@@ -1587,10 +1595,11 @@ impl FakeTarget {
                 repodata_cached: true,
                 mirrorlist_cached: true,
             }],
-            dnf_no_locations: false,
             dnf_repolist_output: None,
             dnf_dry_run_output: None,
-            dnf_location_output: None,
+            dnf_downloadonly_output: None,
+            snap_rpm_listing: None,
+            rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
             live_cache_find_output: None,
             mktemp_output: None,
@@ -1624,10 +1633,11 @@ impl FakeTarget {
             query_completion: None,
             query_results: std::collections::VecDeque::new(),
             dnf_repos: Vec::new(),
-            dnf_no_locations: false,
             dnf_repolist_output: None,
             dnf_dry_run_output: None,
-            dnf_location_output: None,
+            dnf_downloadonly_output: None,
+            snap_rpm_listing: None,
+            rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
             live_cache_find_output: None,
             mktemp_output: None,
@@ -1664,10 +1674,11 @@ impl FakeTarget {
             query_completion: None,
             query_results: std::collections::VecDeque::new(),
             dnf_repos: Vec::new(),
-            dnf_no_locations: false,
             dnf_repolist_output: None,
             dnf_dry_run_output: None,
-            dnf_location_output: None,
+            dnf_downloadonly_output: None,
+            snap_rpm_listing: None,
+            rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
             live_cache_find_output: None,
             mktemp_output: None,
@@ -1698,10 +1709,11 @@ impl FakeTarget {
             query_completion: None,
             query_results: std::collections::VecDeque::new(),
             dnf_repos: Vec::new(),
-            dnf_no_locations: false,
             dnf_repolist_output: None,
             dnf_dry_run_output: None,
-            dnf_location_output: None,
+            dnf_downloadonly_output: None,
+            snap_rpm_listing: None,
+            rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
             live_cache_find_output: None,
             mktemp_output: None,
@@ -1762,6 +1774,31 @@ impl FakeTarget {
 /// The private snapshot root the scripted target hands out via `mktemp`.
 const FAKE_SNAP: &str = "/var/tmp/sinter-dnf.fakesnap";
 
+/// The rpm payload file name a `name-[epoch:]version-release.arch` NEVRA
+/// operand downloads as (without the `.rpm` suffix): the epoch is never
+/// part of the file name.
+fn nevra_payload_basename(nevra: &str) -> Option<String> {
+    let (body, arch) = nevra.rsplit_once('.')?;
+    if arch.is_empty() {
+        return None;
+    }
+    // An epoch sits between the name-EVR separator and the version:
+    // `name-<epoch>:<version-release>` → the file name drops `<epoch>:`.
+    let body = match body.split_once(':') {
+        Some((pre, post)) => match pre.rsplit_once('-') {
+            Some((name, ep)) if !ep.is_empty() && ep.bytes().all(|b| b.is_ascii_digit()) => {
+                format!("{}-{}", name, post)
+            }
+            _ => return None,
+        },
+        None => body.to_string(),
+    };
+    if body.is_empty() {
+        return None;
+    }
+    Some(format!("{}.{}", body, arch))
+}
+
 /// The live DNF metadata cache root the scripted target copies a snapshot
 /// from (R4-A04).
 const LIVE_CACHE_ROOT: &str = "/var/cache/dnf";
@@ -1774,6 +1811,10 @@ pub struct FakeExecutor {
     /// Whether the metadata cache copy into the private snapshot root has
     /// run, so the post-copy `stat` can report a copy that widened the root.
     snap_copied: bool,
+    /// Payload file paths the download-only `dnf install` placed in the
+    /// snapshot's package caches — what `find <snap> -name '*.rpm'` then
+    /// reports.
+    snap_payloads: Vec<String>,
 }
 
 impl FakeExecutor {
@@ -1785,6 +1826,7 @@ impl FakeExecutor {
             home,
             target,
             snap_copied: false,
+            snap_payloads: Vec::new(),
         }
     }
 
@@ -1993,6 +2035,52 @@ impl FakeExecutor {
     }
 
     fn run_rpm(&mut self, args: &[String]) -> Output {
+        // `rpm -qp --queryformat <fmt> <file>` — a payload identity query,
+        // not an installed-package observation: queued answers are popped
+        // from `rpm_qp_results`, and otherwise the identity is derived
+        // from the file's own `<name>-<version-release>.<arch>.rpm` name.
+        if args.iter().any(|a| a == "-qp" || a == "-p") {
+            if let Some(o) = self.target.rpm_qp_results.pop_front() {
+                return o;
+            }
+            let file = args.last().cloned().unwrap_or_default();
+            let base = file.rsplit('/').next().unwrap_or("");
+            let Some(stem) = base.strip_suffix(".rpm") else {
+                return Self::exited(
+                    1,
+                    String::new(),
+                    format!("fake rpm: {} is not a payload file", file),
+                );
+            };
+            // `<name>-<version>-<release>.<arch>`: the name may contain
+            // '-', so version and release split from the right.
+            let Some((noarch, arch)) = stem.rsplit_once('.') else {
+                return Self::exited(
+                    1,
+                    String::new(),
+                    format!("fake rpm: {} is not a payload file", file),
+                );
+            };
+            let Some((nover, rel)) = noarch.rsplit_once('-') else {
+                return Self::exited(
+                    1,
+                    String::new(),
+                    format!("fake rpm: {} is not a payload file", file),
+                );
+            };
+            let Some((name, ver)) = nover.rsplit_once('-') else {
+                return Self::exited(
+                    1,
+                    String::new(),
+                    format!("fake rpm: {} is not a payload file", file),
+                );
+            };
+            return Self::exited(
+                0,
+                format!("{}|(none)|{}|{}|{}\n", name, ver, rel, arch),
+                String::new(),
+            );
+        }
         if let Some(o) = self.next_query_result() {
             return o;
         }
@@ -2031,6 +2119,11 @@ impl FakeExecutor {
         }
     }
 
+    /// `find <snap> -type f -name '*.rpm'` — the payload enumeration after
+    /// the download-only transport: every `.rpm` that landed in the
+    /// snapshot. An explicit listing override wins so tests can model a
+    /// missing, unexpected or misplaced payload.
+    ///
     /// `find <snap> -mindepth 1 -maxdepth 2` — lists the snapshot's
     /// per-repo cache dirs (`<repoid>-<hash>`), repodata, and cached
     /// mirror lists for every modeled repo. An explicit listing override
@@ -2041,6 +2134,17 @@ impl FakeExecutor {
     /// which the snapshot copy copies one at a time (R4-A04).
     fn run_find(&mut self, args: &[String]) -> Output {
         let root = args.first().cloned().unwrap_or_default();
+        if args.iter().any(|a| a == "-name") {
+            if let Some(listing) = self.target.snap_rpm_listing.clone() {
+                return Self::exited(0, listing, String::new());
+            }
+            let mut out = String::new();
+            for p in &self.snap_payloads {
+                out.push_str(p);
+                out.push('\n');
+            }
+            return Self::exited(0, out, String::new());
+        }
         if root == LIVE_CACHE_ROOT {
             // The live metadata cache: one directory per repository whose
             // repodata is cached. A repo with no cached repodata has no
@@ -2168,41 +2272,6 @@ impl FakeExecutor {
             );
         }
         if prog == "dnf" && args.iter().any(|a| a == "repoquery") {
-            // `repoquery --location`: payload URLs composed from the cached
-            // mirror lists — one per name argument. An explicit override
-            // wins so tests can model duplicate/ambiguous URLs.
-            if args.iter().any(|a| a == "--location") {
-                if let Some(o) = self.target.dnf_location_output.clone() {
-                    return o;
-                }
-                let repoid = self
-                    .target
-                    .dnf_repos
-                    .first()
-                    .map(|r| r.id.clone())
-                    .unwrap_or_else(|| "baseos".to_string());
-                let mut out = String::new();
-                if !self.target.dnf_no_locations {
-                    for a in args
-                        .iter()
-                        .skip_while(|x| x.as_str() != "--location")
-                        .skip(1)
-                    {
-                        out.push_str(&format!(
-                            "https://mirror.example/{}/Packages/{}-1.0-1.el9.x86_64.rpm\n",
-                            repoid, a
-                        ));
-                    }
-                }
-                // repoquery redirects INFO to stderr: a successful answer
-                // carries the native metadata-age line there (R5-F04).
-                return Self::exited(
-                    0,
-                    out,
-                    "Last metadata expiration check: 0:30:00 ago on Wed Sep 16 10:28:01 2026.\n"
-                        .to_string(),
-                );
-            }
             // DESIGN §27 snapshot-usability check: a full-output override
             // wins, then a forced completion; otherwise the check fails iff
             // any enabled repo lacks cached repodata ("Cache-only enabled but
@@ -2279,6 +2348,40 @@ impl FakeExecutor {
                 r = repoid
             );
             return Self::exited(1, table, "Operation aborted.\n".to_string());
+        }
+        if prog == "dnf"
+            && args.iter().any(|a| a == "install")
+            && args.iter().any(|a| a == "--downloadonly")
+        {
+            // Native payload transport: dnf places one
+            // `<name>-<version-release>.<arch>.rpm` per resolved NEVRA
+            // operand into the repository's snapshot package dir — no
+            // rpmdb mutation. An explicit override wins so tests can model
+            // a failed transport; the payload set the run reports is then
+            // whatever `snap_rpm_listing` says landed.
+            if let Some(o) = self.target.dnf_downloadonly_output.clone() {
+                return o;
+            }
+            let repoid = self
+                .target
+                .dnf_repos
+                .first()
+                .map(|r| r.id.clone())
+                .unwrap_or_else(|| "baseos".to_string());
+            self.snap_payloads.clear();
+            for a in args
+                .iter()
+                .skip_while(|x| x.as_str() != "--downloadonly")
+                .skip(1)
+            {
+                if let Some(base) = nevra_payload_basename(a) {
+                    self.snap_payloads.push(format!(
+                        "{}/{}-cafebabecafebabe/packages/{}.rpm",
+                        FAKE_SNAP, repoid, base
+                    ));
+                }
+            }
+            return Self::exited(0, String::new(), String::new());
         }
         if let Some(c) = &self.target.manager_completion {
             return Output {

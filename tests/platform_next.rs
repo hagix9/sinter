@@ -79,9 +79,8 @@ fn rocky10_target_selects_dnf_backend() {
 #[test]
 fn rocky10_installs_through_the_dnf_snapshot_contract() {
     // The dnf 4.20 backend keeps the v0.2.0 contract: snapshot, completeness
-    // proof, transaction resolution, payload prefetch, cache-only mutation,
-    // cleanup. Rocky 10's stock image ships curl and no wget, and the fake
-    // models exactly that.
+    // proof, transaction resolution, native download-only payload transport,
+    // cache-only mutation, cleanup.
     let dir = trusted_root("next-rocky10-install");
     let recipe = pkg_recipe(&dir, "tree", "present");
     let r = run_recipe_fake(&recipe, Mode::Apply, false, FakeTarget::rocky10());
@@ -92,9 +91,13 @@ fn rocky10_installs_through_the_dnf_snapshot_contract() {
     assert_eq!(p.verification, Verification::Verified);
     let dnf = commands_with(&r, "/usr/bin/dnf");
     assert_eq!(dnf.len(), 5);
-    // Every dnf invocation is cache-only or repo-disabled.
-    assert!(dnf.iter().all(|c| c.args.iter().any(|a| a == "-C")));
-    assert_eq!(commands_with(&r, "/usr/bin/curl").len(), 1);
+    // Every dnf invocation is cache-only or repo-disabled except the one
+    // payload-transport call, which pins metadata expiry instead of `-C`.
+    assert!(dnf
+        .iter()
+        .all(|c| c.args.iter().any(|a| a == "-C") || c.args.iter().any(|a| a == "--downloadonly")));
+    // No explicit fetcher runs: native dnf/librepo transports the payload.
+    assert!(commands_with(&r, "/usr/bin/curl").is_empty());
     assert!(commands_with(&r, "/usr/bin/wget").is_empty());
     assert_eq!(commands_with(&r, "/usr/bin/rm").len(), 1);
 }

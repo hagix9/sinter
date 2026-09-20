@@ -127,8 +127,8 @@ fn dnf_observes_absent_and_installs() {
     assert_eq!(p.verification, Verification::Verified);
     let dnf = commands_with(&r, "/usr/bin/dnf");
     // DESIGN §27: snapshot completeness check, repository enumeration,
-    // transaction dry-run, payload URL resolution, then the strictly
-    // cache-only install mutation against the snapshot.
+    // transaction dry-run, native download-only payload transport, then
+    // the strictly cache-only install mutation against the snapshot.
     assert_eq!(dnf.len(), 5);
     assert_eq!(
         dnf[0].args,
@@ -154,15 +154,22 @@ fn dnf_observes_absent_and_installs() {
             "nano"
         ]
     );
+    // Payload transport is native dnf/librepo against the snapshot
+    // cachedir: exact NEVRA operands only, metadata expiry pinned so the
+    // prepared metadata stays authoritative, payloads retained for the
+    // cache-only install. `-C` cannot appear here — it would block the
+    // payload transfer itself.
     assert_eq!(
         dnf[3].args,
         vec![
-            "-C",
             "--setopt=cachedir=/var/tmp/sinter-dnf.fakesnap",
+            "--setopt=*.metadata_expire=-1",
             "--setopt=*.skip_if_unavailable=0",
-            "repoquery",
-            "--location",
-            "nano"
+            "--setopt=*.keepcache=1",
+            "-y",
+            "install",
+            "--downloadonly",
+            "nano-1.0-1.el9.x86_64"
         ]
     );
     // The mutation is cache-only against the snapshot: it cannot fetch
@@ -178,18 +185,36 @@ fn dnf_observes_absent_and_installs() {
             "nano"
         ]
     );
-    // Every dnf invocation is cache-only or repo-disabled: no process can
-    // fetch repository metadata.
-    assert!(dnf.iter().all(|c| c.args.iter().any(|a| a == "-C")));
+    // Every dnf invocation is cache-only or repo-disabled except the one
+    // payload-transport call, which pins metadata expiry instead of `-C`:
+    // no process can refresh repository metadata.
+    assert!(dnf
+        .iter()
+        .all(|c| c.args.iter().any(|a| a == "-C") || c.args.iter().any(|a| a == "--downloadonly")));
+    let dl = dnf
+        .iter()
+        .find(|c| c.args.iter().any(|a| a == "--downloadonly"))
+        .expect("a payload transport call");
+    assert!(dl.args.iter().all(|a| a != "-C"));
+    assert!(dl.args.iter().any(|a| a == "--setopt=*.metadata_expire=-1"));
     // Snapshot lifecycle: created, the live cache root enumerated (children
     // only, so the private root's own 0700 metadata is never a copy target),
-    // populated, listed, payload prefetched into the repo package dir,
-    // removed (R4-A04).
+    // populated, listed, payloads downloaded natively then enumerated and
+    // rpm-verified, removed (R4-A04).
     assert_eq!(commands_with(&r, "/usr/bin/mktemp").len(), 1);
     assert_eq!(commands_with(&r, "/usr/bin/cp").len(), 1);
-    assert_eq!(commands_with(&r, "/usr/bin/find").len(), 2);
+    assert_eq!(commands_with(&r, "/usr/bin/find").len(), 3);
     assert_eq!(commands_with(&r, "/usr/bin/mkdir").len(), 1);
-    assert_eq!(commands_with(&r, "/usr/bin/curl").len(), 1);
+    // No explicit fetcher is ever dispatched: librepo owns the transfer.
+    assert!(commands_with(&r, "/usr/bin/curl").is_empty());
+    assert!(commands_with(&r, "/usr/bin/wget").is_empty());
+    // The downloaded payload was identity-verified by rpm before install.
+    let qp = commands_with(&r, "/usr/bin/rpm");
+    assert!(qp.iter().any(|c| c.args.iter().any(|a| a == "-qp")
+        && c.args
+            .last()
+            .map(|a| a.ends_with("/baseos-cafebabecafebabe/packages/nano-1.0-1.el9.x86_64.rpm"))
+            .unwrap_or(false)));
     assert_eq!(commands_with(&r, "/usr/bin/rm").len(), 1);
     // Observation used rpm -q, never dpkg-query.
     assert!(commands_with(&r, "/usr/bin/dpkg-query").is_empty());
@@ -319,41 +344,52 @@ fn dnf_missing_mirrorlist_blocks_mutation() {
 }
 
 #[test]
-fn dnf_unresolvable_payload_location_blocks_mutation() {
-    // The transaction needs a payload that cached metadata cannot locate:
-    // fetching it would require repository access — fail closed instead.
-    let dir = trusted_root("plat-dnf-noloc");
+fn dnf_payload_download_failure_blocks_mutation() {
+    // The native payload transport failed: the transaction's payloads were
+    // not fetched — fail closed rather than let the cache-only mutation
+    // reach for the network.
+    let dir = trusted_root("plat-dnf-dlfail");
     let recipe = pkg_recipe(&dir, "nano", "present");
     let mut t = FakeTarget::rocky9();
-    t.dnf_no_locations = true;
+    t.dnf_downloadonly_output = Some(sinter::executor::Output {
+        completion: Completion::Exited(1),
+        stdout: Vec::new(),
+        stderr: b"Error: Transaction failed\n".to_vec(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+    });
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     let p = find(&r, "p");
     assert_eq!(p.execution, Execution::Failed);
     assert_eq!(p.change, Change::None);
     assert_eq!(p.verification, Verification::NotPerformed);
     let reason = p.reason.as_deref().unwrap_or("");
-    assert!(reason.contains("not locally complete"), "{}", reason);
-    // No install mutation was dispatched; check + repolist + dry-run ran.
+    assert!(reason.contains("payload download failed"), "{}", reason);
+    // No install mutation was dispatched; check + repolist + dry-run +
+    // the failed download-only ran.
     let dnf = commands_with(&r, "/usr/bin/dnf");
-    assert!(!dnf.iter().any(|c| c.args.iter().any(|a| a == "-y")));
+    assert_eq!(dnf.len(), 4);
     assert_eq!(commands_with(&r, "/usr/bin/rm").len(), 1);
 }
 
 #[test]
-fn dnf_no_payload_fetch_tool_blocks_mutation() {
-    // Without curl/wget a payload cannot be placed in the snapshot —
-    // fail closed rather than let the mutation reach for the network.
-    let dir = trusted_root("plat-dnf-nofetch");
+fn dnf_missing_payload_blocks_mutation() {
+    // The download-only transport exited successfully but the expected
+    // payload never landed in the snapshot — the frozen transaction set is
+    // not satisfied, so the mutation must never run.
+    let dir = trusted_root("plat-dnf-nopayload");
     let recipe = pkg_recipe(&dir, "nano", "present");
     let mut t = FakeTarget::rocky9();
-    t.executables.remove("/usr/bin/curl");
+    t.snap_rpm_listing = Some(String::new());
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     let p = find(&r, "p");
     assert_eq!(p.execution, Execution::Failed);
     assert_eq!(p.change, Change::None);
     assert_eq!(p.verification, Verification::NotPerformed);
+    let reason = p.reason.as_deref().unwrap_or("");
+    assert!(reason.contains("missing"), "{}", reason);
     let dnf = commands_with(&r, "/usr/bin/dnf");
-    assert!(!dnf.iter().any(|c| c.args.iter().any(|a| a == "-y")));
+    assert_eq!(dnf.len(), 4);
     assert_eq!(commands_with(&r, "/usr/bin/rm").len(), 1);
 }
 
@@ -716,7 +752,9 @@ fn package_env_reaches_dnf_mutation_and_special_values_are_argv_safe() {
     let dnf = commands_with(&applied, "/usr/bin/dnf");
     let mutation = dnf
         .iter()
-        .find(|c| c.args.windows(2).any(|w| w == ["-y", "install"]))
+        .find(|c| {
+            c.args.iter().any(|a| a == "-C") && c.args.windows(2).any(|w| w == ["-y", "install"])
+        })
         .unwrap();
     assert_eq!(
         mutation.env.get("HTTPS_PROXY"),
@@ -726,12 +764,17 @@ fn package_env_reaches_dnf_mutation_and_special_values_are_argv_safe() {
         mutation.env.get("NO_PROXY"),
         Some(&"a.example,127.0.0.1".to_string())
     );
-    let curl = commands_with(&applied, "/usr/bin/curl");
-    assert!(!curl.is_empty());
+    // The payload-transport call (native dnf download-only) inherits the
+    // resource env too — proxy configuration must reach librepo.
+    let dl = dnf
+        .iter()
+        .find(|c| c.args.iter().any(|a| a == "--downloadonly"))
+        .expect("a payload transport call");
     assert_eq!(
-        curl[0].env.get("HTTPS_PROXY"),
+        dl.env.get("HTTPS_PROXY"),
         Some(&"http://user:p a$s;word@proxy.example:3128".to_string())
     );
+    assert!(commands_with(&applied, "/usr/bin/curl").is_empty());
 }
 
 #[test]
