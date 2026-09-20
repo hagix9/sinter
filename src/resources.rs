@@ -5119,6 +5119,21 @@ fn is_transaction_header(t: &str) -> bool {
         && f[4] == "Size"
 }
 
+/// The continuation line of dnf 4's wrapped transaction-table header: when
+/// a column is too wide for the assumed output width (e.g. a long RHUI
+/// repository id), `output.py` puts `Package` on its own physical line and
+/// the remaining four column labels on the next. The tokens must be exactly
+/// the column labels dnf prints — no reordering, no extras, no missing
+/// fields — so a lone `Package` line is never by itself a header.
+fn is_wrapped_header_continuation(t: &str) -> bool {
+    let f: Vec<&str> = t.split_whitespace().collect();
+    f.len() == 4
+        && (f[0] == "Arch" || f[0] == "Architecture")
+        && f[1] == "Version"
+        && (f[2] == "Repo" || f[2] == "Repository")
+        && f[3] == "Size"
+}
+
 /// Parse a `dnf install --assumeno` transaction table into the exact
 /// payload set (DESIGN §27). Fail closed (`None`) on anything that is not a
 /// recognized, complete table — never a partial guess.
@@ -5161,6 +5176,20 @@ fn parse_dnf_install_set(text: &str) -> Option<Vec<DnfInstallRow>> {
             }
             i += 1;
             continue;
+        }
+        // Wrapped header: `Package` alone on a line, remaining columns on
+        // the next. Both physical lines are consumed as one logical header
+        // (header_idx lands on the continuation line, so the divider and
+        // row offsets below are identical to the single-line form), and a
+        // `Package` line without the exact continuation still fails closed.
+        if t == "Package" {
+            match lines.get(i + 1) {
+                Some(next) if is_wrapped_header_continuation(next.trim()) => {
+                    i += 1;
+                    break;
+                }
+                _ => return None,
+            }
         }
         if !is_known_preamble_line(t) {
             return None;
@@ -5716,6 +5745,152 @@ mod package_tests {
             )
             .is_none()
         );
+    }
+
+    /// Real `dnf -C install --assumeno tree` stdout captured on RHEL 9.8
+    /// (GCE RHUI, 2026-09-20): the long `rhui-…` repository id makes dnf 4
+    /// wrap the transaction-table column header onto two physical lines —
+    /// `Package` alone, then the remaining four columns. stderr carried the
+    /// expected `Operation aborted.` line and is not part of this capture.
+    const RHEL9_WRAPPED_DRY_RUN: &str =
+        "Last metadata expiration check: 0:33:42 ago on Sun Sep 20 14:15:36 2026.\n\
+         Dependencies resolved.\n\
+         ================================================================================\n \
+         Package\n \
+               Arch     Version        Repository                                 Size\n\
+         ================================================================================\n\
+         Installing:\n \
+         tree   x86_64   1.8.0-10.el9   rhui-rhel-9-for-x86_64-baseos-rhui-rpms    58 k\n\
+         \n\
+         Transaction Summary\n\
+         ================================================================================\n\
+         Install  1 Package\n\
+         \n\
+         Total download size: 58 k\n\
+         Installed size: 113 k\n";
+
+    /// Real capture on RHEL 10.2 — same wrapped structure, slightly
+    /// different continuation whitespace (dnf column spacing is
+    /// width-dependent; only the token sequence is significant).
+    const RHEL10_WRAPPED_DRY_RUN: &str =
+        "Last metadata expiration check: 0:25:42 ago on Sun Sep 20 14:24:13 2026.\n\
+         Dependencies resolved.\n\
+         ================================================================================\n \
+         Package\n \
+              Arch    Version          Repository                                 Size\n\
+         ================================================================================\n\
+         Installing:\n \
+         tree  x86_64  2.1.0-8.el10     rhui-rhel-10-for-x86_64-baseos-rhui-rpms   59 k\n\
+         \n\
+         Transaction Summary\n\
+         ================================================================================\n\
+         Install  1 Package\n\
+         \n\
+         Total download size: 59 k\n\
+         Installed size: 108 k\n";
+
+    #[test]
+    fn dnf_install_set_accepts_wrapped_header_rhel9() {
+        let rows = parse_dnf_install_set(RHEL9_WRAPPED_DRY_RUN).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "tree");
+        assert_eq!(rows[0].arch, "x86_64");
+        assert_eq!(rows[0].verrel, "1.8.0-10.el9");
+        assert_eq!(rows[0].repoid, "rhui-rhel-9-for-x86_64-baseos-rhui-rpms");
+    }
+
+    #[test]
+    fn dnf_install_set_accepts_wrapped_header_rhel10() {
+        let rows = parse_dnf_install_set(RHEL10_WRAPPED_DRY_RUN).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "tree");
+        assert_eq!(rows[0].arch, "x86_64");
+        assert_eq!(rows[0].verrel, "2.1.0-8.el10");
+        assert_eq!(rows[0].repoid, "rhui-rhel-10-for-x86_64-baseos-rhui-rpms");
+    }
+
+    /// Build a transaction table whose column header is the wrapped
+    /// two-line form dnf 4 emits when a field is wide.
+    fn table_wrapped(body: &str) -> String {
+        format!(
+            "Dependencies resolved.\n\
+             ================================================================================\n \
+             Package\n \
+                    Arch     Version        Repository                                 Size\n\
+             ================================================================================\n\
+             {}\
+             Transaction Summary\n\
+             ================================================================================\n\
+             Install  2 Packages\n",
+            body
+        )
+    }
+
+    #[test]
+    fn dnf_install_set_wrapped_header_parses_multiple_rows() {
+        let out = table_wrapped(
+            "Installing:\n \
+             httpd  x86_64  2.4.62-13.el9_8.6  rhui-rhel-9-for-x86_64-appstream-rhui-rpms  46 k\n \
+             Installing dependencies:\n \
+             apr    x86_64  1.7.0-12.el9_3     rhui-rhel-9-for-x86_64-appstream-rhui-rpms 122 k\n\n",
+        );
+        let rows = parse_dnf_install_set(&out).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "httpd");
+        assert_eq!(rows[1].name, "apr");
+        assert_eq!(rows[1].repoid, "rhui-rhel-9-for-x86_64-appstream-rhui-rpms");
+    }
+
+    #[test]
+    fn dnf_install_set_rejects_malformed_wrapped_headers() {
+        // A `Package` line whose continuation is not the exact remaining
+        // column labels fails closed — the lone line alone is never proof
+        // of a transaction table.
+        for cont in [
+            "garbage",
+            "Arch Version Repository",
+            "Arch Version Repository Size EXTRA",
+            "Arch Version WrongField Size",
+            "Package Arch Version Repository Size",
+            "",
+        ] {
+            let out = format!(
+                "Dependencies resolved.\n\
+                 ================================================================================\n \
+                 Package\n \
+                 {}\n\
+                 ================================================================================\n\
+                 Installing:\n \
+                 tree   x86_64   1.8.0-10.el9   rhui-rhel-9-for-x86_64-baseos-rhui-rpms    58 k\n\n\
+                 Transaction Summary\n\
+                 ================================================================================\n\
+                 Install  1 Package\n",
+                cont
+            );
+            assert!(
+                parse_dnf_install_set(&out).is_none(),
+                "continuation {:?} must be rejected",
+                cont
+            );
+        }
+        // `Package` as the last physical line — no continuation exists.
+        assert!(parse_dnf_install_set(
+            "Dependencies resolved.\n\
+             ================================================================================\n \
+             Package\n"
+        )
+        .is_none());
+        // A lone `Package` line with a valid continuation but no
+        // terminating divider still fails closed downstream.
+        assert!(parse_dnf_install_set(
+            "Dependencies resolved.\n\
+             ================================================================================\n \
+             Package\n \
+                    Arch     Version        Repository                                 Size\n\
+             Installing:\n \
+             tree   x86_64   1.8.0-10.el9   baseos    58 k\n"
+        )
+        .is_none());
     }
 
     #[test]
