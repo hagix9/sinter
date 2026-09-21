@@ -1,0 +1,8 @@
+version: 1
+
+resources:
+  - id: tree
+    type: package
+    with:
+      name: tree
+      state: present

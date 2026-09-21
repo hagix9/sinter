@@ -10,6 +10,10 @@ Sinterは、Itamaeに着想を得た軽量なエージェントレス構成管�
 単一のRustバイナリからOSの構成を記述・適用し、管理対象ホストには
 SinterエージェントやSinterランタイム、Ruby、Pythonを必要としません。
 
+<p align="center">
+  <img src="assets/demo/sinter-demo.svg" alt="Sinter ターミナルデモ: plan → apply → audit" width="720">
+</p>
+
 ## Sinterの特徴
 
 - **エージェントレス・単一バイナリ**

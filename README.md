@@ -10,6 +10,10 @@ Sinter is a lightweight, agentless configuration-management tool inspired by Ita
 It describes and applies operating-system configuration from a single Rust binary
 without requiring an agent, Ruby, Python, or a Sinter runtime on the managed host.
 
+<p align="center">
+  <img src="assets/demo/sinter-demo.svg" alt="Sinter terminal demo: plan, apply, audit" width="720">
+</p>
+
 ## Why Sinter?
 
 - **Agentless, single-binary controller**

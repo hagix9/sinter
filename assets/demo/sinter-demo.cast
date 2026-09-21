@@ -1,0 +1,10 @@
+{"version": 2, "width": 80, "height": 24, "timestamp": 1790006392, "env": {"SHELL": "/bin/bash", "TERM": null}}
+[0.02444, "o", "$ cat recipe.yaml\r\n"]
+[0.847465, "o", "version: 1\r\n\r\nresources:\r\n  - id: tree\r\n    type: package\r\n    with:\r\n      name: tree\r\n      state: present\r\n"]
+[2.282631, "o", "$ sinter plan recipe.yaml\r\n"]
+[3.334151, "o", "== Sinter PLAN ==\r\ntarget facts: hostname=demo os=Ubuntu family=debian version=24.04 arch=x86_64\r\n\r\nCHANGED  tree [package] known/normal \r\n    current: absent\r\n    desired: installed\r\n\r\nsummary: 1 changed, 0 possible, 0 failed, 0 indeterminate, 1 total\r\nstatus: success\r\n"]
+[4.760353, "o", "$ sinter apply --sudo recipe.yaml\r\n"]
+[7.260353, "o", "== Sinter APPLY ==\r\ntarget facts: hostname=demo os=Ubuntu family=debian version=24.04 arch=x86_64\r\n\r\nCHANGED  tree [package] known/normal \r\n\r\nsummary: 1 changed, 0 possible, 0 failed, 0 indeterminate, 1 total\r\nstatus: success\r\n"]
+[8.684306, "o", "$ sinter audit recipe.yaml\r\n"]
+[9.718981, "o", "== Sinter AUDIT ==\r\nPASS tree [package]\r\n    reason: package already in desired state\r\nsummary: 1 total, 1 compliant, 0 drifted, 0 not_auditable, 0 not_applicable, 0 errors\r\nstatus: no_drift\r\n"]
+[12.718981, "o", ""]
