@@ -14,15 +14,27 @@
 //   - If a localized payload cannot be fetched, the tool falls back to the
 //     English document rather than failing.
 
-(function () {
+// Registration timing: module scripts execute before DOMContentLoaded, and
+// a WebMCP host may expose modelContext only once the document is ready. A
+// one-shot probe at evaluation time can therefore permanently miss the API.
+// Defer the first registration attempt to DOMContentLoaded when the document
+// is still loading; otherwise register immediately. `registered` is set only
+// after a usable modelContext is found, never by a probe that found none.
+var registered = false;
+
+function register() {
   'use strict';
 
+  if (registered) {
+    return;
+  }
   var mc =
     (typeof document !== 'undefined' && document.modelContext) ||
     (typeof navigator !== 'undefined' && navigator.modelContext);
   if (!mc || typeof mc.registerTool !== 'function') {
     return; // WebMCP unsupported — normal documentation still works.
   }
+  registered = true;
 
   var LOCALES = ['en', 'ja'];
   var scriptUrl = new URL(import.meta.url);
@@ -327,4 +339,10 @@
       });
     },
   });
-})();
+}
+
+if (typeof document !== 'undefined' && document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', register, { once: true });
+} else {
+  register();
+}

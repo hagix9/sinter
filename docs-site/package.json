@@ -11,7 +11,7 @@
     "build": "astro build",
     "preview": "astro preview",
     "check": "astro check",
-    "webmcp:check": "node scripts/check-webmcp.mjs",
+    "webmcp:check": "node scripts/check-webmcp.mjs && node scripts/check-webmcp-timing.mjs",
     "webmcp:smoke": "node scripts/smoke-webmcp.mjs"
   },
   "dependencies": {
