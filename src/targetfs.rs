@@ -446,12 +446,15 @@ impl TargetFs {
     }
 
     pub fn systemctl_show_sensitive(&mut self, name: &str, sensitive: bool) -> Result<Output> {
+        // The unit name follows `--`: option parsing ends there, so a
+        // manifest-controlled name like `-H…` can never become an option.
         self.run_argv_sensitivity(
             "/usr/bin/systemctl",
             &[
                 "show".to_string(),
-                name.to_string(),
                 "--property=LoadState,ActiveState,UnitFileState".to_string(),
+                "--".to_string(),
+                name.to_string(),
             ],
             sensitive,
         )

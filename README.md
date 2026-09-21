@@ -376,6 +376,13 @@ sudo = true
 - `sinter_list_targets` returns names only; underlying diagnostics are
   sanitized so profile internals (host, user, key paths) do not reach MCP
   output.
+- An omitted or empty `identity_files` follows the existing Sinter SSH
+  authentication behavior and may use default identity resolution; it does
+  not disable authentication.
+- Host manifests may not use `source:` — controller-local file reads are not
+  permitted over MCP. Host plan output never returns file or template
+  bodies: content diffs are redacted at the MCP boundary regardless of the
+  manifest's `sensitive` flags.
 
 This is unrelated to the documentation site's WebMCP surface (browser-side,
 documentation lookup only); Core MCP exposes Sinter's own operations.

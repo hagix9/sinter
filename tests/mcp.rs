@@ -784,3 +784,89 @@ fn immutable_registry_across_requests() {
     assert_eq!(c["targets"], a["targets"]);
     let _ = b;
 }
+
+// ---------------------------------------------------------------------------
+// C2 R1: F-01 controller-source rejection (defense-in-depth layer 1)
+// ---------------------------------------------------------------------------
+
+const F01_SENTINEL: &str = "F01_SECRET_SENTINEL_91A7";
+
+fn source_manifest(ty: &str, source: &str) -> String {
+    format!(
+        "version: 1\nresources:\n  - id: x\n    type: {ty}\n    with:\n      path: /tmp/dst\n      source: {source}\n"
+    )
+}
+
+#[test]
+fn host_tools_reject_controller_source_before_any_io() {
+    // Sentinel file outside the repository, readable by the MCP process. It
+    // must never be opened: `source:` is rejected at the tool boundary, before
+    // staging, model loading, target resolution, or any network activity.
+    let dir = tempfile::tempdir().unwrap();
+    let secret = dir.path().join("SINTER_MCP_SECRET_F01");
+    std::fs::write(&secret, F01_SENTINEL).unwrap();
+    let abs = secret.display().to_string();
+
+    // No targets file: the `source:` error must win over target resolution,
+    // proving rejection precedes the network boundary.
+    let mut m = Mcp::start();
+    init(&mut m);
+    for tool in ["sinter_plan_host", "sinter_audit_host"] {
+        for (ty, src) in [
+            ("file", abs.as_str()),          // R1-A / R1-C: absolute
+            ("template", abs.as_str()),      // R1-B / R1-D
+            ("file", "relative/secret.txt"), // R1-E: relative
+        ] {
+            let resp = m.tool(
+                7,
+                tool,
+                json!({"manifest": source_manifest(ty, src), "target": "web01"}),
+            );
+            let (is_err, v) = Mcp::payload(&resp);
+            assert!(is_err, "{tool} {ty} source={src} must be rejected: {resp}");
+            assert_eq!(v["error"]["category"], "invalid_manifest");
+            let raw = serde_json::to_string(&resp).unwrap();
+            assert!(raw.contains("source"), "{tool}: {raw}");
+            // R1-F: neither sentinel content nor its path may surface, and
+            // the failure must not fall through to target resolution.
+            assert!(!raw.contains(F01_SENTINEL), "{raw}");
+            assert!(!raw.contains(&abs), "{raw}");
+            assert!(!raw.contains("unknown target"), "{raw}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C2 R1: F-03 protocol-level overlapping profile redaction
+// ---------------------------------------------------------------------------
+
+#[test]
+fn overlapping_profile_values_fully_redacted_in_errors() {
+    // host is a strict prefix of user; known_hosts is a prefix of the
+    // identity path. An unreachable host forces an MCP-facing error.
+    let f = write_targets(
+        "[targets.web01]\n\
+         host = \"127.0.0.1\"\n\
+         port = 1\n\
+         user = \"127.0.0.1-admin\"\n\
+         known_hosts = \"/tmp/secret\"\n\
+         identity_files = [\"/tmp/secret/key\"]\n",
+    );
+    let mut m = Mcp::start_with(&["--targets-file".to_string(), f.path().display().to_string()]);
+    init(&mut m);
+    for tool in ["sinter_plan_host", "sinter_audit_host"] {
+        let resp = m.tool(9, tool, json!({"manifest": VALID_PKG, "target": "web01"}));
+        let (is_err, _) = Mcp::payload(&resp);
+        assert!(is_err, "{tool} must fail against 127.0.0.1:1: {resp}");
+        let raw = serde_json::to_string(&resp).unwrap();
+        // No complete configured value survives — including the suffix
+        // residue the old sequential replacement could leave.
+        for leak in ["127.0.0.1-admin", "/tmp/secret/key", "/tmp/secret"] {
+            assert!(!raw.contains(leak), "{tool} leaked {leak}: {raw}");
+        }
+        assert!(
+            !raw.contains("127.0.0.1") || raw.contains("[target]"),
+            "{tool}: {raw}"
+        );
+    }
+}

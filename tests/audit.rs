@@ -89,7 +89,12 @@ fn assert_observation_only(report: &AuditReport) {
             // list; no other verb and no other property set is permitted.
             "/usr/bin/systemctl" => matches!(
                 args.as_slice(),
-                ["show", _, "--property=LoadState,ActiveState,UnitFileState"]
+                [
+                    "show",
+                    "--property=LoadState,ActiveState,UnitFileState",
+                    "--",
+                    _
+                ]
             ),
             _ => false,
         };
@@ -2305,8 +2310,9 @@ fn audit_allowlist_accepts_every_defined_observation_shape() {
             "/usr/bin/systemctl",
             &[
                 "show",
-                "svc",
                 "--property=LoadState,ActiveState,UnitFileState",
+                "--",
+                "svc",
             ],
         ),
     ];
@@ -2659,5 +2665,80 @@ fn audit_output_order_is_deterministic_dependency_order() {
         first,
         vec!["producer".to_string(), "consumer".to_string()],
         "dependency must be reported before its dependent"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// C2 R1 F-04: service-name option injection at the observation boundary
+// ---------------------------------------------------------------------------
+
+#[test]
+fn systemctl_observation_argv_is_option_injection_safe() {
+    // A manifest-controlled unit name must only ever occupy the operand slot
+    // after `--`. A leading-dash name would otherwise be parsed by systemctl
+    // as an option (e.g. -H would redirect to a different host).
+    let dir = trusted_root("audit-svc-hostile");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nresources:\n  - id: s\n    type: service\n    with:\n      name: -Hevil.invalid\n      state: running\n",
+    );
+    let r = audit_fake(&recipe, FakeTarget::ubuntu2404());
+    let ctl = r
+        .commands
+        .iter()
+        .find(|c| c.program.ends_with("systemctl"))
+        .expect("service observation must dispatch systemctl show");
+    let args: Vec<&str> = ctl.args.iter().map(|a| a.as_str()).collect();
+    assert_eq!(
+        args,
+        [
+            "show",
+            "--property=LoadState,ActiveState,UnitFileState",
+            "--",
+            "-Hevil.invalid"
+        ],
+        "hostile service name must sit after `--` as a data operand"
+    );
+    // Whole-run structural proof still holds.
+    assert_observation_only(&r);
+
+    // A normal unit name produces the same fixed shape (R1-O).
+    let dir = trusted_root("audit-svc-normal-argv");
+    let recipe = service_recipe(&dir, "running", "true");
+    let r = audit_fake(&recipe, FakeTarget::ubuntu2404());
+    let ctl = r
+        .commands
+        .iter()
+        .find(|c| c.program.ends_with("systemctl"))
+        .unwrap();
+    let args: Vec<&str> = ctl.args.iter().map(|a| a.as_str()).collect();
+    assert_eq!(
+        args,
+        [
+            "show",
+            "--property=LoadState,ActiveState,UnitFileState",
+            "--",
+            "svc"
+        ]
+    );
+    assert_observation_only(&r);
+}
+
+#[test]
+fn package_name_option_injection_stays_rejected() {
+    // R1-P: package observation was already safe — `validate_package_name`
+    // refuses leading `-` before any argv is built. Prove the property holds.
+    let dir = trusted_root("audit-pkg-hostile");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nresources:\n  - id: p\n    type: package\n    with:\n      name: -evil\n      state: present\n",
+    );
+    let err = load_model(&recipe).expect_err("leading-dash package name must be rejected");
+    assert!(
+        err.message.contains("invalid package name"),
+        "unexpected error: {}",
+        err.message
     );
 }

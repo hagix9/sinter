@@ -2409,7 +2409,9 @@ impl FakeExecutor {
     fn run_systemctl(&mut self, args: &[String]) -> Output {
         let verb = args.first().map(|s| s.as_str()).unwrap_or("");
         if verb == "show" {
-            let name = args.get(1).cloned().unwrap_or_default();
+            // Observation argv is `show --property=... -- <unit>`: the unit
+            // name is the operand after `--`.
+            let name = args.last().cloned().unwrap_or_default();
             return match self.target.services.get(&name) {
                 Some((load, active, unitfile)) => Self::exited(
                     0,

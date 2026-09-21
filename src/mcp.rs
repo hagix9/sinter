@@ -255,6 +255,9 @@ fn resolve_target<'a>(
 /// Stage-path redaction plus profile confidentiality: administrator-owned
 /// connection details (host, user, known_hosts, identity paths) are replaced
 /// by `[target]` wherever an underlying diagnostic embedded them.
+/// Replacement is overlap-safe: complete values are deduplicated and applied
+/// longest-first, so a shorter value that is a prefix of a longer one cannot
+/// leave residue like `[target]-admin`.
 fn host_error(e: SinterError, stage_dir: &Path, profile: &TargetProfile) -> ToolError {
     let mut t = staged_error(e, stage_dir);
     let mut secrets: Vec<String> = vec![
@@ -269,10 +272,54 @@ fn host_error(e: SinterError, stage_dir: &Path, profile: &TargetProfile) -> Tool
             .iter()
             .map(|p| p.display().to_string()),
     );
-    for s in secrets.iter().filter(|s| !s.is_empty()) {
+    secrets.retain(|s| !s.is_empty());
+    secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    secrets.dedup();
+    for s in &secrets {
         t.message = t.message.replace(s.as_str(), "[target]");
     }
     t
+}
+
+/// F-01: an MCP host manifest must never cause controller-local file reads.
+/// `source:` (file/template) resolves on the controller — during `load_model`
+/// itself for template bodies — so it is rejected at the tool boundary,
+/// before staging and parsing. Absolute and relative forms are rejected
+/// alike: both are controller filesystem authority C2 does not need.
+///
+/// Detects YAML (`source:`, `source :`) and TOML (`source =`, dotted/inline
+/// `with.source =`) key positions. A `source` substring inside a scalar
+/// value may over-reject — conservative and intentional for C2.
+fn contains_source_key(manifest: &str) -> bool {
+    let b = manifest.as_bytes();
+    manifest.match_indices("source").any(|(i, _)| {
+        // Left boundary: preceding byte must not be identifier-like
+        // (rejects "resource"/"my-source"). Non-ASCII bytes are boundaries.
+        if i > 0 {
+            let c = b[i - 1];
+            if c.is_ascii_alphanumeric() || c == b'_' || c == b'-' {
+                return false;
+            }
+        }
+        let mut j = i + "source".len();
+        while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
+            j += 1;
+        }
+        j < b.len() && (b[j] == b':' || b[j] == b'=')
+    })
+}
+
+fn reject_controller_source(manifest: &str) -> Result<(), ToolError> {
+    if contains_source_key(manifest) {
+        return Err(ToolError {
+            category: "invalid_manifest",
+            kind: Some("schema"),
+            message: "host manifests may not use \"source:\" — controller-local \
+                      file reads are not permitted over MCP"
+                .to_string(),
+        });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -417,7 +464,7 @@ fn tool_plan(args: &Value) -> Result<Value, ToolError> {
     let report = engine
         .run()
         .map_err(|e| staged_error(e, &stage.canonical))?;
-    let mut out = plan_report_json(&report);
+    let mut out = plan_report_json(&report, false);
     out["mode"] = json!("plan");
     out["target"] = json!(target_name);
     Ok(out)
@@ -425,7 +472,14 @@ fn tool_plan(args: &Value) -> Result<Value, ToolError> {
 
 /// Shared RunReport → MCP JSON mapping for both plan surfaces. One
 /// serialization path — no MCP-specific planning logic.
-fn plan_report_json(report: &RunReport) -> Value {
+///
+/// `redact_content` (F-02): for real-host output, a textual diff may carry
+/// the observed target file body and/or the desired body — the caller's
+/// `sensitive` flag must NOT control whether remote content is disclosed.
+/// Host tools therefore collapse every `DiffBody::Text` to `Redacted`,
+/// independent of resource sensitivity. Metadata-only `Summary` diffs
+/// (mode/owner/state changes) remain visible.
+fn plan_report_json(report: &RunReport, redact_content: bool) -> Value {
     let resources: Vec<Value> = report
         .resources
         .iter()
@@ -441,6 +495,9 @@ fn plan_report_json(report: &RunReport) -> Value {
                 "unknown": r.unknown,
                 "sensitive": r.sensitive,
                 "diff": r.diff.as_ref().map(|d| match &d.body {
+                    crate::result::DiffBody::Text { .. } if redact_content => {
+                        json!({ "kind": "redacted" })
+                    }
                     crate::result::DiffBody::Text { removed, added } => json!({
                         "kind": "text", "removed": removed, "added": added,
                     }),
@@ -486,6 +543,7 @@ fn tool_list_targets(reg: &TargetRegistry) -> Result<Value, ToolError> {
 fn tool_plan_host(args: &Value, reg: &TargetRegistry) -> Result<Value, ToolError> {
     require_only(args, &["manifest", "target"])?;
     let manifest = require_manifest(args)?;
+    reject_controller_source(manifest)?;
     let (name, profile) = resolve_target(args, reg)?;
     let (stage, path) = stage_manifest(manifest)?;
     let model = load_model(&path).map_err(|e| staged_error(e, &stage.canonical))?;
@@ -503,7 +561,9 @@ fn tool_plan_host(args: &Value, reg: &TargetRegistry) -> Result<Value, ToolError
     let report = engine
         .run()
         .map_err(|e| host_error(e, &stage.canonical, profile))?;
-    let mut out = plan_report_json(&report);
+    // F-02: host boundary — file/template content never crosses to the
+    // caller, regardless of the manifest's own sensitivity flags.
+    let mut out = plan_report_json(&report, true);
     out["mode"] = json!("plan");
     out["target"] = json!(name);
     Ok(out)
@@ -515,6 +575,7 @@ fn tool_plan_host(args: &Value, reg: &TargetRegistry) -> Result<Value, ToolError
 fn tool_audit_host(args: &Value, reg: &TargetRegistry) -> Result<Value, ToolError> {
     require_only(args, &["manifest", "target"])?;
     let manifest = require_manifest(args)?;
+    reject_controller_source(manifest)?;
     let (name, profile) = resolve_target(args, reg)?;
     let (stage, path) = stage_manifest(manifest)?;
     let model = load_model(&path).map_err(|e| staged_error(e, &stage.canonical))?;
@@ -923,5 +984,130 @@ mod tests {
         assert_eq!(err(untouched), untouched);
         // Bare dir also collapses.
         assert!(!err(&format!("inside {dir} boom")).contains(&dir));
+    }
+
+    // -----------------------------------------------------------------------
+    // C2 R1: F-01 source rejection, F-02 content redaction, F-03 overlap-safe
+    // profile redaction
+    // -----------------------------------------------------------------------
+
+    fn sentinel_profile() -> TargetProfile {
+        TargetProfile {
+            spec: crate::engine::SshSpec {
+                host: "LEAK".to_string(),
+                port: 22,
+                user: "LEAK-admin".to_string(),
+                known_hosts: PathBuf::from("/tmp/secret"),
+                identity_files: vec![PathBuf::from("/tmp/secret/key")],
+            },
+            sudo: false,
+        }
+    }
+
+    #[test]
+    fn f01_source_key_detection() {
+        for (m, expect) in [
+            ("with:\n      source: /etc/x\n", true),
+            ("with:\n      source : rel.tpl\n", true),
+            ("with = { source = \"/x\" }\n", true),
+            ("with.source = \"/x\"\n", true),
+            ("resources:\n  - id: a\n", false), // "resources:" is not "source:"
+            ("with:\n      content: \"no key here\"\n", false),
+            ("with:\n      mysource: /x\n", false), // identifier-like left edge
+        ] {
+            assert_eq!(contains_source_key(m), expect, "{m:?}");
+        }
+        assert!(reject_controller_source("with:\n  source: /x\n").is_err());
+        assert!(reject_controller_source("with:\n  path: /x\n").is_ok());
+    }
+
+    #[test]
+    fn f02_host_plan_redacts_text_diffs() {
+        use crate::engine::{AggregateStatus, RunReport};
+        use crate::result::{
+            Change, Diff, DiffBody, Disposition, Execution, ResourceResult, Verification,
+        };
+        let mk = |id: &str, ty: &str, sensitive: bool| ResourceResult {
+            id: id.to_string(),
+            type_: ty.to_string(),
+            origin: "recipe".to_string(),
+            execution: Execution::Succeeded,
+            change: Change::Changed,
+            verification: Verification::NotPerformed,
+            disposition: Disposition::Normal,
+            reason: None,
+            unknown: false,
+            sensitive,
+            diff: Some(Diff {
+                body: DiffBody::Text {
+                    removed: vec!["TARGET_SECRET_F02_6B4E".to_string()],
+                    added: vec!["DESIRED_SECRET_F02_AA39".to_string()],
+                },
+            }),
+            notes: vec![],
+            handler_notifications: vec![],
+            loop_index: None,
+        };
+        let report = RunReport {
+            resources: vec![
+                mk("plain-file", "file", false),
+                mk("tpl", "template", false),
+                mk("sens", "file", true),
+            ],
+            handlers_run: vec![],
+            handlers_pending: vec![],
+            facts: crate::facts::Facts {
+                hostname: "h".to_string(),
+                os_name: "ubuntu".to_string(),
+                os_family: "debian".to_string(),
+                os_version: "24.04".to_string(),
+                arch: "x86_64".to_string(),
+            },
+            status: AggregateStatus::Success,
+            commands: vec![],
+        };
+        // Host boundary: no content, whatever the caller's sensitive flags.
+        let host = serde_json::to_string(&plan_report_json(&report, true)).unwrap();
+        assert!(!host.contains("TARGET_SECRET_F02_6B4E"), "{host}");
+        assert!(!host.contains("DESIRED_SECRET_F02_AA39"), "{host}");
+        let v = plan_report_json(&report, true);
+        for r in v["resources"].as_array().unwrap() {
+            assert_eq!(r["diff"]["kind"], "redacted");
+            // Non-content plan information survives.
+            assert!(r["id"].is_string() && r["change"].is_string());
+        }
+        // The offline supplied-facts tool is unchanged.
+        let offline = serde_json::to_string(&plan_report_json(&report, false)).unwrap();
+        assert!(offline.contains("TARGET_SECRET_F02_6B4E"));
+    }
+
+    #[test]
+    fn f03_overlapping_profile_values_fully_redacted() {
+        let p = sentinel_profile();
+        let (stage, _path) = stage_manifest(MINI).unwrap();
+        let err = host_error(
+            SinterError::connect(
+                "auth failed for LEAK-admin@LEAK using /tmp/secret/key (/tmp/secret)",
+            ),
+            &stage.canonical,
+            &p,
+        );
+        // Complete configured values must not survive, even overlapping.
+        assert!(!err.message.contains("LEAK-admin"), "{}", err.message);
+        assert!(!err.message.contains("/tmp/secret/key"), "{}", err.message);
+        assert!(!err.message.contains("LEAK"), "{}", err.message);
+        assert!(!err.message.contains("/tmp/secret"), "{}", err.message);
+        assert!(err.message.contains("[target]"), "{}", err.message);
+        // Meaning is preserved: still a readable failure line.
+        assert!(err.message.contains("auth failed"), "{}", err.message);
+    }
+
+    #[test]
+    fn f03_empty_profile_values_are_safe() {
+        let mut p = sentinel_profile();
+        p.spec.identity_files.clear();
+        let (stage, _path) = stage_manifest(MINI).unwrap();
+        let err = host_error(SinterError::connect("plain failure"), &stage.canonical, &p);
+        assert_eq!(err.message, "plain failure");
     }
 }
