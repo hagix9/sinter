@@ -786,52 +786,188 @@ fn immutable_registry_across_requests() {
 }
 
 // ---------------------------------------------------------------------------
-// C2 R1: F-01 controller-source rejection (defense-in-depth layer 1)
+// C2 R2: structural manifest-authority boundary (R1-N1 / R1-N2)
 // ---------------------------------------------------------------------------
 
-const F01_SENTINEL: &str = "F01_SECRET_SENTINEL_91A7";
+const R2_SOURCE_SENTINEL: &str = "R2_SOURCE_SECRET_83F1";
+const R2_INCLUDE_SENTINEL: &str = "R2_INCLUDE_SECRET_6A22";
+/// Substring common to both policy rejection messages.
+const R2_POLICY: &str = "controller-local";
 
-fn source_manifest(ty: &str, source: &str) -> String {
+fn manifest_with(ty: &str, with_lines: &str) -> String {
     format!(
-        "version: 1\nresources:\n  - id: x\n    type: {ty}\n    with:\n      path: /tmp/dst\n      source: {source}\n"
+        "version: 1\nresources:\n  - id: x\n    type: {ty}\n    with:\n      path: /tmp/dst\n{with_lines}\n"
     )
 }
 
+fn assert_policy_rejection(resp: &Value, forbidden: &[&str]) {
+    let (is_err, v) = Mcp::payload(resp);
+    assert!(is_err, "manifest must be rejected: {resp}");
+    assert_eq!(v["error"]["category"], "invalid_manifest", "{resp}");
+    let raw = serde_json::to_string(resp).unwrap();
+    assert!(
+        raw.contains(R2_POLICY),
+        "expected the authority-policy rejection: {raw}"
+    );
+    for s in forbidden {
+        assert!(!raw.contains(s), "sentinel/path leaked: {s} in {raw}");
+    }
+    // Policy wins over target resolution — proves ordering.
+    assert!(!raw.contains("unknown target"), "{raw}");
+}
+
 #[test]
-fn host_tools_reject_controller_source_before_any_io() {
+fn host_tools_reject_source_in_every_key_spelling() {
     // Sentinel file outside the repository, readable by the MCP process. It
-    // must never be opened: `source:` is rejected at the tool boundary, before
-    // staging, model loading, target resolution, or any network activity.
+    // must never be opened: `source` is rejected on the parsed structure
+    // before resolution, so every YAML spelling the production parser
+    // accepts is covered identically.
     let dir = tempfile::tempdir().unwrap();
-    let secret = dir.path().join("SINTER_MCP_SECRET_F01");
-    std::fs::write(&secret, F01_SENTINEL).unwrap();
+    let secret = dir.path().join("SINTER_MCP_SECRET_R2");
+    std::fs::write(&secret, R2_SOURCE_SENTINEL).unwrap();
     let abs = secret.display().to_string();
 
-    // No targets file: the `source:` error must win over target resolution,
-    // proving rejection precedes the network boundary.
-    let mut m = Mcp::start();
+    let mut m = Mcp::start(); // no registry: policy must fire before resolution
     init(&mut m);
     for tool in ["sinter_plan_host", "sinter_audit_host"] {
-        for (ty, src) in [
-            ("file", abs.as_str()),          // R1-A / R1-C: absolute
-            ("template", abs.as_str()),      // R1-B / R1-D
-            ("file", "relative/secret.txt"), // R1-E: relative
+        for ty in ["file", "template"] {
+            for with in [
+                format!("      source: {abs}"),                    // R2-A: plain
+                format!("      \"source\": {abs}"),                // R2-B
+                format!("      'source': {abs}"),                  // R2-C
+                format!("      ? source\n      : {abs}"),          // R2-D: explicit key
+                format!("      !!str source: {abs}"),              // tagged key
+                "      source: ./relative/secret.txt".to_string(), // relative
+            ] {
+                let resp = m.tool(
+                    7,
+                    tool,
+                    json!({"manifest": manifest_with(ty, &with), "target": "web01"}),
+                );
+                assert_policy_rejection(&resp, &[R2_SOURCE_SENTINEL, &abs]);
+            }
+        }
+        // R2-E: flow mappings — file and template.
+        for with in [
+            format!("    with: {{ path: /tmp/dst, source: {abs} }}"),
+            format!("    with: {{ path: /tmp/dst, \"source\": {abs} }}"),
         ] {
-            let resp = m.tool(
-                7,
-                tool,
-                json!({"manifest": source_manifest(ty, src), "target": "web01"}),
-            );
+            let mf = format!("version: 1\nresources:\n  - id: x\n    type: file\n{with}\n");
+            let resp = m.tool(7, tool, json!({"manifest": mf, "target": "web01"}));
+            assert_policy_rejection(&resp, &[R2_SOURCE_SENTINEL, &abs]);
+        }
+    }
+}
+
+#[test]
+fn host_tools_reject_all_include_forms() {
+    let dir = tempfile::tempdir().unwrap();
+    let inc = dir.path().join("child.yaml");
+    std::fs::write(&inc, format!("version: 1\n# {R2_INCLUDE_SENTINEL}\n")).unwrap();
+    let abs = inc.display().to_string();
+
+    let mut m = Mcp::start();
+    init(&mut m);
+    let forms = [
+        format!("version: 1\ninclude:\n  - {abs}\n"),            // R2-J absolute
+        "version: 1\ninclude:\n  - ../secret.yaml\n".to_string(), // R2-K relative
+        "version: 1\ninclude:\n  - child.yaml\n".to_string(),     // R2-L child
+        format!("version: 1\ninclude: [\"{abs}\"]\n"),            // flow + quoted
+        format!("version: 1\ninclude:\n  - {abs}\n  - child.yaml\n"), // multiple
+        // include + source combination: main rejected before any expansion.
+        format!(
+            "version: 1\ninclude:\n  - {abs}\nresources:\n  - id: x\n    type: file\n    with:\n      path: /t\n      source: {abs}\n"
+        ),
+    ];
+    for tool in ["sinter_plan_host", "sinter_audit_host"] {
+        for mf in &forms {
+            let resp = m.tool(7, tool, json!({"manifest": mf, "target": "web01"}));
+            assert_policy_rejection(&resp, &[R2_INCLUDE_SENTINEL, R2_SOURCE_SENTINEL, &abs]);
+        }
+    }
+}
+
+#[test]
+fn forbidden_authority_rejected_identically_regardless_of_filesystem() {
+    // Structural rejection must not depend on the referenced path's state —
+    // identical policy errors for existing, missing, directory and
+    // unreadable targets prove no controller I/O happened to decide.
+    let dir = tempfile::tempdir().unwrap();
+    let existing = dir.path().join("exists.yaml");
+    std::fs::write(&existing, R2_SOURCE_SENTINEL).unwrap();
+    let missing = dir.path().join("missing.yaml").display().to_string();
+    let directory = dir.path().display().to_string();
+    let unreadable = dir.path().join("unreadable.yaml");
+    std::fs::write(&unreadable, R2_SOURCE_SENTINEL).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    let un = unreadable.display().to_string();
+    let ex = existing.display().to_string();
+
+    let mut m = Mcp::start();
+    init(&mut m);
+    let mut messages = Vec::new();
+    for tool in ["sinter_plan_host", "sinter_audit_host"] {
+        for path in [
+            ex.as_str(),
+            missing.as_str(),
+            directory.as_str(),
+            un.as_str(),
+        ] {
+            for mf in [
+                manifest_with("file", &format!("      source: {path}")),
+                format!("version: 1\ninclude:\n  - {path}\n"),
+            ] {
+                let resp = m.tool(7, tool, json!({"manifest": mf, "target": "web01"}));
+                assert_policy_rejection(&resp, &[R2_SOURCE_SENTINEL, &ex, &un]);
+                let (_, v) = Mcp::payload(&resp);
+                messages.push(v["error"]["message"].as_str().unwrap().to_string());
+            }
+        }
+    }
+    // Every variant produced one of the two fixed policy messages — no
+    // filesystem-derived text (errno, "Is a directory", "not found").
+    for msg in &messages {
+        assert!(
+            msg.contains(R2_POLICY),
+            "filesystem-dependent error leaked: {msg}"
+        );
+        assert!(!msg.contains(&ex) && !msg.contains(&un), "{msg}");
+    }
+}
+
+#[test]
+fn source_include_words_in_data_are_not_policy_rejected() {
+    // Structural policy ≠ text matching: the words `source`/`include` in
+    // scalar content, block scalars, comments and args carry no authority.
+    // With no registry these must pass the policy and reach `unknown target`.
+    let mut m = Mcp::start();
+    init(&mut m);
+    let manifests = [
+        manifest_with("file", "      content: \"source: /tmp/x\""),
+        manifest_with("file", "      content: \"include: child.yaml\""),
+        manifest_with(
+            "file",
+            "      content: |\n        source: /tmp/x\n        include: child.yaml",
+        ),
+        "version: 1\n# source: /tmp/x\n# include: child.yaml\nresources:\n  - id: x\n    type: file\n    with:\n      path: /t\n      content: ok\n".to_string(),
+        "version: 1\nresources:\n  - id: x\n    type: command\n    with:\n      program: /bin/echo\n      args: [\"source:\", \"include:\"]\n".to_string(),
+        "version: 1\nvars:\n  v:\n    value: \"source: include:\"\nresources:\n  - id: x\n    type: file\n    with:\n      path: /t\n      content: \"{{ vars.v }}\"\n".to_string(),
+    ];
+    for tool in ["sinter_plan_host", "sinter_audit_host"] {
+        for mf in &manifests {
+            let resp = m.tool(7, tool, json!({"manifest": mf, "target": "web01"}));
             let (is_err, v) = Mcp::payload(&resp);
-            assert!(is_err, "{tool} {ty} source={src} must be rejected: {resp}");
-            assert_eq!(v["error"]["category"], "invalid_manifest");
-            let raw = serde_json::to_string(&resp).unwrap();
-            assert!(raw.contains("source"), "{tool}: {raw}");
-            // R1-F: neither sentinel content nor its path may surface, and
-            // the failure must not fall through to target resolution.
-            assert!(!raw.contains(F01_SENTINEL), "{raw}");
-            assert!(!raw.contains(&abs), "{raw}");
-            assert!(!raw.contains("unknown target"), "{raw}");
+            assert!(is_err, "{tool}: {resp}");
+            let msg = v["error"]["message"].as_str().unwrap();
+            assert!(
+                msg.contains("unknown target"),
+                "{tool}: must pass the authority policy and fail at target \
+                 resolution, got: {msg} for {mf:?}"
+            );
         }
     }
 }

@@ -19,6 +19,7 @@
 //! stderr. Supported methods: initialize, ping, tools/list, tools/call.
 
 use crate::audit::run_audit;
+use crate::document::{parse_document, Document};
 use crate::engine::{Engine, Mode, RunOptions, RunReport, TargetSpec};
 use crate::error::{ErrorKind, SinterError};
 use crate::executor::FakeTarget;
@@ -276,48 +277,80 @@ fn host_error(e: SinterError, stage_dir: &Path, profile: &TargetProfile) -> Tool
     secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
     secrets.dedup();
     for s in &secrets {
-        t.message = t.message.replace(s.as_str(), "[target]");
+        t.message = if s.len() >= SHORT_SECRET_LEN {
+            t.message.replace(s.as_str(), "[target]")
+        } else {
+            redact_bounded(&t.message, s)
+        };
     }
     t
 }
 
-/// F-01: an MCP host manifest must never cause controller-local file reads.
-/// `source:` (file/template) resolves on the controller — during `load_model`
-/// itself for template bodies — so it is rejected at the tool boundary,
-/// before staging and parsing. Absolute and relative forms are rejected
-/// alike: both are controller filesystem authority C2 does not need.
-///
-/// Detects YAML (`source:`, `source :`) and TOML (`source =`, dotted/inline
-/// `with.source =`) key positions. A `source` substring inside a scalar
-/// value may over-reject — conservative and intentional for C2.
-fn contains_source_key(manifest: &str) -> bool {
-    let b = manifest.as_bytes();
-    manifest.match_indices("source").any(|(i, _)| {
-        // Left boundary: preceding byte must not be identifier-like
-        // (rejects "resource"/"my-source"). Non-ASCII bytes are boundaries.
-        if i > 0 {
-            let c = b[i - 1];
-            if c.is_ascii_alphanumeric() || c == b'_' || c == b'-' {
-                return false;
-            }
+/// R1-N3: profile values shorter than this are only replaced at token
+/// boundaries. A global substring rule would let a one- or two-character
+/// configured value (e.g. `user = "u"`) mangle ordinary diagnostic words
+/// such as "refused", while boundary matching still masks the value wherever
+/// it is actually printed standalone.
+const SHORT_SECRET_LEN: usize = 4;
+
+fn redact_bounded(text: &str, needle: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(needle) {
+        let bounded_before = rest[..i]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_ascii_alphanumeric());
+        let after = &rest[i + needle.len()..];
+        let bounded_after = after
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_ascii_alphanumeric());
+        if bounded_before && bounded_after {
+            out.push_str(&rest[..i]);
+            out.push_str("[target]");
+        } else {
+            // Embedded in a larger token: not the configured value being
+            // printed — keep it and continue scanning after it.
+            out.push_str(&rest[..i + needle.len()]);
         }
-        let mut j = i + "source".len();
-        while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
-            j += 1;
-        }
-        j < b.len() && (b[j] == b':' || b[j] == b'=')
-    })
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
-fn reject_controller_source(manifest: &str) -> Result<(), ToolError> {
-    if contains_source_key(manifest) {
+/// R2: structural manifest-authority boundary for host tools. Operates on
+/// the parsed `Document` produced by the same production parser the CLI
+/// uses, so every spelling the grammar accepts — plain, quoted, explicit or
+/// flow mapping keys, tagged scalars — is classified identically.
+///
+/// Policy: an untrusted MCP host manifest grants no controller filesystem
+/// authority. `include:` (absolute, relative, nested — all forms) and any
+/// resource `with.source` (file/template, absolute or relative) are
+/// rejected. The check runs on the parsed structure before `load_model`,
+/// so no caller-selected controller path is ever opened: the only file
+/// read is the private staged manifest Sinter itself created.
+fn check_host_authority(doc: &Document) -> Result<(), ToolError> {
+    if !doc.includes.is_empty() {
         return Err(ToolError {
             category: "invalid_manifest",
             kind: Some("schema"),
-            message: "host manifests may not use \"source:\" — controller-local \
+            message: "host manifests may not use \"include:\" — controller-local \
                       file reads are not permitted over MCP"
                 .to_string(),
         });
+    }
+    for r in &doc.resources {
+        if r.with.contains_key("source") {
+            return Err(ToolError {
+                category: "invalid_manifest",
+                kind: Some("schema"),
+                message: "host manifests may not use \"source:\" — controller-local \
+                          file reads are not permitted over MCP"
+                    .to_string(),
+            });
+        }
     }
     Ok(())
 }
@@ -543,9 +576,14 @@ fn tool_list_targets(reg: &TargetRegistry) -> Result<Value, ToolError> {
 fn tool_plan_host(args: &Value, reg: &TargetRegistry) -> Result<Value, ToolError> {
     require_only(args, &["manifest", "target"])?;
     let manifest = require_manifest(args)?;
-    reject_controller_source(manifest)?;
-    let (name, profile) = resolve_target(args, reg)?;
     let (stage, path) = stage_manifest(manifest)?;
+    // Structural parse of the staged manifest (the only permitted controller
+    // read), then the authority policy — before target resolution and before
+    // the production loader, which post-policy can only touch the staged
+    // file again.
+    let doc = parse_document(&path).map_err(|e| staged_error(e, &stage.canonical))?;
+    check_host_authority(&doc)?;
+    let (name, profile) = resolve_target(args, reg)?;
     let model = load_model(&path).map_err(|e| staged_error(e, &stage.canonical))?;
     let opts = RunOptions {
         mode: Mode::Plan,
@@ -575,9 +613,10 @@ fn tool_plan_host(args: &Value, reg: &TargetRegistry) -> Result<Value, ToolError
 fn tool_audit_host(args: &Value, reg: &TargetRegistry) -> Result<Value, ToolError> {
     require_only(args, &["manifest", "target"])?;
     let manifest = require_manifest(args)?;
-    reject_controller_source(manifest)?;
-    let (name, profile) = resolve_target(args, reg)?;
     let (stage, path) = stage_manifest(manifest)?;
+    let doc = parse_document(&path).map_err(|e| staged_error(e, &stage.canonical))?;
+    check_host_authority(&doc)?;
+    let (name, profile) = resolve_target(args, reg)?;
     let model = load_model(&path).map_err(|e| staged_error(e, &stage.canonical))?;
     let opts = RunOptions {
         mode: Mode::Plan,
@@ -1004,21 +1043,113 @@ mod tests {
         }
     }
 
+    /// Structural-policy unit tests: build a `Document` with the same
+    /// production parser the loader uses, then run the host authority check.
+    fn host_doc(manifest: &str) -> Document {
+        let root = crate::yaml::parse_yaml(manifest).unwrap();
+        document_from_value_test(root)
+    }
+
+    fn document_from_value_test(root: crate::value::Value) -> Document {
+        crate::document::document_from_value(root, Path::new("recipe.yaml"), "recipe")
+            .expect("test manifest must parse")
+    }
+
     #[test]
-    fn f01_source_key_detection() {
-        for (m, expect) in [
-            ("with:\n      source: /etc/x\n", true),
-            ("with:\n      source : rel.tpl\n", true),
-            ("with = { source = \"/x\" }\n", true),
-            ("with.source = \"/x\"\n", true),
-            ("resources:\n  - id: a\n", false), // "resources:" is not "source:"
-            ("with:\n      content: \"no key here\"\n", false),
-            ("with:\n      mysource: /x\n", false), // identifier-like left edge
+    fn r2_source_rejected_in_every_key_spelling() {
+        // The policy sees parsed structure, so all YAML spellings of the
+        // `source` key are equivalent.
+        for spelling in [
+            "source: /x",           // plain
+            "\"source\": /x",       // double-quoted
+            "'source': /x",         // single-quoted
+            "? source\n      : /x", // explicit key
+            "!!str source: /x",     // tagged key
         ] {
-            assert_eq!(contains_source_key(m), expect, "{m:?}");
+            let m = format!(
+                "version: 1\nresources:\n  - id: f\n    type: file\n    with:\n      path: /t\n      {spelling}\n"
+            );
+            assert!(
+                check_host_authority(&host_doc(&m)).is_err(),
+                "source spelling not rejected: {spelling:?}"
+            );
         }
-        assert!(reject_controller_source("with:\n  source: /x\n").is_err());
-        assert!(reject_controller_source("with:\n  path: /x\n").is_ok());
+        // Flow mappings.
+        for with in ["{ source: /x }", "{ \"source\": /x }", "{ 'source': /x }"] {
+            let m =
+                format!("version: 1\nresources:\n  - id: f\n    type: file\n    with: {with}\n");
+            assert!(
+                check_host_authority(&host_doc(&m)).is_err(),
+                "flow source not rejected: {with:?}"
+            );
+        }
+        // File and template resources alike.
+        for ty in ["file", "template"] {
+            let m = format!(
+                "version: 1\nresources:\n  - id: f\n    type: {ty}\n    with:\n      path: /t\n      source: /x\n"
+            );
+            assert!(check_host_authority(&host_doc(&m)).is_err(), "{ty}");
+        }
+    }
+
+    #[test]
+    fn r2_include_rejected_in_all_forms() {
+        for inc in [
+            "include:\n  - /abs/x.yaml\n",
+            "include:\n  - ../rel/x.yaml\n",
+            "include:\n  - child.yaml\n",
+            "include: [/abs/x.yaml]\n",
+            "include:\n  - \"quoted.yaml\"\n",
+            "include:\n  - a.yaml\n  - b.yaml\n",
+        ] {
+            let m = format!("version: 1\n{inc}");
+            assert!(
+                check_host_authority(&host_doc(&m)).is_err(),
+                "include form not rejected: {inc:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn r2_source_include_words_in_scalars_not_rejected() {
+        // The words may appear as data without granting authority.
+        for content in [
+            "content: \"source: /tmp/x\"",
+            "content: \"include: child.yaml\"",
+            "content: |\n        source: /tmp/x\n        include: child.yaml",
+            "content: \"# source: /tmp/x\"",
+        ] {
+            let m = format!(
+                "version: 1\n# source: /tmp/x\n# include: child.yaml\nresources:\n  - id: f\n    type: file\n    with:\n      path: /t\n      {content}\n"
+            );
+            assert!(
+                check_host_authority(&host_doc(&m)).is_ok(),
+                "false positive on scalar content: {content:?}"
+            );
+        }
+        // A resource literally named `source` or using `include` as data.
+        let m = "version: 1\nresources:\n  - id: source\n    type: command\n    with:\n      program: /bin/echo\n      args: [\"include:\", \"source:\"]\n";
+        assert!(check_host_authority(&host_doc(m)).is_ok());
+    }
+
+    #[test]
+    fn n3_short_profile_values_redact_at_boundaries() {
+        let mut p = sentinel_profile();
+        p.spec.user = "u".to_string();
+        p.spec.host = "h1".to_string();
+        p.spec.known_hosts = PathBuf::from("/k");
+        p.spec.identity_files.clear();
+        let (stage, _path) = stage_manifest(MINI).unwrap();
+        let err = host_error(
+            SinterError::connect("connection refused for u@h1: auth failed for user u"),
+            &stage.canonical,
+            &p,
+        );
+        // Standalone occurrences masked; ordinary words intact.
+        assert_eq!(
+            err.message,
+            "connection refused for [target]@[target]: auth failed for user [target]"
+        );
     }
 
     #[test]
