@@ -31,7 +31,7 @@ At least one of `state` or `enabled` is required.
 
 - `state: running` starts the unit if needed; `stopped` stops it.
 - `enabled: true`/`false` sets boot enablement.
-- Works on any systemd target — Ubuntu and Rocky alike.
+- Works on any systemd target — Ubuntu and RHEL-family alike.
 - Sinter does not run implicit `daemon-reload`; unit-file changes need their
   own handling.
 

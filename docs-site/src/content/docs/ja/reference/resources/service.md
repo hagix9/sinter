@@ -32,7 +32,7 @@ description: systemd サービスの起動状態と有効化を管理する。
 - `state: running` は必要に応じてユニットを起動します。`stopped` は
   停止します。
 - `enabled: true`/`false` は起動時有効化を設定します。
-- Ubuntu と Rocky を問わず、あらゆる systemd ターゲットで動作します。
+- Ubuntu と RHEL 系を問わず、あらゆる systemd ターゲットで動作します。
 - Sinter は暗黙の `daemon-reload` を実行しません。ユニットファイルの
   変更は別途扱う必要があります。
 

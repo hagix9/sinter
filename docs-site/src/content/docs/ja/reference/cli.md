@@ -13,7 +13,7 @@ Commands:
   audit     Audit whether a target already satisfies a recipe. Read-only.
 ```
 
-`sinter --version` はバージョンを表示します（例: `sinter 0.2.1`）。
+`sinter --version` はバージョンを表示します（例: `sinter 0.4.1`）。
 
 ## validate
 

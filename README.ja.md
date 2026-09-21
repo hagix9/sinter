@@ -65,22 +65,25 @@ sinter audit --host server.example.com --sudo recipe.yaml
 
 このリポジトリは、`GOALS.md`と`DESIGN.md`で定義された
 **Sinter v0.2**を実装しています。これら2ファイルが正式な仕様であり、
-v0.2はv0.1のcontractにRHEL系platform対応（Rocky Linux 9、`dnf`）を
-追加しています。roles、plugins、inventory、orchestration、
+v0.2はv0.1のcontractにRHEL系platform対応（Rocky Linux、RHEL、
+AlmaLinux — `dnf`）を追加しています。roles、plugins、inventory、orchestration、
 embedded scriptingは依然として実装対象に含めません。
 
 ## インストール
 
-Sinter **v0.4.0 は公開済み**です。対応する Ubuntu 24.04 / 26.04、
-Rocky Linux 9 / 10 向けに1つの Linux x86_64 アーティファクトを配布します。
+Sinter **v0.4.1** は、対応するすべての Linux x86_64 プラットフォーム
+ラインを1つの `sinter-v0.4.1-linux-x86_64.tar.gz` アーティファクトで
+配布します。UbuntuとRockyのラインに加え、受入検証済みの
+RHEL 9 / 10、AlmaLinux 9 / 10 対応が追加されました。
 
 ```sh
 curl -fsSL https://hagix9.github.io/sinter/install.sh | sh
 $HOME/.local/bin/sinter --version
 ```
 
-検証したpoint releaseは Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、
-Rocky Linux 9.8、Rocky Linux 10.2（すべてx86_64）です。
+受入検証したpoint release（v0.4.1）は Ubuntu 24.04.5 LTS、
+Ubuntu 26.04.1 LTS、Rocky Linux 9.8、Rocky Linux 10.2、RHEL 9.8、
+RHEL 10.2、AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64）です。
 他の各point releaseを個別に受入検証したという意味ではありません。
 
 インストーラは公式GitHubの最新安定版を選び、展開前にSHA256SUMSを検証し、
@@ -205,17 +208,29 @@ managed target:
 
 | Platform | Architecture | Package backend | Status |
 |----------|--------------|-----------------|--------|
-| Ubuntu 24.04 LTS | amd64 | apt | Supported |
-| Ubuntu 26.04 LTS | amd64 | apt | Supported |
-| Rocky Linux 9 | x86_64 | dnf | Supported |
-| Rocky Linux 10 | x86_64 | dnf | Supported |
+| Ubuntu 24.04 LTS | amd64 | apt | Supported, acceptance-tested |
+| Ubuntu 26.04 LTS | amd64 | apt | Supported, acceptance-tested |
+| Rocky Linux 9 | x86_64 | dnf | Supported, acceptance-tested |
+| Rocky Linux 10 | x86_64 | dnf | Supported, acceptance-tested |
+| RHEL 9 | x86_64 | dnf | Supported, acceptance-tested |
+| RHEL 10 | x86_64 | dnf | Supported, acceptance-tested |
+| AlmaLinux 9 | x86_64 | dnf | Supported, acceptance-tested |
+| AlmaLinux 10 | x86_64 | dnf | Supported, acceptance-tested |
+| Oracle Linux | x86_64 | dnf | Expected compatible — not acceptance-tested |
 
 package recipeはplatform-neutralです。同じ`type: package` / `state:
 present` resourceを、Ubuntuでは`apt`、RHEL系では`dnf`が処理します。
 backendは検出した`/etc/os-release`のidentityから選択されます。
 
-公開済みv0.4.0の受入基準環境は上記の4実ホストのpoint releaseです。
-以前のVM検証とリリース証跡は履歴として保持します。
+Oracle LinuxはRHEL系platformとして認識され、SinterのDNF backendを
+使用します。対応するRHEL系実装と互換性があると見込まれますが、現在
+Sinterの実ホスト受入マトリクスには含まれていません。
+
+Sinter v0.4.1は8台の実x86_64 Linuxホストで受入検証を実施しました —
+[インストール](#インストール)に記載のpoint releaseです。8台すべてが
+同一の凍結済みcandidateバイナリと同一の論理受入シナリオを実行し、
+**344/344チェックが通過**しました。以前のVM検証とリリース証跡は
+履歴として保持します。
 
 すべてのmanaged targetには、systemd、OpenSSH server、`/bin/sh`、
 `attr` package（`/usr/bin/getfattr`。書き込み前に拡張属性とPOSIX ACLを
@@ -223,7 +238,8 @@ backendは検出した`/etc/os-release`のidentityから選択されます。
 不在なら apt または dnf で `attr` をインストールしてください）、および権限昇格が必要な場合の
 passwordless `sudo -n`が必要です。controllerのreference environmentは
 macOS、Ubuntu 24.04 LTS、Ubuntu 26.04 LTS、Rocky Linux 9、
-Rocky Linux 10、およびバイナリをbuildできるその他のx86_64 Linux環境です。
+Rocky Linux 10、RHEL 9、RHEL 10、AlmaLinux 9、AlmaLinux 10、
+およびバイナリをbuildできるその他のx86_64 Linux環境です。
 
 ## テスト
 

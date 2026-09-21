@@ -69,9 +69,16 @@ sinter audit --host server.example.com --sudo recipe.yaml
 | Ubuntu 26.04 LTS | amd64 | apt |
 | Rocky Linux 9 | x86_64 | dnf |
 | Rocky Linux 10 | x86_64 | dnf |
+| RHEL 9 | x86_64 | dnf |
+| RHEL 10 | x86_64 | dnf |
+| AlmaLinux 9 | x86_64 | dnf |
+| AlmaLinux 10 | x86_64 | dnf |
 
-受入基準環境: Rocky Linux 9.8 x86_64（DNF 4.14.0）、Rocky Linux 10.2
-x86_64（DNF 4.20.0）、Ubuntu 24.04.4 amd64、Ubuntu 26.04.1 LTS amd64。
+受入基準環境: Ubuntu 24.04.5 LTS amd64、Ubuntu 26.04.1 LTS amd64、
+Rocky Linux 9.8 x86_64、Rocky Linux 10.2 x86_64、RHEL 9.8 x86_64、
+RHEL 10.2 x86_64、AlmaLinux 9.8 x86_64、AlmaLinux 10.2 x86_64 —
+8台の実ホスト、1つの凍結済みcandidateバイナリ、1つの論理シナリオ、
+344/344チェック。
 完全なマトリクスと要件は[対応プラットフォーム](/sinter/ja/compatibility/platforms/)を参照してください。
 
 ## 次に読む

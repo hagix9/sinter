@@ -53,7 +53,9 @@ by escalating — failures stay failures.
 **`package resources require a supported target platform`**
 
 The target's `/etc/os-release` did not identify a supported platform.
-Supported: Ubuntu 24.04 LTS amd64 (apt), Rocky Linux 9 x86_64 (dnf).
+Supported: Ubuntu 24.04 / 26.04 LTS amd64 (apt); Rocky Linux 9 / 10,
+RHEL 9 / 10, and AlmaLinux 9 / 10 x86_64 (dnf). Oracle Linux is recognized
+as RHEL family (dnf) but is not acceptance-tested.
 
 ## Resource failures
 
@@ -75,7 +77,7 @@ inspect the target state first, then re-apply if safe.
 
 ## dnf-specific
 
-**Metadata/cache failures on Rocky**
+**Metadata/cache failures on RHEL-family targets**
 
 Installs use a private metadata snapshot under `/var/tmp/sinter-dnf.*`
 (mode 0700). Snapshot residues should not persist after runs — if any remain,

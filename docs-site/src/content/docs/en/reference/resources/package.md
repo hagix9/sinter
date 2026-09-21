@@ -45,8 +45,9 @@ not configure a persistent host-wide environment.
 
 - Backend is chosen automatically from the target's `/etc/os-release`
   identity — recipes stay platform-neutral.
-- `present` on Ubuntu → `apt`; on Rocky/RHEL family → `dnf`.
-- No version pinning in v0.2.1.
+- `present` on Ubuntu → `apt`; on RHEL-family targets (Rocky Linux, RHEL,
+  AlmaLinux, Oracle Linux) → `dnf`.
+- No version pinning in v0.4.1.
 - On dnf targets, installs run through a private cache snapshot — see
   [Execution Model](/sinter/en/concepts/execution-model/) and the
   [Rocky guide](/sinter/en/guides/rocky-linux/).
@@ -68,8 +69,11 @@ produce no mutation and no package transaction.
 
 | Platform | Backend |
 |----------|---------|
-| Ubuntu 24.04 LTS amd64 | apt |
-| Rocky Linux 9 x86_64 | dnf |
+| Ubuntu 24.04 / 26.04 LTS | apt |
+| Rocky Linux 9 / 10 | dnf |
+| RHEL 9 / 10 | dnf |
+| AlmaLinux 9 / 10 | dnf |
+| Oracle Linux | dnf (expected compatible — not acceptance-tested) |
 
 ## Related
 

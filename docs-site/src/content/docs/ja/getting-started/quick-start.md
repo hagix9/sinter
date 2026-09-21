@@ -4,8 +4,9 @@ description: レシピをターゲットホストに対して validate・plan・
 ---
 
 このチュートリアルでは管理対象ホストに `tree` パッケージをインストール
-します。同じレシピが Ubuntu（apt）と Rocky Linux（dnf）の両方で動作
-します。Sinter が検出したプラットフォームからバックエンドを選択します。
+します。同じレシピが Ubuntu（apt）と、Rocky Linux、RHEL、AlmaLinux
+などの RHEL 系ターゲット（dnf）の両方で動作します。Sinter が検出した
+プラットフォームからバックエンドを選択します。
 
 ## 1. レシピを書く
 

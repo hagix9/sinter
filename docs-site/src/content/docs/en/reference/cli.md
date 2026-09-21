@@ -13,7 +13,7 @@ Commands:
   audit     Audit whether a target already satisfies a recipe. Read-only.
 ```
 
-`sinter --version` prints the version (e.g. `sinter 0.2.1`).
+`sinter --version` prints the version (e.g. `sinter 0.4.1`).
 
 ## validate
 

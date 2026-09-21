@@ -80,6 +80,8 @@ export default defineConfig({
           items: [
             { slug: 'guides/ubuntu' },
             { slug: 'guides/rocky-linux' },
+            { slug: 'guides/rhel' },
+            { slug: 'guides/almalinux' },
           ],
         },
         {

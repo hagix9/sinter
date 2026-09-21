@@ -5,8 +5,9 @@ description: Install Sinter from release tarballs or build from source.
 
 ## Install
 
-Sinter **v0.4.0 is released** with one Linux x86_64 artifact for the supported
-Ubuntu 24.04 / 26.04 and Rocky Linux 9 / 10 version lines.
+Sinter **v0.4.1** ships one `sinter-v0.4.1-linux-x86_64.tar.gz` artifact
+covering every supported Linux x86_64 platform line — Ubuntu 24.04 / 26.04
+LTS, Rocky Linux 9 / 10, RHEL 9 / 10, and AlmaLinux 9 / 10.
 
 ```sh
 curl -fsSL https://hagix9.github.io/sinter/install.sh | sh
@@ -30,7 +31,7 @@ sh install.sh
 ### Version and destination
 
 ```sh
-SINTER_VERSION=v0.4.0 sh install.sh
+SINTER_VERSION=v0.4.1 sh install.sh
 SINTER_INSTALL_DIR="$HOME/bin" sh install.sh
 ```
 
@@ -45,9 +46,9 @@ Checksums detect corruption and release consistency, not compromise of GitHub.
 ### Manual release installation
 
 ```sh
-ASSET=sinter-v0.4.0-linux-x86_64.tar.gz
-curl -fLO "https://github.com/hagix9/sinter/releases/download/v0.4.0/$ASSET"
-curl -fLO https://github.com/hagix9/sinter/releases/download/v0.4.0/SHA256SUMS
+ASSET=sinter-v0.4.1-linux-x86_64.tar.gz
+curl -fLO "https://github.com/hagix9/sinter/releases/download/v0.4.1/$ASSET"
+curl -fLO https://github.com/hagix9/sinter/releases/download/v0.4.1/SHA256SUMS
 grep -F "  $ASSET" SHA256SUMS | sha256sum -c -
 tar -xzf "$ASSET"
 sudo install -m 0755 "${ASSET%.tar.gz}/sinter" /usr/local/bin/sinter
@@ -87,7 +88,8 @@ The target does not need Sinter installed. It needs:
 - the `attr` package (`/usr/bin/getfattr`) — Sinter inspects extended
   attributes and POSIX ACLs before writing any path and refuses paths it
   cannot prove safe. Check `test -x /usr/bin/getfattr` on each target. If missing, install
-  `attr` with `sudo apt install attr` (Ubuntu) or `sudo dnf install attr` (Rocky)
+  `attr` with `sudo apt install attr` (Ubuntu) or `sudo dnf install attr`
+  (RHEL family: Rocky, RHEL, AlmaLinux)
 - passwordless `sudo -n` if you use `--sudo`
 - a user account whose public key you have authorized, reachable with your
   SSH agent or a key file

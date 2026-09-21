@@ -45,7 +45,13 @@ fan-out or ordering you need from your own scripts.
 | Platform | Architecture | Package backend |
 |----------|--------------|-----------------|
 | Ubuntu 24.04 LTS | amd64 | apt |
+| Ubuntu 26.04 LTS | amd64 | apt |
 | Rocky Linux 9 | x86_64 | dnf |
+| Rocky Linux 10 | x86_64 | dnf |
+| RHEL 9 | x86_64 | dnf |
+| RHEL 10 | x86_64 | dnf |
+| AlmaLinux 9 | x86_64 | dnf |
+| AlmaLinux 10 | x86_64 | dnf |
 
 See [Compatibility](/sinter/en/compatibility/platforms/) for requirements and the
 acceptance reference.

@@ -7,25 +7,46 @@ description: Platform, architecture, and package-backend support matrix.
 
 | Platform | Architecture | Package backend | Status |
 |----------|--------------|-----------------|--------|
-| Ubuntu 24.04 LTS | amd64 | apt | Supported |
-| Ubuntu 26.04 LTS | amd64 | apt | Supported |
-| Rocky Linux 9 | x86_64 | dnf | Supported |
-| Rocky Linux 10 | x86_64 | dnf | Supported |
+| Ubuntu 24.04 LTS | amd64 | apt | Supported, acceptance-tested |
+| Ubuntu 26.04 LTS | amd64 | apt | Supported, acceptance-tested |
+| Rocky Linux 9 | x86_64 | dnf | Supported, acceptance-tested |
+| Rocky Linux 10 | x86_64 | dnf | Supported, acceptance-tested |
+| RHEL 9 | x86_64 | dnf | Supported, acceptance-tested |
+| RHEL 10 | x86_64 | dnf | Supported, acceptance-tested |
+| AlmaLinux 9 | x86_64 | dnf | Supported, acceptance-tested |
+| AlmaLinux 10 | x86_64 | dnf | Supported, acceptance-tested |
+| Oracle Linux | x86_64 | dnf | Expected compatible — not acceptance-tested |
+
+Oracle Linux is recognized as a Red Hat-family platform and uses Sinter's
+DNF backend. It is expected to be compatible with the corresponding Red
+Hat-family implementation, but it is not currently part of Sinter's
+real-host acceptance matrix.
+
+On RHEL-family targets, standard configured DNF repositories must be
+functional. Repository transport and authentication are delegated to the
+native `dnf`/librepo stack — including cloud images whose repositories are
+entitled by the provider — so no Sinter-specific repository configuration
+is required.
 
 ## Unified Linux x86_64 distribution
 
-Sinter v0.4.0 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for the
-supported Ubuntu 24.04 / 26.04 and Rocky Linux 9 / 10 x86_64 version lines.
-The executable is unified; runtime platform detection still selects APT on
-Ubuntu and DNF on Rocky. This is not a claim of support for arbitrary Linux
-systems or architectures.
+Sinter v0.4.1 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for all
+supported x86_64 version lines. The executable is unified; runtime platform
+detection still selects APT on Ubuntu and DNF on RHEL-family targets. This
+is not a claim of support for arbitrary Linux systems or architectures.
 
-The released v0.4.0 executable passed four-real-host acceptance on Ubuntu 24.04.5 LTS,
-Ubuntu 26.04.1 LTS, Rocky Linux 9.8, and Rocky Linux 10.2, all x86_64.
-Other and future point releases have not each been independently validated.
+Sinter v0.4.1 was acceptance-tested on eight real x86_64 Linux hosts.
+All eight hosts executed the same frozen candidate binary and the same
+logical acceptance scenario. **Result: 344/344 checks passed.** The tested
+point releases were Ubuntu 24.04.5 LTS, Ubuntu 26.04.1 LTS,
+Rocky Linux 9.8, Rocky Linux 10.2, RHEL 9.8, RHEL 10.2, AlmaLinux 9.8,
+and AlmaLinux 10.2, all x86_64. The canonical archive was verified to
+extract to that exact binary, which was transferred and executed
+identically on all eight hosts. Other and future point releases have not
+each been independently validated.
 Historical v0.2.1 retains its distro-specific assets; see
 [Installation](https://hagix9.github.io/sinter/en/getting-started/installation/)
-for current downloads. The unified v0.4.0 artifact is published.
+for current downloads.
 
 All managed targets require:
 
@@ -65,9 +86,10 @@ Do not assume image defaults: install `attr` only if the required tool is missin
 ## Controller
 
 The controller (where `sinter` runs) is supported on macOS, Ubuntu 24.04 LTS,
-Ubuntu 26.04 LTS, Rocky Linux 9, Rocky Linux 10, and other x86_64 Linux
-environments where the binary builds. Sinter v0.4.0 release binaries use a
-single Linux x86_64 artifact; published v0.2.1 retains distro-specific assets (see
+Ubuntu 26.04 LTS, Rocky Linux 9, Rocky Linux 10, RHEL 9, RHEL 10,
+AlmaLinux 9, AlmaLinux 10, and other x86_64 Linux environments where the
+binary builds. Sinter release binaries use a single Linux x86_64 artifact;
+published v0.2.1 retains distro-specific assets (see
 [Installation](/sinter/en/getting-started/installation/)).
 
 ## Explicitly not supported

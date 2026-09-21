@@ -7,24 +7,44 @@ description: プラットフォーム、アーキテクチャ、パッケージ�
 
 | プラットフォーム | アーキテクチャ | パッケージバックエンド | ステータス |
 |------------------|----------------|------------------------|-----------|
-| Ubuntu 24.04 LTS | amd64 | apt | サポート |
-| Ubuntu 26.04 LTS | amd64 | apt | サポート |
-| Rocky Linux 9 | x86_64 | dnf | サポート |
-| Rocky Linux 10 | x86_64 | dnf | サポート |
+| Ubuntu 24.04 LTS | amd64 | apt | サポート、受入検証済み |
+| Ubuntu 26.04 LTS | amd64 | apt | サポート、受入検証済み |
+| Rocky Linux 9 | x86_64 | dnf | サポート、受入検証済み |
+| Rocky Linux 10 | x86_64 | dnf | サポート、受入検証済み |
+| RHEL 9 | x86_64 | dnf | サポート、受入検証済み |
+| RHEL 10 | x86_64 | dnf | サポート、受入検証済み |
+| AlmaLinux 9 | x86_64 | dnf | サポート、受入検証済み |
+| AlmaLinux 10 | x86_64 | dnf | サポート、受入検証済み |
+| Oracle Linux | x86_64 | dnf | 互換性見込み — 受入検証は未実施 |
+
+Oracle LinuxはRHEL系platformとして認識され、SinterのDNF backendを
+使用します。対応するRHEL系実装と互換性があると見込まれますが、現在
+Sinterの実ホスト受入マトリクスには含まれていません。
+
+RHEL系ターゲットでは、標準的に構成されたDNFリポジトリが機能している
+必要があります。リポジトリの転送と認証はネイティブのdnf/librepo
+スタックに委任されます — プロバイダがエンタイトルメントを供給する
+クラウドイメージを含む — ため、Sinter固有のリポジトリ設定は不要です。
 
 ## 統一 Linux x86_64 配布
 
-公開済み v0.4.0 では、対応する Ubuntu 24.04 / 26.04、Rocky Linux 9 / 10
-の x86_64 向けに `sinter-v<VERSION>-linux-x86_64.tar.gz` を1つ配布します。
-実行ファイルは共通ですが、実行時の検出により Ubuntu は APT、Rocky は
+Sinter v0.4.1では、対応するすべてのx86_64向けバージョンラインに
+`sinter-v<VERSION>-linux-x86_64.tar.gz` を1つ配布します。
+実行ファイルは共通ですが、実行時の検出により Ubuntu は APT、RHEL系は
 DNF を使います。任意の Linux や他のアーキテクチャへの対応を意味しません。
 
-公開済み v0.4.0 の実行ファイルは Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、Rocky Linux 9.8、
-Rocky Linux 10.2（すべて x86_64）の4実ホストで受入検証済みです。
-他の各point releaseや将来のリリースを個別に検証したという意味ではありません。
+Sinter v0.4.1は8台の実x86_64 Linuxホストで受入検証を実施しました。
+8台すべてが同一の凍結済みcandidateバイナリと同一の論理受入シナリオを
+実行しました。**結果: 344/344チェックが通過。** 検証したpoint releaseは
+Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、Rocky Linux 9.8、
+Rocky Linux 10.2、RHEL 9.8、RHEL 10.2、AlmaLinux 9.8、
+AlmaLinux 10.2（すべてx86_64）です。正規アーカイブはその正規バイナリへ
+展開されることが検証され、そのバイナリが8台すべてのホストで同一に
+転送・実行されました。他の各point releaseや将来のリリースを個別に
+検証したという意味ではありません。
 過去の v0.2.1 は従来のディストリビューション別アセットのままです。
 現在のダウンロードは[インストール](https://hagix9.github.io/sinter/ja/getting-started/installation/)
-を参照してください。統一 v0.4.0 アーティファクトは公開済みです。
+を参照してください。
 
 すべての管理対象に必要なもの:
 
@@ -67,9 +87,10 @@ sudo dnf install attr          # RHEL 系（Rocky など）
 ## コントローラ
 
 コントローラ（`sinter` を実行する側）は macOS、Ubuntu 24.04 LTS、
-Ubuntu 26.04 LTS、Rocky Linux 9、Rocky Linux 10、その他バイナリがビルド
-できる x86_64 Linux 環境でサポートされます。v0.4.0 のリリースバイナリは
-単一の Linux x86_64 アーティファクトです。公開済み v0.2.1 は
+Ubuntu 26.04 LTS、Rocky Linux 9、Rocky Linux 10、RHEL 9、RHEL 10、
+AlmaLinux 9、AlmaLinux 10、その他バイナリがビルドできる x86_64 Linux
+環境でサポートされます。Sinter のリリースバイナリは単一の Linux x86_64
+アーティファクトです。公開済み v0.2.1 は
 ディストリビューション別アセットを維持します
 （[インストール](/sinter/ja/getting-started/installation/)を参照）。
 

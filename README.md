@@ -64,23 +64,27 @@ sinter audit --host server.example.com --sudo recipe.yaml
 
 This repository implements **Sinter v0.2** as specified by `GOALS.md` and
 `DESIGN.md`, which are the authoritative specification; v0.2 extends the v0.1
-contract with RHEL-family platform support (Rocky Linux 9, `dnf`). The
+contract with RHEL-family platform support (Rocky Linux, RHEL, AlmaLinux —
+`dnf`). The
 implementation still adds no features beyond that scope: no roles, plugins,
 inventory, orchestration, or embedded scripting.
 
 ## Install
 
-Sinter **v0.4.0 is released** with one Linux x86_64 artifact for the supported
-Ubuntu 24.04 / 26.04 and Rocky Linux 9 / 10 version lines.
+Sinter **v0.4.1** ships one `sinter-v0.4.1-linux-x86_64.tar.gz` artifact
+covering every supported Linux x86_64 platform line, adding
+acceptance-tested RHEL 9 / 10 and AlmaLinux 9 / 10 support to the
+Ubuntu and Rocky lines.
 
 ```sh
 curl -fsSL https://hagix9.github.io/sinter/install.sh | sh
 $HOME/.local/bin/sinter --version
 ```
 
-Validated point releases: Ubuntu 24.04.5 LTS, Ubuntu 26.04.1 LTS,
-Rocky Linux 9.8 and Rocky Linux 10.2, all x86_64. Other point releases have
-not each been independently accepted.
+Acceptance-tested point releases (v0.4.1): Ubuntu 24.04.5 LTS,
+Ubuntu 26.04.1 LTS, Rocky Linux 9.8, Rocky Linux 10.2, RHEL 9.8, RHEL 10.2,
+AlmaLinux 9.8 and AlmaLinux 10.2, all x86_64. Other point releases have not
+each been independently accepted.
 
 The installer selects the latest stable official GitHub release, verifies
 SHA256SUMS before extraction, and installs without sudo into `$HOME/.local/bin`.
@@ -202,25 +206,39 @@ Managed targets:
 
 | Platform | Architecture | Package backend | Status |
 |----------|--------------|-----------------|--------|
-| Ubuntu 24.04 LTS | amd64 | apt | Supported |
-| Ubuntu 26.04 LTS | amd64 | apt | Supported |
-| Rocky Linux 9 | x86_64 | dnf | Supported |
-| Rocky Linux 10 | x86_64 | dnf | Supported |
+| Ubuntu 24.04 LTS | amd64 | apt | Supported, acceptance-tested |
+| Ubuntu 26.04 LTS | amd64 | apt | Supported, acceptance-tested |
+| Rocky Linux 9 | x86_64 | dnf | Supported, acceptance-tested |
+| Rocky Linux 10 | x86_64 | dnf | Supported, acceptance-tested |
+| RHEL 9 | x86_64 | dnf | Supported, acceptance-tested |
+| RHEL 10 | x86_64 | dnf | Supported, acceptance-tested |
+| AlmaLinux 9 | x86_64 | dnf | Supported, acceptance-tested |
+| AlmaLinux 10 | x86_64 | dnf | Supported, acceptance-tested |
+| Oracle Linux | x86_64 | dnf | Expected compatible — not acceptance-tested |
 
 Package recipes are platform-neutral: the same `type: package` / `state:
 present` resource is handled by `apt` on Ubuntu and `dnf` on RHEL-family
 targets, selected from the detected `/etc/os-release` identity.
 
-The latest released-v0.4.0 acceptance references are the four real-host
-point releases listed above. Earlier VM and release evidence remains historical.
+Oracle Linux is recognized as a Red Hat-family platform and uses Sinter's
+DNF backend. It is expected to be compatible with the corresponding Red
+Hat-family implementation, but it is not currently part of Sinter's
+real-host acceptance matrix.
+
+Sinter v0.4.1 was acceptance-tested on eight real x86_64 Linux hosts — the
+exact point releases listed under [Install](#install). All eight hosts
+executed the same frozen candidate binary and the same logical acceptance
+scenario: **344/344 checks passed**. Earlier VM and release evidence remains
+historical.
 
 All managed targets require systemd, an OpenSSH server, `/bin/sh`, the `attr`
 package (`/usr/bin/getfattr`, used to inspect extended attributes and POSIX
 ACLs before any write — check `test -x /usr/bin/getfattr` on each target;
 install `attr` with apt or dnf if missing), and passwordless `sudo -n` when privilege escalation
 is required. The controller reference environments are macOS, Ubuntu 24.04
-LTS, Ubuntu 26.04 LTS, Rocky Linux 9, Rocky Linux 10, and other x86_64 Linux
-environments where the binary builds.
+LTS, Ubuntu 26.04 LTS, Rocky Linux 9, Rocky Linux 10, RHEL 9, RHEL 10,
+AlmaLinux 9, AlmaLinux 10, and other x86_64 Linux environments where the
+binary builds.
 
 ## Testing
 

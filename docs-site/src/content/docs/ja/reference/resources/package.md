@@ -46,8 +46,9 @@ description: ターゲットのパッケージバックエンドでパッケー�
 
 - バックエンドはターゲットの `/etc/os-release` の識別情報から自動的に
   選択されます — レシピはプラットフォーム中立のままです。
-- Ubuntu での `present` → `apt`。Rocky/RHEL ファミリ → `dnf`。
-- v0.2.1 ではバージョン固定はありません。
+- Ubuntu での `present` → `apt`。RHEL 系ターゲット（Rocky Linux、RHEL、
+  AlmaLinux、Oracle Linux）→ `dnf`。
+- v0.4.1 ではバージョン固定はありません。
 - dnf ターゲットでは、インストールはプライベートキャッシュ
   スナップショット経由で行われます —
   [実行モデル](/sinter/ja/concepts/execution-model/)と
@@ -71,8 +72,11 @@ description: ターゲットのパッケージバックエンドでパッケー�
 
 | プラットフォーム | バックエンド |
 |------------------|--------------|
-| Ubuntu 24.04 LTS amd64 | apt |
-| Rocky Linux 9 x86_64 | dnf |
+| Ubuntu 24.04 / 26.04 LTS | apt |
+| Rocky Linux 9 / 10 | dnf |
+| RHEL 9 / 10 | dnf |
+| AlmaLinux 9 / 10 | dnf |
+| Oracle Linux | dnf（互換性見込み — 受入検証は未実施） |
 
 ## 関連
 

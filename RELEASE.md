@@ -188,6 +188,11 @@ find . -type f | sort | xargs sha256sum > sums.txt   # on each side, then diff
 A real `git worktree`/clone at `RC_COMMIT` is equally acceptable. Uncertain
 provenance → do not publish.
 
+Builder prerequisites: a fresh Rocky Linux 9 image needs explicit
+provisioning before the build — `gcc`, `openssl-devel`, `pkgconf`
+(`sudo dnf install -y gcc openssl-devel pkgconf`) and a Rust toolchain
+(rustup or equivalent). Do not assume these are present.
+
 Record on the build host:
 
 ```sh

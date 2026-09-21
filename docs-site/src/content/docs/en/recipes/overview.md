@@ -1,10 +1,10 @@
 ---
 title: Recipe Overview
-description: Recipe examples built from functionality supported by Sinter v0.2.1.
+description: Recipe examples built from functionality supported by Sinter v0.4.1.
 ---
 
-All examples below use only resource types and fields implemented in v0.2.1.
-Every recipe is platform-neutral — the same YAML applies to Ubuntu and Rocky
+All examples below use only resource types and fields implemented in v0.4.1.
+Every recipe is platform-neutral — the same YAML applies to Ubuntu and RHEL-family
 targets.
 
 ## Package + service baseline
@@ -120,5 +120,5 @@ See the [Recipe Format reference](/sinter/en/reference/recipe-format/) and the
 :::note[Official recipe collections]
 Curated recipe collections (for example a `linux-baseline` set) are a future
 product improvement and do not exist yet — this page documents only what
-v0.2.1 implements.
+v0.4.1 implements.
 :::

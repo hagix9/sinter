@@ -57,8 +57,9 @@ Sinter はパーミッション失敗を昇格してリトライすることは�
 **`package resources require a supported target platform`**
 
 ターゲットの `/etc/os-release` が対応プラットフォームとして識別
-されませんでした。対応: Ubuntu 24.04 LTS amd64（apt）、Rocky Linux 9
-x86_64（dnf）。
+されませんでした。対応: Ubuntu 24.04 / 26.04 LTS amd64（apt）、
+Rocky Linux 9 / 10、RHEL 9 / 10、AlmaLinux 9 / 10 x86_64（dnf）。
+Oracle LinuxはRHEL系として認識されます（dnf）が、受入検証は未実施です。
 
 ## リソースの失敗
 
@@ -80,7 +81,7 @@ Sinter が変更が完了したか確認できませんでした。闇雲にリ�
 
 ## dnf 固有
 
-**Rocky でのメタデータ/キャッシュの失敗**
+**RHEL 系ターゲットでのメタデータ/キャッシュの失敗**
 
 インストールは `/var/tmp/sinter-dnf.*` 配下のプライベートメタデータ
 スナップショット（モード 0700）を使います。スナップショットの残骸は

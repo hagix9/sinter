@@ -78,7 +78,12 @@ are reported as `blocked`.
 ## Package backend isolation (dnf)
 
 On RHEL-family targets, package installs run through a private snapshot of
-the DNF metadata cache: cache-only metadata validation and transaction
-resolution, validated payload prefetch, then a final cache-only `dnf`
-mutation (`-C --setopt=cachedir=...`). The private snapshot is created with
-0700 permissions and removed after the operation, including on failure.
+the DNF metadata cache: cache-only metadata validation and deterministic
+transaction resolution freeze the exact package identities; the resolved
+RPM payloads are then downloaded through the native `dnf`/librepo transport
+— repository authentication stays with dnf/librepo — and each payload's RPM
+identity is verified against the frozen transaction set before a final
+cache-only `dnf` install (`-C --setopt=cachedir=...`). If payload
+completeness or identity cannot be proven, the install fails closed before
+any mutation. The private snapshot is created with 0700 permissions and
+removed after the operation, including on failure.

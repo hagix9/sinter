@@ -4,6 +4,39 @@ All notable changes to Sinter are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.1] - Unreleased
+
+Expanded acceptance-tested Linux x86_64 platform coverage and a more robust
+DNF package path.
+
+### Added
+
+- RHEL 9 and RHEL 10 x86_64 as supported, acceptance-tested targets (`dnf`
+  backend).
+- AlmaLinux 9 and AlmaLinux 10 x86_64 as supported, acceptance-tested
+  targets (`dnf` backend).
+- DNF transaction-table parsing now accepts the wrapped header DNF emits
+  when a repository ID is too long to fit on one line.
+
+### Changed
+
+- RPM payload acquisition now uses the native `dnf`/librepo download
+  transport instead of direct URL fetching, so repository authentication —
+  including authenticated cloud repository services — works without any
+  Sinter-specific credential handling. Each downloaded RPM's identity is
+  verified against the frozen transaction set before the final cache-only
+  `dnf` install; if completeness or identity cannot be proven, the
+  operation fails closed before mutation.
+
+### Acceptance
+
+- Sinter v0.4.1 was acceptance-tested on eight real x86_64 Linux hosts —
+  Ubuntu 24.04.5 LTS, Ubuntu 26.04.1 LTS, Rocky Linux 9.8, Rocky Linux
+  10.2, RHEL 9.8, RHEL 10.2, AlmaLinux 9.8, and AlmaLinux 10.2 — running
+  the same frozen candidate binary and the same logical acceptance
+  scenario: 344/344 checks passed, including the previously accepted
+  Ubuntu and Rocky targets without regression.
+
 ## [0.4.0] - 2026-09-20
 
 Read-only audit workflow, a verified Linux x86_64 installer, and Ubuntu

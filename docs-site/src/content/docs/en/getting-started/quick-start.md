@@ -4,8 +4,9 @@ description: Validate, plan, apply, and audit a recipe against a target host.
 ---
 
 This walkthrough installs the `tree` package on a managed host. The same
-recipe works on Ubuntu (apt) and Rocky Linux (dnf) — Sinter picks the backend
-from the detected platform.
+recipe works on Ubuntu (apt) and RHEL-family targets such as Rocky Linux,
+RHEL, and AlmaLinux (dnf) — Sinter picks the backend from the detected
+platform.
 
 ## 1. Write a recipe
 
