@@ -51,3 +51,9 @@
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+
+/* Keep wheel scrolling on the docs sidebar from chaining to the page once the
+   sidebar reaches a boundary, so pointer-over-sidebar scrolling stays local. */
+#starlight__sidebar {
+  overscroll-behavior-y: contain;
+}
