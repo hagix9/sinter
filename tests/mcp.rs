@@ -390,3 +390,162 @@ fn sequential_requests_and_clean_shutdown() {
     let status = m.child.wait().unwrap();
     assert!(status.success(), "server must exit cleanly on EOF");
 }
+
+// ---------------------------------------------------------------------------
+// F-02: staging-path redaction over the protocol
+// ---------------------------------------------------------------------------
+
+fn assert_no_stage_leak(v: &Value) {
+    let raw = serde_json::to_string(v).unwrap();
+    let tmp = std::env::temp_dir();
+    let tmp_canon = std::fs::canonicalize(&tmp).unwrap_or_else(|_| tmp.clone());
+    for bad in [
+        tmp.display().to_string(),
+        tmp_canon.display().to_string(),
+        "sinter-mcp-".to_string(),
+    ] {
+        assert!(!raw.contains(&bad), "stage path leaked ({bad}): {raw}");
+    }
+}
+
+#[test]
+fn no_stage_path_in_any_diagnostic() {
+    let mut m = Mcp::start();
+    init(&mut m);
+    let cases = [
+        // missing relative include
+        "version: 1\ninclude: [missing.yaml]\n",
+        // nested relative include
+        "version: 1\ninclude: [sub/dir/missing.yaml]\n",
+        // unicode relative include
+        "version: 1\ninclude: [\"ünïcødé.yaml\"]\n",
+        // missing relative template source
+        "version: 1\nresources:\n  - id: t\n    type: template\n    with:\n      path: /etc/x\n      source: missing.tpl\n",
+        // schema error
+        BAD_TYPE,
+        // syntax error
+        BAD_SYNTAX,
+    ];
+    for (i, manifest) in cases.iter().enumerate() {
+        for tool in ["sinter_validate_manifest", "sinter_inspect_manifest"] {
+            let (_e, v) =
+                Mcp::payload(&m.tool(100 + i as u64, tool, json!({"manifest": manifest})));
+            assert_no_stage_leak(&v);
+        }
+        let (_e, v) = Mcp::payload(&m.tool(
+            200 + i as u64,
+            "sinter_plan",
+            json!({"manifest": manifest, "target": "rocky9"}),
+        ));
+        assert_no_stage_leak(&v);
+    }
+}
+
+#[test]
+fn redaction_keeps_relative_diagnostic_visible() {
+    let mut m = Mcp::start();
+    init(&mut m);
+    let (_e, v) = Mcp::payload(&m.tool(
+        1,
+        "sinter_validate_manifest",
+        json!({"manifest": "version: 1\ninclude: [missing.yaml]\n"}),
+    ));
+    let raw = serde_json::to_string(&v).unwrap();
+    // The useful relative name must survive redaction.
+    assert!(raw.contains("missing.yaml"), "relative name lost: {raw}");
+    assert!(raw.contains("recipe:"), "logical prefix missing: {raw}");
+}
+
+// ---------------------------------------------------------------------------
+// F-03: JSON-RPC batch receive support (MCP 2025-03-26)
+// ---------------------------------------------------------------------------
+
+/// Send one raw line and read one raw response line.
+fn raw_roundtrip(m: &mut Mcp, line: &str) -> Value {
+    let stdin = m.stdin.as_mut().unwrap();
+    writeln!(stdin, "{line}").unwrap();
+    stdin.flush().unwrap();
+    let mut buf = String::new();
+    m.stdout.read_line(&mut buf).unwrap();
+    serde_json::from_str(&buf).expect("batch response must be JSON")
+}
+
+#[test]
+fn batch_requests() {
+    let mut m = Mcp::start();
+    init(&mut m);
+
+    // Multiple requests: array of responses, IDs preserved.
+    let r = raw_roundtrip(
+        &mut m,
+        r#"[{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"sinter_get_version","arguments":{}}},{"jsonrpc":"2.0","id":"abc","method":"ping"}]"#,
+    );
+    let arr = r.as_array().expect("batch must return an array");
+    assert_eq!(arr.len(), 3);
+    assert_eq!(arr[0]["id"], 1);
+    assert_eq!(arr[1]["id"], 2);
+    assert!(arr[1]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("0.4.1"));
+    assert_eq!(arr[2]["id"], "abc");
+
+    // Mixed request + notification: only the request gets a response.
+    let r = raw_roundtrip(
+        &mut m,
+        r#"[{"jsonrpc":"2.0","method":"notifications/initialized"},{"jsonrpc":"2.0","id":9,"method":"ping"}]"#,
+    );
+    let arr = r.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"], 9);
+
+    // Invalid member inside a batch → per-element error, others still served.
+    let r = raw_roundtrip(&mut m, r#"[42,{"jsonrpc":"2.0","id":3,"method":"ping"}]"#);
+    let arr = r.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["error"]["code"], -32600);
+    assert_eq!(arr[1]["id"], 3);
+    assert!(arr[1]["result"].is_object());
+
+    // Empty batch → single -32600 error object (not an array).
+    let r = raw_roundtrip(&mut m, "[]");
+    assert_eq!(r["error"]["code"], -32600);
+    assert!(r.as_array().is_none());
+
+    // Notification-only batch → no frame at all; the next request still works.
+    raw_roundtrip_no_reply(&mut m);
+}
+
+fn raw_roundtrip_no_reply(m: &mut Mcp) {
+    const BATCH: &str = r#"[{"jsonrpc":"2.0","method":"notifications/initialized"},{"jsonrpc":"2.0","method":"notifications/cancelled","params":{}}]"#;
+    let stdin = m.stdin.as_mut().unwrap();
+    writeln!(stdin, "{BATCH}").unwrap();
+    stdin.flush().unwrap();
+    // If the server emitted anything it would be a line; instead we expect the
+    // *next* request's response to be the first bytes back.
+    let r = m.call(&json!({"jsonrpc":"2.0","id":77,"method":"ping"}));
+    assert_eq!(
+        r["id"], 77,
+        "notification-only batch must yield no response"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// canary confidentiality
+// ---------------------------------------------------------------------------
+
+#[test]
+fn canary_secrets_never_disclosed() {
+    let mut m = Mcp::start();
+    init(&mut m);
+    let manifest = "version: 1\nvars:\n  tok:\n    value: CANARY_VAR_ABC123\n    sensitive: true\n  plain:\n    value: CANARY_PLAIN_DEF456\nresources:\n  - id: f\n    type: file\n    with:\n      path: /etc/f\n      content: CANARY_CONTENT_GHI789\n  - id: c\n    type: command\n    with:\n      program: /bin/echo\n      args: [CANARY_ARG_JKL012]\n";
+    for tool in ["sinter_inspect_manifest", "sinter_validate_manifest"] {
+        let (_e, v) = Mcp::payload(&m.tool(1, tool, json!({"manifest": manifest})));
+        let raw = serde_json::to_string(&v).unwrap();
+        // inspect/validate must not echo manifest values at all.
+        assert!(!raw.contains("CANARY_VAR_ABC123"), "{tool}: {raw}");
+        assert!(!raw.contains("CANARY_PLAIN_DEF456"), "{tool}: {raw}");
+        assert!(!raw.contains("CANARY_CONTENT_GHI789"), "{tool}: {raw}");
+        assert!(!raw.contains("CANARY_ARG_JKL012"), "{tool}: {raw}");
+    }
+}

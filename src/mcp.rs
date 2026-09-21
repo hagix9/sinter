@@ -27,7 +27,6 @@ use crate::platform::PackageBackend;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// MCP protocol revision this adapter implements.
 const PROTOCOL_VERSION: &str = "2025-03-26";
@@ -47,6 +46,7 @@ fn category(kind: ErrorKind) -> &'static str {
     }
 }
 
+#[derive(Debug)]
 struct ToolError {
     category: &'static str,
     kind: Option<&'static str>,
@@ -88,13 +88,18 @@ fn err_value(e: SinterError) -> ToolError {
     ToolError::from_core(&e)
 }
 
-/// Replace the staged filesystem path inside a core diagnostic with the
-/// logical manifest name — tool output must not leak local paths.
-fn staged_error(e: SinterError, staged: &Path) -> ToolError {
+/// Redact the staging directory inside a core diagnostic — tool output must
+/// never expose physical local paths. The staged manifest itself keeps the
+/// established logical name `recipe`; any other path under the stage becomes
+/// `recipe:/<relative>` (e.g. `recipe:/missing.tpl`).
+fn staged_error(e: SinterError, stage_dir: &Path) -> ToolError {
     let mut t = ToolError::from_core(&e);
-    let sp = staged.display().to_string();
-    if t.message.contains(&sp) {
-        t.message = t.message.replace(&sp, "recipe");
+    let dir = stage_dir.display().to_string();
+    if t.message.contains(&dir) {
+        t.message = t
+            .message
+            .replace(&format!("{dir}/recipe.yaml"), "recipe")
+            .replace(&dir, "recipe:");
     }
     t
 }
@@ -105,45 +110,76 @@ fn staged_error(e: SinterError, staged: &Path) -> ToolError {
 
 /// Private temporary directory holding one staged manifest so the existing
 /// file-based `load_model` parser can run unchanged. Deleted on drop.
-struct Stage(PathBuf);
-
-static STAGE_SEQ: AtomicU64 = AtomicU64::new(0);
+///
+/// Security properties (F-01/F-08):
+///   - the directory name comes from `tempfile`, i.e. OS-backed randomness
+///     with O_EXCL-style exclusive creation — a pre-existing object is never
+///     reused and the name is not practically predictable;
+///   - the directory is private (0700 on Unix) and `recipe.yaml` is created
+///     private (0600 on Unix) with create_new, so a pre-existing entry —
+///     including a symlink — can never be opened or overwritten.
+struct Stage {
+    _dir: tempfile::TempDir,
+    /// Canonicalized stage directory; diagnostics are redacted against this.
+    canonical: PathBuf,
+}
 
 impl Stage {
     fn new() -> Result<Self, ToolError> {
-        let dir = std::env::temp_dir().join(format!(
-            "sinter-mcp-{}-{}",
-            std::process::id(),
-            STAGE_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).map_err(|e| ToolError {
-            category: "internal_error",
-            kind: None,
-            message: format!("cannot create staging directory: {e}"),
-        })?;
+        let dir = tempfile::Builder::new()
+            .prefix("sinter-mcp-")
+            .tempdir()
+            .map_err(|e| ToolError {
+                category: "internal_error",
+                kind: None,
+                message: format!("cannot create staging directory: {e}"),
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).map_err(
+                |e| ToolError {
+                    category: "internal_error",
+                    kind: None,
+                    message: format!("cannot secure staging directory: {e}"),
+                },
+            )?;
+        }
         // Canonicalize so staged paths match the canonicalized paths the
         // parser reports in diagnostics (staged_error replaces them).
-        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
-        Ok(Self(dir))
+        let canonical =
+            std::fs::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_path_buf());
+        Ok(Self {
+            _dir: dir,
+            canonical,
+        })
     }
 
     /// Write manifest content into the stage and return the entry path.
     /// Includes, if any, resolve relative to the staging directory; a
     /// manifest that references files not staged fails honestly.
+    /// `create_new` refuses any pre-existing entry — a planted symlink is
+    /// never followed.
     fn write_manifest(&self, manifest: &str) -> Result<PathBuf, ToolError> {
-        let p = self.0.join("recipe.yaml");
-        std::fs::write(&p, manifest).map_err(|e| ToolError {
+        let p = self.canonical.join("recipe.yaml");
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&p).map_err(|e| ToolError {
+            category: "internal_error",
+            kind: None,
+            message: format!("cannot stage manifest: {e}"),
+        })?;
+        f.write_all(manifest.as_bytes()).map_err(|e| ToolError {
             category: "internal_error",
             kind: None,
             message: format!("cannot stage manifest: {e}"),
         })?;
         Ok(p)
-    }
-}
-
-impl Drop for Stage {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -225,7 +261,7 @@ fn tool_classify_platform(args: &Value) -> Result<Value, ToolError> {
 
 fn tool_validate_manifest(args: &Value) -> Result<Value, ToolError> {
     let manifest = require_manifest(args)?;
-    let (_stage, path) = stage_manifest(manifest)?;
+    let (stage, path) = stage_manifest(manifest)?;
     match load_model(&path) {
         Ok(model) => Ok(json!({
             "valid": true,
@@ -235,15 +271,15 @@ fn tool_validate_manifest(args: &Value) -> Result<Value, ToolError> {
         })),
         Err(e) => Ok(json!({
             "valid": false,
-            "diagnostics": [staged_error(e, &path).to_json()["error"]],
+            "diagnostics": [staged_error(e, &stage.canonical).to_json()["error"]],
         })),
     }
 }
 
 fn tool_inspect_manifest(args: &Value) -> Result<Value, ToolError> {
     let manifest = require_manifest(args)?;
-    let (_stage, path) = stage_manifest(manifest)?;
-    let model = load_model(&path).map_err(|e| staged_error(e, &path))?;
+    let (stage, path) = stage_manifest(manifest)?;
+    let model = load_model(&path).map_err(|e| staged_error(e, &stage.canonical))?;
     let resources: Vec<Value> = model
         .resources
         .iter()
@@ -300,8 +336,8 @@ fn tool_plan(args: &Value) -> Result<Value, ToolError> {
         }
     };
     let sudo = args.get("sudo").and_then(Value::as_bool).unwrap_or(false);
-    let (_stage, path) = stage_manifest(manifest)?;
-    let model = load_model(&path).map_err(|e| staged_error(e, &path))?;
+    let (stage, path) = stage_manifest(manifest)?;
+    let model = load_model(&path).map_err(|e| staged_error(e, &stage.canonical))?;
     let opts = RunOptions {
         mode: Mode::Plan,
         sudo,
@@ -310,8 +346,10 @@ fn tool_plan(args: &Value) -> Result<Value, ToolError> {
         fault: None,
         fake_target: Some(fake),
     };
-    let engine = Engine::new(model, opts).map_err(|e| staged_error(e, &path))?;
-    let report = engine.run().map_err(|e| staged_error(e, &path))?;
+    let engine = Engine::new(model, opts).map_err(|e| staged_error(e, &stage.canonical))?;
+    let report = engine
+        .run()
+        .map_err(|e| staged_error(e, &stage.canonical))?;
     let resources: Vec<Value> = report
         .resources
         .iter()
@@ -535,6 +573,35 @@ pub fn serve() -> Result<(), SinterError> {
             continue;
         }
         let reply = match serde_json::from_str::<Value>(&line) {
+            // MCP 2025-03-26: receivers MUST accept JSON-RPC batches.
+            // Sequential processing; notifications produce no response.
+            Ok(Value::Array(items)) => {
+                if items.is_empty() {
+                    Some(json!({
+                        "jsonrpc": "2.0", "id": Value::Null,
+                        "error": { "code": -32600, "message": "invalid request: empty batch" }
+                    }))
+                } else {
+                    let mut responses = Vec::new();
+                    for item in &items {
+                        if item.is_object() {
+                            if let Some(r) = handle(item) {
+                                responses.push(r);
+                            }
+                        } else {
+                            responses.push(json!({
+                                "jsonrpc": "2.0", "id": Value::Null,
+                                "error": { "code": -32600, "message": "invalid request" }
+                            }));
+                        }
+                    }
+                    if responses.is_empty() {
+                        None // notification-only batch: respond with nothing
+                    } else {
+                        Some(Value::Array(responses))
+                    }
+                }
+            }
             Ok(msg) => handle(&msg),
             Err(_) => Some(json!({
                 "jsonrpc": "2.0", "id": Value::Null,
@@ -550,4 +617,103 @@ pub fn serve() -> Result<(), SinterError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MINI: &str = "version: 1\nresources:\n  - id: a\n    type: file\n    with:\n      path: /etc/a\n      content: x\n";
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_permissions_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let (stage, path) = stage_manifest(MINI).unwrap();
+        let dm = std::fs::metadata(&stage.canonical)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let fm = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dm, 0o700, "stage dir mode {dm:o}");
+        assert_eq!(fm, 0o600, "manifest mode {fm:o}");
+    }
+
+    #[test]
+    fn stage_names_are_unique_and_unpredictable() {
+        let (a, _) = stage_manifest(MINI).unwrap();
+        let (b, _) = stage_manifest(MINI).unwrap();
+        assert_ne!(a.canonical, b.canonical);
+    }
+
+    #[test]
+    fn staged_manifest_refuses_existing_entry() {
+        // Simulate the pre-staging attack: the recipe path already exists —
+        // here as a symlink pointing at a victim file. create_new must fail
+        // rather than follow it.
+        let (stage, path) = {
+            let (s, _) = stage_manifest(MINI).unwrap();
+            let p = s.canonical.join("recipe.yaml");
+            std::fs::remove_file(&p).unwrap();
+            (s, p)
+        };
+        let victim = stage.canonical.join("victim");
+        std::fs::write(&victim, "do not touch").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+        #[cfg(not(unix))]
+        std::fs::write(&path, "planted").unwrap();
+        assert!(stage.write_manifest("version: 1\n").is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "do not touch");
+    }
+
+    #[test]
+    fn stage_removed_on_drop() {
+        let dir = {
+            let (stage, _) = stage_manifest(MINI).unwrap();
+            stage.canonical.clone()
+        };
+        assert!(!dir.exists(), "stage dir must be removed on drop");
+    }
+
+    #[test]
+    fn concurrent_staging_does_not_collide() {
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            handles.push(std::thread::spawn(|| {
+                let (stage, path) = stage_manifest(MINI).unwrap();
+                assert!(path.exists());
+                stage.canonical.clone()
+            }));
+        }
+        let dirs: Vec<PathBuf> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let mut uniq = dirs.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(dirs.len(), uniq.len(), "stage dirs must be unique");
+    }
+
+    #[test]
+    fn redaction_covers_whole_stage_dir() {
+        let (stage, _path) = stage_manifest(MINI).unwrap();
+        let dir = stage.canonical.display().to_string();
+        let err = |m: &str| staged_error(SinterError::schema(m), &stage.canonical).message;
+        // Manifest entry itself keeps the logical name.
+        assert_eq!(err(&format!("{dir}/recipe.yaml: bad")), "recipe: bad");
+        // Other staged-relative paths become recipe:/<rel>.
+        assert_eq!(
+            err(&format!("{dir}/missing.tpl: not found")),
+            "recipe:/missing.tpl: not found"
+        );
+        assert_eq!(
+            err(&format!("{dir}/sub/dir/x.yaml: missing")),
+            "recipe:/sub/dir/x.yaml: missing"
+        );
+        // Unrelated paths are untouched.
+        let untouched = "/home/user/elsewhere: nope";
+        assert_eq!(err(untouched), untouched);
+        // Bare dir also collapses.
+        assert!(!err(&format!("inside {dir} boom")).contains(&dir));
+    }
 }
