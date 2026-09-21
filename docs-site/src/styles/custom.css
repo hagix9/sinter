@@ -58,8 +58,8 @@
   overscroll-behavior-y: contain;
 }
 
-/* The sidebar content has 1rem top padding but no bottom padding, leaving the
-   final nav item flush against the pane edge at max scroll. */
+/* Extra scrollable space below the final nav item so the bottom of the
+   sidebar can be wheeled comfortably away from the window's bottom edge. */
 #starlight__sidebar .sidebar-content {
-  padding-bottom: 1rem;
+  padding-bottom: 4rem;
 }
