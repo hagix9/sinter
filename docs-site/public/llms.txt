@@ -1,0 +1,20 @@
+# Sinter
+
+> Sinter is an agentless configuration-management tool for Linux, built in
+> Rust. Recipes are YAML or TOML; execution is local or over SSH. Current
+> release: v0.4.1 (Linux x86_64).
+
+## Documentation
+
+- [Documentation home (English)](https://hagix9.github.io/sinter/en/)
+- [ドキュメント ホーム (日本語)](https://hagix9.github.io/sinter/ja/)
+- [Installation](https://hagix9.github.io/sinter/en/getting-started/installation/)
+- [Supported platforms](https://hagix9.github.io/sinter/en/compatibility/platforms/)
+- [CLI reference](https://hagix9.github.io/sinter/en/reference/cli/)
+- [Resource reference](https://hagix9.github.io/sinter/en/reference/resources/)
+
+## Machine-readable
+
+- [Documentation WebMCP](https://hagix9.github.io/sinter/en/reference/webmcp/): read-only documentation lookup tools the site exposes to WebMCP-capable browsers
+- [WebMCP data — English](https://hagix9.github.io/sinter/webmcp/en.json): machine-readable Sinter documentation data used by the site's WebMCP tool surface
+- [WebMCP data — 日本語](https://hagix9.github.io/sinter/webmcp/ja.json)

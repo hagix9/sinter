@@ -10,7 +10,9 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "check": "astro check"
+    "check": "astro check",
+    "webmcp:check": "node scripts/check-webmcp.mjs",
+    "webmcp:smoke": "node scripts/smoke-webmcp.mjs"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.42.1",

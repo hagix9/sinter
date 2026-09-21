@@ -24,6 +24,7 @@
     { "title": "command resource", "path": "reference/resources/command", "description": "command resource parameters, guards, registers, changed_when.", "keywords": "command program args env creates removes changed_when register timeout" },
     { "title": "package resource", "path": "reference/resources/package", "description": "package resource: apt/dnf install and removal.", "keywords": "package name state present absent apt dnf" },
     { "title": "service resource", "path": "reference/resources/service", "description": "service resource: systemd state and enabled.", "keywords": "service systemd running stopped enabled" },
+    { "title": "Documentation WebMCP", "path": "reference/webmcp", "description": "Read-only documentation lookup tools exposed by this site via WebMCP.", "keywords": "webmcp modelcontext agent tools api machine-readable documentation" },
     { "title": "Supported Platforms", "path": "compatibility/platforms", "description": "Platform/architecture/backend support matrix and acceptance reference.", "keywords": "compatibility platforms ubuntu rocky rhel almalinux oracle amd64 x86_64 apt dnf" },
     { "title": "Troubleshooting", "path": "troubleshooting", "description": "Common failures: SSH known_hosts, sudo, unsupported platform, verification.", "keywords": "troubleshooting errors ssh known_hosts sudo exit codes" },
     { "title": "Contributing", "path": "contributing", "description": "Build, test, and contribution workflow.", "keywords": "contributing development tests cargo" }

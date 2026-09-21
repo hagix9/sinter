@@ -25,6 +25,7 @@
     { "title": "command リソース", "path": "reference/resources/command", "description": "command リソースのパラメータ、ガード、register、changed_when。", "keywords": "command program args env creates removes changed_when register timeout" },
     { "title": "package リソース", "path": "reference/resources/package", "description": "package リソース: apt/dnf によるインストールと削除。", "keywords": "package name state present absent apt dnf" },
     { "title": "service リソース", "path": "reference/resources/service", "description": "service リソース: systemd の state と enabled。", "keywords": "service systemd running stopped enabled" },
+    { "title": "ドキュメント WebMCP", "path": "reference/webmcp", "description": "このサイトが WebMCP 経由で公開する読み取り専用ドキュメント検索ツール。", "keywords": "webmcp modelcontext エージェント ツール api 機械可読 ドキュメント" },
     { "title": "対応プラットフォーム", "path": "compatibility/platforms", "description": "プラットフォーム/アーキテクチャ/バックエンドのサポートマトリクスと受入基準環境。", "keywords": "対応 プラットフォーム ubuntu rocky rhel almalinux oracle amd64 x86_64 apt dnf" },
     { "title": "トラブルシューティング", "path": "troubleshooting", "description": "よくある失敗: SSH known_hosts、sudo、非対応プラットフォーム、検証。", "keywords": "トラブルシューティング エラー ssh known_hosts sudo 終了コード" },
     { "title": "コントリビューション", "path": "contributing", "description": "ビルド、テスト、コントリビューションのワークフロー。", "keywords": "コントリビューション 開発 テスト cargo" }
