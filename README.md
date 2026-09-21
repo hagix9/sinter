@@ -331,7 +331,15 @@ Tools (all read-only; there is intentionally no apply/execute/install tool):
 
 Not available: apply, arbitrary command execution, or any mutation. Remote
 access is possible **only** through administrator-configured named targets —
-see below. Client configuration example (stdio servers):
+see below.
+
+MCP manifests accept inline content only: `include:` and `source:` are
+rejected on the parsed structure before loading in every manifest-consuming
+tool, so a manifest never grants controller-local filesystem read authority.
+This restriction is MCP-specific — ordinary CLI recipes keep full
+`include:`/`source:` support.
+
+Client configuration example (stdio servers):
 
 ```json
 { "mcpServers": { "sinter": { "command": "sinter", "args": ["mcp"] } } }
@@ -379,11 +387,7 @@ sudo = true
 - An omitted or empty `identity_files` follows the existing Sinter SSH
   authentication behavior and may use default identity resolution; it does
   not disable authentication.
-- Host manifests may not use `include:` or `source:` — an untrusted MCP
-  manifest grants no controller-local filesystem read authority. The policy
-  is enforced on the parsed document structure before loading, so every
-  YAML key spelling is covered and no caller-selected path is ever opened.
-  Host plan output never returns file or template bodies: content diffs are
+- Host plan output never returns file or template bodies: content diffs are
   redacted at the MCP boundary regardless of the manifest's `sensitive`
   flags.
 

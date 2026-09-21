@@ -320,23 +320,24 @@ fn redact_bounded(text: &str, needle: &str) -> String {
     out
 }
 
-/// R2: structural manifest-authority boundary for host tools. Operates on
-/// the parsed `Document` produced by the same production parser the CLI
-/// uses, so every spelling the grammar accepts — plain, quoted, explicit or
-/// flow mapping keys, tagged scalars — is classified identically.
+/// R2/R3: structural manifest-authority boundary for ALL MCP manifest
+/// tools. Operates on the parsed `Document` produced by the same production
+/// parser the CLI uses, so every spelling the grammar accepts — plain,
+/// quoted, explicit or flow mapping keys, tagged scalars — is classified
+/// identically.
 ///
-/// Policy: an untrusted MCP host manifest grants no controller filesystem
+/// Policy: an untrusted MCP manifest grants no controller filesystem
 /// authority. `include:` (absolute, relative, nested — all forms) and any
 /// resource `with.source` (file/template, absolute or relative) are
 /// rejected. The check runs on the parsed structure before `load_model`,
 /// so no caller-selected controller path is ever opened: the only file
 /// read is the private staged manifest Sinter itself created.
-fn check_host_authority(doc: &Document) -> Result<(), ToolError> {
+fn check_mcp_manifest_authority(doc: &Document) -> Result<(), ToolError> {
     if !doc.includes.is_empty() {
         return Err(ToolError {
             category: "invalid_manifest",
             kind: Some("schema"),
-            message: "host manifests may not use \"include:\" — controller-local \
+            message: "MCP manifests may not use \"include:\" — controller-local \
                       file reads are not permitted over MCP"
                 .to_string(),
         });
@@ -346,13 +347,23 @@ fn check_host_authority(doc: &Document) -> Result<(), ToolError> {
             return Err(ToolError {
                 category: "invalid_manifest",
                 kind: Some("schema"),
-                message: "host manifests may not use \"source:\" — controller-local \
+                message: "MCP manifests may not use \"source:\" — controller-local \
                           file reads are not permitted over MCP"
                     .to_string(),
             });
         }
     }
     Ok(())
+}
+
+/// The single MCP manifest boundary every manifest-consuming tool passes
+/// through: structural parse of the staged file (the only permitted
+/// controller read), then the authority policy. Callers invoke
+/// `load_model` only after this returns Ok, so no caller-selected
+/// controller path can be probed, read, or expanded.
+fn check_staged_manifest(path: &Path, stage: &Stage) -> Result<(), ToolError> {
+    let doc = parse_document(path).map_err(|e| staged_error(e, &stage.canonical))?;
+    check_mcp_manifest_authority(&doc)
 }
 
 // ---------------------------------------------------------------------------
@@ -409,6 +420,18 @@ fn tool_classify_platform(args: &Value) -> Result<Value, ToolError> {
 fn tool_validate_manifest(args: &Value) -> Result<Value, ToolError> {
     let manifest = require_manifest(args)?;
     let (stage, path) = stage_manifest(manifest)?;
+    // Parse errors remain `valid: false` diagnostics (the C1 contract); only
+    // an authority-policy violation is a hard tool error.
+    let doc = match parse_document(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            return Ok(json!({
+                "valid": false,
+                "diagnostics": [staged_error(e, &stage.canonical).to_json()["error"]],
+            }))
+        }
+    };
+    check_mcp_manifest_authority(&doc)?;
     match load_model(&path) {
         Ok(model) => Ok(json!({
             "valid": true,
@@ -426,6 +449,7 @@ fn tool_validate_manifest(args: &Value) -> Result<Value, ToolError> {
 fn tool_inspect_manifest(args: &Value) -> Result<Value, ToolError> {
     let manifest = require_manifest(args)?;
     let (stage, path) = stage_manifest(manifest)?;
+    check_staged_manifest(&path, &stage)?;
     let model = load_model(&path).map_err(|e| staged_error(e, &stage.canonical))?;
     let resources: Vec<Value> = model
         .resources
@@ -484,6 +508,7 @@ fn tool_plan(args: &Value) -> Result<Value, ToolError> {
     };
     let sudo = args.get("sudo").and_then(Value::as_bool).unwrap_or(false);
     let (stage, path) = stage_manifest(manifest)?;
+    check_staged_manifest(&path, &stage)?;
     let model = load_model(&path).map_err(|e| staged_error(e, &stage.canonical))?;
     let opts = RunOptions {
         mode: Mode::Plan,
@@ -581,8 +606,7 @@ fn tool_plan_host(args: &Value, reg: &TargetRegistry) -> Result<Value, ToolError
     // read), then the authority policy — before target resolution and before
     // the production loader, which post-policy can only touch the staged
     // file again.
-    let doc = parse_document(&path).map_err(|e| staged_error(e, &stage.canonical))?;
-    check_host_authority(&doc)?;
+    check_staged_manifest(&path, &stage)?;
     let (name, profile) = resolve_target(args, reg)?;
     let model = load_model(&path).map_err(|e| staged_error(e, &stage.canonical))?;
     let opts = RunOptions {
@@ -614,8 +638,7 @@ fn tool_audit_host(args: &Value, reg: &TargetRegistry) -> Result<Value, ToolErro
     require_only(args, &["manifest", "target"])?;
     let manifest = require_manifest(args)?;
     let (stage, path) = stage_manifest(manifest)?;
-    let doc = parse_document(&path).map_err(|e| staged_error(e, &stage.canonical))?;
-    check_host_authority(&doc)?;
+    check_staged_manifest(&path, &stage)?;
     let (name, profile) = resolve_target(args, reg)?;
     let model = load_model(&path).map_err(|e| staged_error(e, &stage.canonical))?;
     let opts = RunOptions {
@@ -1070,7 +1093,7 @@ mod tests {
                 "version: 1\nresources:\n  - id: f\n    type: file\n    with:\n      path: /t\n      {spelling}\n"
             );
             assert!(
-                check_host_authority(&host_doc(&m)).is_err(),
+                check_mcp_manifest_authority(&host_doc(&m)).is_err(),
                 "source spelling not rejected: {spelling:?}"
             );
         }
@@ -1079,7 +1102,7 @@ mod tests {
             let m =
                 format!("version: 1\nresources:\n  - id: f\n    type: file\n    with: {with}\n");
             assert!(
-                check_host_authority(&host_doc(&m)).is_err(),
+                check_mcp_manifest_authority(&host_doc(&m)).is_err(),
                 "flow source not rejected: {with:?}"
             );
         }
@@ -1088,7 +1111,7 @@ mod tests {
             let m = format!(
                 "version: 1\nresources:\n  - id: f\n    type: {ty}\n    with:\n      path: /t\n      source: /x\n"
             );
-            assert!(check_host_authority(&host_doc(&m)).is_err(), "{ty}");
+            assert!(check_mcp_manifest_authority(&host_doc(&m)).is_err(), "{ty}");
         }
     }
 
@@ -1104,7 +1127,7 @@ mod tests {
         ] {
             let m = format!("version: 1\n{inc}");
             assert!(
-                check_host_authority(&host_doc(&m)).is_err(),
+                check_mcp_manifest_authority(&host_doc(&m)).is_err(),
                 "include form not rejected: {inc:?}"
             );
         }
@@ -1123,13 +1146,13 @@ mod tests {
                 "version: 1\n# source: /tmp/x\n# include: child.yaml\nresources:\n  - id: f\n    type: file\n    with:\n      path: /t\n      {content}\n"
             );
             assert!(
-                check_host_authority(&host_doc(&m)).is_ok(),
+                check_mcp_manifest_authority(&host_doc(&m)).is_ok(),
                 "false positive on scalar content: {content:?}"
             );
         }
         // A resource literally named `source` or using `include` as data.
         let m = "version: 1\nresources:\n  - id: source\n    type: command\n    with:\n      program: /bin/echo\n      args: [\"include:\", \"source:\"]\n";
-        assert!(check_host_authority(&host_doc(m)).is_ok());
+        assert!(check_mcp_manifest_authority(&host_doc(m)).is_ok());
     }
 
     #[test]

@@ -453,17 +453,31 @@ fn no_stage_path_in_any_diagnostic() {
 }
 
 #[test]
-fn redaction_keeps_relative_diagnostic_visible() {
+fn include_is_policy_rejected_without_path_echo() {
     let mut m = Mcp::start();
     init(&mut m);
-    let (_e, v) = Mcp::payload(&m.tool(
+    let (is_err, v) = Mcp::payload(&m.tool(
         1,
         "sinter_validate_manifest",
         json!({"manifest": "version: 1\ninclude: [missing.yaml]\n"}),
     ));
+    // R3: include is a policy rejection — the fixed message must not echo
+    // the caller's forbidden path, whether relative or absolute.
+    assert!(is_err);
+    let msg = v["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("controller-local"), "{msg}");
+    assert!(
+        !msg.contains("missing.yaml"),
+        "forbidden path echoed: {msg}"
+    );
+
+    // A staged schema error still surfaces with the logical `recipe:` origin.
+    let (_e, v) = Mcp::payload(&m.tool(
+        2,
+        "sinter_validate_manifest",
+        json!({"manifest": "version: 1\nresources: {}\n"}),
+    ));
     let raw = serde_json::to_string(&v).unwrap();
-    // The useful relative name must survive redaction.
-    assert!(raw.contains("missing.yaml"), "relative name lost: {raw}");
     assert!(raw.contains("recipe:"), "logical prefix missing: {raw}");
 }
 
@@ -1003,6 +1017,150 @@ fn overlapping_profile_values_fully_redacted_in_errors() {
         assert!(
             !raw.contains("127.0.0.1") || raw.contains("[target]"),
             "{tool}: {raw}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C2 R3: the structural authority boundary covers ALL manifest-consuming
+// tools — validate_manifest, inspect_manifest and plan close the same
+// controller-read channel the C2 host tools already enforce.
+// ---------------------------------------------------------------------------
+
+const R3_SENTINEL: &str = "C1_AUTHORITY_SECRET_71A2";
+
+/// sinter_plan needs a canned fake platform name as `target`.
+fn c1_args(tool: &str, manifest: &str) -> Value {
+    if tool == "sinter_plan" {
+        json!({"manifest": manifest, "target": "ubuntu2404"})
+    } else {
+        json!({"manifest": manifest})
+    }
+}
+
+#[test]
+fn c1_manifest_tools_reject_source_and_include() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret = dir.path().join("SINTER_C1_SECRET_R3");
+    std::fs::write(&secret, R3_SENTINEL).unwrap();
+    let abs = secret.display().to_string();
+
+    let mut m = Mcp::start();
+    init(&mut m);
+    let tools = [
+        "sinter_validate_manifest",
+        "sinter_inspect_manifest",
+        "sinter_plan",
+    ];
+    let manifests = [
+        // source: plain, quoted, explicit, tagged, flow — file + template
+        manifest_with("file", &format!("      source: {abs}")),
+        manifest_with("file", &format!("      \"source\": {abs}")),
+        manifest_with("file", &format!("      'source': {abs}")),
+        manifest_with("file", &format!("      ? source\n      : {abs}")),
+        manifest_with("file", &format!("      !!str source: {abs}")),
+        format!(
+            "version: 1\nresources:\n  - id: x\n    type: file\n    with: {{ path: /t, source: {abs} }}\n"
+        ),
+        manifest_with("template", &format!("      source: {abs}")),
+        manifest_with("file", "      source: ./rel/x"),
+        // include: absolute, relative, child, flow, multiple
+        format!("version: 1\ninclude:\n  - {abs}\n"),
+        "version: 1\ninclude:\n  - ../x.yaml\n".to_string(),
+        "version: 1\ninclude:\n  - child.yaml\n".to_string(),
+        format!("version: 1\ninclude: [\"{abs}\"]\n"),
+        format!("version: 1\ninclude:\n  - {abs}\n  - child.yaml\n"),
+    ];
+    for tool in tools {
+        for mf in &manifests {
+            let resp = m.tool(5, tool, c1_args(tool, mf));
+            assert_policy_rejection(&resp, &[R3_SENTINEL, &abs]);
+        }
+    }
+}
+
+#[test]
+fn c1_tools_reject_identically_regardless_of_filesystem() {
+    // Same fixed policy class whether the referenced path exists, is
+    // missing, is a directory, or is unreadable — proof no controller I/O
+    // participates in the decision.
+    let dir = tempfile::tempdir().unwrap();
+    let existing = dir.path().join("exists.txt");
+    std::fs::write(&existing, R3_SENTINEL).unwrap();
+    let missing = dir.path().join("missing.txt").display().to_string();
+    let directory = dir.path().display().to_string();
+    let unreadable = dir.path().join("unreadable.txt");
+    std::fs::write(&unreadable, R3_SENTINEL).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    let un = unreadable.display().to_string();
+    let ex = existing.display().to_string();
+
+    let mut m = Mcp::start();
+    init(&mut m);
+    for tool in [
+        "sinter_validate_manifest",
+        "sinter_inspect_manifest",
+        "sinter_plan",
+    ] {
+        for path in [
+            ex.as_str(),
+            missing.as_str(),
+            directory.as_str(),
+            un.as_str(),
+        ] {
+            for mf in [
+                manifest_with("file", &format!("      source: {path}")),
+                format!("version: 1\ninclude:\n  - {path}\n"),
+            ] {
+                let resp = m.tool(5, tool, c1_args(tool, &mf));
+                assert_policy_rejection(&resp, &[R3_SENTINEL, &ex, &un]);
+            }
+        }
+    }
+}
+
+#[test]
+fn c1_inline_manifests_still_work() {
+    // Ordinary inline manifests are unaffected: the words `source`/`include`
+    // inside scalar data carry no authority and must not be rejected.
+    let mut m = Mcp::start();
+    init(&mut m);
+    let manifests = [
+        VALID.to_string(),
+        manifest_with("file", "      content: \"source: /tmp/x\""),
+        manifest_with("file", "      content: \"include: child.yaml\""),
+        manifest_with(
+            "file",
+            "      content: |\n        source: /tmp/x\n        include: child.yaml",
+        ),
+        "version: 1\n# source: /tmp/x\n# include: child.yaml\nresources:\n  - id: x\n    type: file\n    with:\n      path: /t\n      content: ok\n".to_string(),
+        VALID_PKG.to_string(),
+    ];
+    for mf in &manifests {
+        let (is_err, v) =
+            Mcp::payload(&m.tool(1, "sinter_validate_manifest", json!({"manifest": mf})));
+        assert!(!is_err, "validate: {v}");
+        assert_eq!(
+            v["valid"], true,
+            "validate rejected inline manifest: {mf:?}"
+        );
+
+        let (is_err, v) =
+            Mcp::payload(&m.tool(2, "sinter_inspect_manifest", json!({"manifest": mf})));
+        assert!(!is_err, "inspect: {v}");
+        assert!(v["resources"].is_array(), "inspect: {v}");
+
+        // plan exercises the same boundary; FakeTarget may report resource
+        // errors but must never emit the authority-policy message.
+        let resp = m.tool(3, "sinter_plan", c1_args("sinter_plan", mf));
+        let raw = serde_json::to_string(&resp).unwrap();
+        assert!(
+            !raw.contains(R2_POLICY),
+            "plan policy-rejected inline manifest: {raw}"
         );
     }
 }
