@@ -44,6 +44,9 @@ export default defineConfig({
         },
       ],
       customCss: ['./src/styles/custom.css'],
+      components: {
+        PageTitle: './src/components/PageTitle.astro',
+      },
       head: [
         // Read-only WebMCP tool surface. The script feature-detects
         // document.modelContext / navigator.modelContext and does nothing in

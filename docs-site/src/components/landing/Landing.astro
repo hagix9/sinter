@@ -1,0 +1,175 @@
+---
+import '../../styles/landing.css';
+import { strings } from './strings';
+import TerminalDemo from './TerminalDemo.astro';
+import WebMcpDemo from './WebMcpDemo.astro';
+import SinterFlow from './SinterFlow.astro';
+
+interface Props {
+  locale: 'en' | 'ja';
+}
+
+const { locale } = Astro.props;
+const t = strings[locale] ?? strings.en;
+// BASE_URL has no guaranteed trailing slash ('/sinter'); normalize so the
+// locale join always yields '/sinter/en/...' regardless of config.
+const base = import.meta.env.BASE_URL.replace(/\/*$/, '/');
+const doc = (p: string) => `${base}${locale}/${p}/`;
+---
+
+<div class="landing">
+  <header id="hero" class="landing-hero">
+    <h1 id="_top" class="landing-hero-title">{t.heroTitle}</h1>
+    <p class="landing-hero-sub">{t.heroSub}</p>
+    <nav class="landing-ctas" aria-label="landing">
+      <a class="landing-cta landing-cta-primary" href={doc('getting-started/quick-start')}>{t.heroPrimaryCta}</a>
+      <a class="landing-cta" href="#demo">{t.heroSecondaryCta}</a>
+    </nav>
+    <p class="landing-facts">{t.heroFacts}</p>
+  </header>
+
+  <section id="demo" class="landing-section landing-demo">
+    <h2 class="landing-eyebrow">{t.demoTitle}</h2>
+    <TerminalDemo title={t.terminalTitle} />
+    <p class="landing-note">{t.demoNote}</p>
+  </section>
+
+  <section id="capabilities" class="landing-section">
+    <h2>{t.capabilitiesTitle}</h2>
+    <ol class="caps">
+      <li class="cap">
+        <strong>PLAN</strong>
+        <span class="cap-sub">{t.capPlanSub}</span>
+        <p>{t.capPlanDesc}</p>
+      </li>
+      <li class="cap-arrow" aria-hidden="true">→</li>
+      <li class="cap">
+        <strong>APPLY</strong>
+        <span class="cap-sub">{t.capApplySub}</span>
+        <p>{t.capApplyDesc}</p>
+      </li>
+      <li class="cap-arrow" aria-hidden="true">→</li>
+      <li class="cap">
+        <strong>AUDIT</strong>
+        <span class="cap-sub">{t.capAuditSub}</span>
+        <p>{t.capAuditDesc}</p>
+      </li>
+    </ol>
+  </section>
+
+  <section id="recipe" class="landing-section">
+    <div class="recipe-split">
+      <div class="recipe-copy">
+        <h2>{t.recipeTitle}</h2>
+        <p class="landing-lead">{t.recipeNote}</p>
+        <p><a href={doc('reference/recipe-format')}>{t.recipeCta}</a></p>
+      </div>
+      <pre class="landing-recipe"><code>version: 1
+resources:
+  - id: hello
+    type: file
+    with:
+      path: /home/ops/hello.txt
+      content: "hello from sinter\n"
+      mode: "0644"
+  - id: vim
+    type: package
+    with:
+      name: vim
+      state: present
+  - id: sshd
+    type: service
+    with:
+      name: ssh.service
+      state: running</code></pre>
+    </div>
+  </section>
+
+  <section id="flow" class="landing-section">
+    <h2>{t.flowTitle}</h2>
+    <SinterFlow
+      recipeLabel="Recipe"
+      recipeSub={t.flowRecipeSub}
+      declareLabel={t.flowDeclare}
+      sinterLabel="Sinter"
+      sinterSub={t.flowSinterSub}
+      sshLabel="SSH"
+      observeLabel={t.flowObserve}
+      convergeLabel={t.flowConverge}
+      targetLabel="Linux target"
+      targetSub={t.flowTargetSub}
+      planSub={t.flowPlanSub}
+      applySub={t.flowApplySub}
+      auditSub={t.flowAuditSub}
+      note={t.flowNote}
+    />
+  </section>
+
+  <section id="trust" class="landing-section">
+    <h2>{t.trustTitle}</h2>
+    <ul class="trust-list">
+      {t.trustPoints.map((x) => <li>{x}</li>)}
+    </ul>
+    <p><a href={doc('concepts/execution-model')}>{t.trustCta}</a></p>
+  </section>
+
+  <section id="ai" class="landing-section">
+    <h2>{t.aiTitle}</h2>
+    <p class="landing-lead">{t.aiIntro}</p>
+    <div class="landing-ai-webmcp">
+      <h3>{t.webmcpTitle}</h3>
+      <p>{t.webmcpNote}</p>
+      <WebMcpDemo
+        askLabel={t.webmcpAskLabel}
+        question={t.webmcpQuestion}
+        toolLabel={t.webmcpToolLabel}
+        tool={t.webmcpTool}
+        answerLabel={t.webmcpAnswerLabel}
+        answer={t.webmcpAnswer}
+      />
+      <p><a href={doc('reference/webmcp')}>{t.webmcpDocsCta}</a></p>
+    </div>
+    <div class="landing-ai-coremcp">
+      <h3>{t.coremcpTitle}</h3>
+      <p>{t.coremcpNote}</p>
+      <div class="coremcp-flow" aria-label="Core MCP topology">
+        <span class="cm-node">AI client</span>
+        <span class="cm-edge" aria-hidden="true">→</span>
+        <span class="cm-node"><code>sinter mcp</code></span>
+        <span class="cm-edge" aria-hidden="true">→</span>
+        <span class="cm-node">named target</span>
+        <span class="cm-edge" aria-hidden="true">→</span>
+        <span class="cm-node">PLAN / AUDIT</span>
+      </div>
+      <ul class="coremcp-list">
+        {t.coremcpPoints.map((x) => <li>{x}</li>)}
+      </ul>
+      <p class="coremcp-boundary">{t.coremcpBoundary}</p>
+    </div>
+  </section>
+
+  <section id="platforms" class="landing-section">
+    <h2>{t.platformsTitle}</h2>
+    <p class="platforms-line">{t.platformsLine}</p>
+    <p class="platforms-status">{t.platformsStatus}</p>
+    <p class="landing-note">{t.platformsNote}</p>
+    <p><a href={doc('compatibility/platforms')}>{t.platformsCta}</a></p>
+  </section>
+
+  <section id="install" class="landing-section">
+    <h2>{t.installTitle}</h2>
+    <pre class="landing-install"><code>curl -fsSL https://hagix9.github.io/sinter/install.sh | sh</code></pre>
+    <p>{t.installNote}</p>
+    <p><a href={doc('getting-started/installation')}>{t.installCta}</a></p>
+  </section>
+
+  <section id="get-started" class="landing-section landing-final">
+    <h2>{t.docsTitle}</h2>
+    <p>{t.docsNote}</p>
+    <nav class="landing-ctas">
+      <a class="landing-cta landing-cta-primary" href={doc('getting-started/quick-start')}>{t.quickstartCta}</a>
+      <a class="landing-cta" href={doc('getting-started/what-is-sinter')}>{t.docsCta}</a>
+      <a class="landing-cta" href="https://github.com/hagix9/sinter">{t.githubCta}</a>
+    </nav>
+  </section>
+</div>

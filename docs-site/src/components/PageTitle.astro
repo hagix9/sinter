@@ -1,0 +1,21 @@
+---
+// Starlight PageTitle override: splash-template landing pages render their
+// own h1 inside the Landing hero, so the page title is suppressed only there.
+// Frontmatter `title` still feeds the document <title> and metadata.
+const { entry } = Astro.locals.starlightRoute;
+const isLanding = entry.data.template === 'splash';
+---
+
+{!isLanding && <h1 id="_top">{entry.data.title}</h1>}
+
+<style>
+	@layer starlight.core {
+		h1 {
+			margin-top: 1rem;
+			font-size: var(--sl-text-h1);
+			line-height: var(--sl-line-height-headings);
+			font-weight: 600;
+			color: var(--sl-color-white);
+		}
+	}
+</style>

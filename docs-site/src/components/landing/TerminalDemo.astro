@@ -1,0 +1,46 @@
+---
+interface Props {
+  title: string;
+}
+const { title } = Astro.props;
+---
+
+<figure class="term" aria-label="Sinter terminal session: validate, plan, apply, audit">
+  <figcaption class="term-bar">{title}</figcaption>
+  <pre class="term-body"><code><span class="t-p">$</span> sinter validate recipe.yaml
+ok: 3 resource(s), 0 handler(s), 0 var(s)
+
+<span class="t-p">$</span> sinter plan --host web01 recipe.yaml
+== Sinter PLAN ==
+target facts: hostname=web01 os=Ubuntu family=debian version=24.04 arch=x86_64
+
+<span class="t-changed">CHANGED</span>  hello [file]
+    current: absent
+    desired: 18 bytes
+<span class="t-ok">ok</span>    vim [package] package already in desired state
+<span class="t-ok">ok</span>    sshd [service] service already matches desired state
+
+summary: 1 changed, 0 possible, 0 failed, 0 indeterminate, 3 total
+status: success
+
+<span class="t-p">$</span> sinter apply --host web01 --sudo recipe.yaml
+== Sinter APPLY ==
+
+<span class="t-changed">CHANGED</span>  hello [file]
+<span class="t-ok">ok</span>    vim [package] package already in desired state
+<span class="t-ok">ok</span>    sshd [service] service already matches desired state
+
+summary: 1 changed, 0 possible, 0 failed, 0 indeterminate, 3 total
+status: success
+
+<span class="t-p">$</span> sinter audit --host web01 recipe.yaml
+== Sinter AUDIT ==
+<span class="t-ok">PASS</span> hello [file]
+    reason: file matches desired state
+<span class="t-ok">PASS</span> vim [package]
+    reason: package already in desired state
+<span class="t-ok">PASS</span> sshd [service]
+    reason: service matches desired state
+summary: 3 total, 3 compliant, 0 drifted, 0 not_auditable, 0 not_applicable, 0 errors
+status: no_drift</code></pre>
+</figure>

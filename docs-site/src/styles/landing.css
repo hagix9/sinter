@@ -1,0 +1,782 @@
+/* Landing-page visual system — scoped under .landing so nothing leaks into
+   Starlight documentation pages. Dark-first, restrained purple accent,
+   elevated terminal surface. */
+
+.sl-markdown-content > .landing {
+  margin-top: 0;
+}
+
+.landing {
+  /* landing-local tokens (dark default) */
+  --l-surface: #12141c;
+  --l-surface-2: #171a24;
+  --l-border: #262a38;
+  --l-text: var(--sl-color-text);
+  --l-muted: #9aa1b2;
+  --l-accent: #a78bfa;
+  --l-accent-strong: #8b5cf6;
+  --l-accent-soft: #2a2145;
+  --l-cta-bg: #7c3aed;
+  --l-ok: #7fb98a;
+  --l-term-bg: #0d0f16;
+  --l-term-text: #d6dae3;
+  --l-term-dim: #8b93a3;
+
+  --landing-max: 76rem;
+  max-width: var(--landing-max);
+  margin-inline: auto;
+  color: var(--l-text);
+}
+
+/* Light theme: keep the same structure, lift surfaces, deepen accent for
+   contrast. The terminal surface stays dark in both themes. */
+:root[data-theme='light'] .landing {
+  --l-surface: #f3f1f7;
+  --l-surface-2: #ece9f4;
+  --l-border: #d8d4e4;
+  --l-muted: #5b5f6e;
+  --l-accent: #6d28d9;
+  --l-accent-strong: #5b21b6;
+  --l-accent-soft: #ede7fb;
+  --l-cta-bg: #5b21b6;
+  --l-ok: #2e7d43;
+}
+
+.landing h1,
+.landing h2,
+.landing h3 {
+  margin-top: 0;
+  line-height: 1.15;
+}
+
+.landing a {
+  color: var(--l-accent);
+}
+.landing a:hover {
+  color: var(--l-accent-strong);
+}
+
+/* ---------- hero ---------- */
+
+.landing-hero {
+  padding-block: clamp(2.5rem, 7vw, 5.5rem) clamp(2rem, 5vw, 3.5rem);
+  text-align: center;
+}
+
+.landing-hero-title {
+  font-size: clamp(2rem, 5vw, 3.4rem);
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  max-width: 22ch;
+  margin-inline: auto;
+  text-wrap: balance;
+}
+
+.landing-hero-sub {
+  max-width: 40rem;
+  margin: 1.1rem auto 0;
+  font-size: clamp(1rem, 1.6vw, 1.2rem);
+  color: var(--l-muted);
+  text-wrap: pretty;
+}
+
+.landing-ctas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: center;
+  margin-top: 1.75rem;
+}
+
+.landing-cta {
+  display: inline-block;
+  padding: 0.55rem 1.35rem;
+  border: 1px solid var(--l-border);
+  border-radius: 0.5rem;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--l-text);
+}
+.landing-cta:hover {
+  border-color: var(--l-accent);
+  color: var(--l-text);
+}
+
+.landing a.landing-cta-primary {
+  background: var(--l-cta-bg);
+  border-color: var(--l-cta-bg);
+  color: #fff;
+}
+.landing a.landing-cta-primary:hover {
+  background: var(--l-accent);
+  border-color: var(--l-accent);
+  color: #14101f;
+}
+:root[data-theme='light'] .landing a.landing-cta-primary:hover {
+  color: #fff;
+}
+
+.landing-facts {
+  margin-top: 1.6rem;
+  font-size: 0.85rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--l-muted);
+}
+
+/* ---------- sections ---------- */
+
+.landing-section {
+  padding-block: clamp(2.25rem, 5vw, 3.5rem);
+  border-top: 1px solid var(--l-border);
+}
+
+.landing-section > h2 {
+  font-size: clamp(1.4rem, 2.6vw, 1.9rem);
+}
+
+.landing-eyebrow {
+  font-size: 0.8rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--l-muted);
+  font-weight: 600;
+}
+
+.landing-lead {
+  max-width: 52rem;
+  color: var(--l-muted);
+}
+
+.landing-note {
+  margin-top: 0.75rem;
+  font-size: 0.9rem;
+  color: var(--l-muted);
+}
+
+/* ---------- terminal ---------- */
+
+.term {
+  margin: 1.25rem 0 0;
+  border: 1px solid var(--l-border);
+  border-radius: 0.75rem;
+  overflow: hidden;
+  background: var(--l-term-bg);
+  box-shadow: 0 12px 40px -18px rgba(0, 0, 0, 0.55);
+}
+
+.term-bar {
+  padding: 0.55rem 1rem;
+  font-size: 0.8rem;
+  font-family: var(--sl-font-mono, ui-monospace, monospace);
+  color: var(--l-term-dim);
+  background: var(--l-surface-2);
+  border-bottom: 1px solid var(--l-border);
+}
+:root[data-theme='light'] .term-bar {
+  background: #161926;
+}
+
+.term-body {
+  margin: 0;
+  padding: 1.1rem 1.25rem;
+  overflow-x: auto;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: var(--l-term-text);
+  background: var(--l-term-bg);
+}
+.term-body code {
+  font-family: var(--sl-font-mono, ui-monospace, monospace);
+  background: none;
+  color: inherit;
+}
+
+.t-p {
+  color: var(--l-accent);
+  font-weight: 600;
+}
+.t-changed {
+  color: var(--l-accent);
+  font-weight: 600;
+}
+.t-ok {
+  color: var(--l-ok);
+  font-weight: 600;
+}
+:root[data-theme='light'] .term-body .t-ok {
+  color: #7fb98a;
+}
+
+/* ---------- capabilities ---------- */
+
+.caps {
+  display: flex;
+  align-items: stretch;
+  gap: 0.75rem;
+  margin: 1.25rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cap {
+  flex: 1;
+  border: 1px solid var(--l-border);
+  border-radius: 0.625rem;
+  background: var(--l-surface);
+  padding: 1.1rem 1.25rem;
+}
+.cap strong {
+  font-size: 0.95rem;
+  letter-spacing: 0.08em;
+  font-family: var(--sl-font-mono, ui-monospace, monospace);
+}
+.cap-sub {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--l-muted);
+}
+.cap p {
+  margin: 0.6rem 0 0;
+  font-size: 0.9rem;
+  color: var(--l-muted);
+}
+.cap:nth-of-type(odd) strong {
+  color: var(--l-text);
+}
+.cap:nth-child(3) strong {
+  color: var(--l-accent);
+}
+
+.cap-arrow {
+  align-self: center;
+  color: var(--l-muted);
+  font-size: 1.1rem;
+}
+
+/* ---------- recipe ---------- */
+
+.recipe-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  gap: 2rem;
+  align-items: start;
+}
+
+.landing-recipe {
+  margin: 0;
+  border: 1px solid var(--l-border);
+  border-radius: 0.75rem;
+  padding: 1.1rem 1.25rem;
+  overflow-x: auto;
+  background: var(--l-term-bg);
+  color: var(--l-term-text);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+.landing-recipe code {
+  font-family: var(--sl-font-mono, ui-monospace, monospace);
+  background: none;
+  color: inherit;
+}
+
+/* ---------- Sinter flow diagram ---------- */
+
+.flow {
+  margin-top: 1.25rem;
+  border: 1px solid var(--l-border);
+  border-radius: 0.75rem;
+  background: var(--l-surface);
+  padding: 1.75rem 1.5rem 1.25rem;
+}
+
+.flow-main {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.f-node {
+  border: 1px solid var(--l-border);
+  border-radius: 0.625rem;
+  background: var(--l-surface-2);
+  padding: 0.9rem 1.1rem;
+  min-width: 8.5rem;
+  text-align: center;
+}
+.f-node strong {
+  display: block;
+  font-size: 0.95rem;
+}
+.f-sinter {
+  border-color: var(--l-accent);
+}
+.f-sinter strong {
+  color: var(--l-accent);
+}
+.f-sub {
+  display: block;
+  margin-top: 0.3rem;
+  font-size: 0.72rem;
+  color: var(--l-muted);
+}
+
+.f-edge {
+  position: relative;
+  flex: 1;
+  min-width: 4.5rem;
+  align-self: center;
+  height: 2.75rem;
+}
+.f-edge::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--l-border);
+}
+.f-edge-label {
+  position: absolute;
+  top: 0.1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--l-muted);
+  white-space: nowrap;
+}
+
+/* direction annotations on the SSH edge: arrows carry the direction so the
+   meaning never depends on color or position alone */
+.f-dir {
+  position: absolute;
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  color: var(--l-muted);
+  white-space: nowrap;
+}
+.f-dir b {
+  font-weight: 400;
+  margin-right: 0.25rem;
+}
+.f-dir-converge b {
+  margin: 0 0 0 0.25rem;
+}
+.f-dir-observe {
+  top: 0.1rem;
+  right: 0;
+}
+.f-dir-converge {
+  bottom: 0.1rem;
+  left: 0;
+  color: var(--l-ok);
+}
+
+/* pulses travel along edges on one shared 16s loop, staggered by phase */
+.f-pulse {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 7px;
+  height: 7px;
+  margin-top: -3.5px;
+  border-radius: 50%;
+  background: var(--l-accent);
+  opacity: 0;
+}
+
+@keyframes p-declare {
+  0%, 4%   { left: 0;    opacity: 0; }
+  8%       {             opacity: 1; }
+  14%      { left: 100%; opacity: 1; }
+  18%, 100%{ left: 100%; opacity: 0; }
+}
+@keyframes p-out {
+  0%, 20%  { left: 0;    opacity: 0; }
+  24%      {             opacity: 1; }
+  34%      { left: 100%; opacity: 1; }
+  38%, 100%{ left: 100%; opacity: 0; }
+}
+@keyframes p-back {
+  0%, 40%  { left: 100%; opacity: 0; }
+  44%      {             opacity: 1; }
+  54%      { left: 0;    opacity: 1; }
+  58%, 100%{ left: 0;    opacity: 0; }
+}
+@keyframes p-conv {
+  0%, 62%  { left: 0;    opacity: 0; }
+  66%      {             opacity: 1; }
+  76%      { left: 100%; opacity: 1; }
+  80%, 100%{ left: 100%; opacity: 0; }
+}
+@keyframes p-audit {
+  0%, 82%  { left: 100%; opacity: 0; }
+  86%      {             opacity: 1; }
+  96%      { left: 0;    opacity: 1; }
+  99%, 100%{ left: 0;    opacity: 0; }
+}
+
+.p-declare { animation: p-declare 16s linear infinite; }
+.p-out     { animation: p-out 16s linear infinite; }
+.p-back    { animation: p-back 16s linear infinite; }
+.p-conv    { animation: p-conv 16s linear infinite; background: var(--l-ok); }
+.e-ssh .p-back { background: var(--l-ok); }
+/* audit reuses the back-direction timing slot */
+.e-ssh .p-audit { animation: p-audit 16s linear infinite; background: var(--l-accent); }
+
+/* the converge pulse only exists on the SSH edge; APPLY chip glows in phase */
+@keyframes m-apply {
+  0%, 60%   { border-color: var(--l-border); }
+  66%, 78%  { border-color: var(--l-ok); }
+  84%, 100% { border-color: var(--l-border); }
+}
+.f-apply { animation: m-apply 16s linear infinite; }
+
+.flow-modes {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
+  margin: 1.5rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+.f-mode {
+  border: 1px solid var(--l-border);
+  border-radius: 0.625rem;
+  padding: 0.7rem 1.2rem;
+  text-align: center;
+  min-width: 9rem;
+}
+.f-mode strong {
+  display: block;
+  font-family: var(--sl-font-mono, ui-monospace, monospace);
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+}
+
+.flow-note {
+  margin: 1.25rem 0 0;
+  font-size: 0.85rem;
+  color: var(--l-muted);
+  text-align: center;
+}
+
+/* ---------- trust ---------- */
+
+.trust-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.9rem 1.5rem;
+  margin: 1.25rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+.trust-list li {
+  position: relative;
+  padding-left: 1.4rem;
+  font-size: 0.92rem;
+  color: var(--l-muted);
+}
+.trust-list li::before {
+  content: '▸';
+  position: absolute;
+  left: 0;
+  color: var(--l-accent);
+}
+
+/* ---------- Website WebMCP demo ---------- */
+
+.landing-ai-webmcp,
+.landing-ai-coremcp {
+  border: 1px solid var(--l-border);
+  border-radius: 0.75rem;
+  padding: 1.5rem;
+  margin-top: 1.25rem;
+  background: var(--l-surface);
+}
+
+.wm-demo {
+  margin-top: 1rem;
+  border: 1px solid var(--l-border);
+  border-radius: 0.625rem;
+  background: var(--l-term-bg);
+  padding: 1rem 1.25rem;
+}
+
+.wm-row {
+  display: grid;
+  grid-template-columns: minmax(9rem, 11rem) 1fr;
+  gap: 0.5rem 1rem;
+  padding-block: 0.6rem;
+  align-items: baseline;
+}
+.wm-row + .wm-row {
+  border-top: 1px dashed var(--l-border);
+}
+
+.wm-label {
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--l-term-dim);
+}
+
+.wm-text {
+  margin: 0;
+  color: var(--l-term-text);
+  font-size: 0.95rem;
+}
+
+.wm-tool {
+  color: var(--l-accent);
+  background: none;
+}
+
+/* ---------- Core MCP ---------- */
+
+.coremcp-flow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  font-size: 0.85rem;
+}
+.cm-node {
+  border: 1px solid var(--l-border);
+  border-radius: 0.5rem;
+  padding: 0.4rem 0.8rem;
+  background: var(--l-surface-2);
+}
+.cm-node code {
+  background: none;
+  color: var(--l-accent);
+}
+.cm-edge {
+  color: var(--l-muted);
+}
+
+.coremcp-list {
+  margin: 1rem 0 0;
+  padding-left: 1.25rem;
+  color: var(--l-muted);
+  font-size: 0.92rem;
+}
+.coremcp-list li {
+  margin-block: 0.25rem;
+}
+
+.coremcp-boundary {
+  margin-top: 1rem;
+  padding: 0.6rem 0.9rem;
+  border-left: 3px solid var(--l-accent);
+  background: var(--l-accent-soft);
+  font-size: 0.85rem;
+  border-radius: 0 0.375rem 0.375rem 0;
+}
+
+/* ---------- platforms ---------- */
+
+.platforms-line {
+  font-size: 1.05rem;
+  margin-top: 1rem;
+}
+.platforms-status {
+  color: var(--l-muted);
+  font-size: 0.9rem;
+}
+
+/* ---------- install ---------- */
+
+.landing-install {
+  border: 1px solid var(--l-border);
+  border-radius: 0.625rem;
+  padding: 0.85rem 1.1rem;
+  margin-top: 1rem;
+  overflow-x: auto;
+  background: var(--l-term-bg);
+  color: var(--l-term-text);
+  font-size: 0.9rem;
+}
+
+.landing-final {
+  text-align: center;
+  padding-bottom: 4rem;
+}
+
+/* ---------- reduced motion: complete static topology ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .f-pulse,
+  .e-ssh .p-audit {
+    animation: none;
+    opacity: 0.4;
+    left: 50%;
+  }
+  .p-back {
+    left: auto;
+    right: 20%;
+  }
+  .p-conv {
+    left: 70%;
+  }
+  .p-audit {
+    left: auto;
+    right: 40%;
+  }
+  .f-apply {
+    animation: none;
+    border-color: var(--l-ok);
+  }
+}
+
+/* ---------- responsive ---------- */
+
+@media (max-width: 48rem) {
+  .landing-hero {
+    padding-block: 2rem 1.75rem;
+  }
+  .landing-section {
+    padding-block: 1.9rem;
+  }
+  .term-body {
+    font-size: 0.78rem;
+    padding: 0.9rem 1rem;
+  }
+  .wm-row {
+    grid-template-columns: 1fr;
+    gap: 0.15rem;
+  }
+  .caps {
+    flex-direction: column;
+  }
+  .cap-arrow {
+    align-self: center;
+    transform: rotate(90deg);
+  }
+  .recipe-split {
+    grid-template-columns: 1fr;
+    gap: 1.25rem;
+  }
+  .trust-list {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* The flow goes vertical earlier than the rest of the page: below ~60rem the
+   horizontal SSH edge becomes too narrow for the observe/converge labels. */
+@media (max-width: 60rem) {
+  /* vertical flow topology */
+  .flow-main {
+    flex-direction: column;
+    align-items: center;
+  }
+  .f-node {
+    min-width: 12rem;
+  }
+  .f-edge {
+    flex: none;
+    min-width: 0;
+    width: 2.75rem;
+    height: 4.5rem;
+    align-self: center;
+  }
+  .f-edge::before {
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    right: auto;
+    width: 1px;
+    height: auto;
+  }
+  .f-edge-label {
+    top: 50%;
+    left: auto;
+    right: 55%;
+    transform: translateY(-50%);
+    writing-mode: initial;
+  }
+  /* vertical layout: dir labels move to the right of the line; the arrows
+     rotate so observe reads upward and converge downward */
+  .f-dir-observe {
+    top: 0;
+    right: auto;
+    left: 60%;
+  }
+  .f-dir-converge {
+    top: auto;
+    bottom: 0;
+    left: 60%;
+  }
+  .f-dir b {
+    display: inline-block;
+    transform: rotate(90deg);
+  }
+  .f-pulse {
+    left: 50%;
+    margin-left: -3.5px;
+    margin-top: 0;
+  }
+  @keyframes p-declare-y {
+    0%, 4%   { top: 0;    opacity: 0; }
+    8%       {            opacity: 1; }
+    14%      { top: 100%; opacity: 1; }
+    18%, 100%{ top: 100%; opacity: 0; }
+  }
+  @keyframes p-out-y {
+    0%, 20%  { top: 0;    opacity: 0; }
+    24%      {            opacity: 1; }
+    34%      { top: 100%; opacity: 1; }
+    38%, 100%{ top: 100%; opacity: 0; }
+  }
+  @keyframes p-back-y {
+    0%, 40%  { top: 100%; opacity: 0; }
+    44%      {            opacity: 1; }
+    54%      { top: 0;    opacity: 1; }
+    58%, 100%{ top: 0;    opacity: 0; }
+  }
+  @keyframes p-conv-y {
+    0%, 62%  { top: 0;    opacity: 0; }
+    66%      {            opacity: 1; }
+    76%      { top: 100%; opacity: 1; }
+    80%, 100%{ top: 100%; opacity: 0; }
+  }
+  @keyframes p-audit-y {
+    0%, 82%  { top: 100%; opacity: 0; }
+    86%      {            opacity: 1; }
+    96%      { top: 0;    opacity: 1; }
+    99%, 100%{ top: 0;    opacity: 0; }
+  }
+  .p-declare { animation-name: p-declare-y; }
+  .p-out     { animation-name: p-out-y; }
+  .p-back    { animation-name: p-back-y; }
+  .p-conv    { animation-name: p-conv-y; }
+  .p-audit   { animation-name: p-audit-y; }
+
+  .flow-modes {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+@media (max-width: 60rem) and (prefers-reduced-motion: reduce) {
+  /* the -y keyframe overrides in the 60rem block come after the base
+     reduced-motion rule, so animation must be stopped here too */
+  .f-pulse,
+  .e-ssh .p-audit {
+    animation: none;
+    left: 50%;
+    right: auto;
+    top: 50%;
+  }
+}

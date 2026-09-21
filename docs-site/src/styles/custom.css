@@ -1,17 +1,17 @@
 /* Sinter docs — restrained product-documentation styling on top of Starlight. */
 
 :root {
-  --sl-color-accent-low: #2a1f14;
-  --sl-color-accent: #b0681f;
-  --sl-color-accent-high: #f3d9b8;
-  --sl-color-text-accent: #d68f3a;
+  --sl-color-accent-low: #2a2145;
+  --sl-color-accent: #8b5cf6;
+  --sl-color-accent-high: #c4b5fd;
+  --sl-color-text-accent: #a78bfa;
 }
 
 :root[data-theme='light'] {
-  --sl-color-accent-low: #f7ead9;
-  --sl-color-accent: #9a5a17;
-  --sl-color-accent-high: #3d2c16;
-  --sl-color-text-accent: #8a4f10;
+  --sl-color-accent-low: #ede7fb;
+  --sl-color-accent: #6d28d9;
+  --sl-color-accent-high: #5b21b6;
+  --sl-color-text-accent: #6d28d9;
 }
 
 /* Slightly wider measure for parameter tables. The description column wraps;

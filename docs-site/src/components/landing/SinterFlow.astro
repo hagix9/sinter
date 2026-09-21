@@ -1,0 +1,64 @@
+---
+interface Props {
+  recipeLabel: string;
+  recipeSub: string;
+  declareLabel: string;
+  sinterLabel: string;
+  sinterSub: string;
+  sshLabel: string;
+  observeLabel: string;
+  convergeLabel: string;
+  targetLabel: string;
+  targetSub: string;
+  planSub: string;
+  applySub: string;
+  auditSub: string;
+  note: string;
+}
+const p = Astro.props;
+---
+
+<div class="flow">
+  <ol class="flow-main">
+    <li class="f-node">
+      <strong>{p.recipeLabel}</strong>
+      <span class="f-sub">{p.recipeSub}</span>
+    </li>
+    <li class="f-edge e-declare">
+      <span class="f-edge-label">{p.declareLabel}</span>
+      <i class="f-pulse p-declare" aria-hidden="true"></i>
+    </li>
+    <li class="f-node f-sinter">
+      <strong>{p.sinterLabel}</strong>
+      <span class="f-sub">{p.sinterSub}</span>
+    </li>
+    <li class="f-edge e-ssh">
+      <span class="f-edge-label">{p.sshLabel}</span>
+      <span class="f-dir f-dir-observe"><b aria-hidden="true">&larr;</b>{p.observeLabel}</span>
+      <span class="f-dir f-dir-converge">{p.convergeLabel}<b aria-hidden="true">&rarr;</b></span>
+      <i class="f-pulse p-out" aria-hidden="true"></i>
+      <i class="f-pulse p-back" aria-hidden="true"></i>
+      <i class="f-pulse p-conv" aria-hidden="true"></i>
+      <i class="f-pulse p-audit" aria-hidden="true"></i>
+    </li>
+    <li class="f-node">
+      <strong>{p.targetLabel}</strong>
+      <span class="f-sub">{p.targetSub}</span>
+    </li>
+  </ol>
+  <ul class="flow-modes" aria-label="Sinter modes">
+    <li class="f-mode">
+      <strong>PLAN</strong>
+      <span class="f-sub">{p.planSub}</span>
+    </li>
+    <li class="f-mode f-apply">
+      <strong>APPLY</strong>
+      <span class="f-sub">{p.applySub}</span>
+    </li>
+    <li class="f-mode">
+      <strong>AUDIT</strong>
+      <span class="f-sub">{p.auditSub}</span>
+    </li>
+  </ul>
+  <p class="flow-note">{p.note}</p>
+</div>
