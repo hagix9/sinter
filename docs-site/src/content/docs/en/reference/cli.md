@@ -1,6 +1,6 @@
 ---
 title: CLI Reference
-description: sinter validate, plan, apply, audit — flags and exit codes.
+description: sinter validate, plan, apply, audit, mcp — flags and exit codes.
 ---
 
 ```text
@@ -11,9 +11,12 @@ Commands:
   plan      Preview changes against a target without mutating it
   apply     Apply a recipe to a target
   audit     Audit whether a target already satisfies a recipe. Read-only.
+  mcp       Serve a read-only MCP (Model Context Protocol) endpoint on stdio
 ```
 
-`sinter --version` prints the version (e.g. `sinter 0.4.1`).
+See [Core MCP](/sinter/en/reference/mcp/) for the `mcp` subcommand and `--targets-file`.
+
+`sinter --version` prints the version (e.g. `sinter 0.5.0`).
 
 ## validate
 

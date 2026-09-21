@@ -14,7 +14,7 @@
     { "title": "Rocky Linux ガイド", "path": "guides/rocky-linux", "description": "Rocky Linux 9/10 x86_64 ターゲットガイド（dnf バックエンド）。", "keywords": "rocky rhel dnf 9 10 x86_64" },
     { "title": "Red Hat Enterprise Linux ガイド", "path": "guides/rhel", "description": "RHEL 9/10 x86_64 ターゲットガイド（dnf バックエンド）。", "keywords": "rhel red hat dnf 9 10 x86_64" },
     { "title": "AlmaLinux ガイド", "path": "guides/almalinux", "description": "AlmaLinux 9/10 x86_64 ターゲットガイド（dnf バックエンド）。", "keywords": "almalinux rhel dnf 9 10 x86_64" },
-    { "title": "レシピ概要", "path": "recipes/overview", "description": "v0.4.1 の機能に基づくレシピ例。", "keywords": "レシピ 例 baseline" },
+    { "title": "レシピ概要", "path": "recipes/overview", "description": "v0.5.0 の機能に基づくレシピ例。", "keywords": "レシピ 例 baseline" },
     { "title": "CLI リファレンス", "path": "reference/cli", "description": "sinter validate/plan/apply のフラグと終了コード。", "keywords": "cli フラグ 終了コード host port user sudo identity known_hosts format" },
     { "title": "レシピフォーマット", "path": "reference/recipe-format", "description": "トップレベルフィールド、式、補間のリファレンス。", "keywords": "version vars include resources handlers 式 補間" },
     { "title": "リソースリファレンス", "path": "reference/resources", "description": "すべてのリソースタイプとパラメータ。", "keywords": "リソースタイプ パラメータ リファレンス" },
@@ -26,6 +26,7 @@
     { "title": "package リソース", "path": "reference/resources/package", "description": "package リソース: apt/dnf によるインストールと削除。", "keywords": "package name state present absent apt dnf" },
     { "title": "service リソース", "path": "reference/resources/service", "description": "service リソース: systemd の state と enabled。", "keywords": "service systemd running stopped enabled" },
     { "title": "ドキュメント WebMCP", "path": "reference/webmcp", "description": "このサイトが WebMCP 経由で公開する読み取り専用ドキュメント検索ツール。", "keywords": "webmcp modelcontext エージェント ツール api 機械可読 ドキュメント" },
+    { "title": "Core MCP", "path": "reference/mcp", "description": "sinter mcp — stdio経由の読み取り専用オペレーショナルMCPエンドポイント: named SSHターゲットの validate・plan・audit。", "keywords": "mcp model context protocol stdio 読み取り専用 ツール ターゲット audit plan" },
     { "title": "対応プラットフォーム", "path": "compatibility/platforms", "description": "プラットフォーム/アーキテクチャ/バックエンドのサポートマトリクスと受入基準環境。", "keywords": "対応 プラットフォーム ubuntu rocky rhel almalinux oracle amd64 x86_64 apt dnf" },
     { "title": "トラブルシューティング", "path": "troubleshooting", "description": "よくある失敗: SSH known_hosts、sudo、非対応プラットフォーム、検証。", "keywords": "トラブルシューティング エラー ssh known_hosts sudo 終了コード" },
     { "title": "コントリビューション", "path": "contributing", "description": "ビルド、テスト、コントリビューションのワークフロー。", "keywords": "コントリビューション 開発 テスト cargo" }

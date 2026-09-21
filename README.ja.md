@@ -75,8 +75,8 @@ embedded scriptingは依然として実装対象に含めません。
 
 ## インストール
 
-Sinter **v0.4.1** は、対応するすべての Linux x86_64 プラットフォーム
-ラインを1つの `sinter-v0.4.1-linux-x86_64.tar.gz` アーティファクトで
+Sinter **v0.5.0** は、対応するすべての Linux x86_64 プラットフォーム
+ラインを1つの `sinter-v0.5.0-linux-x86_64.tar.gz` アーティファクトで
 配布します。UbuntuとRockyのラインに加え、受入検証済みの
 RHEL 9 / 10、AlmaLinux 9 / 10 対応が追加されました。
 
@@ -305,9 +305,98 @@ src/
   diff.rs          truthful, sanitized diff rendering
   output.rs        human and JSON rendering with sensitive redaction
   error.rs         error kinds and exit codes
+  mcp.rs           read-only MCP stdio adapter
+  targets.rs       administrator-owned named SSH target profiles for MCP
   main.rs          CLI
 tests/             acceptance and integration test suites
 ```
+
+## MCPインターフェイス
+
+**ステータス:** v0.5.0でリリース。
+
+`sinter mcp` は、stdio上で動作する最小限のstrictly **読み取り専用**な
+MCP（Model Context Protocol）エンドポイントを提供します
+（newline-delimited JSON-RPC 2.0）。authoritative coreの薄い
+アダプタであり、validation、platform、planningの規則を再実装しません。
+
+ツール（すべて読み取り専用。apply/execute/installツールは意図的に
+存在しません）:
+
+| ツール | 目的 |
+|--------|------|
+| `sinter_get_version` | crateバージョンとread-only capabilityの表明。 |
+| `sinter_classify_platform` | `/etc/os-release`の内容からターゲットを分類（family、package backend）。実際のplatform modelを使用。 |
+| `sinter_validate_manifest` | 実際の`load_model`パーサでrecipeテキストを検証。構造化されたdiagnosticsを返す。 |
+| `sinter_inspect_manifest` | recipeの構造的サマリ: resource identity、type、依存関係、sensitive flag。値は返しません。 |
+| `sinter_plan` | **supplied-facts**なターゲットスナップショット（`ubuntu2404`、`ubuntu2604`、`rocky9`、`rocky10`）に対してrecipeをplan。in-processのscripted targetを使用 — 実際のplanningコードを使いますが、SSHも実ホストも使わず、`Mode::Plan`のみ。 |
+| `sinter_list_targets` | 管理者が設定したSSHターゲットプロファイルのopaqueな名前を一覧（名前のみ — 接続情報は返しません）。 |
+| `sinter_plan_host` | **named** SSHターゲットプロファイルに対してrecipeをplan。productionの`Mode::Plan`パスによる実ホストの読み取り専用観測。 |
+| `sinter_audit_host` | named SSHターゲットがrecipeを満たすかを、productionの`run_audit`パスで監査。読み取り専用。 |
+
+利用できないもの: apply、任意コマンド実行、あらゆるmutation。
+リモートアクセスは管理者が設定したnamed targetを**通じてのみ**可能です
+（後述）。
+
+MCP manifestはinline contentのみ受け付けます: `include:`と`source:`は
+パース済み構造上で、すべてのmanifest消費ツールでロード前に拒否されるため、
+manifestがcontrollerローカルのファイルシステム読み取り権限を与えることは
+ありません。この制限はMCP固有です — 通常のCLI recipeは引き続き完全な
+`include:`/`source:`をサポートします。
+
+クライアント設定例（stdioサーバ）:
+
+```json
+{ "mcpServers": { "sinter": { "command": "sinter", "args": ["mcp"] } } }
+```
+
+### Named target（`--targets-file`）
+
+`sinter mcp --targets-file targets.toml` は、起動時に読み込まれ
+immutableなnamed SSHプロファイルのレジストリを通じて、実ホストの
+読み取り専用観測を有効にします。MCPクライアントはターゲットを
+**opaqueな名前でのみ**参照でき、host、port、user、known_hosts、
+identity file、sudo、その他の接続パラメータを指定できません。
+これらは管理者が所有するプロファイルポリシー専用です。
+
+```toml
+[targets.web01]
+host = "web01.example.com"
+port = 22                    # optional, default 22
+user = "deploy"
+known_hosts = "/secure/path/known_hosts"
+identity_files = ["/secure/path/id_ed25519"]  # optional
+sudo = false                 # optional: profile-owned privilege policy
+
+[targets.db01]
+host = "10.0.0.20"
+user = "ops"
+known_hosts = "/secure/path/known_hosts"
+sudo = true
+```
+
+- プロファイル名: `[A-Za-z0-9_-]`、英数字で開始、最大64文字。
+- ファイルは起動時に一度だけパースされます。ファイルがない、読めない、
+  malformed、構造的に不正な場合、`sinter mcp`はエラーで中断します。
+  暗黙のデフォルトパスも環境変数による探索もありません。
+- `--targets-file`なしの場合、host toolは登録されますがfail closedです:
+  `sinter_list_targets`は空リストを返し、plan/audit呼び出しは
+  `unknown target`を報告します。
+- host toolはproductionのPlan/Auditパスを再利用します: read-onlyな
+  `TargetFs`上の`Mode::Plan`（mutation permitは取得不能）、command
+  resourceは実行されず、`run_audit`はpermitを生成し得るengineを
+  さらに拒否します。
+- `sinter_list_targets`は名前のみを返します。underlying diagnosticは
+  sanitizeされ、プロファイル内部情報（host、user、key path）がMCP出力に
+  届きません。
+- `identity_files`を省略または空にした場合、既存のSinter SSH認証動作に
+  従い、デフォルトのidentity解決を使うことがあります。認証を無効化する
+  ものではありません。
+- host plan出力はfileやtemplateのbodyを返しません: content diffは
+  manifestの`sensitive`フラグに関係なくMCP境界で常にredactされます。
+
+これはドキュメントサイトのWebMCP（ブラウザ側、ドキュメント検索のみ）と
+は無関係です。Core MCPはSinter自身の操作を公開します。
 
 ## ライセンス
 

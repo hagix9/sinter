@@ -47,7 +47,7 @@ not configure a persistent host-wide environment.
   identity — recipes stay platform-neutral.
 - `present` on Ubuntu → `apt`; on RHEL-family targets (Rocky Linux, RHEL,
   AlmaLinux, Oracle Linux) → `dnf`.
-- No version pinning in v0.4.1.
+- No version pinning in v0.5.0.
 - On dnf targets, installs run through a private cache snapshot — see
   [Execution Model](/sinter/en/concepts/execution-model/) and the
   [Rocky guide](/sinter/en/guides/rocky-linux/).

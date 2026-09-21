@@ -13,7 +13,7 @@
     { "title": "Rocky Linux Guide", "path": "guides/rocky-linux", "description": "Rocky Linux 9/10 x86_64 target guide (dnf backend).", "keywords": "rocky rhel dnf 9 10 x86_64" },
     { "title": "Red Hat Enterprise Linux Guide", "path": "guides/rhel", "description": "RHEL 9/10 x86_64 target guide (dnf backend).", "keywords": "rhel red hat dnf 9 10 x86_64" },
     { "title": "AlmaLinux Guide", "path": "guides/almalinux", "description": "AlmaLinux 9/10 x86_64 target guide (dnf backend).", "keywords": "almalinux rhel dnf 9 10 x86_64" },
-    { "title": "Recipe Overview", "path": "recipes/overview", "description": "Recipe examples based on v0.4.1 functionality.", "keywords": "recipes examples baseline" },
+    { "title": "Recipe Overview", "path": "recipes/overview", "description": "Recipe examples based on v0.5.0 functionality.", "keywords": "recipes examples baseline" },
     { "title": "CLI Reference", "path": "reference/cli", "description": "sinter validate/plan/apply flags and exit codes.", "keywords": "cli flags exit codes host port user sudo identity known_hosts format" },
     { "title": "Recipe Format", "path": "reference/recipe-format", "description": "Top-level fields, expressions, and interpolation reference.", "keywords": "version vars include resources handlers expressions interpolation" },
     { "title": "Resource Reference", "path": "reference/resources", "description": "All resource types and their parameters.", "keywords": "resource types parameters reference" },
@@ -25,6 +25,7 @@
     { "title": "package resource", "path": "reference/resources/package", "description": "package resource: apt/dnf install and removal.", "keywords": "package name state present absent apt dnf" },
     { "title": "service resource", "path": "reference/resources/service", "description": "service resource: systemd state and enabled.", "keywords": "service systemd running stopped enabled" },
     { "title": "Documentation WebMCP", "path": "reference/webmcp", "description": "Read-only documentation lookup tools exposed by this site via WebMCP.", "keywords": "webmcp modelcontext agent tools api machine-readable documentation" },
+    { "title": "Core MCP", "path": "reference/mcp", "description": "sinter mcp — read-only operational MCP endpoint over stdio: validate, plan, audit named SSH targets.", "keywords": "mcp model context protocol stdio read-only tools targets audit plan" },
     { "title": "Supported Platforms", "path": "compatibility/platforms", "description": "Platform/architecture/backend support matrix and acceptance reference.", "keywords": "compatibility platforms ubuntu rocky rhel almalinux oracle amd64 x86_64 apt dnf" },
     { "title": "Troubleshooting", "path": "troubleshooting", "description": "Common failures: SSH known_hosts, sudo, unsupported platform, verification.", "keywords": "troubleshooting errors ssh known_hosts sudo exit codes" },
     { "title": "Contributing", "path": "contributing", "description": "Build, test, and contribution workflow.", "keywords": "contributing development tests cargo" }

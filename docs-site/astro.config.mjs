@@ -118,6 +118,11 @@ export default defineConfig({
               translations: { ja: 'ドキュメント WebMCP' },
               slug: 'reference/webmcp',
             },
+            {
+              label: 'Core MCP',
+              translations: { ja: 'Core MCP' },
+              slug: 'reference/mcp',
+            },
           ],
         },
         {

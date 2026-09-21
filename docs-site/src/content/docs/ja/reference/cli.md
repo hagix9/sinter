@@ -1,6 +1,6 @@
 ---
 title: CLI リファレンス
-description: sinter validate、plan、apply、audit — フラグと終了コード。
+description: sinter validate、plan、apply、audit、mcp — フラグと終了コード。
 ---
 
 ```text
@@ -11,9 +11,12 @@ Commands:
   plan      Preview changes against a target without mutating it
   apply     Apply a recipe to a target
   audit     Audit whether a target already satisfies a recipe. Read-only.
+  mcp       Serve a read-only MCP (Model Context Protocol) endpoint on stdio
 ```
 
-`sinter --version` はバージョンを表示します（例: `sinter 0.4.1`）。
+`mcp`サブコマンドと`--targets-file`については[Core MCP](/sinter/ja/reference/mcp/)を参照してください。
+
+`sinter --version` はバージョンを表示します（例: `sinter 0.5.0`）。
 
 ## validate
 

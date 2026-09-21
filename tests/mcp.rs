@@ -512,7 +512,7 @@ fn batch_requests() {
     assert!(arr[1]["result"]["content"][0]["text"]
         .as_str()
         .unwrap()
-        .contains("0.4.1"));
+        .contains(env!("CARGO_PKG_VERSION")));
     assert_eq!(arr[2]["id"], "abc");
 
     // Mixed request + notification: only the request gets a response.

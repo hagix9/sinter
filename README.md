@@ -75,7 +75,7 @@ inventory, orchestration, or embedded scripting.
 
 ## Install
 
-Sinter **v0.4.1** ships one `sinter-v0.4.1-linux-x86_64.tar.gz` artifact
+Sinter **v0.5.0** ships one `sinter-v0.5.0-linux-x86_64.tar.gz` artifact
 covering every supported Linux x86_64 platform line, adding
 acceptance-tested RHEL 9 / 10 and AlmaLinux 9 / 10 support to the
 Ubuntu and Rocky lines.
@@ -305,15 +305,15 @@ src/
   diff.rs          truthful, sanitized diff rendering
   output.rs        human and JSON rendering with sensitive redaction
   error.rs         error kinds and exit codes
-  mcp.rs           read-only MCP stdio adapter (unreleased, mainline)
+  mcp.rs           read-only MCP stdio adapter
+  targets.rs       administrator-owned named SSH target profiles for MCP
   main.rs          CLI
 tests/             acceptance and integration test suites
 ```
 
-## MCP interface (unreleased, mainline)
+## MCP interface
 
-**Status:** mainline development after v0.4.1. `sinter mcp` is not part of any
-released artifact.
+**Status:** released in v0.5.0.
 
 `sinter mcp` serves a minimal, strictly **read-only** MCP (Model Context
 Protocol) endpoint over stdio (newline-delimited JSON-RPC 2.0). It is a thin

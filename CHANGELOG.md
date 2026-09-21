@@ -4,6 +4,53 @@ All notable changes to Sinter are documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-22
+
+Core MCP: a read-only Model Context Protocol interface over stdio.
+
+### Added
+
+- `sinter mcp`: a strictly read-only MCP server speaking newline-delimited
+  JSON-RPC 2.0 (protocol revision `2025-03-26`) over stdio. It is a thin
+  adapter over the authoritative parser, planner, and audit engine — no
+  validation or planning rule is reimplemented. stdout carries protocol
+  frames only; diagnostics go to stderr.
+- Eight read-only tools: `sinter_get_version`, `sinter_classify_platform`,
+  `sinter_validate_manifest`, `sinter_inspect_manifest`, `sinter_plan`
+  (supplied-facts in-process targets — no SSH), `sinter_list_targets`,
+  `sinter_plan_host`, and `sinter_audit_host`. There is intentionally no
+  apply, exec, or shell tool, and no mutation capability is exposed.
+- Named target profiles via `sinter mcp --targets-file targets.toml`: an
+  immutable, startup-loaded registry of administrator-owned SSH profiles.
+  MCP callers reference targets by opaque name only — host, port, user,
+  known_hosts, identity files, and sudo policy can never be supplied or
+  overridden through tool arguments. `sinter_plan_host` and
+  `sinter_audit_host` observe real hosts through the production `Mode::Plan`
+  and `run_audit` paths; strict `known_hosts` verification and the existing
+  bounded SSH behavior are unchanged.
+
+### Security
+
+- Read-only is enforced structurally, not by convention: host tools run on a
+  `Mode::Plan` `TargetFs` that cannot produce a mutation permit, and
+  `run_audit` independently refuses any mutation-capable engine. Command
+  resources are never executed and audit as `NOT_AUDITABLE`.
+- MCP manifests accept inline content only. `include:` and `source:` are
+  rejected on the parsed structure before loading, so an MCP manifest grants
+  no controller-local filesystem read authority. Staging uses a private
+  0700 directory and a `create_new` 0600 manifest file.
+- Profile internals (host, user, key paths) and staged paths are redacted
+  from tool-facing diagnostics; host-plan file/template content diffs are
+  always redacted regardless of manifest sensitivity flags.
+
+### Changed
+
+- Remote `systemctl show` observation now terminates option parsing with
+  `--` before the unit name, so a manifest-controlled unit name can never
+  be interpreted as a systemctl option.
+- The documentation site gained a refreshed landing page, sidebar
+  containment fixes, and a README terminal demo.
+
 ## [0.4.1] - 2026-09-21
 
 Expanded acceptance-tested Linux x86_64 platform coverage and a more robust
