@@ -4,7 +4,7 @@ All notable changes to Sinter are documented in this file.
 
 ## [Unreleased]
 
-## [0.4.1] - Unreleased
+## [0.4.1] - 2026-09-21
 
 Expanded acceptance-tested Linux x86_64 platform coverage and a more robust
 DNF package path.
