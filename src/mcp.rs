@@ -18,12 +18,14 @@
 //! transport). stdout carries protocol frames only; diagnostics go to
 //! stderr. Supported methods: initialize, ping, tools/list, tools/call.
 
-use crate::engine::{Engine, Mode, RunOptions, TargetSpec};
+use crate::audit::run_audit;
+use crate::engine::{Engine, Mode, RunOptions, RunReport, TargetSpec};
 use crate::error::{ErrorKind, SinterError};
 use crate::executor::FakeTarget;
 use crate::facts::Facts;
 use crate::model::load_model;
 use crate::platform::PackageBackend;
+use crate::targets::{TargetProfile, TargetRegistry};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -209,6 +211,71 @@ fn require_manifest(args: &Value) -> Result<&str, ToolError> {
 }
 
 // ---------------------------------------------------------------------------
+// Named target resolution (C2)
+// ---------------------------------------------------------------------------
+
+/// Host tools accept exactly `manifest` + `target`. Any other parameter —
+/// including connection-policy fields like host/user/port/identity/sudo —
+/// is rejected outright: those belong to the administrator-owned profile
+/// and must never be caller-controlled.
+fn require_only(args: &Value, allowed: &[&str]) -> Result<(), ToolError> {
+    if let Some(obj) = args.as_object() {
+        for key in obj.keys() {
+            if !allowed.contains(&key.as_str()) {
+                return Err(ToolError::invalid_request(format!(
+                    "unexpected parameter \"{key}\" (allowed: {})",
+                    allowed.join(", ")
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the opaque `target` argument to an immutable registry profile.
+/// Unknown or malformed names fail closed — never interpreted as a hostname.
+fn resolve_target<'a>(
+    args: &Value,
+    reg: &'a TargetRegistry,
+) -> Result<(String, &'a TargetProfile), ToolError> {
+    let name = args.get("target").and_then(Value::as_str).ok_or_else(|| {
+        ToolError::invalid_request("missing or invalid required string parameter \"target\"")
+    })?;
+    if !TargetRegistry::name_is_wellformed(name) {
+        return Err(ToolError::invalid_request("invalid target name"));
+    }
+    match reg.get(name) {
+        Some(p) => Ok((name.to_string(), p)),
+        None => Err(ToolError::invalid_request(format!(
+            "unknown target \"{name}\""
+        ))),
+    }
+}
+
+/// Stage-path redaction plus profile confidentiality: administrator-owned
+/// connection details (host, user, known_hosts, identity paths) are replaced
+/// by `[target]` wherever an underlying diagnostic embedded them.
+fn host_error(e: SinterError, stage_dir: &Path, profile: &TargetProfile) -> ToolError {
+    let mut t = staged_error(e, stage_dir);
+    let mut secrets: Vec<String> = vec![
+        profile.spec.host.clone(),
+        profile.spec.user.clone(),
+        profile.spec.known_hosts.display().to_string(),
+    ];
+    secrets.extend(
+        profile
+            .spec
+            .identity_files
+            .iter()
+            .map(|p| p.display().to_string()),
+    );
+    for s in secrets.iter().filter(|s| !s.is_empty()) {
+        t.message = t.message.replace(s.as_str(), "[target]");
+    }
+    t
+}
+
+// ---------------------------------------------------------------------------
 // Tool implementations — thin adapters over authoritative core entry points
 // ---------------------------------------------------------------------------
 
@@ -350,6 +417,15 @@ fn tool_plan(args: &Value) -> Result<Value, ToolError> {
     let report = engine
         .run()
         .map_err(|e| staged_error(e, &stage.canonical))?;
+    let mut out = plan_report_json(&report);
+    out["mode"] = json!("plan");
+    out["target"] = json!(target_name);
+    Ok(out)
+}
+
+/// Shared RunReport → MCP JSON mapping for both plan surfaces. One
+/// serialization path — no MCP-specific planning logic.
+fn plan_report_json(report: &RunReport) -> Value {
     let resources: Vec<Value> = report
         .resources
         .iter()
@@ -376,15 +452,13 @@ fn tool_plan(args: &Value) -> Result<Value, ToolError> {
             })
         })
         .collect();
-    Ok(json!({
+    json!({
         "status": match report.status {
             crate::engine::AggregateStatus::Success => "success",
             crate::engine::AggregateStatus::PlanError => "plan_error",
             crate::engine::AggregateStatus::ApplyFailed => "apply_failed",
             crate::engine::AggregateStatus::Indeterminate => "indeterminate",
         },
-        "mode": "plan",
-        "target": target_name,
         "facts": {
             "hostname": report.facts.hostname,
             "os_name": report.facts.os_name,
@@ -394,6 +468,100 @@ fn tool_plan(args: &Value) -> Result<Value, ToolError> {
         },
         "resources": resources,
         "handlers_pending": report.handlers_pending,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// C2 tools — named-target read-only observation
+// ---------------------------------------------------------------------------
+
+/// Opaque profile names only — never connection details.
+fn tool_list_targets(reg: &TargetRegistry) -> Result<Value, ToolError> {
+    Ok(json!({ "targets": reg.names() }))
+}
+
+/// Plan a recipe against a preconfigured named SSH target. Read-only by
+/// construction: Mode::Plan on a read-only TargetFs — mutation permits are
+/// unobtainable and command resources never execute.
+fn tool_plan_host(args: &Value, reg: &TargetRegistry) -> Result<Value, ToolError> {
+    require_only(args, &["manifest", "target"])?;
+    let manifest = require_manifest(args)?;
+    let (name, profile) = resolve_target(args, reg)?;
+    let (stage, path) = stage_manifest(manifest)?;
+    let model = load_model(&path).map_err(|e| staged_error(e, &stage.canonical))?;
+    let opts = RunOptions {
+        mode: Mode::Plan,
+        sudo: profile.sudo,
+        target: TargetSpec {
+            ssh: Some(profile.spec.clone()),
+        },
+        verbose: false,
+        fault: None,
+        fake_target: None,
+    };
+    let engine = Engine::new(model, opts).map_err(|e| host_error(e, &stage.canonical, profile))?;
+    let report = engine
+        .run()
+        .map_err(|e| host_error(e, &stage.canonical, profile))?;
+    let mut out = plan_report_json(&report);
+    out["mode"] = json!("plan");
+    out["target"] = json!(name);
+    Ok(out)
+}
+
+/// Audit a named SSH target against a recipe via the production audit path:
+/// Plan-mode (read-only) engine construction, then `run_audit`, which also
+/// refuses any engine that could produce a mutation permit.
+fn tool_audit_host(args: &Value, reg: &TargetRegistry) -> Result<Value, ToolError> {
+    require_only(args, &["manifest", "target"])?;
+    let manifest = require_manifest(args)?;
+    let (name, profile) = resolve_target(args, reg)?;
+    let (stage, path) = stage_manifest(manifest)?;
+    let model = load_model(&path).map_err(|e| staged_error(e, &stage.canonical))?;
+    let opts = RunOptions {
+        mode: Mode::Plan,
+        sudo: profile.sudo,
+        target: TargetSpec {
+            ssh: Some(profile.spec.clone()),
+        },
+        verbose: false,
+        fault: None,
+        fake_target: None,
+    };
+    let engine = Engine::new(model, opts).map_err(|e| host_error(e, &stage.canonical, profile))?;
+    let report = run_audit(engine).map_err(|e| host_error(e, &stage.canonical, profile))?;
+    let resources: Vec<Value> = report
+        .resources
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.id,
+                "type": r.type_,
+                "status": r.status.label(),
+                "sensitive": r.sensitive,
+                "details": r.details.iter().map(|d| json!({
+                    "dimension": d.dimension,
+                    "observed": d.observed,
+                    "desired": d.desired,
+                })).collect::<Vec<Value>>(),
+                "reason": r.reason,
+                "loop_index": r.loop_index,
+            })
+        })
+        .collect();
+    let s = &report.summary;
+    Ok(json!({
+        "status": report.aggregate_label(),
+        "target": name,
+        "resources": resources,
+        "summary": {
+            "total": s.total,
+            "compliant": s.compliant,
+            "drifted": s.drifted,
+            "not_auditable": s.not_auditable,
+            "not_applicable": s.not_applicable,
+            "errors": s.errors,
+        },
     }))
 }
 
@@ -401,8 +569,8 @@ fn tool_plan(args: &Value) -> Result<Value, ToolError> {
 // Registry + protocol
 // ---------------------------------------------------------------------------
 
-/// The complete C1 tool surface. The allowlist test in tests/mcp.rs asserts
-/// this exact set — no mutation-capable tool may ever appear here.
+/// The complete C1+C2 tool surface. The allowlist test in tests/mcp.rs
+/// asserts this exact set — no mutation-capable tool may ever appear here.
 pub fn tool_names() -> Vec<&'static str> {
     vec![
         "sinter_get_version",
@@ -410,6 +578,9 @@ pub fn tool_names() -> Vec<&'static str> {
         "sinter_validate_manifest",
         "sinter_inspect_manifest",
         "sinter_plan",
+        "sinter_list_targets",
+        "sinter_plan_host",
+        "sinter_audit_host",
     ]
 }
 
@@ -476,16 +647,50 @@ fn tools() -> Vec<Value> {
                 "additionalProperties": false
             },
         }),
+        json!({
+            "name": "sinter_list_targets",
+            "description": "List the opaque names of administrator-configured SSH target profiles. Returns names only — never connection details.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+        }),
+        json!({
+            "name": "sinter_plan_host",
+            "description": "Plan a recipe against a named administrator-configured SSH target. Read-only observation only (Mode::Plan): no mutation, no command-resource execution. The target is an opaque profile name — connection details cannot be supplied.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "manifest": { "type": "string", "description": "Full recipe text (YAML or TOML)." },
+                    "target": { "type": "string", "description": "Named target profile from sinter_list_targets." }
+                },
+                "required": ["manifest", "target"],
+                "additionalProperties": false
+            },
+        }),
+        json!({
+            "name": "sinter_audit_host",
+            "description": "Audit whether a named administrator-configured SSH target currently satisfies a recipe. Read-only: no mutation, no command-resource execution. The target is an opaque profile name — connection details cannot be supplied.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "manifest": { "type": "string", "description": "Full recipe text (YAML or TOML)." },
+                    "target": { "type": "string", "description": "Named target profile from sinter_list_targets." }
+                },
+                "required": ["manifest", "target"],
+                "additionalProperties": false
+            },
+        }),
     ]
 }
 
-fn call_tool(name: &str, args: &Value) -> Result<Value, ToolError> {
+fn call_tool(name: &str, args: &Value, reg: &TargetRegistry) -> Result<Value, ToolError> {
     match name {
         "sinter_get_version" => tool_get_version(),
         "sinter_classify_platform" => tool_classify_platform(args),
         "sinter_validate_manifest" => tool_validate_manifest(args),
         "sinter_inspect_manifest" => tool_inspect_manifest(args),
         "sinter_plan" => tool_plan(args),
+        "sinter_list_targets" => tool_list_targets(reg),
+        "sinter_plan_host" => tool_plan_host(args, reg),
+        "sinter_audit_host" => tool_audit_host(args, reg),
         _ => Err(ToolError::invalid_request(format!("unknown tool: {name}"))),
     }
 }
@@ -506,7 +711,7 @@ fn result_error(e: &ToolError) -> Value {
 
 /// Handle one decoded JSON-RPC message. Returns Some(response) for requests,
 /// None for notifications.
-fn handle(msg: &Value) -> Option<Value> {
+fn handle(msg: &Value, reg: &TargetRegistry) -> Option<Value> {
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
     let is_request = id.is_some();
@@ -539,7 +744,7 @@ fn handle(msg: &Value) -> Option<Value> {
             if !args.is_object() {
                 return error(-32602, "invalid params: \"arguments\" must be an object");
             }
-            match call_tool(name, &args) {
+            match call_tool(name, &args, reg) {
                 Ok(v) => response(result_text(&v)),
                 Err(e) => response(result_error(&e)),
             }
@@ -557,7 +762,10 @@ fn handle(msg: &Value) -> Option<Value> {
 }
 
 /// Serve MCP over stdio until EOF. Protocol frames only on stdout.
-pub fn serve() -> Result<(), SinterError> {
+/// `targets` is the immutable named-target registry loaded at startup
+/// (empty when `--targets-file` was not given — host tools then fail
+/// closed as unknown target).
+pub fn serve(targets: TargetRegistry) -> Result<(), SinterError> {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -585,7 +793,7 @@ pub fn serve() -> Result<(), SinterError> {
                     let mut responses = Vec::new();
                     for item in &items {
                         if item.is_object() {
-                            if let Some(r) = handle(item) {
+                            if let Some(r) = handle(item, &targets) {
                                 responses.push(r);
                             }
                         } else {
@@ -602,7 +810,7 @@ pub fn serve() -> Result<(), SinterError> {
                     }
                 }
             }
-            Ok(msg) => handle(&msg),
+            Ok(msg) => handle(&msg, &targets),
             Err(_) => Some(json!({
                 "jsonrpc": "2.0", "id": Value::Null,
                 "error": { "code": -32700, "message": "parse error" }

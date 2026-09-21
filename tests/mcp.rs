@@ -21,8 +21,16 @@ struct Mcp {
 
 impl Mcp {
     fn start() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_sinter"))
-            .arg("mcp")
+        Self::start_with(&[])
+    }
+
+    fn start_with(extra: &[String]) -> Self {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_sinter"));
+        cmd.arg("mcp");
+        for a in extra {
+            cmd.arg(a);
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -95,16 +103,19 @@ fn init(m: &mut Mcp) {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn registry_is_exact_c1_allowlist() {
+fn registry_is_exact_allowlist() {
     let mut names = sinter::mcp::tool_names();
     names.sort();
     assert_eq!(
         names,
         vec![
+            "sinter_audit_host",
             "sinter_classify_platform",
             "sinter_get_version",
             "sinter_inspect_manifest",
+            "sinter_list_targets",
             "sinter_plan",
+            "sinter_plan_host",
             "sinter_validate_manifest",
         ]
     );
@@ -128,7 +139,7 @@ fn initialize_list_tools() {
     init(&mut m);
     let r = m.call(&json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}));
     let tools = r["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 5);
+    assert_eq!(tools.len(), 8);
     for t in tools {
         assert!(t["name"].is_string());
         assert_eq!(t["inputSchema"]["type"], "object");
@@ -548,4 +559,228 @@ fn canary_secrets_never_disclosed() {
         assert!(!raw.contains("CANARY_CONTENT_GHI789"), "{tool}: {raw}");
         assert!(!raw.contains("CANARY_ARG_JKL012"), "{tool}: {raw}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// C2: named-target read-only observation
+// ---------------------------------------------------------------------------
+
+fn write_targets(body: &str) -> tempfile::NamedTempFile {
+    let f = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(f.path(), body).unwrap();
+    f
+}
+
+/// Sentinel profile internals — must never reach MCP-facing output.
+const SENT_HOST: &str = "sentinel-host.invalid";
+const SENT_USER: &str = "sentineluser_xyz";
+const SENT_KH: &str = "/sentinel/known_hosts_xyz";
+const SENT_ID: &str = "/sentinel/id_xyz";
+
+const TARGETS_OK: &str = "[targets.web01]\n\
+    host = \"sentinel-host.invalid\"\n\
+    user = \"sentineluser_xyz\"\n\
+    known_hosts = \"/sentinel/known_hosts_xyz\"\n\
+    identity_files = [\"/sentinel/id_xyz\"]\n\
+    [targets.db01]\n\
+    host = \"10.9.9.9\"\n\
+    user = \"ops\"\n\
+    known_hosts = \"/sentinel/known_hosts_xyz\"\n\
+    sudo = true\n";
+
+#[test]
+fn no_targets_file_eight_tools_and_closed_host_tools() {
+    let mut m = Mcp::start();
+    init(&mut m);
+    let r = m.call(&json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}));
+    assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 8);
+
+    let (_e, v) = Mcp::payload(&m.tool(4, "sinter_list_targets", json!({})));
+    assert_eq!(v["targets"], json!([]));
+
+    for tool in ["sinter_plan_host", "sinter_audit_host"] {
+        let (is_err, v) =
+            Mcp::payload(&m.tool(5, tool, json!({"manifest": VALID, "target": "web01"})));
+        assert!(is_err, "{tool} must fail closed without a registry");
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unknown target"),
+            "{tool}: {v}"
+        );
+    }
+}
+
+#[test]
+fn list_targets_returns_sorted_names_only() {
+    let f = write_targets(TARGETS_OK);
+    let mut m = Mcp::start_with(&["--targets-file".to_string(), f.path().display().to_string()]);
+    init(&mut m);
+    let resp = m.tool(1, "sinter_list_targets", json!({}));
+    let (is_err, v) = Mcp::payload(&resp);
+    assert!(!is_err);
+    assert_eq!(v["targets"], json!(["db01", "web01"]));
+    let raw = serde_json::to_string(&resp).unwrap();
+    for leak in [
+        SENT_HOST, SENT_USER, SENT_KH, SENT_ID, "10.9.9.9", "ops", "sudo",
+    ] {
+        assert!(
+            !raw.contains(leak),
+            "profile detail leaked: {leak} in {raw}"
+        );
+    }
+}
+
+#[test]
+fn startup_fails_closed_on_bad_targets_file() {
+    // missing file
+    let status = Command::new(env!("CARGO_BIN_EXE_sinter"))
+        .args(["mcp", "--targets-file", "/nonexistent/targets.toml"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!status.success(), "missing targets file must fail startup");
+    // malformed TOML
+    let f = write_targets("[targets.x\nhost=");
+    let status = Command::new(env!("CARGO_BIN_EXE_sinter"))
+        .args(["mcp", "--targets-file"])
+        .arg(f.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!status.success(), "malformed TOML must fail startup");
+    // structurally invalid profile (missing user)
+    let f = write_targets("[targets.a]\nhost=\"h\"\nknown_hosts=\"/k\"\n");
+    let status = Command::new(env!("CARGO_BIN_EXE_sinter"))
+        .args(["mcp", "--targets-file"])
+        .arg(f.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!status.success(), "invalid profile must fail startup");
+}
+
+#[test]
+fn unknown_target_fails_closed_and_sanitized() {
+    let f = write_targets(TARGETS_OK);
+    let mut m = Mcp::start_with(&["--targets-file".to_string(), f.path().display().to_string()]);
+    init(&mut m);
+    for tool in ["sinter_plan_host", "sinter_audit_host"] {
+        let resp = m.tool(1, tool, json!({"manifest": VALID, "target": "web99"}));
+        let (is_err, v) = Mcp::payload(&resp);
+        assert!(is_err, "{tool}");
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown target"));
+        let raw = serde_json::to_string(&v).unwrap();
+        for leak in [SENT_HOST, SENT_USER, SENT_KH, SENT_ID] {
+            assert!(!raw.contains(leak), "{tool} leaked {leak}");
+        }
+    }
+    // Malformed name: rejected without echo.
+    let (is_err, v) = Mcp::payload(&m.tool(
+        2,
+        "sinter_plan_host",
+        json!({"manifest": VALID, "target": "../escape\nname"}),
+    ));
+    assert!(is_err);
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("invalid target name"));
+}
+
+#[test]
+fn host_tools_reject_connection_parameters() {
+    let f = write_targets(TARGETS_OK);
+    let mut m = Mcp::start_with(&["--targets-file".to_string(), f.path().display().to_string()]);
+    init(&mut m);
+    for tool in ["sinter_plan_host", "sinter_audit_host"] {
+        for key in [
+            "host",
+            "port",
+            "user",
+            "sudo",
+            "identity_files",
+            "known_hosts",
+            "command",
+        ] {
+            let (is_err, v) = Mcp::payload(&m.tool(
+                1,
+                tool,
+                json!({"manifest": VALID, "target": "web01", key: "x"}),
+            ));
+            assert!(is_err, "{tool} accepted connection parameter {key}");
+            assert!(
+                v["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("unexpected parameter"),
+                "{tool} {key}: {v}"
+            );
+        }
+    }
+}
+
+#[test]
+fn host_tool_schemas_expose_only_manifest_and_target() {
+    let mut m = Mcp::start();
+    init(&mut m);
+    let r = m.call(&json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}));
+    let tools = r["result"]["tools"].as_array().unwrap();
+    for name in ["sinter_plan_host", "sinter_audit_host"] {
+        let t = tools.iter().find(|t| t["name"] == name).unwrap();
+        let props = t["inputSchema"]["properties"].as_object().unwrap();
+        let mut keys: Vec<&str> = props.keys().map(|k| k.as_str()).collect();
+        keys.sort();
+        assert_eq!(keys, ["manifest", "target"], "{name} schema");
+    }
+}
+
+#[test]
+fn unreachable_host_error_is_sanitized() {
+    // 127.0.0.1:1 refuses immediately — exercises the real SSH connect path
+    // and its MCP-boundary sanitization without touching a real host.
+    let body = "[targets.local]\n\
+        host = \"127.0.0.1\"\n\
+        port = 1\n\
+        user = \"sentineluser_xyz\"\n\
+        known_hosts = \"/sentinel/known_hosts_xyz\"\n\
+        identity_files = [\"/sentinel/id_xyz\"]\n";
+    let f = write_targets(body);
+    let mut m = Mcp::start_with(&["--targets-file".to_string(), f.path().display().to_string()]);
+    init(&mut m);
+    let resp = m.tool(
+        1,
+        "sinter_plan_host",
+        json!({"manifest": VALID, "target": "local"}),
+    );
+    let (is_err, v) = Mcp::payload(&resp);
+    assert!(is_err, "unreachable target must produce a tool error: {v}");
+    let raw = serde_json::to_string(&v).unwrap();
+    for leak in [SENT_USER, SENT_KH, SENT_ID] {
+        assert!(!raw.contains(leak), "connect error leaked {leak}: {raw}");
+    }
+}
+
+#[test]
+fn immutable_registry_across_requests() {
+    let f = write_targets(TARGETS_OK);
+    let mut m = Mcp::start_with(&["--targets-file".to_string(), f.path().display().to_string()]);
+    init(&mut m);
+    // No request can add or alter profiles — enumerate twice.
+    let (_e, a) = Mcp::payload(&m.tool(1, "sinter_list_targets", json!({})));
+    let (_e, b) = Mcp::payload(&m.tool(2, "sinter_list_targets", json!({"target": "evil"})));
+    let (_e, c) = Mcp::payload(&m.tool(3, "sinter_list_targets", json!({})));
+    assert_eq!(a["targets"], json!(["db01", "web01"]));
+    assert_eq!(c["targets"], a["targets"]);
+    let _ = b;
 }

@@ -15,6 +15,7 @@ pub mod platform;
 pub mod resources;
 pub mod result;
 pub mod targetfs;
+pub mod targets;
 pub mod toml_front;
 pub mod value;
 pub mod yaml;

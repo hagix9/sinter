@@ -325,13 +325,57 @@ Tools (all read-only; there is intentionally no apply/execute/install tool):
 | `sinter_validate_manifest` | Validate recipe text with the real `load_model` parser; structured diagnostics. |
 | `sinter_inspect_manifest` | Structural recipe summary: resource identities, types, dependencies, sensitivity flags. Values are never returned. |
 | `sinter_plan` | Plan a recipe against a **supplied-facts** target snapshot (`ubuntu2404`, `ubuntu2604`, `rocky9`, `rocky10`) using the in-process scripted target — production planning code, no SSH, no real host, `Mode::Plan` only. |
+| `sinter_list_targets` | List the opaque names of administrator-configured SSH target profiles (names only — never connection details). |
+| `sinter_plan_host` | Plan a recipe against a **named** SSH target profile: real-host read-only observation via the production `Mode::Plan` path. |
+| `sinter_audit_host` | Audit whether a named SSH target satisfies a recipe via the production `run_audit` path. Read-only. |
 
-Not available: apply, arbitrary command execution, remote access, or any
-mutation. Client configuration example (stdio servers):
+Not available: apply, arbitrary command execution, or any mutation. Remote
+access is possible **only** through administrator-configured named targets —
+see below. Client configuration example (stdio servers):
 
 ```json
 { "mcpServers": { "sinter": { "command": "sinter", "args": ["mcp"] } } }
 ```
+
+### Named targets (`--targets-file`)
+
+`sinter mcp --targets-file targets.toml` enables real-host read-only
+observation through an immutable, startup-loaded registry of named SSH
+profiles. The MCP client may reference a target **only by its opaque name** —
+it cannot supply host, port, user, known_hosts, identity files, sudo, or any
+other connection parameter. Those are exclusively administrator-owned profile
+policy.
+
+```toml
+[targets.web01]
+host = "web01.example.com"
+port = 22                    # optional, default 22
+user = "deploy"
+known_hosts = "/secure/path/known_hosts"
+identity_files = ["/secure/path/id_ed25519"]  # optional
+sudo = false                 # optional: profile-owned privilege policy
+
+[targets.db01]
+host = "10.0.0.20"
+user = "ops"
+known_hosts = "/secure/path/known_hosts"
+sudo = true
+```
+
+- Profile names: `[A-Za-z0-9_-]`, start alphanumeric, max 64 chars.
+- The file is parsed once at startup; a missing, unreadable, malformed, or
+  structurally invalid file aborts `sinter mcp` with an error. No implicit
+  default locations, no environment-variable discovery.
+- Without `--targets-file`, the host tools are registered but fail closed:
+  `sinter_list_targets` returns an empty list and plan/audit calls report
+  `unknown target`.
+- Host tools reuse the production Plan/Audit paths: `Mode::Plan` on a
+  read-only `TargetFs` (mutation permits are unobtainable), command
+  resources never execute, and `run_audit` additionally refuses any engine
+  that could produce a permit.
+- `sinter_list_targets` returns names only; underlying diagnostics are
+  sanitized so profile internals (host, user, key paths) do not reach MCP
+  output.
 
 This is unrelated to the documentation site's WebMCP surface (browser-side,
 documentation lookup only); Core MCP exposes Sinter's own operations.

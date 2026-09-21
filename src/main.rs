@@ -30,7 +30,15 @@ enum Command {
     /// Audit whether a target already satisfies a recipe. Read-only.
     Audit(TargetArgs),
     /// Serve a read-only MCP (Model Context Protocol) endpoint on stdio.
-    Mcp,
+    Mcp(McpArgs),
+}
+
+#[derive(Args, Debug)]
+struct McpArgs {
+    /// Named SSH target profiles for read-only plan/audit tools (TOML).
+    /// Omitted: host tools are registered but fail closed as unknown target.
+    #[arg(long)]
+    targets_file: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -153,8 +161,14 @@ fn run(cli: Cli) -> Result<u8, SinterError> {
             render_audit(&report, &ro, &mut lock).map_err(io_error)?;
             Ok(report.exit_code())
         }
-        Command::Mcp => {
-            sinter::mcp::serve()?;
+        Command::Mcp(a) => {
+            // Load once, fail closed: a missing/unreadable/malformed targets
+            // file aborts startup; the registry is immutable while serving.
+            let targets = match &a.targets_file {
+                Some(p) => sinter::targets::TargetRegistry::load(p)?,
+                None => sinter::targets::TargetRegistry::default(),
+            };
+            sinter::mcp::serve(targets)?;
             Ok(0)
         }
     }
