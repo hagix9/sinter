@@ -29,6 +29,8 @@ enum Command {
     Apply(TargetArgs),
     /// Audit whether a target already satisfies a recipe. Read-only.
     Audit(TargetArgs),
+    /// Serve a read-only MCP (Model Context Protocol) endpoint on stdio.
+    Mcp,
 }
 
 #[derive(Args, Debug)]
@@ -150,6 +152,10 @@ fn run(cli: Cli) -> Result<u8, SinterError> {
             let mut lock = stdout.lock();
             render_audit(&report, &ro, &mut lock).map_err(io_error)?;
             Ok(report.exit_code())
+        }
+        Command::Mcp => {
+            sinter::mcp::serve()?;
+            Ok(0)
         }
     }
 }

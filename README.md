@@ -301,9 +301,40 @@ src/
   diff.rs          truthful, sanitized diff rendering
   output.rs        human and JSON rendering with sensitive redaction
   error.rs         error kinds and exit codes
+  mcp.rs           read-only MCP stdio adapter (unreleased, mainline)
   main.rs          CLI
 tests/             acceptance and integration test suites
 ```
+
+## MCP interface (unreleased, mainline)
+
+**Status:** mainline development after v0.4.1. `sinter mcp` is not part of any
+released artifact.
+
+`sinter mcp` serves a minimal, strictly **read-only** MCP (Model Context
+Protocol) endpoint over stdio (newline-delimited JSON-RPC 2.0). It is a thin
+adapter over the authoritative core — no validation, platform, or planning
+rule is reimplemented.
+
+Tools (all read-only; there is intentionally no apply/execute/install tool):
+
+| Tool | Purpose |
+|------|---------|
+| `sinter_get_version` | Crate version and read-only capability statement. |
+| `sinter_classify_platform` | Classify a target from `/etc/os-release` content (family, package backend) via the real platform model. |
+| `sinter_validate_manifest` | Validate recipe text with the real `load_model` parser; structured diagnostics. |
+| `sinter_inspect_manifest` | Structural recipe summary: resource identities, types, dependencies, sensitivity flags. Values are never returned. |
+| `sinter_plan` | Plan a recipe against a **supplied-facts** target snapshot (`ubuntu2404`, `ubuntu2604`, `rocky9`, `rocky10`) using the in-process scripted target — production planning code, no SSH, no real host, `Mode::Plan` only. |
+
+Not available: apply, arbitrary command execution, remote access, or any
+mutation. Client configuration example (stdio servers):
+
+```json
+{ "mcpServers": { "sinter": { "command": "sinter", "args": ["mcp"] } } }
+```
+
+This is unrelated to the documentation site's WebMCP surface (browser-side,
+documentation lookup only); Core MCP exposes Sinter's own operations.
 
 ## License
 

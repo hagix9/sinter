@@ -7,6 +7,7 @@ pub mod executor;
 pub mod expressions;
 pub mod facts;
 pub mod ir;
+pub mod mcp;
 pub mod model;
 pub mod output;
 pub mod paths;
