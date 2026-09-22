@@ -7,6 +7,7 @@
 //! No HTTP endpoints, auth, persistence, or deployment in this phase.
 
 pub mod auth;
+pub mod bridge;
 pub mod cleanup;
 pub mod clock;
 pub mod config;

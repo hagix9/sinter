@@ -9,6 +9,14 @@ publish = false
 # builds — P6 replaces PublicAuth with OAuth and deletes this path.
 test-auth = []
 
+[[bin]]
+name = "sinter-gateway"
+path = "src/bin/gateway.rs"
+
+[[bin]]
+name = "sinter-bridge"
+path = "src/bin/bridge.rs"
+
 [[test]]
 name = "mcp_http"
 required-features = ["test-auth"]
@@ -25,6 +33,10 @@ required-features = ["test-auth"]
 name = "p7_log_grep"
 required-features = ["test-auth"]
 
+[[test]]
+name = "assembly"
+required-features = ["test-auth"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -35,10 +47,11 @@ sha2 = "0.10"
 hex = "0.4"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 axum = "0.8.9"
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "time"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
 jsonwebtoken = "9"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 url = "2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tracing-subscriber = "0.3"
