@@ -1,0 +1,34 @@
+[package]
+name = "sinter-gateway"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[features]
+# Test-only public auth (X-Sinter-Test-Principal). Never enable in production
+# builds — P6 replaces PublicAuth with OAuth and deletes this path.
+test-auth = []
+
+[[test]]
+name = "mcp_http"
+required-features = ["test-auth"]
+
+[[test]]
+name = "mcp_log"
+required-features = ["test-auth"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+getrandom = "0.3"
+sha2 = "0.10"
+hex = "0.4"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+axum = "0.8.9"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "time"] }
+
+[dev-dependencies]
+tracing-subscriber = "0.3"
+axum = "0.8.9"

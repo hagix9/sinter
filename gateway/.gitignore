@@ -1,0 +1,6 @@
+target/
+# Runtime identity DB — never commit (contains verifier material)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite*
