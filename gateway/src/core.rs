@@ -437,14 +437,28 @@ impl<C: Clock> GatewayCore<C> {
 
     /// Caller-side termination (HTTP disconnect or notifications/cancelled):
     /// terminal — a late controller response can never complete the call.
-    pub fn cancel(&self, request_id: &RequestId) -> Result<(), TransportError> {
+    ///
+    /// F-03 (P7): ownership is mandatory. A `RequestId` alone never
+    /// authorizes — the caller must present the owning account. Foreign
+    /// rids fail `wrong_account` before any state is touched.
+    pub fn cancel(
+        &self,
+        account: &AccountId,
+        request_id: &RequestId,
+    ) -> Result<(), TransportError> {
         let mut g = self.inner.lock().unwrap();
         let now = self.clock.mono();
-        if !g.requests.contains_key(request_id) {
+        let Some(req) = g.requests.get(request_id) else {
             return Err(match g.tombstones.get(request_id) {
                 Some(t) => terminal_error(t.state),
                 None => TransportError::new(ErrorCode::UnknownRequest, "unknown request_id"),
             });
+        };
+        if &req.account != account {
+            return Err(TransportError::new(
+                ErrorCode::WrongAccount,
+                "request belongs to a different account",
+            ));
         }
         finalize(
             &mut g,
@@ -487,6 +501,20 @@ impl<C: Clock> GatewayCore<C> {
         let ttl = Duration::from_millis(TOMBSTONE_TTL_MS);
         g.tombstones.retain(|_, t| now.duration_since(t.at) < ttl);
         n
+    }
+
+    /// Observability gauges (P7 metrics) — counts only, no identity labels.
+    pub fn active_poll_count(&self) -> usize {
+        self.inner.lock().unwrap().active_polls.len()
+    }
+    /// Requests in a non-terminal state (queued + delivered).
+    pub fn work_queued_count(&self) -> usize {
+        self.inner.lock().unwrap().requests.len()
+    }
+    /// Controllers seen within the online window.
+    pub fn online_controller_count(&self) -> usize {
+        let g = self.inner.lock().unwrap();
+        g.controllers.keys().filter(|c| self.online(&g, c)).count()
     }
 
     /// Observability for tests/diagnostics: current state, terminal included.

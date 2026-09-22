@@ -7,14 +7,18 @@
 //! No HTTP endpoints, auth, persistence, or deployment in this phase.
 
 pub mod auth;
+pub mod cleanup;
 pub mod clock;
+pub mod config;
 pub mod core;
 pub mod edge;
 pub mod http;
 pub mod id;
 pub mod mcp;
+pub mod metrics;
 pub mod oauth;
 pub mod proto;
+pub mod rate_limit;
 pub mod sqlite_store;
 pub mod state;
 pub mod store;

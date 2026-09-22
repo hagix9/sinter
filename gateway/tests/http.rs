@@ -444,7 +444,7 @@ async fn respond_ownership_and_state_negatives() {
         .unwrap();
     http(addr, "POST", "/v1/poll", &[&bearer(&cred_a)], b"");
     rig.core
-        .cancel(&RequestId::from_wire(rid3.as_str()))
+        .cancel(p.account_id(), &RequestId::from_wire(rid3.as_str()))
         .unwrap();
     let (s, b) = post(&cred_a, &mk(rid3.as_str()));
     assert_eq!((s, err_code(&b)), (410, "cancelled_request".into()));

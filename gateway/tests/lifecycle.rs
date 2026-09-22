@@ -187,7 +187,7 @@ fn cancel_is_terminal_and_blocks_late_response() {
     let (c, _h, acc, ctl) = setup();
     let (rid, rx) = submit(&c, &acc);
     c.poll(&ctl).unwrap();
-    c.cancel(&rid).unwrap();
+    c.cancel(&acc, &rid).unwrap();
     assert_eq!(c.request_state(&rid), Some(ReqState::Cancelled));
 
     let e = c
@@ -205,7 +205,7 @@ fn cancel_is_terminal_and_blocks_late_response() {
 fn cancel_queued_request() {
     let (c, _h, acc, ctl) = setup();
     let (rid, _rx) = submit(&c, &acc);
-    c.cancel(&rid).unwrap();
+    c.cancel(&acc, &rid).unwrap();
     assert!(c.poll(&ctl).unwrap().is_none());
     assert_eq!(c.request_state(&rid), Some(ReqState::Cancelled));
 }
@@ -215,7 +215,7 @@ fn cancel_vs_expiry_first_terminal_wins() {
     let (c, h, acc, ctl) = setup();
     let (rid, _rx) = submit(&c, &acc);
     c.poll(&ctl).unwrap();
-    c.cancel(&rid).unwrap();
+    c.cancel(&acc, &rid).unwrap();
     h.advance(Duration::from_millis(11_000));
     assert_eq!(
         c.sweep_expired(),

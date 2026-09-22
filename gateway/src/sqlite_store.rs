@@ -143,6 +143,9 @@ const CONTROLLER_COLS: &str = "controller_id, account_id, cred_verifier, status,
 /// workload and it makes every trait method trivially serialized.
 pub struct SqliteStore {
     conn: Mutex<Connection>,
+    /// P7 telemetry: `sqlite_errors_total{op}` — optional, categorical.
+    /// Interior-mutable so it can attach through `Arc<SqliteStore>`.
+    metrics: Mutex<Option<crate::metrics::Metrics>>,
 }
 
 impl std::fmt::Debug for SqliteStore {
@@ -182,6 +185,7 @@ impl SqliteStore {
         }
         Ok(Self {
             conn: Mutex::new(conn),
+            metrics: Mutex::new(None),
         })
     }
 
@@ -264,14 +268,36 @@ impl SqliteStore {
         .map_err(to_store_err)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            metrics: Mutex::new(None),
         })
+    }
+}
+
+impl SqliteStore {
+    fn count_op(&self, op: crate::metrics::SqlOp) {
+        if let Some(m) = self.metrics.lock().unwrap().as_ref() {
+            m.sqlite_error(op);
+        }
+    }
+
+    /// Convert a rusqlite error and count it under the operation label.
+    fn serr(&self, op: crate::metrics::SqlOp, e: rusqlite::Error) -> StoreError {
+        self.count_op(op);
+        to_store_err(e)
+    }
+
+    /// Count an already-converted StoreError under the operation label.
+    fn cerr(&self, op: crate::metrics::SqlOp, e: StoreError) -> StoreError {
+        self.count_op(op);
+        e
     }
 }
 
 impl IdentityStore for SqliteStore {
     fn put_registration_token(&self, rec: RegistrationTokenRecord) -> Result<(), StoreError> {
+        use crate::metrics::SqlOp::TokenPut as OP;
         let conn = self.conn.lock().unwrap();
-        let tx = conn.unchecked_transaction().map_err(to_store_err)?;
+        let tx = conn.unchecked_transaction().map_err(|e| self.serr(OP, e))?;
         tx.execute(
             "INSERT INTO registration_tokens
              (verifier, account_id, created_unix_ms, expires_unix_ms, consumed_unix_ms)
@@ -283,15 +309,16 @@ impl IdentityStore for SqliteStore {
                 rec.expires_unix_ms as i64
             ],
         )
-        .map_err(to_store_err)?;
+        .map_err(|e| self.serr(OP, e))?;
         audit(
             &tx,
             rec.created_unix_ms,
             "registration_token_issued",
             Some(rec.account_id.as_str()),
             None,
-        )?;
-        tx.commit().map_err(to_store_err)
+        )
+        .map_err(|e| self.cerr(OP, e))?;
+        tx.commit().map_err(|e| self.serr(OP, e))
     }
 
     /// ATOMIC: presence + unconsumed + unexpired checked and consumed marked
@@ -301,8 +328,9 @@ impl IdentityStore for SqliteStore {
         verifier: &Verifier,
         now_unix_ms: u64,
     ) -> Result<TokenTake, StoreError> {
+        use crate::metrics::SqlOp::TokenTake as OP;
         let conn = self.conn.lock().unwrap();
-        let tx = conn.unchecked_transaction().map_err(to_store_err)?;
+        let tx = conn.unchecked_transaction().map_err(|e| self.serr(OP, e))?;
         let row = tx
             .query_row(
                 "SELECT account_id, expires_unix_ms, created_unix_ms, consumed_unix_ms
@@ -318,7 +346,7 @@ impl IdentityStore for SqliteStore {
                 },
             )
             .optional()
-            .map_err(to_store_err)?;
+            .map_err(|e| self.serr(OP, e))?;
         let Some((account, expires, created, consumed)) = row else {
             return Ok(TokenTake::Missing); // tx drops → rollback, no write
         };
@@ -332,15 +360,16 @@ impl IdentityStore for SqliteStore {
             "UPDATE registration_tokens SET consumed_unix_ms = ?1 WHERE verifier = ?2",
             params![now_unix_ms as i64, verifier.0],
         )
-        .map_err(to_store_err)?;
+        .map_err(|e| self.serr(OP, e))?;
         audit(
             &tx,
             now_unix_ms,
             "registration_token_consumed",
             Some(account.as_str()),
             None,
-        )?;
-        tx.commit().map_err(to_store_err)?;
+        )
+        .map_err(|e| self.cerr(OP, e))?;
+        tx.commit().map_err(|e| self.serr(OP, e))?;
         Ok(TokenTake::Consumed(RegistrationTokenRecord {
             verifier: verifier.clone(),
             account_id: AccountId::new(account),
@@ -354,8 +383,9 @@ impl IdentityStore for SqliteStore {
     /// application check raced — constraint violation maps to
     /// AccountHasActiveController.
     fn insert_controller(&self, rec: ControllerRecord) -> Result<(), StoreError> {
+        use crate::metrics::SqlOp::ControllerInsert as OP;
         let conn = self.conn.lock().unwrap();
-        let tx = conn.unchecked_transaction().map_err(to_store_err)?;
+        let tx = conn.unchecked_transaction().map_err(|e| self.serr(OP, e))?;
         let res = tx.execute(
             "INSERT INTO controllers
              (controller_id, account_id, cred_verifier, status, created_unix_ms)
@@ -374,7 +404,7 @@ impl IdentityStore for SqliteStore {
             {
                 return Err(StoreError::AccountHasActiveController)
             }
-            Err(e) => return Err(to_store_err(e)),
+            Err(e) => return Err(self.serr(OP, e)),
         }
         audit(
             &tx,
@@ -382,30 +412,45 @@ impl IdentityStore for SqliteStore {
             "controller_registered",
             Some(rec.account_id.as_str()),
             Some(rec.controller_id.as_str()),
-        )?;
-        tx.commit().map_err(to_store_err)
+        )
+        .map_err(|e| self.cerr(OP, e))?;
+        tx.commit().map_err(|e| self.serr(OP, e))
     }
 
     fn controller_by_verifier(&self, verifier: &Verifier) -> Option<ControllerRecord> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            &format!("SELECT {CONTROLLER_COLS} FROM controllers WHERE cred_verifier = ?1"),
-            params![verifier.0],
-            row_to_controller,
-        )
-        .optional()
-        .unwrap_or(None)
+        match conn
+            .query_row(
+                &format!("SELECT {CONTROLLER_COLS} FROM controllers WHERE cred_verifier = ?1"),
+                params![verifier.0],
+                row_to_controller,
+            )
+            .optional()
+        {
+            Ok(v) => v,
+            Err(e) => {
+                self.serr(crate::metrics::SqlOp::Read, e);
+                None
+            }
+        }
     }
 
     fn controller(&self, id: &ControllerId) -> Option<ControllerRecord> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            &format!("SELECT {CONTROLLER_COLS} FROM controllers WHERE controller_id = ?1"),
-            params![id.as_str()],
-            row_to_controller,
-        )
-        .optional()
-        .unwrap_or(None)
+        match conn
+            .query_row(
+                &format!("SELECT {CONTROLLER_COLS} FROM controllers WHERE controller_id = ?1"),
+                params![id.as_str()],
+                row_to_controller,
+            )
+            .optional()
+        {
+            Ok(v) => v,
+            Err(e) => {
+                self.serr(crate::metrics::SqlOp::Read, e);
+                None
+            }
+        }
     }
 
     /// ATOMIC rotation: read status+verifier, verify expected, swap verifier —
@@ -420,8 +465,9 @@ impl IdentityStore for SqliteStore {
         new_verifier: Verifier,
         now_unix_ms: u64,
     ) -> Result<(), StoreError> {
+        use crate::metrics::SqlOp::Rotate as OP;
         let conn = self.conn.lock().unwrap();
-        let tx = conn.unchecked_transaction().map_err(to_store_err)?;
+        let tx = conn.unchecked_transaction().map_err(|e| self.serr(OP, e))?;
         let row = tx
             .query_row(
                 "SELECT status, cred_verifier, account_id FROM controllers
@@ -436,7 +482,7 @@ impl IdentityStore for SqliteStore {
                 },
             )
             .optional()
-            .map_err(to_store_err)?;
+            .map_err(|e| self.serr(OP, e))?;
         let Some((status, cur_verifier, account)) = row else {
             return Err(StoreError::UnknownController);
         };
@@ -451,15 +497,16 @@ impl IdentityStore for SqliteStore {
              WHERE controller_id = ?3",
             params![new_verifier.0, now_unix_ms as i64, id.as_str()],
         )
-        .map_err(to_store_err)?;
+        .map_err(|e| self.serr(OP, e))?;
         audit(
             &tx,
             now_unix_ms,
             "credential_rotated",
             Some(account.as_str()),
             Some(id.as_str()),
-        )?;
-        tx.commit().map_err(to_store_err)
+        )
+        .map_err(|e| self.cerr(OP, e))?;
+        tx.commit().map_err(|e| self.serr(OP, e))
     }
 
     /// ATOMIC + terminal: Revoked→Active rejected inside the transaction.
@@ -469,8 +516,9 @@ impl IdentityStore for SqliteStore {
         status: ControllerStatus,
         now_unix_ms: u64,
     ) -> Result<(), StoreError> {
+        use crate::metrics::SqlOp::Status as OP;
         let conn = self.conn.lock().unwrap();
-        let tx = conn.unchecked_transaction().map_err(to_store_err)?;
+        let tx = conn.unchecked_transaction().map_err(|e| self.serr(OP, e))?;
         let row = tx
             .query_row(
                 "SELECT status, account_id FROM controllers WHERE controller_id = ?1",
@@ -478,7 +526,7 @@ impl IdentityStore for SqliteStore {
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             )
             .optional()
-            .map_err(to_store_err)?;
+            .map_err(|e| self.serr(OP, e))?;
         let Some((cur, account)) = row else {
             return Err(StoreError::UnknownController);
         };
@@ -497,7 +545,7 @@ impl IdentityStore for SqliteStore {
                 id.as_str()
             ],
         )
-        .map_err(to_store_err)?;
+        .map_err(|e| self.serr(OP, e))?;
         audit(
             &tx,
             now_unix_ms,
@@ -507,11 +555,13 @@ impl IdentityStore for SqliteStore {
             },
             Some(account.as_str()),
             Some(id.as_str()),
-        )?;
-        tx.commit().map_err(to_store_err)
+        )
+        .map_err(|e| self.cerr(OP, e))?;
+        tx.commit().map_err(|e| self.serr(OP, e))
     }
 
     fn purge_spent_tokens(&self, now_unix_ms: u64) -> Result<u64, StoreError> {
+        use crate::metrics::SqlOp::Purge as OP;
         let conn = self.conn.lock().unwrap();
         let n = conn
             .execute(
@@ -520,7 +570,27 @@ impl IdentityStore for SqliteStore {
                    AND ?1 - consumed_unix_ms >= ?2",
                 params![now_unix_ms as i64, SPENT_TOKEN_RETENTION_MS as i64],
             )
-            .map_err(to_store_err)?;
+            .map_err(|e| self.serr(OP, e))?;
+        Ok(n as u64)
+    }
+
+    /// RFC §F: revoked controllers purgeable after +90d. Active rows are
+    /// never touched; the `controller_revoked` audit row persists.
+    fn purge_revoked_controllers(
+        &self,
+        now_unix_ms: u64,
+        retention_ms: u64,
+    ) -> Result<u64, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn
+            .execute(
+                "DELETE FROM controllers
+                 WHERE status = 'revoked'
+                   AND revoked_unix_ms IS NOT NULL
+                   AND ?1 - revoked_unix_ms >= ?2",
+                params![now_unix_ms as i64, retention_ms as i64],
+            )
+            .map_err(|e| self.serr(crate::metrics::SqlOp::Purge, e))?;
         Ok(n as u64)
     }
 
@@ -529,7 +599,14 @@ impl IdentityStore for SqliteStore {
             .lock()
             .unwrap()
             .query_row("SELECT 1", [], |_| Ok(()))
-            .map_err(to_store_err)
+            .map_err(|e| self.serr(crate::metrics::SqlOp::Readyz, e))
+    }
+
+    /// Attach the shared metrics handle for `sqlite_errors_total{op}`.
+    /// `&self` so it works on an `Arc<SqliteStore>`/`Arc<dyn IdentityStore>`
+    /// after wiring (F-17: called by `GatewayHttp::new`).
+    fn set_metrics(&self, m: crate::metrics::Metrics) {
+        *self.metrics.lock().unwrap() = Some(m);
     }
 }
 

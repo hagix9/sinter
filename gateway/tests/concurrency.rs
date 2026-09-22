@@ -123,7 +123,7 @@ fn concurrent_cancel_and_respond_one_terminal_outcome() {
         let rid2 = rid.clone();
         let ctl2 = ctl.clone();
         let t = std::thread::spawn(move || c2.respond(&ctl2, &rid2, Outcome::Mcp(json!({"ok":1}))));
-        let cancel_res = c.cancel(&rid);
+        let cancel_res = c.cancel(&acc, &rid);
         let respond_res = t.join().unwrap();
 
         // Exactly one of cancel/respond won; both paths are loud, none silent.

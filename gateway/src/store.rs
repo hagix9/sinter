@@ -141,9 +141,24 @@ pub trait IdentityStore: Send + Sync {
     /// Returns rows removed.
     fn purge_spent_tokens(&self, now_unix_ms: u64) -> Result<u64, StoreError>;
 
+    /// Purge controllers whose revocation is older than `retention_ms`
+    /// (RFC §F: revoked +90d). Active controllers are never touched.
+    /// Returns rows removed.
+    fn purge_revoked_controllers(
+        &self,
+        now_unix_ms: u64,
+        retention_ms: u64,
+    ) -> Result<u64, StoreError>;
+
     /// Readiness probe for /readyz: is the store usable right now?
     /// In-memory is always ready; durable impls run a trivial query.
     fn readyz(&self) -> Result<(), StoreError>;
+
+    /// Attach the shared P7 metrics handle for `sqlite_errors_total{op}`
+    /// (RFC §L). Default no-op — stores without a metrics sink ignore it.
+    /// F-17: wired at `GatewayHttp::new` so durable-store failures are
+    /// observable without each call site remembering to attach.
+    fn set_metrics(&self, _m: crate::metrics::Metrics) {}
 }
 
 /// In-memory store — correct and atomic; the P3 SQLite store must satisfy the
@@ -291,6 +306,34 @@ impl IdentityStore for MemoryStore {
             None => true,
         });
         Ok((before - g.tokens.len()) as u64)
+    }
+
+    fn purge_revoked_controllers(
+        &self,
+        now_unix_ms: u64,
+        retention_ms: u64,
+    ) -> Result<u64, StoreError> {
+        let mut g = self.inner.lock().unwrap();
+        // Collect first: verifiers must leave by_verifier with the record.
+        let dead: Vec<ControllerId> = g
+            .controllers
+            .iter()
+            .filter(|(_, c)| {
+                c.status == ControllerStatus::Revoked
+                    && c.revoked_unix_ms
+                        .is_some_and(|t| now_unix_ms.saturating_sub(t) >= retention_ms)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &dead {
+            if let Some(rec) = g.controllers.remove(id) {
+                g.by_verifier.remove(&rec.cred_verifier);
+                if g.by_account.get(&rec.account_id) == Some(id) {
+                    g.by_account.remove(&rec.account_id);
+                }
+            }
+        }
+        Ok(dead.len() as u64)
     }
 
     fn readyz(&self) -> Result<(), StoreError> {

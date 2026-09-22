@@ -17,6 +17,14 @@ required-features = ["test-auth"]
 name = "mcp_log"
 required-features = ["test-auth"]
 
+[[test]]
+name = "abuse"
+required-features = ["test-auth"]
+
+[[test]]
+name = "p7_log_grep"
+required-features = ["test-auth"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

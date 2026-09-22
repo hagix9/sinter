@@ -316,6 +316,8 @@ pub struct OAuthValidator {
     cfg: OAuthConfig,
     source: Box<dyn JwksSource>,
     jwks: Mutex<JwksState>,
+    /// P7 telemetry: `jwks_refresh_total{result}` — optional, categorical.
+    metrics: Option<crate::metrics::Metrics>,
 }
 
 impl OAuthValidator {
@@ -329,7 +331,13 @@ impl OAuthValidator {
                 last_attempt: None,
                 keys_fresh: false,
             }),
+            metrics: None,
         })
+    }
+
+    /// Attach the shared metrics handle (P7 `jwks_refresh_total{result}`).
+    pub fn set_metrics(&mut self, m: crate::metrics::Metrics) {
+        self.metrics = Some(m);
     }
 
     /// RFC 9728 protected-resource metadata — exact document served at
@@ -355,9 +363,15 @@ impl OAuthValidator {
             Ok(keys) => {
                 st.keys = keys;
                 st.keys_fresh = true;
+                if let Some(m) = &self.metrics {
+                    m.jwks_refresh(true);
+                }
                 true
             }
             Err(e) => {
+                if let Some(m) = &self.metrics {
+                    m.jwks_refresh(false);
+                }
                 tracing::warn!(reason = %e, "jwks refresh failed");
                 false
             }

@@ -356,6 +356,7 @@ struct CancelOnDrop<'a> {
     core: &'a GatewayCore<SystemClock>,
     sessions: &'a SessionManager,
     sid: &'a str,
+    account: &'a AccountId,
     rid: RequestId,
     done: bool,
 }
@@ -364,7 +365,8 @@ impl Drop for CancelOnDrop<'_> {
     fn drop(&mut self) {
         self.sessions.untrack(self.sid, &self.rid);
         if !self.done {
-            let _ = self.core.cancel(&self.rid);
+            // F-03: ownership-scoped cancel — this request's own account.
+            let _ = self.core.cancel(self.account, &self.rid);
             info!(request_id = %self.rid, "mcp caller disconnected — work cancelled");
         }
     }
@@ -389,6 +391,7 @@ pub async fn handle_post(
     session_id: Option<&str>,
     frame: Value,
     deadline: Duration,
+    metrics: &crate::metrics::Metrics,
 ) -> Result<(McpOutcome, Option<String>), TransportError> {
     let deadline = deadline.min(MCP_DEADLINE);
     // Session required for everything except initialize. (Batch arrays are
@@ -437,13 +440,14 @@ pub async fn handle_post(
                 // request state. Best-effort: unknown/stale ids are a no-op,
                 // the notification is still 202'd.
                 if let Some(rid) = sessions.cancel_live(sid, principal, &public_id) {
-                    let _ = core.cancel(&rid);
+                    // F-03: ownership-scoped cancel — the caller's account.
+                    let _ = core.cancel(&account, &rid);
                     info!(request_id = %rid, "mcp request cancelled by notification");
                 }
                 Ok((McpOutcome::Accepted, None))
             }
             EdgeAction::Forward(f) => {
-                let resp = forward(core, sessions, sid, &account, f, deadline).await;
+                let resp = forward(core, sessions, sid, &account, f, deadline, metrics).await;
                 Ok((McpOutcome::Json(resp), None))
             }
         }
@@ -459,6 +463,7 @@ async fn forward(
     account: &AccountId,
     frame: Value,
     deadline: Duration,
+    metrics: &crate::metrics::Metrics,
 ) -> Value {
     let caller_id = frame.get("id").cloned().unwrap_or(Value::Null);
     let is_tools_list = frame.get("method").and_then(Value::as_str) == Some("tools/list");
@@ -473,6 +478,7 @@ async fn forward(
         core,
         sessions,
         sid,
+        account,
         rid: rid.clone(),
         done: false,
     };
@@ -485,6 +491,9 @@ async fn forward(
         Ok(Err(e)) => {
             // Timeout = honest deadline. Disconnected = the request reached a
             // terminal state without an outcome send — report its real state.
+            if matches!(e, std::sync::mpsc::RecvTimeoutError::Timeout) {
+                metrics.deadline_exceeded(1);
+            }
             let code = match e {
                 std::sync::mpsc::RecvTimeoutError::Timeout => ErrorCode::DeadlineExceeded,
                 std::sync::mpsc::RecvTimeoutError::Disconnected => match core.request_state(&rid) {

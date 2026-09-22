@@ -27,9 +27,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::net::IpAddr;
+
 use axum::body::to_bytes;
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
@@ -38,12 +41,19 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use crate::auth::{AuthenticatedController, ControllerAuth};
+use crate::cleanup::CleanupScheduler;
 use crate::clock::SystemClock;
+use crate::config::GwConfig;
 use crate::core::GatewayCore;
 use crate::id::RequestId;
 use crate::mcp::{self, McpOutcome, PublicAuth, PublicAuthError, SessionManager};
+use crate::metrics::{AuthFailReason, Metrics};
 use crate::oauth::{JwksSource, OAuthConfig, OAuthValidator};
 use crate::proto::*;
+use crate::rate_limit::{
+    BucketClass, ConcurrencyGate, Limited, RateLimiter, MCP_GLOBAL_CONCURRENCY,
+    REGISTER_CONCURRENCY, RESPOND_CONCURRENCY, ROTATE_CONCURRENCY,
+};
 use crate::sqlite_store::SqliteStore;
 use crate::store::IdentityStore;
 
@@ -77,6 +87,20 @@ pub struct GatewayHttp {
     /// RFC 9728 protected-resource document — Some only when P6 OAuth is
     /// configured; the well-known route 404s otherwise.
     prm_document: Option<serde_json::Value>,
+    /// P7: token-bucket limiter (memory-only; RFC §K). Keys are account,
+    /// controller, or socket peer IP — never forwarded headers.
+    limiter: Arc<RateLimiter<SystemClock>>,
+    /// P7: bounded in-process counters (RFC §L).
+    metrics: Metrics,
+    /// P7: concurrency ceilings (RFC §K "Concurrency" column).
+    gate_mcp: ConcurrencyGate,
+    gate_respond: ConcurrencyGate,
+    gate_register: ConcurrencyGate,
+    gate_rotate: ConcurrencyGate,
+    /// P7: optional `/metrics` admin bind (None = off; loopback-only).
+    metrics_bind: Option<SocketAddr>,
+    /// P7: identity/bucket GC period (RFC §M `SINTER_GW_CLEANUP_INTERVAL_SECS`).
+    cleanup_interval: Duration,
 }
 
 impl GatewayHttp {
@@ -85,7 +109,7 @@ impl GatewayHttp {
         auth: Arc<ControllerAuth<SqliteStore, SystemClock>>,
         store: Arc<dyn IdentityStore>,
     ) -> Self {
-        Self {
+        let st = Self {
             core,
             auth,
             store,
@@ -95,7 +119,19 @@ impl GatewayHttp {
             mcp_deadline: mcp::MCP_DEADLINE,
             allowed_origins: Arc::new(std::collections::HashSet::new()),
             prm_document: None,
-        }
+            limiter: Arc::new(RateLimiter::new(SystemClock, Default::default())),
+            metrics: Metrics::new(),
+            gate_mcp: ConcurrencyGate::new(MCP_GLOBAL_CONCURRENCY),
+            gate_respond: ConcurrencyGate::new(RESPOND_CONCURRENCY),
+            gate_register: ConcurrencyGate::new(REGISTER_CONCURRENCY),
+            gate_rotate: ConcurrencyGate::new(ROTATE_CONCURRENCY),
+            metrics_bind: None,
+            cleanup_interval: Duration::from_secs(3600),
+        };
+        // F-17: wire `sqlite_errors_total{op}` into the store at the
+        // composition root — durable-store failures are observable.
+        st.store.set_metrics(st.metrics.clone());
+        st
     }
 
     /// Attach the P5 public-auth implementation (test injection now, OAuth
@@ -119,11 +155,37 @@ impl GatewayHttp {
         jwks_source: Box<dyn JwksSource>,
         allowed_origins: std::collections::HashSet<String>,
     ) -> Result<Self, TransportError> {
-        let validator = OAuthValidator::new(config, jwks_source)?;
+        let mut validator = OAuthValidator::new(config, jwks_source)?;
+        validator.set_metrics(self.metrics.clone());
         self.prm_document = Some(validator.protected_resource_metadata());
         self.public_auth = Some(Arc::new(validator));
         self.allowed_origins = Arc::new(allowed_origins);
         Ok(self)
+    }
+
+    /// P7: apply the validated runtime configuration (RFC §M). Rate limits,
+    /// metrics endpoint, cleanup period — all restart-scoped.
+    pub fn with_config(mut self, cfg: &GwConfig) -> Self {
+        self.limiter = Arc::new(RateLimiter::new(SystemClock, cfg.rate.clone()));
+        self.metrics_bind = cfg.metrics_enabled.then_some(cfg.metrics_bind);
+        self.cleanup_interval = cfg.cleanup_interval;
+        self
+    }
+
+    /// P7: attach a pre-built limiter — deterministic control in tests.
+    pub fn with_limiter(mut self, limiter: Arc<RateLimiter<SystemClock>>) -> Self {
+        self.limiter = limiter;
+        self
+    }
+
+    /// P7: shared metrics handle (for store/oauth wiring and tests).
+    pub fn metrics(&self) -> &Metrics {
+        &self.metrics
+    }
+
+    /// P7: rate limiter handle (for the cleanup scheduler/tests).
+    pub fn limiter(&self) -> &Arc<RateLimiter<SystemClock>> {
+        &self.limiter
     }
 
     /// Test/config hook: shorten the /mcp forwarded-request deadline —
@@ -167,6 +229,10 @@ impl GatewayHttp {
                 "/.well-known/oauth-protected-resource/mcp",
                 get(protected_resource_metadata),
             )
+            .layer(middleware::from_fn_with_state(
+                self.metrics.clone(),
+                observe_http,
+            ))
             .with_state(self.clone())
     }
 }
@@ -297,11 +363,123 @@ async fn json_body<T: serde::de::DeserializeOwned>(
         .map_err(|_| bad(ErrorCode::MalformedRequest, "malformed JSON body"))
 }
 
+// ---------- P7 rate-limit / metrics plumbing ----------
+
+/// Socket peer identity for pre-auth limiter keys. Forwarded/XFF-style
+/// headers are ignored entirely (RFC §K): only the TCP connection's remote
+/// address is trusted.
+fn peer_ip(info: &ConnectInfo<SocketAddr>) -> IpAddr {
+    info.0.ip()
+}
+
+/// Uniform RFC §K rejection: `429` + `Retry-After`, categorical body.
+/// No identity, bucket state, or route detail is revealed.
+fn rate_limited_response(lim: Limited) -> Response {
+    let mut r = (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({
+            "error": {"code": "rate_limited", "message": "rate limit exceeded"}
+        })),
+    )
+        .into_response();
+    r.headers_mut().insert(
+        header::RETRY_AFTER,
+        axum::http::HeaderValue::from(lim.retry_after_secs),
+    );
+    r
+}
+
+fn concurrency_limited(st: &GatewayHttp) -> Box<Response> {
+    st.metrics.concurrency_limited();
+    Box::new(rate_limited_response(Limited {
+        retry_after_secs: 1,
+    }))
+}
+
+/// Identity-keyed bucket check → uniform 429.
+fn check_rate(st: &GatewayHttp, class: BucketClass, key: &str) -> Result<(), Box<Response>> {
+    st.limiter.check(class, key).map_err(|lim| {
+        st.metrics.rate_limited(class);
+        Box::new(rate_limited_response(lim))
+    })
+}
+
+/// Peer-IP-keyed bucket check → uniform 429.
+fn check_rate_ip(st: &GatewayHttp, class: BucketClass, ip: IpAddr) -> Result<(), Box<Response>> {
+    st.limiter.check_ip(class, ip).map_err(|lim| {
+        st.metrics.rate_limited(class);
+        Box::new(rate_limited_response(lim))
+    })
+}
+
+/// RFC §K row 8: every credential rejection also debits the per-IP
+/// `invalid_auth` bucket; when empty the caller sees 429 instead of the
+/// auth error — brute-force becomes self-limiting without touching the
+/// authenticated path.
+fn authfail_or(st: &GatewayHttp, ip: IpAddr, reason: AuthFailReason, err: Response) -> Response {
+    st.metrics.auth_failure(reason);
+    match st.limiter.check_ip(BucketClass::AuthFailIp, ip) {
+        Ok(()) => err,
+        Err(lim) => {
+            st.metrics.rate_limited(BucketClass::AuthFailIp);
+            rate_limited_response(lim)
+        }
+    }
+}
+
+fn public_auth_reason(e: &PublicAuthError) -> AuthFailReason {
+    match e {
+        PublicAuthError::Missing => AuthFailReason::Missing,
+        PublicAuthError::Malformed => AuthFailReason::Malformed,
+        PublicAuthError::Invalid => AuthFailReason::Invalid,
+        PublicAuthError::Unbound => AuthFailReason::Unbound,
+    }
+}
+
+/// Whether a controller-endpoint rejection counts against the invalid-auth
+/// bucket: credential/registration failures yes, protocol errors no.
+fn is_auth_failure(status: StatusCode) -> bool {
+    matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
+}
+
+/// RFC §L: `http_requests_total{route,method,status_class}` +
+/// `http_request_seconds{route,method}` — the route label comes from axum's
+/// `MatchedPath` so cardinality stays bounded by the router itself.
+async fn observe_http(State(metrics): State<Metrics>, req: Request, next: Next) -> Response {
+    let route = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|p| p.as_str().to_string());
+    let method = req.method().to_string();
+    let t0 = std::time::Instant::now();
+    let resp = next.run(req).await;
+    metrics.observe_http(
+        route.as_deref(),
+        &method,
+        resp.status().as_u16(),
+        t0.elapsed().as_secs_f64(),
+    );
+    resp
+}
+
 // ---------- handlers ----------
 
 /// RFC §6 exchange: registration token → controller identity + credential.
 /// The plaintext credential leaves in exactly this response, once.
-async fn register(State(st): State<GatewayHttp>, req: Request) -> Response {
+async fn register(
+    State(st): State<GatewayHttp>,
+    info: ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
+    let ip = peer_ip(&info);
+    // RFC §K: 5/min per source IP — pre-auth, socket-IP keyed.
+    if let Err(r) = check_rate_ip(&st, BucketClass::RegisterIp, ip) {
+        return *r;
+    }
+    let _gate = match st.gate_register.acquire() {
+        Some(g) => g,
+        None => return *concurrency_limited(&st),
+    };
     let headers = req.headers().clone();
     let body = match json_body::<RegisterRequest>(&headers, req, MAX_REGISTER_BODY).await {
         Ok(b) => b,
@@ -316,17 +494,41 @@ async fn register(State(st): State<GatewayHttp>, req: Request) -> Response {
             }),
         )
             .into_response(),
-        Err(e) => err_response(e),
+        Err(e) => {
+            let r = err_response(e);
+            if is_auth_failure(r.status()) {
+                authfail_or(&st, ip, AuthFailReason::Invalid, r)
+            } else {
+                r
+            }
+        }
     }
 }
 
 /// RFC §6 rotation: authenticated; new credential returned exactly once,
 /// old credential dead at commit.
-async fn rotate(State(st): State<GatewayHttp>, req: Request) -> Response {
+async fn rotate(
+    State(st): State<GatewayHttp>,
+    info: ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
+    let ip = peer_ip(&info);
     let headers = req.headers().clone();
-    let (_principal, cred) = match authenticate(&st, &headers) {
+    let (principal, cred) = match authenticate(&st, &headers) {
         Ok(v) => v,
-        Err(r) => return *r,
+        Err(r) => return authfail_or(&st, ip, AuthFailReason::Controller, *r),
+    };
+    // RFC §K: 10/min per controller.
+    if let Err(r) = check_rate(
+        &st,
+        BucketClass::RotateController,
+        principal.account_id().as_str(),
+    ) {
+        return *r;
+    }
+    let _gate = match st.gate_rotate.acquire() {
+        Some(g) => g,
+        None => return *concurrency_limited(&st),
     };
     match st.auth.rotate(&cred) {
         Ok(new) => (
@@ -350,15 +552,28 @@ async fn rotate(State(st): State<GatewayHttp>, req: Request) -> Response {
 /// F-07: `ensure_active` is re-checked immediately before every delivery,
 /// so a mid-poll revocation aborts with `revoked_controller` and does not
 /// hand out post-revocation work.
-async fn poll(State(st): State<GatewayHttp>, req: Request) -> Response {
+async fn poll(
+    State(st): State<GatewayHttp>,
+    info: ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
+    let ip = peer_ip(&info);
     let headers = req.headers().clone();
     if let Err(r) = bounded_body(req, MAX_POLL_BODY).await {
         return *r;
     }
     let (principal, _cred) = match authenticate(&st, &headers) {
         Ok(v) => v,
-        Err(r) => return *r,
+        Err(r) => return authfail_or(&st, ip, AuthFailReason::Controller, *r),
     };
+    // RFC §K: 2/s per controller — long-poll rate is deliberately tight.
+    if let Err(r) = check_rate(
+        &st,
+        BucketClass::PollController,
+        principal.account_id().as_str(),
+    ) {
+        return *r;
+    }
     if let Err(e) = st.auth.bind(&st.core, &principal) {
         return err_response(e);
     }
@@ -388,13 +603,30 @@ async fn poll(State(st): State<GatewayHttp>, req: Request) -> Response {
 /// A valid `request_id` alone never authorizes — ownership is the core's.
 /// F-07: `ensure_active` runs again after body parse, closing the
 /// authenticate→respond gap against a concurrent revocation.
-async fn respond(State(st): State<GatewayHttp>, req: Request) -> Response {
+async fn respond(
+    State(st): State<GatewayHttp>,
+    info: ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
+    let ip = peer_ip(&info);
     let headers = req.headers().clone();
     // Authenticate before body parsing — an unauthenticated request
     // receives no service.
     let (principal, _cred) = match authenticate(&st, &headers) {
         Ok(v) => v,
-        Err(r) => return *r,
+        Err(r) => return authfail_or(&st, ip, AuthFailReason::Controller, *r),
+    };
+    // RFC §K: 20/s per controller + ≤32 in-flight responses.
+    if let Err(r) = check_rate(
+        &st,
+        BucketClass::RespondController,
+        principal.account_id().as_str(),
+    ) {
+        return *r;
+    }
+    let _gate = match st.gate_respond.acquire() {
+        Some(g) => g,
+        None => return *concurrency_limited(&st),
     };
     let body = match json_body::<RespondRequest>(&headers, req, MAX_RESPOND_BODY).await {
         Ok(b) => b,
@@ -441,36 +673,124 @@ pub struct GatewayServer {
     shutdown_tx: watch::Sender<bool>,
     join: tokio::task::JoinHandle<()>,
     core: Arc<GatewayCore<SystemClock>>,
+    /// P7: cleanup scheduler — stopped first so no GC pass runs against a
+    /// torn-down server.
+    cleanup: Option<CleanupScheduler>,
+    /// P7: optional loopback `/metrics` listener (RFC §L; off by default).
+    metrics_srv: Option<(watch::Sender<bool>, tokio::task::JoinHandle<()>)>,
+    /// Bound address of the metrics listener (None when disabled).
+    pub metrics_addr: Option<SocketAddr>,
 }
 
 impl GatewayServer {
     /// Bind `addr` ("127.0.0.1:0" for ephemeral test ports) and serve.
+    /// Starts the P7 cleanup scheduler and (if configured) the loopback
+    /// metrics listener alongside the HTTP task.
     pub async fn start(state: GatewayHttp, addr: &str) -> std::io::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
         let bound = listener.local_addr()?;
         let (tx, mut rx) = watch::channel(false);
         let core = state.core.clone();
+        let cleanup = Some(CleanupScheduler::start(
+            state.cleanup_interval,
+            state.core.clone(),
+            state.store.clone(),
+            state.limiter.clone(),
+            SystemClock,
+            state.metrics.clone(),
+        ));
+        let metrics_srv = if let Some(bind) = state.metrics_bind {
+            Some(start_metrics_server(state.metrics.clone(), state.core.clone(), bind).await?)
+        } else {
+            None
+        };
+        let metrics_addr = metrics_srv.as_ref().map(|(_, _, a)| *a);
         let app = state.router();
         let join = tokio::spawn(async move {
-            let _ = axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    let _ = rx.changed().await;
-                })
-                .await;
+            // ConnectInfo supplies the socket peer IP — the only trusted
+            // pre-auth identity (RFC §K); forwarded headers never reach a
+            // limiter key.
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                let _ = rx.changed().await;
+            })
+            .await;
         });
         Ok(Self {
             addr: bound,
             shutdown_tx: tx,
             join,
             core,
+            cleanup,
+            metrics_addr,
+            metrics_srv: metrics_srv.map(|(tx, j, _)| (tx, j)),
         })
     }
 
     pub async fn shutdown(self) {
+        if let Some(c) = self.cleanup {
+            c.stop();
+        }
+        if let Some((tx, j)) = self.metrics_srv {
+            let _ = tx.send(true);
+            let _ = j.await;
+        }
         let _ = self.shutdown_tx.send(true);
         self.core.shutdown(); // wake waiting polls so connections can drain
         let _ = self.join.await;
     }
+}
+
+/// P7 §L: optional loopback `/metrics` — off by default, plaintext
+/// counters; gauges refreshed from core at render time. No auth: it binds
+/// loopback only and `GwConfig` refuses a non-loopback bind.
+async fn start_metrics_server(
+    metrics: Metrics,
+    core: Arc<GatewayCore<SystemClock>>,
+    bind: SocketAddr,
+) -> std::io::Result<(watch::Sender<bool>, tokio::task::JoinHandle<()>, SocketAddr)> {
+    // F-13: the loopback invariant is enforced at the bind site, not only
+    // in env-config parsing — a programmatically built GwConfig cannot
+    // expose the unauthenticated metrics endpoint on a public interface.
+    if !bind.ip().is_loopback() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "metrics listener must bind loopback",
+        ));
+    }
+    let listener = TcpListener::bind(bind).await?;
+    let bound = listener.local_addr()?;
+    let (tx, mut rx) = watch::channel(false);
+    let app = Router::new()
+        .route(
+            "/metrics",
+            get(move || {
+                let m = metrics.clone();
+                let c = core.clone();
+                async move {
+                    m.set_controller_active_polls(c.active_poll_count());
+                    m.set_work_queued(c.work_queued_count());
+                    m.set_controller_online(c.online_controller_count());
+                    (
+                        StatusCode::OK,
+                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                        m.render(),
+                    )
+                }
+            }),
+        )
+        .with_state(());
+    let j = tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = rx.changed().await;
+            })
+            .await;
+    });
+    Ok((tx, j, bound))
 }
 
 // ---------- /mcp public ingress (P5) ----------
@@ -555,40 +875,82 @@ fn auth_rejection(pa: &dyn PublicAuth, e: PublicAuthError) -> Box<Response> {
 }
 
 /// Authenticate the public caller. Runs on a blocking executor slot —
-/// validators may perform bounded JWKS fetches.
+/// validators may perform bounded JWKS fetches. On failure the categorical
+/// `AuthFailReason` is returned alongside the response so the caller can
+/// feed `auth_failures_total{reason_class}` and the invalid-auth bucket.
 async fn public_principal(
     st: &GatewayHttp,
     headers: &HeaderMap,
-) -> Result<mcp::PublicPrincipal, Box<Response>> {
+) -> Result<mcp::PublicPrincipal, (Option<AuthFailReason>, Box<Response>)> {
     let Some(pa) = st.public_auth.clone() else {
-        return Err(bad(
-            ErrorCode::BackendUnavailable,
-            "public ingress not configured",
+        return Err((
+            None,
+            bad(
+                ErrorCode::BackendUnavailable,
+                "public ingress not configured",
+            ),
         ));
     };
     let h = headers.clone();
     let challenge_pa = pa.clone();
     match tokio::task::spawn_blocking(move || pa.authenticate(&h)).await {
         Ok(Ok(p)) => Ok(p),
-        Ok(Err(e)) => Err(auth_rejection(&*challenge_pa, e)),
-        Err(_) => Err(bad(
-            ErrorCode::BackendUnavailable,
-            "authentication backend failed",
+        Ok(Err(e)) => Err((
+            Some(public_auth_reason(&e)),
+            auth_rejection(&*challenge_pa, e),
+        )),
+        Err(_) => Err((
+            None,
+            bad(
+                ErrorCode::BackendUnavailable,
+                "authentication backend failed",
+            ),
         )),
     }
 }
 
-async fn mcp_post(State(st): State<GatewayHttp>, req: Request) -> Response {
+async fn mcp_post(
+    State(st): State<GatewayHttp>,
+    info: ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
     let headers = req.headers().clone();
     if let Err(r) = check_origin(&headers, &st.allowed_origins) {
+        return *r;
+    }
+    let ip = peer_ip(&info);
+    // RFC §K pre-auth ordering: global concurrency cap → 300/s global
+    // bucket → 30/s/IP → OAuth → 30/s+60 burst per account.
+    let _active = st.metrics.mcp_active();
+    let _gate = match st.gate_mcp.acquire() {
+        Some(g) => g,
+        None => return *concurrency_limited(&st),
+    };
+    if let Err(r) = check_rate(&st, BucketClass::McpGlobal, "gateway") {
+        return *r;
+    }
+    if let Err(r) = check_rate_ip(&st, BucketClass::McpPreAuthIp, ip) {
         return *r;
     }
     // Authenticate before any body processing — an unauthenticated request
     // receives no service beyond the auth challenge.
     let principal = match public_principal(&st, &headers).await {
         Ok(p) => p,
-        Err(r) => return *r,
+        Err((reason, r)) => match reason {
+            Some(reason) => return authfail_or(&st, ip, reason, *r),
+            // Backend failure is not a credential failure — no authfail
+            // debit, no reason label.
+            None => return *r,
+        },
     };
+    // RFC §K: 30/s + burst 60 per authenticated account.
+    if let Err(r) = check_rate(
+        &st,
+        BucketClass::McpAccount,
+        principal.account_id().as_str(),
+    ) {
+        return *r;
+    }
     if let Err(r) = check_protocol_version(&headers) {
         return *r;
     }
@@ -604,6 +966,7 @@ async fn mcp_post(State(st): State<GatewayHttp>, req: Request) -> Response {
         sid,
         frame,
         st.mcp_deadline,
+        &st.metrics,
     )
     .await
     {
@@ -627,22 +990,47 @@ async fn mcp_post(State(st): State<GatewayHttp>, req: Request) -> Response {
 
 /// DELETE /mcp: logout — invalidate the session and cancel its live work.
 /// Same principal only; repeated DELETE → 404 (deterministic).
-async fn mcp_delete(State(st): State<GatewayHttp>, req: Request) -> Response {
+async fn mcp_delete(
+    State(st): State<GatewayHttp>,
+    info: ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response {
     let headers = req.headers().clone();
     if let Err(r) = check_origin(&headers, &st.allowed_origins) {
         return *r;
     }
+    let ip = peer_ip(&info);
+    let _active = st.metrics.mcp_active();
+    // Same bucket classes as POST /mcp (RFC §K applies to the route).
+    if let Err(r) = check_rate(&st, BucketClass::McpGlobal, "gateway") {
+        return *r;
+    }
+    if let Err(r) = check_rate_ip(&st, BucketClass::McpPreAuthIp, ip) {
+        return *r;
+    }
     let principal = match public_principal(&st, &headers).await {
         Ok(p) => p,
-        Err(r) => return *r,
+        Err((reason, r)) => match reason {
+            Some(reason) => return authfail_or(&st, ip, reason, *r),
+            None => return *r,
+        },
     };
+    if let Err(r) = check_rate(
+        &st,
+        BucketClass::McpAccount,
+        principal.account_id().as_str(),
+    ) {
+        return *r;
+    }
     let Some(sid) = headers.get(MCP_HDR_SESSION).and_then(|v| v.to_str().ok()) else {
         return *bad(ErrorCode::MissingAuth, "MCP-Session-Id required");
     };
     match st.sessions.delete(sid, &principal) {
         Ok(live) => {
+            // F-03: cancel every in-flight request this session owns —
+            // ownership-scoped to the caller's account.
             for rid in &live {
-                let _ = st.core.cancel(rid);
+                let _ = st.core.cancel(principal.account_id(), rid);
             }
             tracing::info!(session = %sid, cancelled = live.len(), "mcp session deleted");
             StatusCode::OK.into_response()
