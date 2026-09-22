@@ -291,7 +291,9 @@ async fn end_to_end_real_sinter_mcp() {
     assert_eq!(s, 200, "{b}");
     let v: Value = serde_json::from_str(&b).unwrap();
     assert_eq!(v["id"], 77);
-    let tools = v["result"]["tools"].as_array().unwrap();
+    let tools = v["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("resp: {v}"));
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(tools.len(), 9, "{names:?}");
     assert!(names.contains(&"sinter_get_version"));

@@ -55,6 +55,8 @@ pub enum ErrorCode {
     PollConflict,
     MissingAuth,
     UnsupportedMediaType,
+    // P6 — public OAuth.
+    UnboundAccount,
 }
 
 impl ErrorCode {
@@ -86,6 +88,7 @@ impl ErrorCode {
             Self::PollConflict => "poll_conflict",
             Self::MissingAuth => "missing_auth",
             Self::UnsupportedMediaType => "unsupported_media_type",
+            Self::UnboundAccount => "account_unbound",
         }
     }
 }

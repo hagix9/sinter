@@ -28,7 +28,13 @@ hex = "0.4"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 axum = "0.8.9"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "time"] }
+jsonwebtoken = "9"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+url = "2"
 
 [dev-dependencies]
 tracing-subscriber = "0.3"
 axum = "0.8.9"
+base64 = "0.22"
+rsa = "0.9"
+pkcs8 = { version = "0.10", features = ["pem"] }

@@ -22,7 +22,7 @@ fn initialize_is_edge_answered_with_truthful_contract() {
     let mut s = session();
     let f = json!({"jsonrpc":"2.0","id":1,"method":"initialize",
         "params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"chatgpt","version":"1"}}});
-    match handle_frame(&mut s, &acc(), &f) {
+    match handle_frame(&mut s, &f) {
         EdgeAction::Answer(r) => {
             assert_eq!(r["id"], 1);
             let res = &r["result"];
@@ -41,7 +41,7 @@ fn initialize_negotiates_unknown_version_down_to_edge_preferred() {
     let mut s = session();
     let f = json!({"jsonrpc":"2.0","id":1,"method":"initialize",
         "params":{"protocolVersion":"1999-01-01"}});
-    match handle_frame(&mut s, &acc(), &f) {
+    match handle_frame(&mut s, &f) {
         EdgeAction::Answer(r) => {
             assert_eq!(r["result"]["protocolVersion"], "2025-11-25");
         }
@@ -53,8 +53,8 @@ fn initialize_negotiates_unknown_version_down_to_edge_preferred() {
 fn reinitialize_is_rejected() {
     let mut s = session();
     let f = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}});
-    let _ = handle_frame(&mut s, &acc(), &f);
-    match handle_frame(&mut s, &acc(), &f) {
+    let _ = handle_frame(&mut s, &f);
+    match handle_frame(&mut s, &f) {
         EdgeAction::Answer(r) => assert_eq!(r["error"]["code"], -32600),
         _ => panic!("re-initialize must fail"),
     }
@@ -65,22 +65,16 @@ fn notifications_are_consumed_never_forwarded() {
     let mut s = session();
     // notifications/initialized — before AND after init, always AcceptOnly.
     let n = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
-    assert!(matches!(
-        handle_frame(&mut s, &acc(), &n),
-        EdgeAction::AcceptOnly
-    ));
+    assert!(matches!(handle_frame(&mut s, &n), EdgeAction::AcceptOnly));
     let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}});
-    let _ = handle_frame(&mut s, &acc(), &init);
-    assert!(matches!(
-        handle_frame(&mut s, &acc(), &n),
-        EdgeAction::AcceptOnly
-    ));
+    let _ = handle_frame(&mut s, &init);
+    assert!(matches!(handle_frame(&mut s, &n), EdgeAction::AcceptOnly));
     // notifications/cancelled is STILL consumed at the edge (never
     // forwarded) but as of P5 maps to EdgeAction::Cancel carrying the
     // caller's public requestId (RFC §8: edge maps it to `cancelled`).
     let cancelled =
         json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"req_x"}});
-    match handle_frame(&mut s, &acc(), &cancelled) {
+    match handle_frame(&mut s, &cancelled) {
         EdgeAction::Cancel(id) => assert_eq!(id, json!("req_x")),
         _ => panic!("cancelled notification must surface the requestId"),
     }
@@ -90,7 +84,7 @@ fn notifications_are_consumed_never_forwarded() {
 fn ping_is_edge_answered() {
     let mut s = session();
     let f = json!({"jsonrpc":"2.0","id":5,"method":"ping"});
-    match handle_frame(&mut s, &acc(), &f) {
+    match handle_frame(&mut s, &f) {
         EdgeAction::Answer(r) => assert_eq!(r["result"], json!({})),
         _ => panic!(),
     }
@@ -103,7 +97,7 @@ fn tools_calls_are_blocked_before_initialize() {
         json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
         json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sinter_get_version","arguments":{}}}),
     ] {
-        match handle_frame(&mut s, &acc(), &f) {
+        match handle_frame(&mut s, &f) {
             EdgeAction::Answer(r) => assert_eq!(r["error"]["code"], -32600),
             _ => panic!("pre-init tool traffic must fail closed"),
         }
@@ -114,16 +108,16 @@ fn tools_calls_are_blocked_before_initialize() {
 fn tools_list_and_call_forward_verbatim_after_init() {
     let mut s = session();
     let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}});
-    let _ = handle_frame(&mut s, &acc(), &init);
+    let _ = handle_frame(&mut s, &init);
 
     let tl = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
-    match handle_frame(&mut s, &acc(), &tl) {
+    match handle_frame(&mut s, &tl) {
         EdgeAction::Forward(f) => assert_eq!(f, tl), // byte-verbatim, caller id intact
         _ => panic!("tools/list must forward"),
     }
     let tc = json!({"jsonrpc":"2.0","id":"weird-id-42","method":"tools/call",
         "params":{"name":"sinter_audit_host","arguments":{"target":"demo","manifest":"m"}}});
-    match handle_frame(&mut s, &acc(), &tc) {
+    match handle_frame(&mut s, &tc) {
         EdgeAction::Forward(f) => assert_eq!(f, tc),
         _ => panic!("tools/call must forward"),
     }
@@ -135,12 +129,21 @@ fn profile_tool_is_edge_answered_from_account_identity() {
     s.initialized = true;
     let f = json!({"jsonrpc":"2.0","id":9,"method":"tools/call",
         "params":{"name":PROFILE_TOOL,"arguments":{}}});
-    match handle_frame(&mut s, &acc(), &f) {
-        EdgeAction::Answer(r) => {
+    match handle_frame(&mut s, &f) {
+        EdgeAction::Profile(id) => {
+            // The MCP layer answers from the authenticated principal.
+            let r = sinter_gateway::edge::profile_result(
+                &id,
+                &acc(),
+                Some("Alice A"),
+                Some("a@example.com"),
+            );
             assert_eq!(r["result"]["structuredContent"]["id"], ACC);
+            assert_eq!(r["result"]["structuredContent"]["name"], "Alice A");
+            assert_eq!(r["result"]["structuredContent"]["email"], "a@example.com");
             assert_eq!(r["result"]["isError"], false);
         }
-        _ => panic!("profile tool must be edge-answered"),
+        _ => panic!("profile tool must be edge-classified"),
     }
 }
 
@@ -156,7 +159,7 @@ fn unsupported_methods_are_edge_rejected_not_forwarded() {
         "",
     ] {
         let f = json!({"jsonrpc":"2.0","id":1,"method":m});
-        match handle_frame(&mut s, &acc(), &f) {
+        match handle_frame(&mut s, &f) {
             EdgeAction::Answer(r) => assert_eq!(r["error"]["code"], -32601),
             EdgeAction::Forward(_) => panic!("{m} must not reach the controller"),
             _ => panic!(),
@@ -175,7 +178,7 @@ fn malformed_frames_rejected_at_edge() {
         json!({"jsonrpc":"2.0","id":1}),                   // request w/o method
         json!({"jsonrpc":"2.0","method":"explode"}),       // notification w/o prefix
     ] {
-        match handle_frame(&mut s, &acc(), &f) {
+        match handle_frame(&mut s, &f) {
             EdgeAction::Answer(r) => assert_eq!(r["error"]["code"], -32600, "frame: {f}"),
             _ => panic!("malformed frame must not be forwarded: {f}"),
         }
@@ -315,7 +318,7 @@ fn live_edge_to_backend_forwarding_chain() {
     let f = json!({"jsonrpc":"2.0","id":77,"method":"tools/call",
         "params":{"name":"sinter_validate_manifest","arguments":
             {"manifest":"version: 1\nresources:\n  - id: tree\n    type: package\n    with:\n      name: tree\n      state: present\n"}}});
-    match handle_frame(&mut s, &acc(), &f) {
+    match handle_frame(&mut s, &f) {
         EdgeAction::Forward(frame) => {
             let r = child.call(&frame);
             assert_eq!(r["id"], 77); // caller id preserved end-to-end

@@ -230,12 +230,12 @@ async fn test_public_auth_requires_feature_and_default_fails_closed() {
     let mut pa = TestPublicAuth::new();
     pa.add("tok", "acc", "sub");
     let mut hdrs = axum::http::HeaderMap::new();
-    assert!(PublicAuth::authenticate(&pa, &hdrs).is_none());
+    assert!(PublicAuth::authenticate(&pa, &hdrs).is_err());
     hdrs.insert(
         "x-sinter-test-principal",
         axum::http::HeaderValue::from_static("tok"),
     );
-    assert!(PublicAuth::authenticate(&pa, &hdrs).is_some());
+    assert!(PublicAuth::authenticate(&pa, &hdrs).is_ok());
 
     // Default GatewayHttp has no public auth → /mcp fails closed.
     let path = tmpdb("f01");

@@ -41,7 +41,8 @@ use crate::auth::{AuthenticatedController, ControllerAuth};
 use crate::clock::SystemClock;
 use crate::core::GatewayCore;
 use crate::id::RequestId;
-use crate::mcp::{self, McpOutcome, PublicAuth, SessionManager};
+use crate::mcp::{self, McpOutcome, PublicAuth, PublicAuthError, SessionManager};
+use crate::oauth::{JwksSource, OAuthConfig, OAuthValidator};
 use crate::proto::*;
 use crate::sqlite_store::SqliteStore;
 use crate::store::IdentityStore;
@@ -73,6 +74,9 @@ pub struct GatewayHttp {
     /// (non-browser clients); present-but-unlisted = 403. Multiple Origin
     /// headers = rejected. Empty set = reject any presented Origin.
     allowed_origins: Arc<std::collections::HashSet<String>>,
+    /// RFC 9728 protected-resource document — Some only when P6 OAuth is
+    /// configured; the well-known route 404s otherwise.
+    prm_document: Option<serde_json::Value>,
 }
 
 impl GatewayHttp {
@@ -90,6 +94,7 @@ impl GatewayHttp {
             sessions: Arc::new(SessionManager::default()),
             mcp_deadline: mcp::MCP_DEADLINE,
             allowed_origins: Arc::new(std::collections::HashSet::new()),
+            prm_document: None,
         }
     }
 
@@ -103,6 +108,22 @@ impl GatewayHttp {
         self.public_auth = Some(auth);
         self.allowed_origins = Arc::new(allowed_origins);
         self
+    }
+
+    /// P6 production path: attach the OAuth resource-server validator as
+    /// the public-auth implementation plus the Origin allowlist. Validates
+    /// config at construction — fails closed, never starts anonymous.
+    pub fn with_oauth(
+        mut self,
+        config: OAuthConfig,
+        jwks_source: Box<dyn JwksSource>,
+        allowed_origins: std::collections::HashSet<String>,
+    ) -> Result<Self, TransportError> {
+        let validator = OAuthValidator::new(config, jwks_source)?;
+        self.prm_document = Some(validator.protected_resource_metadata());
+        self.public_auth = Some(Arc::new(validator));
+        self.allowed_origins = Arc::new(allowed_origins);
+        Ok(self)
     }
 
     /// Test/config hook: shorten the /mcp forwarded-request deadline —
@@ -136,6 +157,16 @@ impl GatewayHttp {
             // /mcp: POST = JSON-RPC message; DELETE = session logout;
             // GET → 405 (RFC §9 — no SSE; sinter emits no server traffic).
             .route("/mcp", post(mcp_post).delete(mcp_delete).get(mcp_get))
+            // RFC 9728 protected-resource metadata (P6): base form plus the
+            // resource-path-suffixed form for the /mcp resource.
+            .route(
+                "/.well-known/oauth-protected-resource",
+                get(protected_resource_metadata),
+            )
+            .route(
+                "/.well-known/oauth-protected-resource/mcp",
+                get(protected_resource_metadata),
+            )
             .with_state(self.clone())
     }
 }
@@ -152,7 +183,7 @@ fn status_for(code: &str) -> StatusCode {
         "missing_auth" | "malformed_credential" | "invalid_credential" | "revoked_controller" => {
             StatusCode::UNAUTHORIZED
         }
-        "wrong_controller" | "wrong_account" => StatusCode::FORBIDDEN,
+        "wrong_controller" | "wrong_account" | "account_unbound" => StatusCode::FORBIDDEN,
         "unknown_request" | "unknown_controller" => StatusCode::NOT_FOUND,
         "duplicate_response"
         | "poll_conflict"
@@ -359,12 +390,14 @@ async fn poll(State(st): State<GatewayHttp>, req: Request) -> Response {
 /// authenticate→respond gap against a concurrent revocation.
 async fn respond(State(st): State<GatewayHttp>, req: Request) -> Response {
     let headers = req.headers().clone();
-    let body = match json_body::<RespondRequest>(&headers, req, MAX_RESPOND_BODY).await {
-        Ok(b) => b,
-        Err(r) => return *r,
-    };
+    // Authenticate before body parsing — an unauthenticated request
+    // receives no service.
     let (principal, _cred) = match authenticate(&st, &headers) {
         Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let body = match json_body::<RespondRequest>(&headers, req, MAX_RESPOND_BODY).await {
+        Ok(b) => b,
         Err(r) => return *r,
     };
     if let Err(e) = st.auth.ensure_active(principal.controller_id()) {
@@ -490,18 +523,59 @@ fn check_protocol_version(headers: &HeaderMap) -> Result<(), Box<Response>> {
     }
 }
 
-fn public_principal(
+/// RFC 9728 protected-resource metadata. 404 when OAuth is not
+/// configured — the document exists only on a production-auth deployment.
+async fn protected_resource_metadata(State(st): State<GatewayHttp>) -> Response {
+    match &st.prm_document {
+        Some(doc) => (StatusCode::OK, Json(doc.clone())).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Map a public-auth rejection to the OAuth protected-resource contract:
+/// 401 (+ WWW-Authenticate) for missing/malformed/invalid credentials,
+/// 403 for an authenticated-but-unbound principal.
+fn auth_rejection(pa: &dyn PublicAuth, e: PublicAuthError) -> Box<Response> {
+    let (code, msg) = match e {
+        PublicAuthError::Missing => (ErrorCode::MissingAuth, "authentication required"),
+        PublicAuthError::Malformed => (ErrorCode::MalformedCredential, "malformed credential"),
+        PublicAuthError::Invalid => (ErrorCode::InvalidCredential, "invalid credential"),
+        PublicAuthError::Unbound => (
+            ErrorCode::UnboundAccount,
+            "identity not bound to an account",
+        ),
+    };
+    let mut resp = *bad(code, msg);
+    if let Some(challenge) = pa.www_authenticate(&e) {
+        if let Ok(v) = challenge.parse() {
+            resp.headers_mut().insert("www-authenticate", v);
+        }
+    }
+    Box::new(resp)
+}
+
+/// Authenticate the public caller. Runs on a blocking executor slot —
+/// validators may perform bounded JWKS fetches.
+async fn public_principal(
     st: &GatewayHttp,
     headers: &HeaderMap,
 ) -> Result<mcp::PublicPrincipal, Box<Response>> {
-    let Some(pa) = &st.public_auth else {
+    let Some(pa) = st.public_auth.clone() else {
         return Err(bad(
             ErrorCode::BackendUnavailable,
             "public ingress not configured",
         ));
     };
-    pa.authenticate(headers)
-        .ok_or_else(|| bad(ErrorCode::MissingAuth, "authentication required"))
+    let h = headers.clone();
+    let challenge_pa = pa.clone();
+    match tokio::task::spawn_blocking(move || pa.authenticate(&h)).await {
+        Ok(Ok(p)) => Ok(p),
+        Ok(Err(e)) => Err(auth_rejection(&*challenge_pa, e)),
+        Err(_) => Err(bad(
+            ErrorCode::BackendUnavailable,
+            "authentication backend failed",
+        )),
+    }
 }
 
 async fn mcp_post(State(st): State<GatewayHttp>, req: Request) -> Response {
@@ -509,15 +583,17 @@ async fn mcp_post(State(st): State<GatewayHttp>, req: Request) -> Response {
     if let Err(r) = check_origin(&headers, &st.allowed_origins) {
         return *r;
     }
+    // Authenticate before any body processing — an unauthenticated request
+    // receives no service beyond the auth challenge.
+    let principal = match public_principal(&st, &headers).await {
+        Ok(p) => p,
+        Err(r) => return *r,
+    };
     if let Err(r) = check_protocol_version(&headers) {
         return *r;
     }
     let frame: serde_json::Value = match json_body(&headers, req, MAX_MCP_BODY).await {
         Ok(v) => v,
-        Err(r) => return *r,
-    };
-    let principal = match public_principal(&st, &headers) {
-        Ok(p) => p,
         Err(r) => return *r,
     };
     let sid = headers.get(MCP_HDR_SESSION).and_then(|v| v.to_str().ok());
@@ -556,7 +632,7 @@ async fn mcp_delete(State(st): State<GatewayHttp>, req: Request) -> Response {
     if let Err(r) = check_origin(&headers, &st.allowed_origins) {
         return *r;
     }
-    let principal = match public_principal(&st, &headers) {
+    let principal = match public_principal(&st, &headers).await {
         Ok(p) => p,
         Err(r) => return *r,
     };

@@ -52,32 +52,86 @@ pub const MCP_DEADLINE: Duration = Duration::from_millis(MAX_DEADLINE_MS);
 
 // ---------- public principal ----------
 
-/// The P5 public identity. `account_id` is the Sinter tenant; `subject_id`
+/// The public identity. `account_id` is the Sinter tenant; `subject_id`
 /// is the upstream identity claim. Fields are private — constructed only by
-/// a `PublicAuth` implementation.
+/// a `PublicAuth` implementation. `name`/`email` are optional display
+/// claims for the platform profile tool; they are never routing inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicPrincipal {
     account_id: AccountId,
     subject_id: String,
+    name: Option<String>,
+    email: Option<String>,
 }
 
 impl PublicPrincipal {
+    /// Crate-internal constructor: only authentication implementations may
+    /// build a principal. Nothing else can mint account identity.
+    pub(crate) fn new(
+        account_id: AccountId,
+        subject_id: String,
+        name: Option<String>,
+        email: Option<String>,
+    ) -> Self {
+        Self {
+            account_id,
+            subject_id,
+            name,
+            email,
+        }
+    }
+
     pub fn account_id(&self) -> &AccountId {
         &self.account_id
     }
     pub fn subject_id(&self) -> &str {
         &self.subject_id
     }
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+    pub fn email(&self) -> Option<&str> {
+        self.email.as_deref()
+    }
 }
 
-/// P6 replaces this with real OAuth bearer validation. The trait exists so
-/// `/mcp` never sees raw identity claims — whatever proves the caller
-/// produces a `PublicPrincipal`, and only that object can route work.
+/// Public-authentication rejection categories. Mapped by the HTTP layer to
+/// the OAuth protected-resource contract (401/403 + `WWW-Authenticate`);
+/// they never cross into JSON-RPC responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicAuthError {
+    /// No credential presented.
+    Missing,
+    /// Credential present but structurally unusable (duplicated header,
+    /// wrong scheme, whitespace ambiguity, oversized).
+    Malformed,
+    /// Credential well-formed but not valid (bad signature, expired,
+    /// wrong issuer/audience, unknown key).
+    Invalid,
+    /// Credential valid but carries no usable account binding — the caller
+    /// is authenticated yet maps to no Gateway account.
+    Unbound,
+}
+
+/// Produces `PublicPrincipal` from request headers. `/mcp` never sees raw
+/// identity claims — whatever proves the caller produces a
+/// `PublicPrincipal`, and only that object can route work.
 pub trait PublicAuth: Send + Sync {
     /// Authenticate the public request. `headers` are the raw HTTP headers;
-    /// implementations extract their own credential. Returns None on any
-    /// failure — the handler maps that to 401 without enumeration detail.
-    fn authenticate(&self, headers: &axum::http::HeaderMap) -> Option<PublicPrincipal>;
+    /// implementations extract their own credential. Rejection categories
+    /// drive status + challenge; no validation internals are returned.
+    /// Implementations may block (e.g. JWKS fetch) — the HTTP layer runs
+    /// them on a blocking executor slot.
+    fn authenticate(
+        &self,
+        headers: &axum::http::HeaderMap,
+    ) -> Result<PublicPrincipal, PublicAuthError>;
+
+    /// RFC 6750 `WWW-Authenticate` challenge for a rejection, if the
+    /// implementation speaks the bearer contract.
+    fn www_authenticate(&self, _err: &PublicAuthError) -> Option<String> {
+        None
+    }
 }
 
 /// TEST/INTERNAL ONLY — maps a static header to a pre-registered principal.
@@ -118,13 +172,21 @@ impl Default for TestPublicAuth {
 
 #[cfg(any(test, feature = "test-auth"))]
 impl PublicAuth for TestPublicAuth {
-    fn authenticate(&self, headers: &axum::http::HeaderMap) -> Option<PublicPrincipal> {
-        let v = headers.get("x-sinter-test-principal")?.to_str().ok()?;
-        let (account, subject) = self.map.get(v)?;
-        Some(PublicPrincipal {
-            account_id: account.clone(),
-            subject_id: subject.clone(),
-        })
+    fn authenticate(
+        &self,
+        headers: &axum::http::HeaderMap,
+    ) -> Result<PublicPrincipal, PublicAuthError> {
+        let Some(v) = headers.get("x-sinter-test-principal") else {
+            return Err(PublicAuthError::Missing);
+        };
+        let v = v.to_str().map_err(|_| PublicAuthError::Malformed)?;
+        let (account, subject) = self.map.get(v).ok_or(PublicAuthError::Invalid)?;
+        Ok(PublicPrincipal::new(
+            account.clone(),
+            subject.clone(),
+            None,
+            None,
+        ))
     }
 }
 
@@ -337,8 +399,7 @@ pub async fn handle_post(
         // initialize runs against a fresh edge state; the session is created
         // only after a successful edge answer.
         let mut edge_state = EdgeSession::default();
-        let account = principal.account_id().clone();
-        match edge::handle_frame(&mut edge_state, &account, &frame) {
+        match edge::handle_frame(&mut edge_state, &frame) {
             EdgeAction::Answer(resp) => {
                 let sid = sessions.create(principal, edge_state)?;
                 info!(account = %principal.account_id(), "mcp session created");
@@ -357,11 +418,20 @@ pub async fn handle_post(
         })?;
         let account = principal.account_id().clone();
         let action = sessions.with_session(sid, principal, |edge_state| {
-            edge::handle_frame(edge_state, &account, &frame)
+            edge::handle_frame(edge_state, &frame)
         })?;
         match action {
             EdgeAction::Answer(resp) => Ok((McpOutcome::Json(resp), None)),
             EdgeAction::AcceptOnly => Ok((McpOutcome::Accepted, None)),
+            EdgeAction::Profile(id) => Ok((
+                McpOutcome::Json(edge::profile_result(
+                    &id,
+                    principal.account_id(),
+                    principal.name(),
+                    principal.email(),
+                )),
+                None,
+            )),
             EdgeAction::Cancel(public_id) => {
                 // RFC §8: edge maps notifications/cancelled to the cancelled
                 // request state. Best-effort: unknown/stale ids are a no-op,

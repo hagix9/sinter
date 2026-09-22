@@ -63,7 +63,8 @@ fn http(
     s.write_all(body).unwrap();
     s.flush().unwrap();
     let mut buf = Vec::new();
-    s.read_to_end(&mut buf).unwrap();
+    // Early rejects can RST before the body drains — keep received bytes.
+    let _ = s.read_to_end(&mut buf);
     let text = String::from_utf8_lossy(&buf);
     let status: u16 = text
         .split_whitespace()
@@ -526,9 +527,10 @@ async fn methods_and_surface() {
         assert_eq!(s, 404, "{p}");
     }
     // /mcp EXISTS as of P5 — in a rig with no public auth it must fail
-    // closed (415 here: no Content-Type), never silently 404 or 200.
+    // closed. As of P6 authentication precedes body checks, so an
+    // unconfigured gateway answers 503 before content negotiation.
     let (s, _) = http(addr, "POST", "/mcp", &[&bearer(&cred)], b"");
-    assert_eq!(s, 415, "POST /mcp without content-type");
+    assert_eq!(s, 503, "POST /mcp with no public auth configured");
     // health endpoints
     let (s, b) = http(addr, "GET", "/healthz", &[], b"");
     assert_eq!(s, 200);

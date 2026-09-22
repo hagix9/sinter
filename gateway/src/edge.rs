@@ -60,6 +60,9 @@ pub enum EdgeAction {
     /// cancelled (RFC §8: edge maps it to the `cancelled` request state).
     /// Still answered 202; cancellation is best-effort against live work.
     Cancel(Value),
+    /// Gateway-owned profile tool call — answered by the MCP layer from the
+    /// authenticated principal (edge classification does not see identity).
+    Profile(Value),
 }
 
 fn result(id: &Value, r: Value) -> Value {
@@ -129,8 +132,23 @@ pub fn inject_profile_tool(tools_list_response: &Value) -> Value {
     resp
 }
 
-fn profile_result(id: &Value, account: &AccountId) -> Value {
-    let profile = json!({"id": account.as_str()});
+/// Build the profile-tool result from the authenticated principal. Lives
+/// in edge (wire-shape authority) but is invoked by the MCP layer, which
+/// owns the `PublicPrincipal`.
+pub fn profile_result(
+    id: &Value,
+    account: &AccountId,
+    name: Option<&str>,
+    email: Option<&str>,
+) -> Value {
+    let mut profile = json!({"id": account.as_str()});
+    if let Some(n) = name {
+        profile["name"] = json!(n);
+        profile["nickname"] = json!(n);
+    }
+    if let Some(e) = email {
+        profile["email"] = json!(e);
+    }
     result(
         id,
         json!({
@@ -143,7 +161,7 @@ fn profile_result(id: &Value, account: &AccountId) -> Value {
 
 /// Classify one inbound JSON-RPC frame. Single messages only — arrays are
 /// rejected per the Streamable HTTP transport contract.
-pub fn handle_frame(session: &mut EdgeSession, account: &AccountId, frame: &Value) -> EdgeAction {
+pub fn handle_frame(session: &mut EdgeSession, frame: &Value) -> EdgeAction {
     if frame.is_array() {
         return EdgeAction::Answer(error(
             &Value::Null,
@@ -230,7 +248,7 @@ pub fn handle_frame(session: &mut EdgeSession, account: &AccountId, frame: &Valu
                 .and_then(Value::as_str)
                 .unwrap_or("");
             if name == PROFILE_TOOL {
-                EdgeAction::Answer(profile_result(id, account))
+                EdgeAction::Profile(id.clone())
             } else {
                 // Forwarded verbatim — tool-name validity is sinter's
                 // authority, not the gateway's.

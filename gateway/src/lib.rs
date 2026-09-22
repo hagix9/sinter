@@ -13,6 +13,7 @@ pub mod edge;
 pub mod http;
 pub mod id;
 pub mod mcp;
+pub mod oauth;
 pub mod proto;
 pub mod sqlite_store;
 pub mod state;
