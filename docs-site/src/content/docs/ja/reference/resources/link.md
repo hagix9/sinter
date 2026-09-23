@@ -48,5 +48,5 @@ description: シンボリックリンクを管理する。
 
 ## 関連
 
-[file](/sinter/ja/reference/resources/file/) ·
-[directory](/sinter/ja/reference/resources/directory/)
+[file](/ja/reference/resources/file/) ·
+[directory](/ja/reference/resources/directory/)

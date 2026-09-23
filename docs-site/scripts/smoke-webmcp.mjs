@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 // Deployed-site WebMCP/discovery acceptance check (read-only, GET only).
 //
 // Verifies the LIVE GitHub Pages deployment serves the human docs, the
@@ -6,9 +8,12 @@
 // matrix, hedged Oracle status).
 //
 // Usage: node scripts/smoke-webmcp.mjs [base-url]
-//   default base: https://hagix9.github.io/sinter
+//   default base: https://sinter.fulltrust.co.jp
 
-const base = (process.argv[2] ?? 'https://hagix9.github.io/sinter').replace(/\/+$/, '');
+const base = (process.argv[2] ?? 'https://sinter.fulltrust.co.jp').replace(/\/+$/, '');
+const cargoToml = readFileSync(new URL('../../Cargo.toml', import.meta.url), 'utf8');
+const expectedVersion = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+if (!expectedVersion) throw new Error('could not read package version from Cargo.toml');
 
 let failures = 0;
 const fail = (m) => { failures++; console.error(`FAIL  ${m}`); };
@@ -58,8 +63,8 @@ const ja = payloads['/webmcp/ja.json'];
 const root = payloads['/webmcp.json'];
 if (en) {
   if (en.locale !== 'en') fail('en.json: locale != "en"');
-  if (en.version !== '0.4.1') fail(`en.json: version "${en.version}" != 0.4.1`);
-  if (en.installation?.release !== 'v0.4.1') fail(`en.json: installation.release "${en.installation?.release}" != v0.4.1`);
+  if (en.version !== expectedVersion) fail(`en.json: version "${en.version}" != ${expectedVersion}`);
+  if (en.installation?.release !== `v${expectedVersion}`) fail(`en.json: installation.release "${en.installation?.release}" != v${expectedVersion}`);
   const plats = en.compatibility?.platforms ?? [];
   const tested = plats.filter((p) => p.status === 'supported, acceptance-tested');
   if (tested.length !== 8) fail(`en.json: ${tested.length} acceptance-tested platforms (expected 8)`);
@@ -95,11 +100,11 @@ if (llms) {
   for (const bad of ['localhost', '127.0.0.1', 'file://', '/Users/', 'v0.4.0']) {
     if (llms.includes(bad)) fail(`llms.txt: contains "${bad}"`);
   }
-  if (!llms.includes(`${base}/en/`)) fail('llms.txt: missing canonical docs URL');
+  if (!llms.includes('https://sinter.fulltrust.co.jp/en/')) fail('llms.txt: missing canonical docs URL');
 }
 const robots = await expectOk('/robots.txt', /text\/plain/);
 if (robots) {
-  if (!/Sitemap:\s*https:\/\/hagix9\.github\.io\/sinter\/sitemap-index\.xml/.test(robots)) {
+  if (!/Sitemap:\s*https:\/\/sinter\.fulltrust\.co\.jp\/sitemap-index\.xml/.test(robots)) {
     fail('robots.txt: sitemap reference missing/incorrect');
   }
   if (/Disallow:\s*\/sinter\/?\s*$/m.test(robots)) fail('robots.txt: blocks the documentation site');

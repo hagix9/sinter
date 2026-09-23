@@ -51,5 +51,5 @@ Applies to all supported targets.
 
 ## Related
 
-[file](/sinter/en/reference/resources/file/) ·
-[link](/sinter/en/reference/resources/link/)
+[file](/en/reference/resources/file/) ·
+[link](/en/reference/resources/link/)

@@ -40,7 +40,7 @@ hostname = {{ facts.hostname }}
 ## Expected behavior
 
 - The template is rendered on the controller and published atomically like
-  [`file`](/sinter/en/reference/resources/file/).
+  [`file`](/en/reference/resources/file/).
 - Template expressions may read `vars.*`, `facts.*`, `registers.*`, and
   `template.*`. `template.*` names never shadow the other namespaces.
 - `content` is **not** supported — template resources always use `source`.
@@ -64,5 +64,5 @@ Applies to all supported targets.
 
 ## Related
 
-[file](/sinter/en/reference/resources/file/) ·
-[Recipes — expressions](/sinter/en/concepts/recipes/)
+[file](/en/reference/resources/file/) ·
+[Recipes — expressions](/en/concepts/recipes/)

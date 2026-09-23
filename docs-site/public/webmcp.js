@@ -38,7 +38,7 @@ function register() {
 
   var LOCALES = ['en', 'ja'];
   var scriptUrl = new URL(import.meta.url);
-  var base = scriptUrl.pathname.replace(/webmcp\.js$/, ''); // e.g. /sinter/
+  var base = scriptUrl.pathname.replace(/webmcp\.js$/, ''); // e.g. /
 
   var dataPromises = {};
   function data(locale) {

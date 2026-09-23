@@ -6,15 +6,15 @@
 
 ## Documentation
 
-- [Documentation home (English)](https://hagix9.github.io/sinter/en/)
-- [ドキュメント ホーム (日本語)](https://hagix9.github.io/sinter/ja/)
-- [Installation](https://hagix9.github.io/sinter/en/getting-started/installation/)
-- [Supported platforms](https://hagix9.github.io/sinter/en/compatibility/platforms/)
-- [CLI reference](https://hagix9.github.io/sinter/en/reference/cli/)
-- [Resource reference](https://hagix9.github.io/sinter/en/reference/resources/)
+- [Documentation home (English)](https://sinter.fulltrust.co.jp/en/)
+- [ドキュメント ホーム (日本語)](https://sinter.fulltrust.co.jp/ja/)
+- [Installation](https://sinter.fulltrust.co.jp/en/getting-started/installation/)
+- [Supported platforms](https://sinter.fulltrust.co.jp/en/compatibility/platforms/)
+- [CLI reference](https://sinter.fulltrust.co.jp/en/reference/cli/)
+- [Resource reference](https://sinter.fulltrust.co.jp/en/reference/resources/)
 
 ## Machine-readable
 
-- [Documentation WebMCP](https://hagix9.github.io/sinter/en/reference/webmcp/): read-only documentation lookup tools the site exposes to WebMCP-capable browsers
-- [WebMCP data — English](https://hagix9.github.io/sinter/webmcp/en.json): machine-readable Sinter documentation data used by the site's WebMCP tool surface
-- [WebMCP data — 日本語](https://hagix9.github.io/sinter/webmcp/ja.json)
+- [Documentation WebMCP](https://sinter.fulltrust.co.jp/en/reference/webmcp/): read-only documentation lookup tools the site exposes to WebMCP-capable browsers
+- [WebMCP data — English](https://sinter.fulltrust.co.jp/webmcp/en.json): machine-readable Sinter documentation data used by the site's WebMCP tool surface
+- [WebMCP data — 日本語](https://sinter.fulltrust.co.jp/webmcp/ja.json)

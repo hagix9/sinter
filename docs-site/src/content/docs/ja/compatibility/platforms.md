@@ -43,7 +43,7 @@ AlmaLinux 10.2（すべてx86_64）です。正規アーカイブはその正規
 転送・実行されました。他の各point releaseや将来のリリースを個別に
 検証したという意味ではありません。
 過去の v0.2.1 は従来のディストリビューション別アセットのままです。
-現在のダウンロードは[インストール](https://hagix9.github.io/sinter/ja/getting-started/installation/)
+現在のダウンロードは[インストール](https://sinter.fulltrust.co.jp/ja/getting-started/installation/)
 を参照してください。
 
 すべての管理対象に必要なもの:
@@ -92,7 +92,7 @@ AlmaLinux 9、AlmaLinux 10、その他バイナリがビルドできる x86_64 L
 環境でサポートされます。Sinter のリリースバイナリは単一の Linux x86_64
 アーティファクトです。公開済み v0.2.1 は
 ディストリビューション別アセットを維持します
-（[インストール](/sinter/ja/getting-started/installation/)を参照）。
+（[インストール](/ja/getting-started/installation/)を参照）。
 
 ## 明示的に非対応のもの
 
@@ -106,5 +106,5 @@ AlmaLinux 9、AlmaLinux 10、その他バイナリがビルドできる x86_64 L
 
 Sinter のスコープにはインベントリ、ロール、プラグイン、
 オーケストレーション、組み込みスクリプトは含まれません。リリース履歴は
-[CHANGELOG](https://github.com/hagix9/sinter/blob/main/CHANGELOG.md)を
+[CHANGELOG](https://github.com/hagix9/blob/main/CHANGELOG.md)を
 参照してください。

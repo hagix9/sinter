@@ -20,7 +20,7 @@ AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64、344/344チェック）の
 8実ホストで受入検証済みです。
 他の各point releaseや将来のリリースを個別に検証したという意味ではありません。
 過去の v0.2.1 は従来のディストリビューション別アセットのままです。
-現在のダウンロードは[インストール](https://hagix9.github.io/sinter/ja/getting-started/installation/)
+現在のダウンロードは[インストール](https://sinter.fulltrust.co.jp/ja/getting-started/installation/)
 を参照してください。
 
 
@@ -71,4 +71,4 @@ sinter apply --host web01 --sudo recipe.yaml
 
 リポジトリの SSH 統合テストスイートは、`SINTER_TEST_SSH_*` 環境変数を
 使って使い捨ての Ubuntu ホストを対象にします。
-[コントリビューション](/sinter/ja/contributing/)を参照してください。
+[コントリビューション](/ja/contributing/)を参照してください。

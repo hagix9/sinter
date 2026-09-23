@@ -8,13 +8,13 @@ complete supported set — unknown `with` fields are schema errors.
 
 | Type | Purpose | Key parameters |
 |------|---------|----------------|
-| [file](/sinter/en/reference/resources/file/) | Regular file content + metadata | `path`, `state`, `content`/`source`, `owner`, `group`, `mode` |
-| [directory](/sinter/en/reference/resources/directory/) | Directory presence + metadata | `path`, `state`, `owner`, `group`, `mode` |
-| [link](/sinter/en/reference/resources/link/) | Symbolic links | `path`, `target`, `state` |
-| [template](/sinter/en/reference/resources/template/) | Rendered controller-side templates | `path`, `source`, `vars`, `mode` |
-| [command](/sinter/en/reference/resources/command/) | Exact-argv program execution | `program`, `args`, `creates`/`removes`, `changed_when`, `register` |
-| [package](/sinter/en/reference/resources/package/) | Package install/remove (apt/dnf) | `name`, `state` |
-| [service](/sinter/en/reference/resources/service/) | systemd state + enablement | `name`, `state`, `enabled` |
+| [file](/en/reference/resources/file/) | Regular file content + metadata | `path`, `state`, `content`/`source`, `owner`, `group`, `mode` |
+| [directory](/en/reference/resources/directory/) | Directory presence + metadata | `path`, `state`, `owner`, `group`, `mode` |
+| [link](/en/reference/resources/link/) | Symbolic links | `path`, `target`, `state` |
+| [template](/en/reference/resources/template/) | Rendered controller-side templates | `path`, `source`, `vars`, `mode` |
+| [command](/en/reference/resources/command/) | Exact-argv program execution | `program`, `args`, `creates`/`removes`, `changed_when`, `register` |
+| [package](/en/reference/resources/package/) | Package install/remove (apt/dnf) | `name`, `state` |
+| [service](/en/reference/resources/service/) | systemd state + enablement | `name`, `state`, `enabled` |
 
 ## Shared conventions
 

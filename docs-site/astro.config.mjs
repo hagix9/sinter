@@ -2,25 +2,22 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import docIndex from './src/data/doc-index.json' with { type: 'json' };
 
-// GitHub Pages project site: https://hagix9.github.io/sinter/
-// If a custom domain is adopted later, change site/base together and update
-// the WebMCP bootstrap path below.
-const site = 'https://hagix9.github.io';
-const base = '/sinter';
+// Production site is served from the GitHub Pages custom domain root.
+const site = 'https://sinter.fulltrust.co.jp';
+const base = '/';
+const basePrefix = base === '/' ? '' : base;
 
-// Phase 1 served English docs at unprefixed paths (/sinter/<path>/). English
-// now lives under /sinter/en/ so old links keep working via static redirects.
-// Astro redirect sources are base-relative; destinations are absolute paths
-// and must include the base explicitly.
+// English docs live under /en/; legacy unprefixed paths redirect there.
+// With a root deployment, sources and destinations are root-relative.
 const legacyRedirects = Object.fromEntries(
   docIndex.pages
     .filter((p) => p.path !== '')
     .flatMap((p) => [
-      [`/${p.path}/`, `${base}/en/${p.path}/`],
-      [`/${p.path}`, `${base}/en/${p.path}/`],
+      [`/${p.path}/`, `${basePrefix}/en/${p.path}/`],
+      [`/${p.path}`, `${basePrefix}/en/${p.path}/`],
     ]),
 );
-legacyRedirects['/'] = `${base}/en/`;
+legacyRedirects['/'] = `${basePrefix}/en/`;
 
 export default defineConfig({
   site,
@@ -53,7 +50,7 @@ export default defineConfig({
         // browsers without WebMCP support.
         {
           tag: 'script',
-          attrs: { type: 'module', src: `${base}/webmcp.js` },
+          attrs: { type: 'module', src: `${basePrefix}/webmcp.js` },
         },
       ],
       sidebar: [

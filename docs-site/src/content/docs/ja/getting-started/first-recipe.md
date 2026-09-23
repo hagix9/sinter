@@ -96,7 +96,7 @@ sinter apply --host web01.example.com --sudo recipe.yaml
 
 ## サービスを追加する
 
-`service` リソースの基本は[クイックスタート](/sinter/ja/getting-started/quick-start/)
+`service` リソースの基本は[クイックスタート](/ja/getting-started/quick-start/)
 に含まれています。1 つのルールを覚えておいてください。`service` リソースと
 ハンドラの `service:` はどちらも**ターゲット上の systemd ユニット名**を
 指定します。ユニット名はディストリビューションによって異なります —
@@ -114,13 +114,13 @@ SSH デーモンは Ubuntu では `ssh.service`、Rocky Linux では
 ```
 
 リソースが変更されたときにだけサービスを再起動したい場合はハンドラを
-追加します。完全なハンドラモデルは[レシピ](/sinter/ja/concepts/recipes/)
+追加します。完全なハンドラモデルは[レシピ](/ja/concepts/recipes/)
 を参照してください。
 
 ## もう 2 つのリソースを試す
 
 Sinter は 7 つのリソースタイプを実装しています。一覧は
-[リソースリファレンス](/sinter/ja/reference/resources/)を参照して
+[リソースリファレンス](/ja/reference/resources/)を参照して
 ください。このレシピの小さなバリエーション 2 つで、さらに 2 つの
 タイプを試せます。
 
@@ -178,8 +178,8 @@ resources:
 これらはすべて上で示したのと同じコマンドで実行できます。より大きな
 構成要素 — ガード付きの `command` リソース、`package`/`service` の
 ベースライン、ハンドラ — については
-[レシピ概要](/sinter/ja/recipes/overview/)を参照してください。
+[レシピ概要](/ja/recipes/overview/)を参照してください。
 
-完全なモデルは[レシピ](/sinter/ja/concepts/recipes/)へ、各リソースの
-詳細は[リソースリファレンス](/sinter/ja/reference/resources/)へ進んで
+完全なモデルは[レシピ](/ja/concepts/recipes/)へ、各リソースの
+詳細は[リソースリファレンス](/ja/reference/resources/)へ進んで
 ください。

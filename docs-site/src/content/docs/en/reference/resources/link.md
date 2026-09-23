@@ -47,5 +47,5 @@ Applies to all supported targets.
 
 ## Related
 
-[file](/sinter/en/reference/resources/file/) ·
-[directory](/sinter/en/reference/resources/directory/)
+[file](/en/reference/resources/file/) ·
+[directory](/en/reference/resources/directory/)

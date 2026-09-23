@@ -68,5 +68,5 @@ description: 正確な argv と固定された環境でターゲット上のプ�
 
 ## 関連
 
-[冪等性](/sinter/ja/concepts/idempotency/) ·
-[レシピ — 式](/sinter/ja/concepts/recipes/)
+[冪等性](/ja/concepts/idempotency/) ·
+[レシピ — 式](/ja/concepts/recipes/)

@@ -53,7 +53,7 @@ fan-out or ordering you need from your own scripts.
 | AlmaLinux 9 | x86_64 | dnf |
 | AlmaLinux 10 | x86_64 | dnf |
 
-See [Compatibility](/sinter/en/compatibility/platforms/) for requirements and the
+See [Compatibility](/en/compatibility/platforms/) for requirements and the
 acceptance reference.
 
 ## What Sinter is not

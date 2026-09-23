@@ -14,7 +14,7 @@ Commands:
   mcp       Serve a read-only MCP (Model Context Protocol) endpoint on stdio
 ```
 
-`mcp`サブコマンドと`--targets-file`については[Core MCP](/sinter/ja/reference/mcp/)を参照してください。
+`mcp`サブコマンドと`--targets-file`については[Core MCP](/ja/reference/mcp/)を参照してください。
 
 `sinter --version` はバージョンを表示します（例: `sinter 0.5.0`）。
 

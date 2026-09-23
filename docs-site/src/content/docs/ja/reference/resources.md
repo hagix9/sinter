@@ -9,13 +9,13 @@ Sinter v0.5.0 は 7 つのリソースタイプを実装しています。以下
 
 | タイプ | 用途 | 主要パラメータ |
 |--------|------|----------------|
-| [file](/sinter/ja/reference/resources/file/) | 通常ファイルの内容とメタデータ | `path`、`state`、`content`/`source`、`owner`、`group`、`mode` |
-| [directory](/sinter/ja/reference/resources/directory/) | ディレクトリの存在とメタデータ | `path`、`state`、`owner`、`group`、`mode` |
-| [link](/sinter/ja/reference/resources/link/) | シンボリックリンク | `path`、`target`、`state` |
-| [template](/sinter/ja/reference/resources/template/) | コントローラ側テンプレートのレンダリング | `path`、`source`、`vars`、`mode` |
-| [command](/sinter/ja/reference/resources/command/) | 正確な argv によるプログラム実行 | `program`、`args`、`creates`/`removes`、`changed_when`、`register` |
-| [package](/sinter/ja/reference/resources/package/) | パッケージのインストール/削除（apt/dnf） | `name`、`state` |
-| [service](/sinter/ja/reference/resources/service/) | systemd の状態と有効化 | `name`、`state`、`enabled` |
+| [file](/ja/reference/resources/file/) | 通常ファイルの内容とメタデータ | `path`、`state`、`content`/`source`、`owner`、`group`、`mode` |
+| [directory](/ja/reference/resources/directory/) | ディレクトリの存在とメタデータ | `path`、`state`、`owner`、`group`、`mode` |
+| [link](/ja/reference/resources/link/) | シンボリックリンク | `path`、`target`、`state` |
+| [template](/ja/reference/resources/template/) | コントローラ側テンプレートのレンダリング | `path`、`source`、`vars`、`mode` |
+| [command](/ja/reference/resources/command/) | 正確な argv によるプログラム実行 | `program`、`args`、`creates`/`removes`、`changed_when`、`register` |
+| [package](/ja/reference/resources/package/) | パッケージのインストール/削除（apt/dnf） | `name`、`state` |
+| [service](/ja/reference/resources/service/) | systemd の状態と有効化 | `name`、`state`、`enabled` |
 
 ## 共通の規約
 

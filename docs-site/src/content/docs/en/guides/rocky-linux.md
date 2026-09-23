@@ -26,7 +26,7 @@ Ubuntu 26.04.1 LTS, Rocky Linux 9.8, Rocky Linux 10.2, RHEL 9.8, RHEL 10.2,
 AlmaLinux 9.8, and AlmaLinux 10.2 — all x86_64, 344/344 checks.
 Other and future point releases have not each been independently validated.
 Historical v0.2.1 retains its distro-specific assets; see
-[Installation](https://hagix9.github.io/sinter/en/getting-started/installation/)
+[Installation](https://sinter.fulltrust.co.jp/en/getting-started/installation/)
 for current downloads.
 
 

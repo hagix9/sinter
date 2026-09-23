@@ -60,8 +60,8 @@ resources:
 ```
 
 共通フィールド: `id`、`type`、`with`、`when`、`loop`、`depends_on`、
-`notify`、`sensitive`。意味については[リソース](/sinter/ja/concepts/resources/)を、
-タイプ別パラメータについては[リソースリファレンス](/sinter/ja/reference/resources/)を参照してください。
+`notify`、`sensitive`。意味については[リソース](/ja/concepts/resources/)を、
+タイプ別パラメータについては[リソースリファレンス](/ja/reference/resources/)を参照してください。
 
 ## ハンドラ
 

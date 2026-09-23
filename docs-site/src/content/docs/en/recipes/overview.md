@@ -114,8 +114,8 @@ resources:
       content: "ready\n"
 ```
 
-See the [Recipe Format reference](/sinter/en/reference/recipe-format/) and the
-[Resource Reference](/sinter/en/reference/resources/) for the full schema.
+See the [Recipe Format reference](/en/reference/recipe-format/) and the
+[Resource Reference](/en/reference/resources/) for the full schema.
 
 :::note[Official recipe collections]
 Curated recipe collections (for example a `linux-baseline` set) are a future

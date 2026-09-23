@@ -11,19 +11,19 @@ AlmaLinux 9 / 10 — を1つの `sinter-v0.5.0-linux-x86_64.tar.gz`
 アーティファクトで配布します。
 
 ```sh
-curl -fsSL https://hagix9.github.io/sinter/install.sh | sh
+curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
 $HOME/.local/bin/sinter --version
 ```
 
 インストーラは公式GitHubの最新安定版を選び、展開前にSHA256SUMSを検証し、
 sudoを使わず `$HOME/.local/bin` に配置します。必要なら自分でPATHへ追加して
 ください。シェル設定は変更しません。実行前の内容確認と手動ダウンロードは
-[インストール](https://hagix9.github.io/sinter/ja/getting-started/installation/)を参照してください。
+[インストール](https://sinter.fulltrust.co.jp/ja/getting-started/installation/)を参照してください。
 
 ### 実行前に内容を確認
 
 ```sh
-curl -fsSLo install.sh https://hagix9.github.io/sinter/install.sh
+curl -fsSLo install.sh https://sinter.fulltrust.co.jp/install.sh
 less install.sh
 sh install.sh
 ```

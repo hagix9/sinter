@@ -2,7 +2,7 @@
 
 [English](README.md) | **日本語**
 
-**ドキュメント:** <https://hagix9.github.io/sinter/ja/> ([English](https://hagix9.github.io/sinter/))
+**ドキュメント:** <https://sinter.fulltrust.co.jp/ja/> ([English](https://sinter.fulltrust.co.jp/))
 
 **Small enough to understand, strong enough to trust.**
 
@@ -81,7 +81,7 @@ Sinter **v0.5.0** は、対応するすべての Linux x86_64 プラットフォ
 RHEL 9 / 10、AlmaLinux 9 / 10 対応が追加されました。
 
 ```sh
-curl -fsSL https://hagix9.github.io/sinter/install.sh | sh
+curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
 $HOME/.local/bin/sinter --version
 ```
 
@@ -93,7 +93,7 @@ RHEL 10.2、AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64）です。
 インストーラは公式GitHubの最新安定版を選び、展開前にSHA256SUMSを検証し、
 sudoを使わず `$HOME/.local/bin` に配置します。必要なら自分でPATHへ追加して
 ください。シェル設定は変更しません。実行前の内容確認と手動ダウンロードは
-[インストール](https://hagix9.github.io/sinter/ja/getting-started/installation/)を参照してください。
+[インストール](https://sinter.fulltrust.co.jp/ja/getting-started/installation/)を参照してください。
 
 ## ビルド
 

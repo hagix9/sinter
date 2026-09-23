@@ -49,8 +49,8 @@ not configure a persistent host-wide environment.
   AlmaLinux, Oracle Linux) → `dnf`.
 - No version pinning in v0.5.0.
 - On dnf targets, installs run through a private cache snapshot — see
-  [Execution Model](/sinter/en/concepts/execution-model/) and the
-  [Rocky guide](/sinter/en/guides/rocky-linux/).
+  [Execution Model](/en/concepts/execution-model/) and the
+  [Rocky guide](/en/guides/rocky-linux/).
 - Broken package states (half-configured etc.) fail rather than auto-repair.
 
 ## Idempotency
@@ -77,5 +77,5 @@ produce no mutation and no package transaction.
 
 ## Related
 
-[service](/sinter/en/reference/resources/service/) ·
-[Execution Model](/sinter/en/concepts/execution-model/)
+[service](/en/reference/resources/service/) ·
+[Execution Model](/en/concepts/execution-model/)

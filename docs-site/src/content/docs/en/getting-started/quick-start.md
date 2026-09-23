@@ -94,5 +94,5 @@ sinter plan \
 | `--format` | `text` (default) or `json`. |
 | `--verbose` | Verbose output. |
 
-Next: [First Recipe](/sinter/en/getting-started/first-recipe/) adds files,
+Next: [First Recipe](/en/getting-started/first-recipe/) adds files,
 directories, links, and services.

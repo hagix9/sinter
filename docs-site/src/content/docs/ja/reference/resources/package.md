@@ -51,8 +51,8 @@ description: ターゲットのパッケージバックエンドでパッケー�
 - v0.5.0 ではバージョン固定はありません。
 - dnf ターゲットでは、インストールはプライベートキャッシュ
   スナップショット経由で行われます —
-  [実行モデル](/sinter/ja/concepts/execution-model/)と
-  [Rocky ガイド](/sinter/ja/guides/rocky-linux/)を参照してください。
+  [実行モデル](/ja/concepts/execution-model/)と
+  [Rocky ガイド](/ja/guides/rocky-linux/)を参照してください。
 - 壊れたパッケージ状態（設定途中など）は自動修復ではなく失敗と
   なります。
 
@@ -80,5 +80,5 @@ description: ターゲットのパッケージバックエンドでパッケー�
 
 ## 関連
 
-[service](/sinter/ja/reference/resources/service/) ·
-[実行モデル](/sinter/ja/concepts/execution-model/)
+[service](/ja/reference/resources/service/) ·
+[実行モデル](/ja/concepts/execution-model/)

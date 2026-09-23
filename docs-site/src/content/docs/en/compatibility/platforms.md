@@ -45,7 +45,7 @@ extract to that exact binary, which was transferred and executed
 identically on all eight hosts. Other and future point releases have not
 each been independently validated.
 Historical v0.2.1 retains its distro-specific assets; see
-[Installation](https://hagix9.github.io/sinter/en/getting-started/installation/)
+[Installation](https://sinter.fulltrust.co.jp/en/getting-started/installation/)
 for current downloads.
 
 All managed targets require:
@@ -90,7 +90,7 @@ Ubuntu 26.04 LTS, Rocky Linux 9, Rocky Linux 10, RHEL 9, RHEL 10,
 AlmaLinux 9, AlmaLinux 10, and other x86_64 Linux environments where the
 binary builds. Sinter release binaries use a single Linux x86_64 artifact;
 published v0.2.1 retains distro-specific assets (see
-[Installation](/sinter/en/getting-started/installation/)).
+[Installation](/en/getting-started/installation/)).
 
 ## Explicitly not supported
 
@@ -104,5 +104,5 @@ published v0.2.1 retains distro-specific assets (see
 
 Sinter scope does not include inventory, roles, plugins, orchestration, or
 embedded scripting. See the
-[CHANGELOG](https://github.com/hagix9/sinter/blob/main/CHANGELOG.md) for
+[CHANGELOG](https://github.com/hagix9/blob/main/CHANGELOG.md) for
 release history.

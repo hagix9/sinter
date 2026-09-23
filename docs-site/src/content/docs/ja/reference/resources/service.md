@@ -57,5 +57,5 @@ description: systemd サービスの起動状態と有効化を管理する。
 
 ## 関連
 
-[package](/sinter/ja/reference/resources/package/) ·
-[handlers](/sinter/ja/concepts/recipes/)
+[package](/ja/reference/resources/package/) ·
+[handlers](/ja/concepts/recipes/)

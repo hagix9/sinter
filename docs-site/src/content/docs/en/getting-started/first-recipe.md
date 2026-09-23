@@ -90,7 +90,7 @@ sinter apply --host web01.example.com --sudo recipe.yaml
 
 ## Adding a service
 
-A service resource is included in the [Quick Start](/sinter/en/getting-started/quick-start/)
+A service resource is included in the [Quick Start](/en/getting-started/quick-start/)
 basics. Keep one rule in mind: a `service` resource and a handler `service:`
 both name the **systemd unit on the target**, and unit names differ between
 distributions — the SSH daemon is `ssh.service` on Ubuntu but `sshd.service`
@@ -107,12 +107,12 @@ documented `when` expression:
 ```
 
 To restart a service only when a resource changes, add a handler — see
-[Recipes](/sinter/en/concepts/recipes/) for the full handler model.
+[Recipes](/en/concepts/recipes/) for the full handler model.
 
 ## Two more resources to try
 
 Sinter implements seven resource types — the
-[Resource Reference](/sinter/en/reference/resources/) lists them all. Two
+[Resource Reference](/en/reference/resources/) lists them all. Two
 small variations on this recipe exercise two more of them.
 
 ### Inline content with `file`
@@ -166,7 +166,7 @@ directory.
 
 All of these run with the same commands shown above. For larger building
 blocks — guarded `command` resources, `package`/`service` baselines, and
-handlers — see [Recipe Overview](/sinter/en/recipes/overview/).
+handlers — see [Recipe Overview](/en/recipes/overview/).
 
-Continue to [Recipes](/sinter/en/concepts/recipes/) for the full model, or jump
-to the [Resource Reference](/sinter/en/reference/resources/).
+Continue to [Recipes](/en/concepts/recipes/) for the full model, or jump
+to the [Resource Reference](/en/reference/resources/).

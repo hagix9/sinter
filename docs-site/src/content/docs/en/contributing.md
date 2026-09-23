@@ -64,5 +64,5 @@ Resource metadata shared by the docs and the WebMCP tools lives in
 ## Releases
 
 Release procedure: see
-[RELEASE.md](https://github.com/hagix9/sinter/blob/main/RELEASE.md) in the
+[RELEASE.md](https://github.com/hagix9/blob/main/RELEASE.md) in the
 repository.

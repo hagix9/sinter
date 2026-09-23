@@ -29,13 +29,13 @@ automatically when viewing the site.
 | `sinter_get_installation` | Installation steps for a platform (`linux-x86_64` or `source`; old Ubuntu/Rocky identifiers remain aliases). |
 
 The same machine-readable data is also served directly as JSON at
-`/sinter/webmcp/en.json` and `/sinter/webmcp/ja.json`.
+`/webmcp/en.json` and `/webmcp/ja.json`.
 
 ## Locales
 
 Every tool accepts an optional `locale` input: `en` or `ja`. When omitted,
 the locale is detected from the page currently being viewed
-(`/sinter/ja/...` → `ja`, otherwise `en`). An invalid locale fails cleanly
+(`/ja/...` → `ja`, otherwise `en`). An invalid locale fails cleanly
 with the supported locales listed, and if a localized payload is unavailable
 the tools fall back to the English data rather than failing.
 

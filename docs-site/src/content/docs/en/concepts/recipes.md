@@ -60,8 +60,8 @@ resources:
 ```
 
 Common fields: `id`, `type`, `with`, `when`, `loop`, `depends_on`, `notify`,
-`sensitive`. See [Resources](/sinter/en/concepts/resources/) for semantics and
-the [Resource Reference](/sinter/en/reference/resources/) for per-type
+`sensitive`. See [Resources](/en/concepts/resources/) for semantics and
+the [Resource Reference](/en/reference/resources/) for per-type
 parameters.
 
 ## Handlers

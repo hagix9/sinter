@@ -55,7 +55,7 @@ sinter apply --host web01.example.com --sudo recipe.yaml
 | AlmaLinux 9 | x86_64 | dnf |
 | AlmaLinux 10 | x86_64 | dnf |
 
-要件と受入基準環境は[対応プラットフォーム](/sinter/ja/compatibility/platforms/)を参照してください。
+要件と受入基準環境は[対応プラットフォーム](/ja/compatibility/platforms/)を参照してください。
 
 ## Sinter でないもの
 

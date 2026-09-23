@@ -93,5 +93,5 @@ sinter plan \
 | `--format` | `text`（デフォルト）または `json`。 |
 | `--verbose` | 詳細な出力。 |
 
-次は [はじめてのレシピ](/sinter/ja/getting-started/first-recipe/) で
+次は [はじめてのレシピ](/ja/getting-started/first-recipe/) で
 ファイル、ディレクトリ、リンク、サービスを追加します。

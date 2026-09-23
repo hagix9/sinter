@@ -10,7 +10,7 @@ covering every supported Linux x86_64 platform line — Ubuntu 24.04 / 26.04
 LTS, Rocky Linux 9 / 10, RHEL 9 / 10, and AlmaLinux 9 / 10.
 
 ```sh
-curl -fsSL https://hagix9.github.io/sinter/install.sh | sh
+curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
 $HOME/.local/bin/sinter --version
 ```
 
@@ -18,12 +18,12 @@ The installer selects the latest stable official GitHub release, verifies
 SHA256SUMS before extraction, and installs without sudo into `$HOME/.local/bin`.
 If needed, add that directory to PATH yourself; shell profiles are not edited.
 For inspect-before-run and manual downloads, see
-[Installation](https://hagix9.github.io/sinter/en/getting-started/installation/).
+[Installation](https://sinter.fulltrust.co.jp/en/getting-started/installation/).
 
 ### Inspect before running
 
 ```sh
-curl -fsSLo install.sh https://hagix9.github.io/sinter/install.sh
+curl -fsSLo install.sh https://sinter.fulltrust.co.jp/install.sh
 less install.sh
 sh install.sh
 ```

@@ -40,7 +40,7 @@ hostname = {{ facts.hostname }}
 ## 期待される動作
 
 - テンプレートはコントローラ上でレンダリングされ、
-  [`file`](/sinter/ja/reference/resources/file/) と同様にアトミックに
+  [`file`](/ja/reference/resources/file/) と同様にアトミックに
   公開されます。
 - テンプレート式は `vars.*`、`facts.*`、`registers.*`、`template.*` を
   読み取れます。`template.*` の名前が他の名前空間をシャドウすることは
@@ -67,5 +67,5 @@ hostname = {{ facts.hostname }}
 
 ## 関連
 
-[file](/sinter/ja/reference/resources/file/) ·
-[レシピ — 式](/sinter/ja/concepts/recipes/)
+[file](/ja/reference/resources/file/) ·
+[レシピ — 式](/ja/concepts/recipes/)

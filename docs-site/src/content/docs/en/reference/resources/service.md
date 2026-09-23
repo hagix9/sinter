@@ -55,5 +55,5 @@ Requires systemd on the target (all supported platforms).
 
 ## Related
 
-[package](/sinter/en/reference/resources/package/) ·
-[handlers](/sinter/en/concepts/recipes/)
+[package](/en/reference/resources/package/) ·
+[handlers](/en/concepts/recipes/)

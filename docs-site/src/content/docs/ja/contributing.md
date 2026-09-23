@@ -66,5 +66,5 @@ npm run build    # dist/ への静的ビルド
 ## リリース
 
 リリース手順: リポジトリの
-[RELEASE.md](https://github.com/hagix9/sinter/blob/main/RELEASE.md)を
+[RELEASE.md](https://github.com/hagix9/blob/main/RELEASE.md)を
 参照してください。

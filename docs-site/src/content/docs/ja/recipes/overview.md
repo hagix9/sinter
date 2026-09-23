@@ -114,8 +114,8 @@ resources:
       content: "ready\n"
 ```
 
-完全なスキーマは[レシピフォーマット リファレンス](/sinter/ja/reference/recipe-format/)と
-[リソースリファレンス](/sinter/ja/reference/resources/)を参照してください。
+完全なスキーマは[レシピフォーマット リファレンス](/ja/reference/recipe-format/)と
+[リソースリファレンス](/ja/reference/resources/)を参照してください。
 
 :::note[公式レシピコレクション]
 キュレーションされたレシピコレクション（例えば `linux-baseline`

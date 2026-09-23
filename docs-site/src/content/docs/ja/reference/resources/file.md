@@ -62,6 +62,6 @@ description: 通常ファイルの内容とメタデータを管理する。
 
 ## 関連
 
-[template](/sinter/ja/reference/resources/template/) ·
-[directory](/sinter/ja/reference/resources/directory/) ·
-[link](/sinter/ja/reference/resources/link/)
+[template](/ja/reference/resources/template/) ·
+[directory](/ja/reference/resources/directory/) ·
+[link](/ja/reference/resources/link/)

@@ -61,6 +61,6 @@ as `/tmp` fail the trust-boundary check.
 
 ## Related
 
-[template](/sinter/en/reference/resources/template/) ·
-[directory](/sinter/en/reference/resources/directory/) ·
-[link](/sinter/en/reference/resources/link/)
+[template](/en/reference/resources/template/) ·
+[directory](/en/reference/resources/directory/) ·
+[link](/en/reference/resources/link/)

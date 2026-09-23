@@ -67,5 +67,5 @@ target.
 
 ## Related
 
-[Idempotency](/sinter/en/concepts/idempotency/) ·
-[Recipes — expressions](/sinter/en/concepts/recipes/)
+[Idempotency](/en/concepts/idempotency/) ·
+[Recipes — expressions](/en/concepts/recipes/)

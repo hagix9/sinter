@@ -51,5 +51,5 @@ description: ディレクトリを目的のメタデータで存在させる。
 
 ## 関連
 
-[file](/sinter/ja/reference/resources/file/) ·
-[link](/sinter/ja/reference/resources/link/)
+[file](/ja/reference/resources/file/) ·
+[link](/ja/reference/resources/link/)
