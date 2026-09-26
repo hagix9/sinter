@@ -3,7 +3,7 @@ title: Resources
 description: The resource model — common fields, ordering, dependencies, notifications.
 ---
 
-Resources are the unit of desired state. v0.5.0 implements seven types:
+Resources are the unit of desired state. v0.5.1 implements seven types:
 `file`, `directory`, `link`, `template`, `command`, `package`, `service`.
 
 ## Common fields

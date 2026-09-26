@@ -42,7 +42,7 @@ ChatGPT
 
 | Requirement | Detail |
 |---|---|
-| Sinter | v0.5.0 or later (`sinter mcp`); see [Installation](/en/getting-started/installation/) |
+| Sinter | v0.5.1 or later (`sinter mcp`); see [Installation](/en/getting-started/installation/) |
 | sinter-bridge | Built from this repository's `gateway/` crate (not yet in release archives); needs a Rust toolchain |
 | Bridge host | Linux x86_64 (release archive) or another Unix-like machine where you build Sinter from source (for example macOS); it must reach `https://gateway.fulltrust.co.jp` over outbound HTTPS (443) and stay online while you use the plugin |
 | ChatGPT | A ChatGPT plan that can use apps/plugins; developer mode to add the app while the plugin is in preview |
@@ -51,7 +51,7 @@ ChatGPT
 
 ## Quick start
 
-1. **Install Sinter** (v0.5.0+). On Linux x86_64:
+1. **Install Sinter** (v0.5.1+). On Linux x86_64:
 
    ```sh
    curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
@@ -117,7 +117,7 @@ ChatGPT
 > Ask Sinter which version it is running.
 
 ChatGPT calls `sinter_get_version`; your bridge answers from your local
-Sinter, for example `{"name":"sinter","readOnly":true,"version":"0.5.0"}`.
+Sinter, for example `{"name":"sinter","readOnly":true,"version":"0.5.1"}`.
 
 Other read-only prompts:
 

@@ -75,10 +75,9 @@ embedded scriptingは依然として実装対象に含めません。
 
 ## インストール
 
-Sinter **v0.5.0** は、対応するすべての Linux x86_64 プラットフォーム
-ラインを1つの `sinter-v0.5.0-linux-x86_64.tar.gz` アーティファクトで
-配布します。UbuntuとRockyのラインに加え、受入検証済みの
-RHEL 9 / 10、AlmaLinux 9 / 10 対応が追加されました。
+Sinter **v0.5.1** は、対応するすべての Linux x86_64 プラットフォーム
+ライン（Ubuntu、Rocky Linux、RHEL 9 / 10、AlmaLinux 9 / 10）を1つの
+`sinter-v0.5.1-linux-x86_64.tar.gz` アーティファクトで配布します。
 
 ```sh
 curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh

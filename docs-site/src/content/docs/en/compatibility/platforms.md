@@ -30,7 +30,7 @@ is required.
 
 ## Unified Linux x86_64 distribution
 
-Sinter v0.5.0 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for all
+Sinter v0.5.1 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for all
 supported x86_64 version lines. The executable is unified; runtime platform
 detection still selects APT on Ubuntu and DNF on RHEL-family targets. This
 is not a claim of support for arbitrary Linux systems or architectures.

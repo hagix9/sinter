@@ -1,6 +1,6 @@
 [package]
 name = "sinter"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "Sinter: a lightweight, agentless configuration-management tool"
 license = "MIT OR Apache-2.0"

@@ -62,6 +62,23 @@ the account, checks for an existing controller, asks for confirmation, and
 supports `--dry-run` and read-only `list`/`status`. See
 [`OPERATOR_ONBOARDING.md`](OPERATOR_ONBOARDING.md).
 
+### Administrative access
+
+Run operator commands over SSH through IAP only. On GCE, the reference
+deployment:
+
+- blocks direct Internet SSH with two firewall rules scoped to the Gateway
+  VM's network tag: allow tcp/22 from the IAP range `35.235.240.0/20` at
+  priority 900, and deny tcp/22 from `0.0.0.0/0` at priority 950;
+- connects with `gcloud compute ssh <vm> --tunnel-through-iap` (IAP API
+  enabled; `roles/iap.tunnelResourceAccessor`);
+- sets `SINTER_GW_ADMIN_GCE_IAP=1` for `scripts/sinter-gw-admin`.
+
+Break-glass: firewall rules are managed through the GCP API, not SSH. If IAP
+is unavailable, delete the tag-scoped deny rule to restore direct SSH
+temporarily, then recreate it and re-verify that IAP SSH succeeds and direct
+SSH is refused.
+
 ## 3. External Authorization Server contract
 
 The Gateway implements the RFC 9728 protected-resource side only. An

@@ -1,9 +1,9 @@
 ---
 title: Resource Reference
-description: All Sinter resource types implemented in v0.5.0.
+description: All Sinter resource types implemented in v0.5.1.
 ---
 
-Sinter v0.5.0 implements seven resource types. Parameters below are the
+Sinter v0.5.1 implements seven resource types. Parameters below are the
 complete supported set — unknown `with` fields are schema errors.
 
 | Type | Purpose | Key parameters |

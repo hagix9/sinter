@@ -5,9 +5,9 @@ description: リリース tarball から Sinter をインストールするか�
 
 ## インストール
 
-Sinter **v0.5.0** は、対応するすべての Linux x86_64 プラットフォーム
+Sinter **v0.5.1** は、対応するすべての Linux x86_64 プラットフォーム
 ライン — Ubuntu 24.04 / 26.04 LTS、Rocky Linux 9 / 10、RHEL 9 / 10、
-AlmaLinux 9 / 10 — を1つの `sinter-v0.5.0-linux-x86_64.tar.gz`
+AlmaLinux 9 / 10 — を1つの `sinter-v0.5.1-linux-x86_64.tar.gz`
 アーティファクトで配布します。
 
 ```sh
@@ -31,7 +31,7 @@ sh install.sh
 ### バージョンと配置先
 
 ```sh
-SINTER_VERSION=v0.5.0 sh install.sh
+SINTER_VERSION=v0.5.1 sh install.sh
 SINTER_INSTALL_DIR="$HOME/bin" sh install.sh
 ```
 
@@ -46,9 +46,9 @@ checksumは破損・配布整合性を確認し、GitHub侵害への完全な防
 ### リリースから手動インストール
 
 ```sh
-ASSET=sinter-v0.5.0-linux-x86_64.tar.gz
-curl -fLO "https://github.com/hagix9/sinter/releases/download/v0.5.0/$ASSET"
-curl -fLO https://github.com/hagix9/sinter/releases/download/v0.5.0/SHA256SUMS
+ASSET=sinter-v0.5.1-linux-x86_64.tar.gz
+curl -fLO "https://github.com/hagix9/sinter/releases/download/v0.5.1/$ASSET"
+curl -fLO https://github.com/hagix9/sinter/releases/download/v0.5.1/SHA256SUMS
 grep -F "  $ASSET" SHA256SUMS | sha256sum -c -
 tar -xzf "$ASSET"
 sudo install -m 0755 "${ASSET%.tar.gz}/sinter" /usr/local/bin/sinter

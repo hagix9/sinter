@@ -36,7 +36,13 @@
 
 ## 1. 事前準備（運用者のマシンで一度だけ）
 
-1. `gcloud auth login` 済みで、Gateway VM に `gcloud compute ssh` できること。VM 上の sudo はパスワード不要である必要があります。
+1. `gcloud auth login` 済みで、Gateway VM に **IAP 経由** で SSH できること（`gcloud compute ssh <Gateway VM 名> --project <GCP project> --zone <zone> --tunnel-through-iap`）。
+   - 本番では、インターネットからの直接 SSH（tcp/22）を firewall で遮断しています。Gateway VM の network tag に限定した 2 つのルールで実現しています。
+     - IAP の送信元 `35.235.240.0/20` からの tcp/22 を許可（priority 900）
+     - それ以外からの tcp/22 を拒否（priority 950）
+   - IAP API（`iap.googleapis.com`）の有効化と、`roles/iap.tunnelResourceAccessor` が必要です（project owner は保有）。
+   - VM 上の sudo はパスワード不要である必要があります。
+   - IAP 経由の接続時に表示される NumPy の警告は無害です。
 2. 設定ファイル `~/.config/sinter/gw-admin.env` を作成し、`chmod 600` にします。秘密情報は含みません。Git に入れないでください。
 
    ```sh
@@ -44,7 +50,7 @@
    SINTER_GW_ADMIN_GCE_PROJECT=<GCP project>
    SINTER_GW_ADMIN_GCE_ZONE=<zone>
    SINTER_GW_ADMIN_GCE_INSTANCE=<Gateway VM 名>
-   SINTER_GW_ADMIN_GCE_IAP=0          # SSH を IAP 経由に限定した後は 1
+   SINTER_GW_ADMIN_GCE_IAP=1          # 本番は IAP 経由のみ（直接 SSH は遮断）
    SINTER_GW_ADMIN_PUBLIC_URL=https://<Gateway ホスト>
    ```
 
@@ -53,6 +59,18 @@
    ```sh
    gateway/scripts/sinter-gw-admin list
    ```
+
+### 緊急時（IAP が使えない場合）
+
+firewall は GCP の API で操作でき、SSH を必要としません。そのため、IAP が使えなくても管理不能にはなりません。緊急時は次の手順で、一時的に直接 SSH を戻します。
+
+1. Gateway VM の tag を対象とする tcp/22 の拒否ルールを確認します。
+   ```sh
+   gcloud compute firewall-rules list --project <GCP project> --filter="targetTags:<gateway tag>"
+   ```
+2. 拒否ルールを削除します。直接 SSH は既存の `default-allow-ssh` で再び通るようになります。
+3. 復旧後、同じ定義（tcp/22、`0.0.0.0/0`、priority 950、同じ tag）で拒否ルールを作り直します。
+4. IAP 経由の SSH が成功することと、直接 SSH が拒否されることを、両方確認します。
 
 `sinter-gw-admin` の動作:
 - Gateway 既存の CLI（`sinter-gateway --issue-registration-token` / `--revoke-controller`）を、Gateway の service user として、Gateway の env を読み込んだ状態で実行します。
@@ -130,7 +148,7 @@ Gateway は account ごとの通常の poll を記録しません。**bridge が
    - MCP サーバーの URL: `https://<Gateway ホスト>/mcp`
    - 認証: OAuth
 2. Logto のサインイン画面で、手順 2.2 のユーザーでサインインし、同意します。
-3. 新しいチャットで「Sinter のバージョンを教えて」と聞くと、例えば `0.5.0` と read-only が返ります。
+3. 新しいチャットで「Sinter のバージョンを教えて」と聞くと、例えば `0.5.1` と read-only が返ります。
 4. 運用者は `sinter-gw-admin status <account>` を実行し、`mcp session created account=<account>` が出ていることを確認します。
 
 ## 6. registration に失敗した場合

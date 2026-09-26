@@ -42,7 +42,7 @@ ChatGPT
 
 | 項目 | 内容 |
 |---|---|
-| Sinter | v0.5.0 以降（`sinter mcp`）。[インストール](/ja/getting-started/installation/)参照 |
+| Sinter | v0.5.1 以降（`sinter mcp`）。[インストール](/ja/getting-started/installation/)参照 |
 | sinter-bridge | 本リポジトリの `gateway/` crate からビルド（リリースアーカイブには未同梱）。Rust toolchain が必要 |
 | bridge ホスト | Linux x86_64（リリースアーカイブ）、または Sinter をソースからビルドする他の Unix 系マシン（例: macOS）。`https://gateway.fulltrust.co.jp` へ外向き HTTPS（443）で到達でき、Plugin 利用中は起動し続けていること |
 | ChatGPT | apps / plugins を利用できる ChatGPT プラン。プレビュー期間中はアプリ追加に developer mode が必要 |
@@ -51,7 +51,7 @@ ChatGPT
 
 ## クイックスタート
 
-1. **Sinter をインストール**（v0.5.0 以降）。Linux x86_64 の場合:
+1. **Sinter をインストール**（v0.5.1 以降）。Linux x86_64 の場合:
 
    ```sh
    curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
@@ -113,7 +113,7 @@ ChatGPT
 > Sinter のバージョンを教えて
 
 ChatGPT は `sinter_get_version` を呼び出し、あなたの bridge がローカルの
-Sinter から応答します。例: `{"name":"sinter","readOnly":true,"version":"0.5.0"}`
+Sinter から応答します。例: `{"name":"sinter","readOnly":true,"version":"0.5.1"}`
 
 その他の read-only な例:
 

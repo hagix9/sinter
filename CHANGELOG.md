@@ -4,6 +4,12 @@ All notable changes to Sinter are documented in this file.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-27
+
+MCP tool annotations for the read-only `sinter mcp` interface, plus ChatGPT
+Plugin documentation and public Gateway operator tooling. No change to
+configuration management behavior.
+
 ### Added
 
 - MCP tool annotations: every `sinter mcp` tool now declares
@@ -27,6 +33,12 @@ All notable changes to Sinter are documented in this file.
 - `gateway/docs/PRODUCTION_DEPLOYMENT.md`: the bridge bootstrap ran
   `sinter-bridge register` twice; the first run consumed the single-use
   registration token. It now runs once and writes the credential file.
+
+### Changed
+
+- Gateway operator docs: administrative SSH to the Gateway host goes through
+  IAP (`gcloud compute ssh --tunnel-through-iap`); the onboarding example sets
+  `SINTER_GW_ADMIN_GCE_IAP=1`, and the break-glass path is documented.
 
 ## [0.5.0] - 2026-09-22
 

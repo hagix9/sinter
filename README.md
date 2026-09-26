@@ -75,10 +75,9 @@ inventory, orchestration, or embedded scripting.
 
 ## Install
 
-Sinter **v0.5.0** ships one `sinter-v0.5.0-linux-x86_64.tar.gz` artifact
-covering every supported Linux x86_64 platform line, adding
-acceptance-tested RHEL 9 / 10 and AlmaLinux 9 / 10 support to the
-Ubuntu and Rocky lines.
+Sinter **v0.5.1** ships one `sinter-v0.5.1-linux-x86_64.tar.gz` artifact
+covering every supported Linux x86_64 platform line: Ubuntu, Rocky Linux,
+RHEL 9 / 10, and AlmaLinux 9 / 10.
 
 ```sh
 curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
