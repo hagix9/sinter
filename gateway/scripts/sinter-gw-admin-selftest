@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Isolated end-to-end check of the operator onboarding path:
+#   sinter-gw-admin issue → sinter-bridge register → controller bound →
+#   sinter-gw-admin revoke
+# against a throwaway local Gateway (loopback, temporary SQLite). Touches no
+# production system. Tokens and credentials are never printed.
+#
+# usage: SINTER_BIN=/path/to/sinter gateway/scripts/sinter-gw-admin-selftest [BIN_DIR]
+#   BIN_DIR holds sinter-gateway and sinter-bridge [gateway/target/release]
+
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+admin="$here/sinter-gw-admin"
+bin_dir=${1:-"$here/../target/release"}
+gw="$bin_dir/sinter-gateway"
+br="$bin_dir/sinter-bridge"
+sinter=${SINTER_BIN:-sinter}
+for b in "$gw" "$br"; do [ -x "$b" ] || { echo "missing $b" >&2; exit 2; }; done
+command -v "$sinter" >/dev/null || [ -x "$sinter" ] || { echo "set SINTER_BIN" >&2; exit 2; }
+
+tmp=$(mktemp -d)
+pids=()
+cleanup() {
+    for p in "${pids[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
+    wait 2>/dev/null || true
+    rm -rf "$tmp"
+}
+trap cleanup EXIT
+
+pass=0
+ok() { pass=$((pass + 1)); echo "ok   $*"; }
+fail() {
+    echo "FAIL $*" >&2
+    for f in gw.log bridge.log; do
+        [ -f "$tmp/$f" ] && { echo "--- $f (tail)" >&2; tail -n 15 "$tmp/$f" >&2; }
+    done
+    exit 1
+}
+
+port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')
+url="http://127.0.0.1:$port"
+cat >"$tmp/gateway.env" <<EOF
+SINTER_GW_BIND=127.0.0.1:$port
+SINTER_GW_SQLITE=$tmp/identity.db
+SINTER_GW_PUBLIC_URL=$url
+SINTER_GW_OAUTH_ISSUER=http://127.0.0.1:9
+SINTER_GW_OAUTH_AUDIENCE=$url
+SINTER_GW_OAUTH_JWKS_URI=http://127.0.0.1:9/jwks.json
+EOF
+
+export SINTER_GW_ADMIN_CONFIG=/dev/null
+export SINTER_GW_ADMIN_TRANSPORT=local
+export SINTER_GW_ADMIN_ENV_FILE="$tmp/gateway.env"
+export SINTER_GW_ADMIN_BIN="$gw"
+export SINTER_GW_ADMIN_SERVICE_USER=""
+export SINTER_GW_ADMIN_UNIT=""
+export SINTER_GW_ADMIN_PUBLIC_URL="$url"
+
+(set -a; . "$tmp/gateway.env"; exec "$gw") >"$tmp/gw.log" 2>&1 &
+pids+=($!)
+for _ in $(seq 1 50); do curl -fsS "$url/healthz" >/dev/null 2>&1 && break; sleep 0.2; done
+curl -fsS "$url/healthz" >/dev/null || fail "gateway did not start"
+ok "local gateway up ($url)"
+
+acct=selftest-a
+
+"$admin" list | grep -q '(none)' || fail "fresh DB should list no controllers"
+ok "list on empty DB"
+
+"$admin" issue "Bad Acct" >/dev/null 2>&1 && fail "invalid account accepted"
+ok "invalid account id rejected"
+
+"$admin" issue --dry-run "$acct" >/dev/null 2>&1 || fail "dry-run failed"
+"$admin" list "$acct" | grep -A1 'pending registration tokens' | grep -q '(none)' ||
+    fail "dry-run must not issue a token"
+ok "dry-run issues nothing"
+
+echo wrong-account | "$admin" issue "$acct" >/dev/null 2>&1 && fail "mismatched confirmation accepted"
+"$admin" list "$acct" | grep -A1 'pending registration tokens' | grep -q '(none)' ||
+    fail "mismatched confirmation must not issue a token"
+ok "mismatched confirmation issues nothing"
+
+out=$(echo "$acct" | "$admin" issue "$acct" 2>/dev/null) || fail "issue failed"
+token=$(grep -oE 'reg_[0-9a-f]{64}' <<<"$out" | head -n1)
+[ -n "$token" ] || fail "no token in issue output"
+grep -q "SINTER_BRIDGE_GATEWAY_URL=$url" <<<"$out" || fail "handoff text missing"
+unset out
+ok "issue: one token + handoff printed"
+
+umask 077
+SINTER_BRIDGE_GATEWAY_URL=$url SINTER_BRIDGE_ALLOW_HTTP=1 SINTER_BRIDGE_REG_TOKEN=$token \
+    "$br" register >"$tmp/bridge.cred" 2>"$tmp/register.err" || fail "bridge register failed"
+grep -qE '^ctrlk_[0-9a-f]{64}$' "$tmp/bridge.cred" || fail "credential file malformed"
+[ "$(wc -l <"$tmp/bridge.cred" | tr -d ' ')" = 1 ] || fail "credential file must contain one line"
+ok "bridge register → credential file (one line, ctrlk_…)"
+
+if SINTER_BRIDGE_GATEWAY_URL=$url SINTER_BRIDGE_ALLOW_HTTP=1 SINTER_BRIDGE_REG_TOKEN=$token \
+    "$br" register >/dev/null 2>"$tmp/register2.err"; then
+    fail "token was accepted twice"
+fi
+grep -q 'HTTP 409' "$tmp/register2.err" || fail "second register should be 409 (consumed)"
+unset token
+ok "token is single-use (second register → 409)"
+
+SINTER_BRIDGE_GATEWAY_URL=$url SINTER_BRIDGE_ALLOW_HTTP=1 \
+    SINTER_BRIDGE_CREDENTIAL_FILE="$tmp/bridge.cred" SINTER_BRIDGE_SINTER_BIN="$sinter" \
+    "$br" >"$tmp/bridge.log" 2>&1 &
+pids+=($!)
+plain() { sed 's/\x1b\[[0-9;]*m//g' "$1"; }
+plain "$tmp/gw.log" | grep -q "controller registered controller=ctl_[0-9a-f]* account=$acct" ||
+    fail "gateway did not log the controller registration"
+ok "gateway logged 'controller registered … account=$acct' at register time"
+
+for _ in $(seq 1 50); do grep -q 'bridge polling' "$tmp/bridge.log" && break; sleep 0.2; done
+sleep 3
+grep -q 'bridge polling' "$tmp/bridge.log" || fail "bridge did not start polling"
+kill -0 "${pids[1]}" 2>/dev/null || fail "bridge exited"
+grep -qE 'WARN|ERROR' "$tmp/bridge.log" && fail "bridge reported a problem while polling"
+ok "bridge polling with the new credential (alive, no auth warnings)"
+
+"$admin" status "$acct" | grep -qE "ctl_[0-9a-f]{32} +$acct +active" || fail "status should show active controller"
+ok "status shows the active controller"
+
+echo "$acct" | "$admin" issue "$acct" >/dev/null 2>"$tmp/issue2.err" && fail "issue allowed with an active controller"
+grep -q 'already has an active controller' "$tmp/issue2.err" || fail "wrong pre-check message"
+ok "issue refused while the account has an active controller"
+
+ctl=$("$admin" list "$acct" | grep -oE 'ctl_[0-9a-f]{32}' | head -n1)
+"$admin" revoke --dry-run "$ctl" >/dev/null 2>&1 || fail "revoke dry-run failed"
+"$admin" list "$acct" | grep -qE "$ctl +$acct +active" || fail "dry-run must not revoke"
+echo not-it | "$admin" revoke "$ctl" >/dev/null 2>&1 && fail "revoke accepted wrong confirmation"
+echo "$acct" | "$admin" revoke "$ctl" >/dev/null 2>&1 || fail "revoke failed"
+"$admin" list "$acct" | grep -qE "$ctl +$acct +revoked" || fail "controller should be revoked"
+ok "revoke: dry-run and wrong confirmation change nothing; confirmed revoke works"
+
+for _ in $(seq 1 150); do grep -q 'controller authentication failed' "$tmp/bridge.log" && break; sleep 0.5; done
+grep -q 'controller authentication failed' "$tmp/bridge.log" || fail "revoked bridge should be rejected"
+ok "revoked bridge is rejected by the gateway"
+
+"$admin" issue --dry-run "$acct" >/dev/null 2>&1 || fail "account should be re-issuable after revoke"
+ok "after revoke the account can be issued a new token"
+
+grep -rqE 'reg_[0-9a-f]{64}|ctrlk_[0-9a-f]{64}' "$tmp/gw.log" "$tmp/bridge.log" "$tmp/register.err" &&
+    fail "a token or credential appeared in a log"
+ok "no token or credential in gateway/bridge logs"
+
+echo "PASS ($pass checks)"

@@ -1,0 +1,28 @@
+# systemd *user* unit for sinter-bridge (Linux).
+#
+# Install (as the user who owns the bridge credential):
+#   install -D -m 644 sinter-bridge.service ~/.config/systemd/user/sinter-bridge.service
+#   install -D -m 600 bridge.env.example    ~/.config/sinter/bridge.env   # then edit paths
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now sinter-bridge
+#   loginctl enable-linger "$USER"      # keep running after logout / at boot
+#   journalctl --user -u sinter-bridge -f
+#
+# Exit behaviour: SIGTERM (systemctl stop) is a clean exit 0, so it is not
+# restarted. Configuration or child-restart-budget failures exit non-zero,
+# so Restart=on-failure brings the bridge back.
+
+[Unit]
+Description=Sinter bridge (ChatGPT plugin controller)
+
+[Service]
+Type=simple
+# KEY=value lines; use absolute paths — systemd does not expand ~ or %h here.
+EnvironmentFile=%h/.config/sinter/bridge.env
+ExecStart=%h/.local/bin/sinter-bridge
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

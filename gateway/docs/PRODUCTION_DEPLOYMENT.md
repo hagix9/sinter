@@ -57,6 +57,10 @@ sinter-gateway --revoke-controller <controller-id>
 ```
 
 Both open `SINTER_GW_SQLITE` directly; run as the service user.
+`scripts/sinter-gw-admin` wraps them for day-to-day onboarding: it validates
+the account, checks for an existing controller, asks for confirmation, and
+supports `--dry-run` and read-only `list`/`status`. See
+[`OPERATOR_ONBOARDING.md`](OPERATOR_ONBOARDING.md).
 
 ## 3. External Authorization Server contract
 
@@ -116,10 +120,11 @@ sinter-gateway --issue-registration-token acme-corp
 
 # customer, on the controller host:
 export SINTER_BRIDGE_GATEWAY_URL=https://gw.example.com
-sinter-bridge register              # prompts for the token (or
-                                    # SINTER_BRIDGE_REG_TOKEN); never argv
 umask 077
-sinter-bridge register > ~/.config/sinter/controller.cred   # credential once
+# run register ONCE: it consumes the single-use token. It prompts for the
+# token on stderr (or reads SINTER_BRIDGE_REG_TOKEN) — never argv — and
+# prints only the credential on stdout.
+sinter-bridge register > ~/.config/sinter/controller.cred
 export SINTER_BRIDGE_CREDENTIAL_FILE=~/.config/sinter/controller.cred
 sinter-bridge                     # runs
 ```
@@ -158,6 +163,10 @@ ExecStart=/usr/local/bin/sinter-bridge
 Restart=on-failure
 RestartSec=10
 ```
+
+A complete bridge user unit and environment template (absolute paths —
+systemd does not expand `~` in `EnvironmentFile`) are in
+`gateway/contrib/systemd/`.
 
 SIGTERM/SIGINT trigger graceful shutdown on both binaries (bounded;
 parked polls are woken, the SQLite store is closed cleanly).

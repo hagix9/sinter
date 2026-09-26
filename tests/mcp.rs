@@ -143,6 +143,14 @@ fn initialize_list_tools() {
     for t in tools {
         assert!(t["name"].is_string());
         assert_eq!(t["inputSchema"]["type"], "object");
+        // Every tool is explicitly annotated read-only / non-destructive /
+        // closed-world (required by plugin directory review).
+        assert_eq!(
+            t["annotations"],
+            json!({"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false}),
+            "{}",
+            t["name"]
+        );
     }
 }
 

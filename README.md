@@ -398,6 +398,31 @@ sudo = true
 This is unrelated to the documentation site's WebMCP surface (browser-side,
 documentation lookup only); Core MCP exposes Sinter's own operations.
 
+## ChatGPT Plugin (preview)
+
+The Sinter ChatGPT plugin lets ChatGPT call the read-only `sinter mcp` tools on
+**your own** Sinter installation:
+
+```text
+ChatGPT → Sinter plugin → public Gateway (https://gateway.fulltrust.co.jp/mcp)
+        → your account's controller → your sinter-bridge → your local `sinter mcp`
+```
+
+- The public Gateway (`gateway/` crate) authenticates ChatGPT with OAuth and
+  relays MCP requests; it is not your Sinter host and never connects to your
+  servers.
+- `sinter-bridge` runs on your machine (outbound HTTPS only) and forwards each
+  request to a local `sinter mcp` child. All tools are read-only and annotated
+  `readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: false`.
+- Sinter for ChatGPT is currently available by invitation. To request
+  access, contact us through the [Fulltrust contact form](https://fulltrust.co.jp/contact/index.html) and
+  mention "Sinter" in your inquiry (do not include server details,
+  credentials, or tokens). The Gateway operator then sets up your sign-in
+  account and issues a one-time registration token for your bridge.
+
+Setup, troubleshooting, and security/privacy details:
+[ChatGPT Plugin guide](https://sinter.fulltrust.co.jp/en/guides/chatgpt-plugin/).
+
 ## License
 
 Sinter is licensed under either of:

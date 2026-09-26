@@ -1,0 +1,279 @@
+#!/usr/bin/env bash
+# sinter-gw-admin — operator helper for onboarding Sinter plugin users.
+#
+# Thin wrapper around the existing Gateway operator CLI
+# (`sinter-gateway --issue-registration-token` / `--revoke-controller`) plus
+# read-only status queries. It never edits the identity database directly,
+# never stores tokens, and never prints credentials other than the one
+# registration token shown once by `issue`.
+#
+# Transport (where the Gateway host commands run):
+#   gce   (default) run on the Gateway VM via `gcloud compute ssh`
+#   local run on this machine (use when already on the Gateway host, or
+#         for testing against a local Gateway)
+#
+# Configuration: environment variables, optionally from
+# ${SINTER_GW_ADMIN_CONFIG:-$HOME/.config/sinter/gw-admin.env} (KEY=VALUE).
+# Keep that file out of Git; it holds no secrets.
+#
+#   SINTER_GW_ADMIN_TRANSPORT     gce | local                 [gce]
+#   SINTER_GW_ADMIN_GCE_PROJECT   GCP project                  (gce: required)
+#   SINTER_GW_ADMIN_GCE_ZONE      GCE zone                     (gce: required)
+#   SINTER_GW_ADMIN_GCE_INSTANCE  Gateway VM name              (gce: required)
+#   SINTER_GW_ADMIN_GCE_IAP       1 = --tunnel-through-iap     [0]
+#   SINTER_GW_ADMIN_ENV_FILE      Gateway env file             [/etc/sinter/gateway.env]
+#   SINTER_GW_ADMIN_BIN           sinter-gateway binary        [/usr/local/bin/sinter-gateway]
+#   SINTER_GW_ADMIN_SERVICE_USER  run Gateway commands as      [sinter-gw] ("" = current user)
+#   SINTER_GW_ADMIN_UNIT          systemd unit for status logs [sinter-gateway] ("" = skip)
+#   SINTER_GW_ADMIN_PUBLIC_URL    Gateway URL for user handoff (required for `issue`)
+#   SINTER_GW_ADMIN_GUIDE_URL     user guide URL for handoff   [https://sinter.fulltrust.co.jp/en/guides/chatgpt-plugin/]
+
+set -euo pipefail
+
+PROG=sinter-gw-admin
+CONFIG=${SINTER_GW_ADMIN_CONFIG:-$HOME/.config/sinter/gw-admin.env}
+if [ -f "$CONFIG" ]; then
+    # shellcheck disable=SC1090
+    set -a; . "$CONFIG"; set +a
+fi
+
+TRANSPORT=${SINTER_GW_ADMIN_TRANSPORT:-gce}
+ENV_FILE=${SINTER_GW_ADMIN_ENV_FILE:-/etc/sinter/gateway.env}
+GW_BIN=${SINTER_GW_ADMIN_BIN:-/usr/local/bin/sinter-gateway}
+SVC_USER=${SINTER_GW_ADMIN_SERVICE_USER-sinter-gw}
+UNIT=${SINTER_GW_ADMIN_UNIT-sinter-gateway}
+PUBLIC_URL=${SINTER_GW_ADMIN_PUBLIC_URL:-}
+GUIDE_URL=${SINTER_GW_ADMIN_GUIDE_URL:-https://sinter.fulltrust.co.jp/en/guides/chatgpt-plugin/}
+
+# Account ids must match the Logto customData.sinter_account value exactly.
+ACCOUNT_RE='^[a-z0-9][a-z0-9._-]{1,62}$'
+CONTROLLER_RE='^ctl_[0-9a-f]{32}$'
+
+usage() {
+    cat <<EOF
+usage: $PROG <command> [args]
+
+  list [ACCOUNT]            controllers, pending registration tokens, recent
+                            audit events (read-only)
+  status ACCOUNT            list ACCOUNT + recent Gateway log lines for it
+  issue [--dry-run] ACCOUNT pre-check, confirm, then issue ONE single-use
+                            registration token (15 min) and print user handoff
+  revoke [--dry-run] CONTROLLER_ID
+                            revoke a controller (the user's bridge stops
+                            working; the account can register again later)
+  handoff ACCOUNT           print the user instructions (no token)
+
+Config: $CONFIG (see header of this script).
+EOF
+}
+
+die() { echo "$PROG: $*" >&2; exit 1; }
+
+need_account() {
+    [[ "${1:-}" =~ $ACCOUNT_RE ]] ||
+        die "invalid account '${1:-}': use 2-63 chars [a-z0-9._-], starting with [a-z0-9]"
+}
+
+# Run a shell snippet on the Gateway host. The snippet runs as the service
+# user with the Gateway env file loaded (set -a), so SINTER_GW_SQLITE etc.
+# are available. Positional arguments are passed without re-parsing.
+gw_sh() {
+    local snippet=$1; shift
+    local inner="set -a; . $(printf %q "$ENV_FILE"); set +a; $snippet"
+    local -a cmd
+    if [ -n "$SVC_USER" ]; then
+        cmd=(sudo -n -u "$SVC_USER" sh -c "$inner" "$PROG" "$@")
+    else
+        cmd=(sh -c "$inner" "$PROG" "$@")
+    fi
+    remote "${cmd[@]}"
+}
+
+# Run a command (argv) on the Gateway host.
+remote() {
+    case "$TRANSPORT" in
+    local)
+        "$@"
+        ;;
+    gce)
+        : "${SINTER_GW_ADMIN_GCE_PROJECT:?set SINTER_GW_ADMIN_GCE_PROJECT}"
+        : "${SINTER_GW_ADMIN_GCE_ZONE:?set SINTER_GW_ADMIN_GCE_ZONE}"
+        : "${SINTER_GW_ADMIN_GCE_INSTANCE:?set SINTER_GW_ADMIN_GCE_INSTANCE}"
+        local q="" a
+        for a in "$@"; do q+=" $(printf %q "$a")"; done
+        local -a iap=()
+        [ "${SINTER_GW_ADMIN_GCE_IAP:-0}" = 1 ] && iap=(--tunnel-through-iap)
+        gcloud compute ssh "$SINTER_GW_ADMIN_GCE_INSTANCE" \
+            --project "$SINTER_GW_ADMIN_GCE_PROJECT" \
+            --zone "$SINTER_GW_ADMIN_GCE_ZONE" ${iap[@]+"${iap[@]}"} --quiet \
+            --command "${q# }" 2> >(grep -vE '^(Warning:|Updating|Waiting for|External IP|No zone)' >&2)
+        ;;
+    *) die "unknown SINTER_GW_ADMIN_TRANSPORT '$TRANSPORT'" ;;
+    esac
+}
+
+# Read-only report from the identity DB (SELECT only, opened mode=ro; never
+# reads credential or token verifiers). Emits KEY=VALUE summary lines first.
+QUERY_PY='
+import sqlite3, sys, time, datetime
+db, acct = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None)
+con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+now = int(time.time() * 1000)
+t = lambda ms: "-" if ms is None else datetime.datetime.fromtimestamp(ms / 1000, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+w, p = (" WHERE account_id = ?", (acct,)) if acct else ("", ())
+ctl = con.execute("SELECT controller_id, account_id, status, created_unix_ms, revoked_unix_ms FROM controllers" + w + " ORDER BY created_unix_ms", p).fetchall()
+pend = con.execute("SELECT account_id, expires_unix_ms FROM registration_tokens WHERE consumed_unix_ms IS NULL AND expires_unix_ms > ?" + (" AND account_id = ?" if acct else "") + " ORDER BY expires_unix_ms", (now,) + p).fetchall()
+aud = con.execute("SELECT ts_unix_ms, kind, account_id, controller_id FROM audit_events" + w + " ORDER BY id DESC LIMIT 10", p).fetchall()
+print("ACTIVE_CONTROLLERS=%d" % sum(1 for r in ctl if r[2] == "active"))
+print("PENDING_TOKENS=%d" % len(pend))
+print("## controllers")
+for r in ctl: print("  %-37s %-24s %-7s created %s revoked %s" % (r[0], r[1], r[2], t(r[3]), t(r[4])))
+if not ctl: print("  (none)")
+print("## pending registration tokens (unused, unexpired)")
+for r in pend: print("  %-24s expires %s" % (r[0], t(r[1])))
+if not pend: print("  (none)")
+print("## recent audit events")
+for r in aud: print("  %s  %-26s %-24s %s" % (t(r[0]), r[1], r[2] or "-", r[3] or "-"))
+if not aud: print("  (none)")
+'
+
+db_report() {
+    local b64
+    b64=$(printf '%s' "$QUERY_PY" | base64 | tr -d '\n')
+    gw_sh 'exec python3 -c "$(printf %s "$1" | base64 -d)" "$SINTER_GW_SQLITE" "$2"' \
+        "$b64" "${1:-}"
+}
+
+confirm() {
+    # $1 = prompt, $2 = expected answer. Reads the terminal when available.
+    local ans
+    printf '%s' "$1" >&2
+    if [ -r /dev/tty ] && { : </dev/tty; } 2>/dev/null; then
+        IFS= read -r ans </dev/tty || ans=""
+    else
+        IFS= read -r ans || ans=""
+    fi
+    [ "$ans" = "$2" ] || die "confirmation did not match — nothing was changed"
+}
+
+handoff() {
+    local account=$1
+    cat <<EOF
+
+================ Send to the user (account: $account) ================
+1. Sign-in account for ChatGPT: the Logto user you created, mapped to
+   customData.sinter_account = "$account" (send its sign-in details
+   separately from the token).
+2. Gateway URL : ${PUBLIC_URL:-<SINTER_GW_ADMIN_PUBLIC_URL>}
+   MCP URL     : ${PUBLIC_URL:-<SINTER_GW_ADMIN_PUBLIC_URL>}/mcp   (ChatGPT app, OAuth)
+3. Guide       : $GUIDE_URL
+4. Register the bridge ONCE (the token is single-use, valid 15 minutes):
+     umask 077; mkdir -p ~/.config/sinter
+     SINTER_BRIDGE_GATEWAY_URL=${PUBLIC_URL:-<URL>} \\
+       sinter-bridge register > ~/.config/sinter/bridge.cred
+     # paste the registration token at the prompt
+5. Start the bridge (see the guide for systemd):
+     SINTER_BRIDGE_GATEWAY_URL=${PUBLIC_URL:-<URL>} \\
+     SINTER_BRIDGE_CREDENTIAL_FILE=\$HOME/.config/sinter/bridge.cred \\
+       sinter-bridge
+======================================================================
+EOF
+}
+
+cmd_list() {
+    [ -z "${1:-}" ] || need_account "$1"
+    db_report "${1:-}" | grep -v '^[A-Z_]*=[0-9]*$'
+}
+
+cmd_status() {
+    need_account "${1:-}"
+    cmd_list "$1"
+    if [ -n "$UNIT" ] && [ "$TRANSPORT" = gce ]; then
+        echo "## Gateway log (last 24h, this account)"
+        remote sh -c 'sudo -n journalctl -u "$1" --since -24h --no-pager -o cat 2>/dev/null |
+            sed "s/\x1b\[[0-9;]*m//g" | grep -F "account=$2" | tail -n 8 || true' "$PROG" "$UNIT" "$1"
+        echo "  'controller registered' = registration, or re-bind on the first poll after a Gateway"
+        echo "  restart. 'mcp session created' = authenticated ChatGPT use. The Gateway does not log"
+        echo "  routine polls per account: prove the bridge is online with a ChatGPT tool call."
+    fi
+}
+
+cmd_issue() {
+    local dry=0
+    [ "${1:-}" = --dry-run ] && { dry=1; shift; }
+    local account=${1:-}
+    need_account "$account"
+    [ -n "$PUBLIC_URL" ] || die "set SINTER_GW_ADMIN_PUBLIC_URL (used in the user handoff)"
+
+    echo "## pre-check for account '$account'" >&2
+    local report active pending
+    report=$(db_report "$account")
+    printf '%s\n' "$report" | grep -v '^[A-Z_]*=[0-9]*$' >&2
+    active=$(printf '%s\n' "$report" | sed -n 's/^ACTIVE_CONTROLLERS=//p')
+    pending=$(printf '%s\n' "$report" | sed -n 's/^PENDING_TOKENS=//p')
+    [ -n "$active" ] || die "pre-check failed (could not read the identity DB)"
+
+    if [ "$active" != 0 ]; then
+        die "account '$account' already has an active controller — registration would fail (409).
+  To replace the user's bridge: $PROG revoke <controller-id>, then issue again."
+    fi
+    if [ "$pending" != 0 ]; then
+        echo "$PROG: note: $pending unused, unexpired token(s) already exist for '$account' (they expire on their own)." >&2
+    fi
+    echo "$PROG: the account must equal the Logto user's customData.sinter_account exactly." >&2
+
+    if [ "$dry" = 1 ]; then
+        echo "DRY RUN: would run '$GW_BIN --issue-registration-token $account' as '${SVC_USER:-current user}' via $TRANSPORT. No token issued." >&2
+        return 0
+    fi
+    confirm "Type the account id again to issue a token: " "$account"
+
+    local token
+    token=$(gw_sh 'exec "$1" --issue-registration-token "$2"' "$GW_BIN" "$account") ||
+        die "token issuance failed"
+    [[ "$token" =~ ^reg_[0-9a-f]{64}$ ]] || die "unexpected issuer output (token not shown)"
+
+    handoff "$account"
+    cat <<EOF
+
+Registration token for '$account' — shown ONCE, not stored anywhere.
+Deliver it through a private channel (not in the same message as the
+sign-in password). Valid 15 minutes, single use:
+
+    $token
+
+EOF
+    unset token
+}
+
+cmd_revoke() {
+    local dry=0
+    [ "${1:-}" = --dry-run ] && { dry=1; shift; }
+    local id=${1:-}
+    [[ "$id" =~ $CONTROLLER_RE ]] || die "invalid controller id '$id' (expected ctl_ + 32 hex; see '$PROG list')"
+    local line account
+    line=$(db_report "" | grep -E "^  $id " || true)
+    [ -n "$line" ] || die "controller $id not found"
+    echo "$line" >&2
+    account=$(awk '{print $2}' <<<"$line")
+    if [ "$(awk '{print $3}' <<<"$line")" != active ]; then
+        die "controller $id is not active — nothing to do"
+    fi
+    if [ "$dry" = 1 ]; then
+        echo "DRY RUN: would revoke $id (account '$account'). Nothing changed." >&2
+        return 0
+    fi
+    confirm "Type the account id '$account' to revoke this controller: " "$account"
+    gw_sh 'exec "$1" --revoke-controller "$2"' "$GW_BIN" "$id"
+    cmd_list "$account"
+}
+
+case "${1:-}" in
+list) shift; cmd_list "$@" ;;
+status) shift; cmd_status "$@" ;;
+issue) shift; cmd_issue "$@" ;;
+revoke) shift; cmd_revoke "$@" ;;
+handoff) shift; need_account "${1:-}"; handoff "$1" ;;
+-h | --help | help | "") usage ;;
+*) usage >&2; exit 64 ;;
+esac

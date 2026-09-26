@@ -13,6 +13,7 @@
     { "title": "Rocky Linux Guide", "path": "guides/rocky-linux", "description": "Rocky Linux 9/10 x86_64 target guide (dnf backend).", "keywords": "rocky rhel dnf 9 10 x86_64" },
     { "title": "Red Hat Enterprise Linux Guide", "path": "guides/rhel", "description": "RHEL 9/10 x86_64 target guide (dnf backend).", "keywords": "rhel red hat dnf 9 10 x86_64" },
     { "title": "AlmaLinux Guide", "path": "guides/almalinux", "description": "AlmaLinux 9/10 x86_64 target guide (dnf backend).", "keywords": "almalinux rhel dnf 9 10 x86_64" },
+    { "title": "ChatGPT Plugin", "path": "guides/chatgpt-plugin", "description": "Use Sinter from ChatGPT through the public Gateway and your own sinter-bridge (read-only).", "keywords": "chatgpt plugin mcp gateway bridge oauth read-only" },
     { "title": "Recipe Overview", "path": "recipes/overview", "description": "Recipe examples based on v0.5.0 functionality.", "keywords": "recipes examples baseline" },
     { "title": "CLI Reference", "path": "reference/cli", "description": "sinter validate/plan/apply flags and exit codes.", "keywords": "cli flags exit codes host port user sudo identity known_hosts format" },
     { "title": "Recipe Format", "path": "reference/recipe-format", "description": "Top-level fields, expressions, and interpolation reference.", "keywords": "version vars include resources handlers expressions interpolation" },

@@ -34,7 +34,8 @@ Client configuration example (stdio servers):
 ## Tools
 
 All eight tools are read-only. There is intentionally no apply, exec, or
-shell tool.
+shell tool. Every tool carries the MCP annotations `readOnlyHint: true`,
+`destructiveHint: false`, and `openWorldHint: false`.
 
 | Tool | Purpose |
 |------|---------|

@@ -35,7 +35,8 @@ sinter mcp --targets-file targets.toml
 ## ツール
 
 8つのツールはすべて読み取り専用です。apply、exec、shellツールは
-意図的に存在しません。
+意図的に存在しません。すべてのツールに MCP annotation
+`readOnlyHint: true`、`destructiveHint: false`、`openWorldHint: false` が付いています。
 
 | ツール | 目的 |
 |--------|------|

@@ -398,6 +398,32 @@ sudo = true
 これはドキュメントサイトのWebMCP（ブラウザ側、ドキュメント検索のみ）と
 は無関係です。Core MCPはSinter自身の操作を公開します。
 
+## ChatGPT Plugin（プレビュー）
+
+Sinter ChatGPT Plugin を使うと、ChatGPT から **ご自身の** Sinter 環境にある
+read-only の `sinter mcp` tool を呼び出せます:
+
+```text
+ChatGPT → Sinter Plugin → 公開 Gateway (https://gateway.fulltrust.co.jp/mcp)
+        → あなたのアカウントの controller → あなたの sinter-bridge → ローカルの `sinter mcp`
+```
+
+- 公開 Gateway（`gateway/` crate）は ChatGPT を OAuth で認証し、MCP リクエストを
+  中継します。あなたの Sinter ホストではなく、あなたのサーバーへ接続することも
+  ありません。
+- `sinter-bridge` はあなたのマシンで動作し（外向き HTTPS のみ）、各リクエストを
+  ローカルの `sinter mcp` 子プロセスへ渡します。すべての tool は read-only で、
+  `readOnlyHint: true`、`destructiveHint: false`、`openWorldHint: false` の
+  annotation が付いています。
+- Sinter for ChatGPT は現在招待制です。利用を希望する場合は
+  [Fulltrust お問い合わせフォーム](https://fulltrust.co.jp/contact/index.html) から、お問い合わせ内容に
+  「Sinter利用希望」と記載してご連絡ください（サーバー情報・認証情報・トークンは
+  記載しないでください）。Gateway 運用者がサインインアカウントを用意し、bridge 用の
+  1 回限りの registration token を発行します。
+
+セットアップ、トラブルシューティング、セキュリティ / プライバシーの詳細:
+[ChatGPT Plugin ガイド](https://sinter.fulltrust.co.jp/ja/guides/chatgpt-plugin/)
+
 ## ライセンス
 
 Sinterは以下のいずれかを選択できるデュアルライセンスです。

@@ -4,6 +4,30 @@ All notable changes to Sinter are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- MCP tool annotations: every `sinter mcp` tool now declares
+  `readOnlyHint: true`, `destructiveHint: false`, and `openWorldHint: false`,
+  making the existing read-only guarantee explicit to MCP clients (required
+  for ChatGPT plugin directory review). Tool behavior is unchanged.
+- Documentation: ChatGPT Plugin guide (English and Japanese) covering the
+  public Gateway / `sinter-bridge` architecture, setup, troubleshooting, and
+  security/privacy, plus a README section.
+- Gateway operator onboarding: `gateway/scripts/sinter-gw-admin` wraps the
+  existing `sinter-gateway` operator CLI with account validation, an
+  existing-controller pre-check, confirmation, `--dry-run`, and read-only
+  `list`/`status`; `gateway/scripts/sinter-gw-admin-selftest` checks the
+  issue → register → revoke path against a throwaway local Gateway;
+  `gateway/docs/OPERATOR_ONBOARDING.md` is the operator runbook.
+- `gateway/contrib/systemd/`: user unit and environment template for running
+  `sinter-bridge` on Linux.
+
+### Fixed
+
+- `gateway/docs/PRODUCTION_DEPLOYMENT.md`: the bridge bootstrap ran
+  `sinter-bridge register` twice; the first run consumed the single-use
+  registration token. It now runs once and writes the credential file.
+
 ## [0.5.0] - 2026-09-22
 
 Core MCP: a read-only Model Context Protocol interface over stdio.

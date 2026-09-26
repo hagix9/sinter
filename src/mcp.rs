@@ -708,7 +708,7 @@ pub fn tool_names() -> Vec<&'static str> {
 }
 
 fn tools() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         json!({
             "name": "sinter_get_version",
             "description": "Return the Sinter version and read-only capability statement.",
@@ -801,7 +801,20 @@ fn tools() -> Vec<Value> {
                 "additionalProperties": false
             },
         }),
-    ]
+    ];
+    // The whole tool surface is read-only by design (no apply/execute/install
+    // tool exists), so every tool carries the same MCP annotations: nothing
+    // outside the conversation is changed, nothing is destroyed, and host
+    // access is bounded to administrator-configured named targets rather than
+    // the open world.
+    for tool in &mut tools {
+        tool["annotations"] = json!({
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "openWorldHint": false,
+        });
+    }
+    tools
 }
 
 fn call_tool(name: &str, args: &Value, reg: &TargetRegistry) -> Result<Value, ToolError> {
