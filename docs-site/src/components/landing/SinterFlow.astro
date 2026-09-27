@@ -14,11 +14,23 @@ interface Props {
   applySub: string;
   auditSub: string;
   note: string;
+  pauseLabel: string;
+  playLabel: string;
 }
 const p = Astro.props;
 ---
 
 <div class="flow">
+  <button
+    type="button"
+    class="flow-toggle"
+    aria-label={p.pauseLabel}
+    data-label-pause={p.pauseLabel}
+    data-label-play={p.playLabel}
+    hidden
+  >
+    <span class="flow-toggle-icon" aria-hidden="true">❚❚</span>
+  </button>
   <ol class="flow-main">
     <li class="f-node">
       <strong>{p.recipeLabel}</strong>
@@ -62,3 +74,24 @@ const p = Astro.props;
   </ul>
   <p class="flow-note">{p.note}</p>
 </div>
+
+<script>
+  // Pause / Play for the flow animation. Play restarts the cycle from the
+  // beginning. The button stays hidden without JS and under reduced motion
+  // (see landing.css), where the diagram is already static.
+  for (const flow of document.querySelectorAll<HTMLElement>('.flow')) {
+    const button = flow.querySelector<HTMLButtonElement>('.flow-toggle');
+    const icon = button?.querySelector('.flow-toggle-icon');
+    if (!button || !icon) continue;
+    const { labelPause = 'Pause', labelPlay = 'Play' } = button.dataset;
+    button.hidden = false;
+    button.addEventListener('click', () => {
+      const paused = flow.classList.toggle('is-paused');
+      if (!paused) {
+        for (const a of flow.getAnimations({ subtree: true })) a.currentTime = 0;
+      }
+      button.setAttribute('aria-label', paused ? labelPlay : labelPause);
+      icon.textContent = paused ? '▶' : '❚❚';
+    });
+  }
+</script>

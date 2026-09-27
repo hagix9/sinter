@@ -287,11 +287,48 @@
 /* ---------- Sinter flow diagram ---------- */
 
 .flow {
+  position: relative;
   margin-top: 1.25rem;
   border: 1px solid var(--l-border);
   border-radius: 0.75rem;
   background: var(--l-surface);
-  padding: 1.75rem 1.5rem 1.25rem;
+  /* top padding leaves room for the Pause / Play button */
+  padding: 2.4rem 1.5rem 1.25rem;
+}
+
+/* Pause / Play: absolutely placed so toggling never shifts the layout. */
+.flow-toggle {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 1.75rem;
+  padding: 0;
+  border: 1px solid var(--l-border);
+  border-radius: 0.5rem;
+  background: var(--l-surface-2);
+  color: var(--l-muted);
+  font-size: 0.7rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.flow-toggle:hover {
+  border-color: var(--l-accent);
+  color: var(--l-text);
+}
+.flow-toggle:focus-visible {
+  outline: 2px solid var(--l-accent);
+  outline-offset: 2px;
+}
+.flow-toggle[hidden] {
+  display: none;
+}
+.flow.is-paused .f-pulse,
+.flow.is-paused .f-apply {
+  animation-play-state: paused;
 }
 
 .flow-main {
@@ -617,6 +654,9 @@
 /* ---------- reduced motion: complete static topology ---------- */
 
 @media (prefers-reduced-motion: reduce) {
+  .flow-toggle {
+    display: none;
+  }
   .f-pulse,
   .e-ssh .p-audit {
     animation: none;

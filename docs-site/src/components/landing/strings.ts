@@ -28,6 +28,8 @@ export interface LandingStrings {
   flowPlanSub: string;
   flowApplySub: string;
   flowAuditSub: string;
+  flowPause: string;
+  flowPlay: string;
   trustTitle: string;
   trustPoints: string[];
   trustCta: string;
@@ -99,6 +101,8 @@ export const strings: Record<'en' | 'ja', LandingStrings> = {
     flowPlanSub: 'read-only preview',
     flowApplySub: 'explicit mutation',
     flowAuditSub: 'PASS / DRIFT report',
+    flowPause: 'Pause animation',
+    flowPlay: 'Play animation',
     trustTitle: 'Built to fail closed',
     trustPoints: [
       'Strict SSH host-key verification — unknown or mismatched keys refuse, never prompt.',
@@ -186,6 +190,8 @@ export const strings: Record<'en' | 'ja', LandingStrings> = {
     flowPlanSub: '読み取り専用プレビュー',
     flowApplySub: '明示的な変更',
     flowAuditSub: 'PASS / DRIFT レポート',
+    flowPause: 'アニメーションを一時停止',
+    flowPlay: 'アニメーションを再生',
     trustTitle: 'フェイルクローズ設計',
     trustPoints: [
       '厳格な SSH ホスト鍵検証 — 未知・不一致の鍵は拒否し、確認プロンプトに頼りません。',
