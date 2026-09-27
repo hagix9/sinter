@@ -1,0 +1,49 @@
+name: Start environment
+
+# Builds the README "Open in GitHub Codespaces" dev container exactly as
+# Codespaces would and runs the start guide against it.
+on:
+  push:
+    paths:
+      - '.devcontainer/**'
+      - 'examples/start/**'
+      - 'install.sh'
+      - '.github/workflows/start.yml'
+  pull_request:
+    paths:
+      - '.devcontainer/**'
+      - 'examples/start/**'
+      - 'install.sh'
+      - '.github/workflows/start.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  devcontainer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - run: npm install -g @devcontainers/cli@0.89.0
+
+      - run: devcontainer up --workspace-folder .
+
+      - name: Run the start guide in the dev container
+        run: |
+          devcontainer exec --workspace-folder . bash -euo pipefail -c '
+            test "$(sinter --version)" = "sinter 1.0.0"
+            sinter validate examples/start/hello.yaml
+            sinter plan examples/start/hello.yaml
+            test ! -e /home/vscode/sinter-start
+            sinter apply examples/start/hello.yaml
+            test "$(cat /home/vscode/sinter-start/hello.txt)" = "hello from sinter"
+            sinter plan examples/start/hello.yaml
+            sinter audit examples/start/hello.yaml
+          '

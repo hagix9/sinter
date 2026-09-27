@@ -6,6 +6,11 @@
 
 **Small enough to understand, strong enough to trust.**
 
+[![GitHub Codespaces で開く](https://github.com/codespaces/badge.svg)](https://codespaces.new/hagix9/sinter?quickstart=1)
+
+ブラウザ上の使い捨て Ubuntu コンテナで Sinter v1.0.0 を試せます。ローカルへの
+インストール、SSH、サーバーは不要です。[スタートガイド](examples/start/README.ja.md)を参照してください。
+
 Sinterは、Itamaeに着想を得た軽量なエージェントレス構成管理ツールです。
 単一のRustバイナリからOSの構成を記述・適用し、管理対象ホストには
 SinterエージェントやSinterランタイム、Ruby、Pythonを必要としません。

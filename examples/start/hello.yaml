@@ -1,0 +1,20 @@
+# Demo recipe for the README "Open in GitHub Codespaces" start path.
+# It manages only ~/sinter-start of the codespace user (vscode) on the machine
+# you run it on (the disposable codespace). It needs no sudo, no SSH, and no
+# packages. Sinter refuses to write under world-writable parents such as /tmp.
+version: 1
+
+resources:
+  - id: start-dir
+    type: directory
+    with:
+      path: /home/vscode/sinter-start
+      mode: "0755"
+
+  - id: hello
+    type: file
+    depends_on: [start-dir]
+    with:
+      path: /home/vscode/sinter-start/hello.txt
+      content: "hello from sinter\n"
+      mode: "0644"

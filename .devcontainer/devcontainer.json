@@ -1,0 +1,13 @@
+{
+  "name": "Sinter quick start",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "remoteEnv": {
+    "PATH": "${containerEnv:PATH}:/home/vscode/.local/bin"
+  },
+  "postCreateCommand": "bash .devcontainer/install-sinter.sh",
+  "customizations": {
+    "codespaces": {
+      "openFiles": ["examples/start/README.md"]
+    }
+  }
+}

@@ -6,6 +6,11 @@
 
 **Small enough to understand, strong enough to trust.**
 
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/hagix9/sinter?quickstart=1)
+
+Try Sinter v1.0.0 in a disposable Ubuntu container in your browser — nothing to
+install locally, no SSH, no servers. See the [start guide](examples/start/README.md).
+
 Sinter is a lightweight, agentless configuration-management tool inspired by Itamae.
 It describes and applies operating-system configuration from a single Rust binary
 without requiring an agent, Ruby, Python, or a Sinter runtime on the managed host.
