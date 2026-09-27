@@ -1,19 +1,18 @@
 ---
 title: ChatGPT Plugin
-description: 公開 Sinter Gateway とご自身の sinter-bridge を経由して、ChatGPT から Sinter を利用する（read-only）。
+description: 一時停止中：公開 Sinter Gateway とご自身の sinter-bridge を経由する ChatGPT Plugin の経路（read-only）。CLI、sinter mcp、WebMCP には影響しません。
 ---
 
 Sinter ChatGPT Plugin を使うと、ChatGPT から **ご自身の** Sinter 環境にある
 **read-only** の MCP tool（recipe の検証・構造確認・plan、名前付き SSH target の
 plan / audit）を呼び出せます。
 
-:::caution[プレビュー]
-Sinter for ChatGPT は現在招待制で、ChatGPT の Plugin ディレクトリにはまだ
-掲載されていません。利用を希望する場合は [Fulltrust お問い合わせフォーム](https://fulltrust.co.jp/contact/index.html) から、
-お問い合わせ内容に「Sinter利用希望」と記載してご連絡ください。フォームには
-サーバー情報・認証情報・トークンを記載しないでください。承認後、Gateway 運用者が
-サインインアカウントを用意し、1 回限りの registration token をお送りします
-（[クイックスタート](#クイックスタート)参照）。
+:::caution[一時停止中]
+公開 ChatGPT Plugin / remote MCP の公開経路は、Sinter 本体の体験に注力するため
+現在一時停止しています。ChatGPT の Plugin ディレクトリには掲載されておらず、
+利用申請の受付も保留しています。Sinter CLI、[`sinter mcp`](/ja/reference/mcp/)、
+[WebMCP](/ja/reference/webmcp/) には影響しません。このページの以降の内容は、
+構築済みの構成の記録です。
 :::
 
 ## 仕組み

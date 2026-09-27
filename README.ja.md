@@ -397,7 +397,12 @@ sudo = true
 これはドキュメントサイトのWebMCP（ブラウザ側、ドキュメント検索のみ）と
 は無関係です。Core MCPはSinter自身の操作を公開します。
 
-## ChatGPT Plugin（プレビュー）
+## ChatGPT Plugin（一時停止中）
+
+> **一時停止中。** 公開 ChatGPT Plugin / remote MCP の公開経路は、Sinter 本体の
+> 体験に注力するため現在一時停止しており、利用申請の受付も保留しています。
+> Sinter CLI、`sinter mcp`、WebMCP には影響しません。以下は構築済みの構成の
+> 説明です。
 
 Sinter ChatGPT Plugin を使うと、ChatGPT から **ご自身の** Sinter 環境にある
 read-only の `sinter mcp` tool を呼び出せます:

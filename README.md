@@ -397,7 +397,13 @@ sudo = true
 This is unrelated to the documentation site's WebMCP surface (browser-side,
 documentation lookup only); Core MCP exposes Sinter's own operations.
 
-## ChatGPT Plugin (preview)
+## ChatGPT Plugin (paused)
+
+> **Paused.** The public ChatGPT plugin / remote MCP publication path is
+> currently paused while the project focuses on the core Sinter experience,
+> and access requests are on hold. This does not affect the Sinter CLI,
+> `sinter mcp`, or WebMCP. The section below describes the architecture as
+> built.
 
 The Sinter ChatGPT plugin lets ChatGPT call the read-only `sinter mcp` tools on
 **your own** Sinter installation:
