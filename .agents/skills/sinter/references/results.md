@@ -54,12 +54,32 @@ not_applicable, errors) and `status:` (`no_drift` exit 0, `drift` exit 7,
 resource was verified: always mention `NOT_AUDITABLE` resources. Content
 drift details are redacted by design.
 
-## Indeterminate results
+## Unknown, possible, and indeterminate are different
 
-Apply exit 6, `INDET`, `POSSIBLE`, or `unknown/` mean Sinter could not prove
-what happened. Report it as unknown, not as success or failure. Next step:
-audit or plan the same target to observe the actual state, then decide with
-the user. Do not re-run apply just to "clear" it.
+- **Plan-side unknown** (text `unknown/` or `?`, JSON `unknown: true`): the
+  resource's current state was not fully observed, so the preview is
+  incomplete for it. A plan never executes `command` resources, so they
+  appear this way (`execution: not_run`), as does a resource whose `when`
+  condition evaluates to unknown in a plan. A plan mutates nothing, so this
+  is neither an apply failure nor an uncertain mutation. It is also not a
+  clean result: the effect of that resource is only known after apply, so
+  name it when presenting the plan.
+- **Possible change** (JSON `change: possible`; text `POSSIBLE` when the
+  execution itself succeeded): a change may have happened but could not be
+  confirmed. It also accompanies failures: a command that ran and exited with
+  a code outside `success_codes` shows `FAILED` in text and
+  `change: possible` in JSON. Check the target's state before applying
+  again.
+- **Apply-side indeterminate** (text `INDET`, JSON `execution:
+  indeterminate`, apply `status: indeterminate`, exit 6): Sinter attempted a
+  mutation and cannot establish whether it took effect (for example a
+  timeout after dispatch, a lost response, or signal uncertainty). Sinter
+  never retries it automatically. Report it as unknown, never as success or
+  failure. Next step: audit or plan the same target to observe the actual
+  state, then decide with the user. Do not re-run apply just to "clear" it.
+
+Audit exit 6 is a different case: it means some observations failed
+(`ERROR` results), not that a mutation is in doubt.
 
 ## Evidence versus inference
 

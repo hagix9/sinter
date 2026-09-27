@@ -58,8 +58,24 @@ container resource), say it does not exist rather than inventing syntax.
 - Parent directories of managed paths must already exist and pass the
   trust-boundary check; paths under world-writable directories such as `/tmp`
   are refused.
-- `command` runs `program` with `args` directly (no shell). Use `creates` or
-  `removes` guards, or `changed_when`, so repeated applies stay idempotent.
+- `command` runs `program` with `args` directly (no shell). Plan never runs
+  it; every apply runs it again unless something keeps it from running (a
+  guard, a false `when`, or an earlier failure that blocks it). Guards and
+  `changed_when` do different things:
+  - `creates` / `removes` are execution guards, checked before the command
+    would run: if the `creates` path exists, or the `removes` path is absent,
+    the command is not executed and the result is `guard_satisfied` with no
+    change.
+  - `changed_when` is not a guard. It is evaluated only after the command has
+    run and exited with a code in `success_codes`, and it only decides whether
+    that run is reported as changed (without it, every successful run is
+    reported as changed). `changed_when: "false"` still runs the command on
+    every apply; it only reports no change.
+  - `changed_when` alone never prevents re-execution. If a command must not
+    run again, use a `creates` or `removes` guard, or make the command itself
+    safe to repeat.
+  - `changed_when` must be a string expression (for example `"false"`); a
+    YAML boolean is rejected by validate.
 - Expressions (`when`, `changed_when`, `{{ ... }}`) may use `vars.<name>`,
   `facts.hostname`, `facts.os.name`, `facts.os.family`, `facts.os.version`,
   `facts.arch`, `registers.<name>.<field>`, `item`, and `result.<field>`.
