@@ -2,7 +2,13 @@
 
 All notable changes to Sinter are documented in this file.
 
-## [Unreleased]
+## [1.0.0] - 2026-09-27
+
+First stable release. It declares the 1.x compatibility contract for the
+`--format json` output and puts every release from here on behind a
+mandatory Linux validation gate and published, independently verifiable
+acceptance evidence. The `sinter` source is unchanged from 0.5.1 apart from
+the version; configuration management behavior is unchanged.
 
 ### Added
 

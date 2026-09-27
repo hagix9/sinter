@@ -16,7 +16,7 @@ Commands:
 
 `mcp`サブコマンドと`--targets-file`については[Core MCP](/ja/reference/mcp/)を参照してください。
 
-`sinter --version` はバージョンを表示します（例: `sinter 0.5.1`）。
+`sinter --version` はバージョンを表示します（例: `sinter 1.0.0`）。
 
 ## validate
 

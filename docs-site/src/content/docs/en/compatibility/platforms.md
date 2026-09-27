@@ -30,14 +30,19 @@ is required.
 
 ## Unified Linux x86_64 distribution
 
-Sinter v0.5.1 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for all
+Sinter v1.0.0 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for all
 supported x86_64 version lines. The executable is unified; runtime platform
 detection still selects APT on Ubuntu and DNF on RHEL-family targets. This
 is not a claim of support for arbitrary Linux systems or architectures.
 
-The current release, Sinter v0.5.1, was acceptance-tested as its exact
-release artifact, `sinter-v0.5.1-linux-x86_64.tar.gz`, on eight real x86_64
-Linux hosts. The tested point releases were Ubuntu 24.04.5 LTS,
+Each release from v1.0.0 on is acceptance-tested as its exact release
+artifact on the eight supported targets before it is published; the
+acceptance manifest, raw logs, and checksums are published as release assets
+(see [acceptance evidence](https://github.com/hagix9/sinter/blob/main/release/ACCEPTANCE_EVIDENCE.md)).
+
+The Sinter v0.5.1 release artifact, `sinter-v0.5.1-linux-x86_64.tar.gz`, was
+acceptance-tested on eight real x86_64 Linux hosts. The tested point
+releases were Ubuntu 24.04.5 LTS,
 Ubuntu 26.04.1 LTS, Rocky Linux 9.8, Rocky Linux 10.2, RHEL 9.8, RHEL 10.2,
 AlmaLinux 9.8, and AlmaLinux 10.2, all x86_64. On every host the extracted
 executable was verified byte-identical (SHA-256) and ran the same logical

@@ -75,9 +75,9 @@ embedded scriptingは依然として実装対象に含めません。
 
 ## インストール
 
-Sinter **v0.5.1** は、対応するすべての Linux x86_64 プラットフォーム
+Sinter **v1.0.0** は、対応するすべての Linux x86_64 プラットフォーム
 ライン（Ubuntu、Rocky Linux、RHEL 9 / 10、AlmaLinux 9 / 10）を1つの
-`sinter-v0.5.1-linux-x86_64.tar.gz` アーティファクトで配布します。
+`sinter-v1.0.0-linux-x86_64.tar.gz` アーティファクトで配布します。
 
 ```sh
 curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
@@ -229,8 +229,10 @@ Oracle LinuxはRHEL系platformとして認識され、SinterのDNF backendを
 使用します。対応するRHEL系実装と互換性があると見込まれますが、現在
 Sinterの実ホスト受入マトリクスには含まれていません。
 
-現行リリースの Sinter v0.5.1 は、リリース成果物そのもの
-（`sinter-v0.5.1-linux-x86_64.tar.gz`）を8台の実x86_64 Linuxホストで
+v1.0.0 以降の各リリースは、公開前にリリース成果物そのものを8つの対応
+ターゲットで受入検証し、その受入証跡（manifest、raw log、チェックサム）を
+リリースと一緒に公開します。Sinter v0.5.1 のリリース成果物
+（`sinter-v0.5.1-linux-x86_64.tar.gz`）は8台の実x86_64 Linuxホストで
 受入検証しました — [インストール](#インストール)に記載のpoint releaseです。
 各ホストで展開したバイナリがバイト単位で同一（SHA-256）であることを確認し、
 同一の論理受入シナリオを実行して、**344チェックが通過、失敗0**でした。
