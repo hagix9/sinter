@@ -40,14 +40,17 @@ artifact on the eight supported targets before it is published; the
 acceptance manifest, raw logs, and checksums are published as release assets
 (see [acceptance evidence](https://github.com/hagix9/sinter/blob/main/release/ACCEPTANCE_EVIDENCE.md)).
 
-The Sinter v0.5.1 release artifact, `sinter-v0.5.1-linux-x86_64.tar.gz`, was
-acceptance-tested on eight real x86_64 Linux hosts. The tested point
-releases were Ubuntu 24.04.5 LTS,
-Ubuntu 26.04.1 LTS, Rocky Linux 9.8, Rocky Linux 10.2, RHEL 9.8, RHEL 10.2,
-AlmaLinux 9.8, and AlmaLinux 10.2, all x86_64. On every host the extracted
-executable was verified byte-identical (SHA-256) and ran the same logical
-acceptance scenario. **Result: 344 checks passed, 0 failed.** Sinter v0.4.1
-passed the same eight-host acceptance earlier (344/344); that record is
+The current release, Sinter v1.0.0, passed the Linux x86_64 validation gate
+and was then acceptance-tested as its exact release artifact,
+`sinter-v1.0.0-linux-x86_64.tar.gz`, on eight real x86_64 Linux hosts. The
+tested point releases were Ubuntu 24.04.5 LTS, Ubuntu 26.04.1 LTS, Rocky
+Linux 9.8, Rocky Linux 10.2, RHEL 9.8, RHEL 10.2, AlmaLinux 9.8, and
+AlmaLinux 10.2, all x86_64. On every host the tarball and the extracted
+executable were verified byte-identical (SHA-256) and ran the same logical
+acceptance scenario plus artifact-identity and MCP checks.
+**Result: 408 checks passed, 0 failed** (see the
+[v1.0.0 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.0.0)). Sinter v0.5.1 and v0.4.1 each
+passed the earlier eight-host acceptance (344/344); those records are
 historical. Other and future point releases have not each been independently
 validated.
 Historical v0.2.1 retains its distro-specific assets; see

@@ -84,7 +84,7 @@ curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
 $HOME/.local/bin/sinter --version
 ```
 
-受入検証したpoint release（v0.5.1 リリース成果物）は Ubuntu 24.04.5 LTS、
+受入検証したpoint release（v1.0.0 リリース成果物）は Ubuntu 24.04.5 LTS、
 Ubuntu 26.04.1 LTS、Rocky Linux 9.8、Rocky Linux 10.2、RHEL 9.8、
 RHEL 10.2、AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64）です。
 他の各point releaseを個別に受入検証したという意味ではありません。
@@ -231,13 +231,15 @@ Sinterの実ホスト受入マトリクスには含まれていません。
 
 v1.0.0 以降の各リリースは、公開前にリリース成果物そのものを8つの対応
 ターゲットで受入検証し、その受入証跡（manifest、raw log、チェックサム）を
-リリースと一緒に公開します。Sinter v0.5.1 のリリース成果物
-（`sinter-v0.5.1-linux-x86_64.tar.gz`）は8台の実x86_64 Linuxホストで
+リリースと一緒に公開します。現行リリースの Sinter v1.0.0 は、Linux x86_64
+検証ゲートを通過した後、リリース成果物そのもの
+（`sinter-v1.0.0-linux-x86_64.tar.gz`）を8台の実x86_64 Linuxホストで
 受入検証しました — [インストール](#インストール)に記載のpoint releaseです。
-各ホストで展開したバイナリがバイト単位で同一（SHA-256）であることを確認し、
-同一の論理受入シナリオを実行して、**344チェックが通過、失敗0**でした。
-Sinter v0.4.1 も同じ8台での受入検証（344/344）を通過しています。その記録と
-以前のVM検証・リリース証跡は履歴として保持します。
+各ホストでtarballと展開したバイナリがバイト単位で同一（SHA-256）であることを
+確認し、同一の論理受入シナリオと成果物同一性・MCPのチェックを実行して、
+**408チェックが通過、失敗0**でした（[v1.0.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.0.0)参照）。
+Sinter v0.5.1 と v0.4.1 もそれぞれ以前の8台での受入検証（344/344）を
+通過しています。その記録と以前のVM検証・リリース証跡は履歴として保持します。
 
 すべてのmanaged targetには、systemd、OpenSSH server、`/bin/sh`、
 `attr` package（`/usr/bin/getfattr`。書き込み前に拡張属性とPOSIX ACLを

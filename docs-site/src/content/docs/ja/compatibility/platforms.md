@@ -37,14 +37,17 @@ v1.0.0 以降の各リリースは、公開前にリリース成果物そのも�
 ターゲットで受入検証し、受入manifest、raw log、チェックサムをリリース
 アセットとして公開します（[受入証跡](https://github.com/hagix9/sinter/blob/main/release/ACCEPTANCE_EVIDENCE.md)参照）。
 
-Sinter v0.5.1 のリリース成果物（`sinter-v0.5.1-linux-x86_64.tar.gz`）は
-8台の実x86_64 Linuxホストで受入検証しました。検証したpoint releaseは Ubuntu 24.04.5 LTS、
-Ubuntu 26.04.1 LTS、Rocky Linux 9.8、Rocky Linux 10.2、RHEL 9.8、
-RHEL 10.2、AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64）です。各ホストで
-展開した実行ファイルがバイト単位で同一（SHA-256）であることを確認し、
-同一の論理受入シナリオを実行しました。**結果: 344チェックが通過、失敗0。**
-Sinter v0.4.1 も以前に同じ8台での受入検証（344/344）を通過しており、
-その記録は履歴として保持します。他の各point releaseや将来のリリースを
+現行リリースの Sinter v1.0.0 は、Linux x86_64 検証ゲートを通過した後、
+リリース成果物そのもの（`sinter-v1.0.0-linux-x86_64.tar.gz`）を8台の
+実x86_64 Linuxホストで受入検証しました。検証したpoint releaseは
+Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、Rocky Linux 9.8、Rocky Linux 10.2、
+RHEL 9.8、RHEL 10.2、AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64）です。
+各ホストでtarballと展開した実行ファイルがバイト単位で同一（SHA-256）で
+あることを確認し、同一の論理受入シナリオと成果物同一性・MCPのチェックを
+実行しました。**結果: 408チェックが通過、失敗0。**
+（[v1.0.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.0.0)参照）Sinter v0.5.1 と v0.4.1 も
+それぞれ以前の8台での受入検証（344/344）を通過しており、その記録は履歴として
+保持します。他の各point releaseや将来のリリースを
 個別に検証したという意味ではありません。
 過去の v0.2.1 は従来のディストリビューション別アセットのままです。
 現在のダウンロードは[インストール](https://sinter.fulltrust.co.jp/ja/getting-started/installation/)
