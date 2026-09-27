@@ -76,10 +76,18 @@ unknown extra fields must be ignored.
 ## Control flow
 
 1. Validate after every recipe edit. Stop on exit 2 and fix the recipe.
-2. Plan against the exact target (same `--host`, `--user`, `--sudo`, and
-   `--known-hosts`) that a later apply would use. Stop on exit 3 or 4.
-3. Present the plan and get confirmation (see [safety.md](safety.md)).
-4. Apply with the same options. Exit 5: report the failure; fix and plan
+2. For a requested mutation, establish the exact user-identified target;
+   never infer it from an environment/role label or default to local. Plan
+   against that target (same `--host`, `--user`, `--port`, `--sudo`,
+   `--known-hosts`, and `--identity`) that a later apply would use. Stop on
+   exit 3 or 4. A plan must actually run and its result must be observed;
+   claims, expectations, examples, and hypothetical results are not evidence.
+3. Present actual plan output and relevant effects, including destructive
+   resources and command details/uncertainty, then obtain the user's
+   confirmation. A command's `changed_when` does not guard execution. If any
+   gate is missing, do not construct or invoke apply; see [safety.md](safety.md).
+4. Apply only with the same options after all mutation gates pass. Exit 5:
+   report the failure; fix and plan
    again. Exit 6: state unknown; audit or plan before anything else.
 5. Audit the same target. Exit 7 or 6 after an apply needs investigation, not
    an automatic re-apply.

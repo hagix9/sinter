@@ -85,11 +85,17 @@ container resource), say it does not exist rather than inventing syntax.
 ## Secrets
 
 - `sensitive: true` (on a var or a resource) redacts values in all output.
-  It does not protect the recipe file itself: a secret written into a recipe
-  is still stored in plain text.
-- Never write passwords, tokens, or private keys into a recipe you produce,
-  and never ask the user to paste them. Leave a clearly marked placeholder and
-  tell the user to supply the value through their own secret handling.
+  It does not protect or encrypt recipe contents: a secret written into a
+  recipe remains plaintext.
+- Never copy a user-supplied password, token, private key, or other secret
+  into generated recipe content, command lines, example commands, logs, or
+  reports merely because asked to use it. Avoid echoing the value. Do not ask
+  the user to paste secrets.
+- Use only an indirection supported by Sinter's documented contract. If the
+  requested secret cannot be represented safely with a documented feature,
+  state that limitation and use a clearly marked placeholder where useful.
+  Do not invent variable interpolation, secret managers, vaults, or external
+  integrations.
 
 ## Managed targets
 
