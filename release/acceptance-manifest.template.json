@@ -13,6 +13,7 @@
     "build": {
       "baseline": "<build OS and version, e.g. Rocky Linux 9.x x86_64>",
       "rustc": "<rustc --version>",
+      "cargo": "<cargo --version>",
       "max_glibc": "<e.g. GLIBC_2.34>"
     }
   },
@@ -28,6 +29,22 @@
   "run": {
     "started_at": "<RFC 3339 UTC, e.g. 2026-01-01T00:00:00Z>",
     "finished_at": "<RFC 3339 UTC>"
+  },
+  "linux_validation": {
+    "os_name": "<NAME from /etc/os-release of the supported Linux x86_64 gate host>",
+    "os_version": "<VERSION_ID>",
+    "arch": "<x86_64>",
+    "source_commit": "<40-hex, equal to candidate.source_commit>",
+    "rustc": "<rustc --version>",
+    "cargo": "<cargo --version>",
+    "started_at": "<RFC 3339 UTC>",
+    "finished_at": "<RFC 3339 UTC, before run.started_at>",
+    "linux_only_suites": ["<tests/name.rs gated by cfg(target_os = \"linux\")>"],
+    "steps": [
+      { "name": "<root-fmt | root-clippy | root-test | installer-test | checker-test | gateway-fmt | gateway-clippy | gateway-test>", "command": "<exact pinned command>", "result": "<PASS>", "passed": 0, "failed": 0, "ignored": 0 }
+    ],
+    "verdict": "<PASS>",
+    "log": { "path": "<validation/linux-gate.log>", "sha256": "<64-hex>" }
   },
   "targets": [
     {
@@ -48,5 +65,6 @@
   ],
   "totals": { "targets": 0, "total": 0, "passed": 0, "failed": 0, "skipped": 0 },
   "verdict": "<GO or NO-GO>",
-  "evidence_bundle": "<sinter-vX.Y.Z-acceptance-evidence.tar.gz>"
+  "evidence_bundle": "<sinter-vX.Y.Z-acceptance-evidence.tar.gz>",
+  "sanitization": { "allowed_literals": [] }
 }

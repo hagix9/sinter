@@ -12,8 +12,16 @@ All notable changes to Sinter are documented in this file.
 - Acceptance evidence retention for v1.0.0 candidates onward
   (`release/ACCEPTANCE_EVIDENCE.md`): an Evidence Manifest, a published
   evidence bundle, acceptance checksums, and a checker
-  (`release/check_acceptance_manifest.py`). `RELEASE.md` now includes these
-  steps.
+  (`release/check_acceptance_manifest.py`) with offline threat-model tests
+  (`release/tests/`). The checker verifies the bundle archive in memory
+  (containment, completeness, no links or special files), the artifact and
+  executable hashes, the acceptance checksums, all eight required targets,
+  the Linux validation gate record, and a sensitive-data scan.
+- `RELEASE.md` is now a single ordered release state machine: source
+  candidate, metadata, source validation, a mandatory Linux x86_64
+  validation gate, one build and freeze, acceptance of that exact artifact,
+  evidence and checker, human review, then tag and publish, with explicit
+  invalidation rules.
 
 ### Fixed
 
