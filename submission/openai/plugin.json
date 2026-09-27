@@ -1,0 +1,38 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "sinter",
+  "version": "1.0.0",
+  "description": "Write and review Sinter recipes, and run or interpret sinter validate, plan, audit, and apply for Linux hosts with explicit confirmation before any change.",
+  "author": {
+    "name": "Fulltrust",
+    "url": "https://sinter.fulltrust.co.jp/"
+  },
+  "homepage": "https://sinter.fulltrust.co.jp/",
+  "repository": "https://github.com/hagix9/sinter",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["configuration-management", "linux", "ssh", "infrastructure-as-code"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Sinter",
+        "shortDescription": "Write and check Sinter recipes",
+        "longDescription": "Sinter is an agentless configuration-management tool for Linux hosts. This skill helps you write and review Sinter recipes (YAML or TOML) and run or interpret sinter validate, plan, audit, and apply.\n\nIt first checks which Sinter capability is actually available in the session: the Sinter CLI, the read-only Sinter MCP server, or documentation only. It validates and plans before any change, and it applies only with the Sinter CLI after you name the exact target, see an actual plan, and confirm. It never adds privilege escalation on its own, and it reports only results it actually observed.\n\nThe skill does not include Sinter itself. Running commands needs the Sinter CLI (official releases are Linux x86_64) or a configured sinter mcp server; without them it helps with drafting, review, and explanation only.",
+        "developerName": "Fulltrust",
+        "category": "Developer Tools",
+        "capabilities": [
+          "Write and review Sinter recipes",
+          "Validate recipes and explain plan and audit results",
+          "Plan and apply changes only after explicit confirmation"
+        ],
+        "websiteURL": "https://sinter.fulltrust.co.jp/",
+        "defaultPrompt": [
+          "Use Sinter to review this recipe and explain what a plan would change.",
+          "Write a Sinter recipe that keeps nginx installed and running on Ubuntu 24.04.",
+          "Explain this Sinter audit output and which resources need attention."
+        ],
+        "composerIcon": "./assets/sinter-icon.png",
+        "logo": "./assets/sinter-logo.png"
+      }
+    }
+  }
+}

@@ -1,0 +1,7 @@
+version: 1
+resources:
+  - id: reindex
+    type: command
+    with:
+      program: /usr/local/bin/myapp-reindex
+      changed_when: false

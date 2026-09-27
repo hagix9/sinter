@@ -1,0 +1,43 @@
+{
+  "facts": {
+    "arch": "x86_64",
+    "hostname": "ubuntu2404.test",
+    "os_family": "debian",
+    "os_name": "Ubuntu",
+    "os_version": "24.04"
+  },
+  "handlers_pending": [],
+  "mode": "plan",
+  "resources": [
+    {
+      "change": "changed",
+      "diff": {
+        "current": "absent",
+        "desired": "installed",
+        "kind": "summary"
+      },
+      "disposition": "normal",
+      "execution": "succeeded",
+      "id": "tree",
+      "reason": null,
+      "sensitive": false,
+      "type": "package",
+      "unknown": false,
+      "verification": "not_performed"
+    },
+    {
+      "change": "none",
+      "diff": null,
+      "disposition": "normal",
+      "execution": "not_run",
+      "id": "reindex",
+      "reason": "command not executed during plan",
+      "sensitive": false,
+      "type": "command",
+      "unknown": true,
+      "verification": "not_applicable"
+    }
+  ],
+  "status": "success",
+  "target": "ubuntu2404"
+}

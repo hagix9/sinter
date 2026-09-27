@@ -1,0 +1,9 @@
+== Sinter AUDIT ==
+PASS nginx-pkg [package]
+DRIFT nginx-conf [file]
+    content: observed=[redacted] desired=[redacted]
+PASS nginx [service]
+NOT_AUDITABLE reload-cache [command]
+    reason: command resources are not executed during audit
+summary: 4 total, 2 compliant, 1 drifted, 1 not_auditable, 0 not_applicable, 0 errors
+status: drift
