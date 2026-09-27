@@ -298,6 +298,74 @@ fn parse_jwks(body: &[u8]) -> Result<KeyMap, String> {
     Ok(map)
 }
 
+// ---------- diagnostics ----------
+
+/// Coarse, fixed classification of a bearer-token validation failure.
+/// Internal/log-only: every variant maps to the same public
+/// `401 invalid_credential`. Never carries token or claim data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidReason {
+    MalformedToken,
+    UnsupportedAlg,
+    KidInvalid,
+    JwksUnavailable,
+    UnknownKid,
+    KeyAlgMismatch,
+    SignatureInvalid,
+    IssuerMismatch,
+    AudienceMismatch,
+    Expired,
+    NotYetValid,
+    MissingRequiredClaim,
+    IatInvalid,
+    SubInvalid,
+    OtherValidationFailure,
+}
+
+impl InvalidReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MalformedToken => "malformed_token",
+            Self::UnsupportedAlg => "unsupported_alg",
+            Self::KidInvalid => "kid_invalid",
+            Self::JwksUnavailable => "jwks_unavailable",
+            Self::UnknownKid => "unknown_kid",
+            Self::KeyAlgMismatch => "key_alg_mismatch",
+            Self::SignatureInvalid => "signature_invalid",
+            Self::IssuerMismatch => "issuer_mismatch",
+            Self::AudienceMismatch => "audience_mismatch",
+            Self::Expired => "expired",
+            Self::NotYetValid => "not_yet_valid",
+            Self::MissingRequiredClaim => "missing_required_claim",
+            Self::IatInvalid => "iat_invalid",
+            Self::SubInvalid => "sub_invalid",
+            Self::OtherValidationFailure => "other_validation_failure",
+        }
+    }
+}
+
+/// Internal validation outcome; mapped 1:1 onto `PublicAuthError::Invalid`
+/// / `PublicAuthError::Unbound` at the `PublicAuth` boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenRejection {
+    Invalid(InvalidReason),
+    Unbound,
+}
+
+fn classify_jwt_error(e: &jsonwebtoken::errors::Error) -> InvalidReason {
+    use jsonwebtoken::errors::ErrorKind as K;
+    match e.kind() {
+        K::InvalidToken | K::Base64(_) | K::Json(_) | K::Utf8(_) => InvalidReason::MalformedToken,
+        K::InvalidSignature => InvalidReason::SignatureInvalid,
+        K::InvalidIssuer => InvalidReason::IssuerMismatch,
+        K::InvalidAudience => InvalidReason::AudienceMismatch,
+        K::ExpiredSignature => InvalidReason::Expired,
+        K::ImmatureSignature => InvalidReason::NotYetValid,
+        K::MissingRequiredClaim(_) => InvalidReason::MissingRequiredClaim,
+        _ => InvalidReason::OtherValidationFailure,
+    }
+}
+
 // ---------- validator ----------
 
 struct JwksState {
@@ -379,13 +447,33 @@ impl OAuthValidator {
     }
 
     fn decode_token(&self, token: &str) -> Result<PublicPrincipal, PublicAuthError> {
-        let header = decode_header(token).map_err(|_| PublicAuthError::Invalid)?;
+        self.evaluate_token(token).map_err(|r| match r {
+            TokenRejection::Invalid(reason) => {
+                // Fixed enum string only — never token, header, or claim data.
+                tracing::info!(
+                    code = "invalid_credential",
+                    reason_class = reason.as_str(),
+                    "bearer credential failed validation"
+                );
+                PublicAuthError::Invalid
+            }
+            TokenRejection::Unbound => PublicAuthError::Unbound,
+        })
+    }
+
+    /// Validate a bearer token, returning the internal rejection class.
+    /// Diagnostic-only: callers outside this module must map any rejection
+    /// to the same public error regardless of reason.
+    pub fn evaluate_token(&self, token: &str) -> Result<PublicPrincipal, TokenRejection> {
+        use InvalidReason as R;
+        let inv = TokenRejection::Invalid;
+        let header = decode_header(token).map_err(|_| inv(R::MalformedToken))?;
         if !ALLOWED_ALGS.contains(&header.alg) {
-            return Err(PublicAuthError::Invalid);
+            return Err(inv(R::UnsupportedAlg));
         }
         let kid = header.kid.as_deref().unwrap_or("");
         if kid.is_empty() || kid.len() > MAX_KID_LEN {
-            return Err(PublicAuthError::Invalid);
+            return Err(inv(R::KidInvalid));
         }
 
         let mut st = self.jwks.lock().unwrap();
@@ -403,14 +491,14 @@ impl OAuthValidator {
             if stale && !ok {
                 // Forced-refresh window with a failed fetch: fail closed
                 // rather than authenticate on expired trust.
-                return Err(PublicAuthError::Invalid);
+                return Err(inv(R::JwksUnavailable));
             }
         }
         let Some(Some(jwk)) = st.keys.get(kid) else {
-            return Err(PublicAuthError::Invalid);
+            return Err(inv(R::UnknownKid));
         };
         if jwk.alg != header.alg {
-            return Err(PublicAuthError::Invalid); // key/alg family mismatch
+            return Err(inv(R::KeyAlgMismatch)); // key/alg family mismatch
         }
 
         let mut validation = Validation::new(header.alg);
@@ -423,8 +511,8 @@ impl OAuthValidator {
         validation.validate_exp = true;
         validation.validate_nbf = true;
         validation.leeway = LEEWAY_SECS;
-        let data =
-            decode::<Value>(token, &jwk.key, &validation).map_err(|_| PublicAuthError::Invalid)?;
+        let data = decode::<Value>(token, &jwk.key, &validation)
+            .map_err(|e| inv(classify_jwt_error(&e)))?;
         let claims = data.claims;
 
         // iat is optional but, when present, must be a NumericDate — a
@@ -433,22 +521,22 @@ impl OAuthValidator {
         // fail closed, not silently degrade to "absent" (F-11).
         if let Some(v) = claims.get("iat") {
             let Some(iat) = v.as_u64() else {
-                return Err(PublicAuthError::Invalid);
+                return Err(inv(R::IatInvalid));
             };
             if iat > now_secs() + LEEWAY_SECS {
-                return Err(PublicAuthError::Invalid);
+                return Err(inv(R::IatInvalid));
             }
         }
         let sub = claims
             .get("sub")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
-            .ok_or(PublicAuthError::Invalid)?;
+            .ok_or(inv(R::SubInvalid))?;
         let account = claims
             .get(&self.cfg.account_claim)
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
-            .ok_or(PublicAuthError::Unbound)?;
+            .ok_or(TokenRejection::Unbound)?;
         let name = claims.get("name").and_then(Value::as_str);
         let email = claims.get("email").and_then(Value::as_str);
         Ok(PublicPrincipal::new(
