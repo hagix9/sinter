@@ -217,9 +217,11 @@ struct SinterChild {
 }
 
 impl SinterChild {
-    fn spawn() -> Option<Self> {
-        let bin = std::env::var("SINTER_MCP_BIN").unwrap_or_else(|_| {
-            "/Volumes/VGX1000 SSD/Codex/Projects/Sinter/target/debug/sinter".into()
+    fn spawn() -> Self {
+        // The root crate's debug build (`cargo test` in the repository root
+        // builds it first); `SINTER_BIN` overrides it.
+        let bin = std::env::var("SINTER_BIN").unwrap_or_else(|_| {
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../target/debug/sinter").into()
         });
         let mut p = std::process::Command::new(&bin)
             .args(["mcp"])
@@ -227,12 +229,14 @@ impl SinterChild {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .ok()?;
-        Some(Self {
+            .unwrap_or_else(|e| {
+                panic!("real sinter binary {bin:?} could not be started ({e}); build the root crate or set SINTER_BIN")
+            });
+        Self {
             stdin: p.stdin.take().unwrap(),
             stdout: std::io::BufReader::new(p.stdout.take().unwrap()),
             _proc: p,
-        })
+        }
     }
     fn call(&mut self, frame: &Value) -> Value {
         use std::io::{BufRead, Write};
@@ -246,10 +250,7 @@ impl SinterChild {
 
 #[test]
 fn live_sinter_backend_contract() {
-    let Some(mut child) = SinterChild::spawn() else {
-        eprintln!("SKIP: sinter binary not found");
-        return;
-    };
+    let mut child = SinterChild::spawn();
     // initialize: constant, idempotent, fixed version.
     let r = child.call(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}));
     assert_eq!(r["result"]["protocolVersion"], "2025-03-26");
@@ -288,10 +289,7 @@ fn live_sinter_backend_contract() {
 fn live_notification_produces_no_output_line() {
     // Proves the edge MUST NOT forward notifications: sinter never answers
     // them, and a bridge waiting on a line would deadlock.
-    let Some(mut child) = SinterChild::spawn() else {
-        eprintln!("SKIP: sinter binary not found");
-        return;
-    };
+    let mut child = SinterChild::spawn();
     use std::io::Write;
     writeln!(
         child.stdin,
@@ -309,10 +307,7 @@ fn live_notification_produces_no_output_line() {
 fn live_edge_to_backend_forwarding_chain() {
     // The complete Q-2 chain without any network: edge classifies → forward
     // verbatim → real sinter answers → caller's JSON-RPC id preserved.
-    let Some(mut child) = SinterChild::spawn() else {
-        eprintln!("SKIP: sinter binary not found");
-        return;
-    };
+    let mut child = SinterChild::spawn();
     let mut s = session();
     s.initialized = true;
     let f = json!({"jsonrpc":"2.0","id":77,"method":"tools/call",

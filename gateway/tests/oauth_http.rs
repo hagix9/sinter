@@ -348,9 +348,11 @@ struct SinterChild {
 }
 
 impl SinterChild {
-    fn spawn() -> Option<Self> {
+    fn spawn() -> Self {
+        // The root crate's debug build (`cargo test` in the repository root
+        // builds it first); `SINTER_BIN` overrides it.
         let bin = std::env::var("SINTER_BIN").unwrap_or_else(|_| {
-            "/Volumes/VGX1000 SSD/Codex/Projects/Sinter/target/debug/sinter".into()
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../target/debug/sinter").into()
         });
         let mut p = Command::new(&bin)
             .args(["mcp"])
@@ -358,12 +360,14 @@ impl SinterChild {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .ok()?;
-        Some(Self {
+            .unwrap_or_else(|e| {
+                panic!("real sinter binary {bin:?} could not be started ({e}); build the root crate or set SINTER_BIN")
+            });
+        Self {
             stdin: p.stdin.take().unwrap(),
             stdout: BufReader::new(p.stdout.take().unwrap()),
             _proc: p,
-        })
+        }
     }
     fn call(&mut self, frame: &Value) -> Value {
         writeln!(self.stdin, "{frame}").unwrap();
@@ -392,12 +396,14 @@ impl Drop for Bridge {
 fn start_bridge(addr: SocketAddr, cred: String, use_real_sinter: bool) -> Bridge {
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = stop.clone();
+    // Start the real sinter on the test thread so a missing binary fails the
+    // test immediately instead of silently degrading to the stub.
+    let mut child = if use_real_sinter {
+        Some(SinterChild::spawn())
+    } else {
+        None
+    };
     let join = std::thread::spawn(move || {
-        let mut child = if use_real_sinter {
-            SinterChild::spawn()
-        } else {
-            None
-        };
         let bearer = format!("Authorization: Bearer {cred}");
         while !stop2.load(Ordering::SeqCst) {
             let (s, _h, body) = http_full(addr, "POST", "/v1/poll", &[&bearer], b"");
