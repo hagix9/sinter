@@ -38,12 +38,12 @@ Post-Publish Verification         → read-back checks
 
 | Gate | Purpose | Allowed changes | Required evidence | GO condition | STOP / rollback |
 |------|---------|-----------------|-------------------|--------------|-----------------|
-| A. Target Acceptance | Prove the implementation works on each supported target | None — repository read-only | Real-target run log: platform detection, package/file/service/command, idempotency, failure truth, sensitive redaction, cleanup | All matrix rows PASS on every supported target | Any FAIL → NO-GO, fix in a new remediation round |
+| A. Target Acceptance | Prove the implementation works on each supported target | None — repository read-only | Real-target run log: platform detection, package/file/service/command, idempotency, failure truth, sensitive redaction, cleanup — captured as a publishable Evidence Manifest + bundle (`release/ACCEPTANCE_EVIDENCE.md`) | All matrix rows PASS on every supported target | Any FAIL → NO-GO, fix in a new remediation round |
 | B. Release Preparation | Package accepted code as a versioned candidate | Version fields, `Cargo.lock`, `CHANGELOG.md`, README platform docs — nothing else | Diff shows only release files; gates clean | All prep checks pass, single preparation commit | Unexpected diff → STOP, redo from accepted commit |
 | C. Final Release Check | Verify RC = accepted code + correct metadata | None | Fresh build, `--version`, gates, lineage proof | All §C checks pass | Any failure → NO-GO back to B or remediation |
 | D. Artifact Staging | Produce the exact publishable files | Nothing in repo; artifacts outside it | Baseline native build + source provenance, ABI inspection, exact artifact verification per target, checksums, manifest | All artifacts verified | Missing/incorrect artifact → NOT READY |
 | Human Review | Human signs off | None | Reviewer checks manifest, notes, sums, tarballs | Explicit human approval | Any doubt → hold |
-| Publish | Make it public | Remote refs + GitHub Release only | Read-back verification | §Publish checks pass | Partial failure → §Partial publish failure |
+| Publish | Make it public | Remote refs + GitHub Release only | Read-back verification, including the acceptance assets | §Publish checks pass | Partial failure → §Partial publish failure |
 | Post-publish | Confirm what the world sees | None | Downloaded assets match staged checksums | All read-backs pass | Mismatch → incident, do not force-fix |
 
 ## Golden rule
@@ -85,6 +85,29 @@ Minimum matrix per target:
 
 Report ends with an explicit `GO` or `NO-GO`. Do not remediate during
 acceptance — reproduce, preserve evidence, report, stop.
+
+### Acceptance evidence (v1.0.0 candidates onward)
+
+Acceptance evidence must stay verifiable after the release, independently of
+any maintainer machine. Follow `release/ACCEPTANCE_EVIDENCE.md`:
+
+- Run the acceptance harness against the exact extracted release artifact.
+  Capture one raw, sanitized log per target, labelled by a non-identifying
+  target label (never a hostname or IP).
+- Record, as they are produced, the Evidence Manifest fields:
+  - candidate version, tag, and source commit;
+  - artifact name, SHA-256, and size;
+  - executable SHA-256;
+  - harness files and their SHA-256;
+  - per-target OS, version, architecture, public image identity, and times;
+  - the artifact and executable SHA-256 observed on each target;
+  - `--version` output;
+  - check counts and verdict.
+- Build the evidence bundle and the manifest from those recorded values only.
+  Never reconstruct evidence from memory or summaries.
+- `python3 release/check_acceptance_manifest.py <manifest> --bundle <dir>`
+  must pass. A sensitive-content finding is a STOP until the logs are
+  sanitized and the bundle is rebuilt.
 
 ## Phase B — Release Preparation
 
@@ -287,12 +310,18 @@ For every tarball:
 Generate `SHA256SUMS` **only after the artifacts are final**:
 
 ```sh
-shasum -a 256 sinter-v${VERSION}-*.tar.gz > SHA256SUMS   # or sha256sum
-shasum -a 256 -c SHA256SUMS                              # verify
+shasum -a 256 sinter-v${VERSION}-linux-*.tar.gz > SHA256SUMS   # or sha256sum
+shasum -a 256 -c SHA256SUMS                                    # verify
+
+# Acceptance assets get their own checksum file (release/ACCEPTANCE_EVIDENCE.md)
+shasum -a 256 sinter-v${VERSION}-acceptance-manifest.json \
+  sinter-v${VERSION}-acceptance-evidence.tar.gz > sinter-v${VERSION}-acceptance-SHA256SUMS
+shasum -a 256 -c sinter-v${VERSION}-acceptance-SHA256SUMS
 ```
 
 Repacking an artifact invalidates its checksum — regenerate `SHA256SUMS`
-whenever any tarball changes.
+whenever any tarball changes. Only the installable `linux-*` artifacts go into
+`SHA256SUMS`; the acceptance evidence bundle never does.
 
 ### Human review package
 
@@ -300,15 +329,22 @@ Assemble outside the repository:
 
 ```text
 ~/Downloads/Sinter-v${VERSION}-release-staging/
-  sinter-v${VERSION}-*.tar.gz     # → release assets
+  sinter-v${VERSION}-linux-*.tar.gz  # → release assets
   SHA256SUMS                      # → release asset
   RELEASE_NOTES.md                # → GitHub Release body source
   RELEASE_MANIFEST.md             # internal review evidence
   evidence/                       # provenance logs, file-hash lists, build envs
+  sinter-v${VERSION}-acceptance-manifest.json   # → release asset
+  sinter-v${VERSION}-acceptance-evidence.tar.gz # → release asset
+  sinter-v${VERSION}-acceptance-SHA256SUMS      # → release asset
 ```
 
-GitHub Release assets are the tarballs + `SHA256SUMS` only. The manifest and
-`evidence/` are for human review, not publication.
+GitHub Release assets are the tarballs, `SHA256SUMS`, and the three
+acceptance assets (manifest, evidence bundle, acceptance checksums; see
+`release/ACCEPTANCE_EVIDENCE.md`). `SHA256SUMS` lists the tarballs only, so
+the installer and the documented checksum command are unaffected.
+`RELEASE_MANIFEST.md` and the build `evidence/` directory remain internal
+review material and are not published.
 
 ### RELEASE_MANIFEST.md required fields
 
@@ -339,8 +375,10 @@ Publishing requires explicit human review of, in order:
 2. `RELEASE_NOTES.md`
 3. `SHA256SUMS`
 4. tarball contents (`tar tzvf`, spot-run `--version`)
+5. the acceptance manifest and its checker result, and
+   `sinter-v${VERSION}-acceptance-SHA256SUMS`
 
-No publish until the human confirms all four.
+No publish until the human confirms all five.
 
 ## Publish
 
@@ -373,7 +411,10 @@ git ls-remote --tags <remote> | grep ${TAG}   # confirm points at RC_COMMIT
 gh release create ${TAG} \
   --title "Sinter ${TAG}" \
   --notes-file RELEASE_NOTES.md \
-  sinter-v${VERSION}-*.tar.gz SHA256SUMS
+  sinter-v${VERSION}-linux-*.tar.gz SHA256SUMS \
+  sinter-v${VERSION}-acceptance-manifest.json \
+  sinter-v${VERSION}-acceptance-evidence.tar.gz \
+  sinter-v${VERSION}-acceptance-SHA256SUMS
 
 # 11. Read back
 gh release view ${TAG}                   # tag, title, asset names/sizes
@@ -402,12 +443,18 @@ git ls-remote --tags <remote> | grep ${TAG}    # tag → RC_COMMIT
 - [ ] Release exists with correct title
 - [ ] Exactly the intended assets, no extras
 - [ ] `SHA256SUMS` downloadable and matches staged copy
-- [ ] Fresh-download each asset and check against `SHA256SUMS`:
+- [ ] Fresh-download each asset and check against `SHA256SUMS` and the
+      acceptance checksums:
 
 ```sh
 gh release download ${TAG} -D /tmp/verify-${TAG} --clobber
-(cd /tmp/verify-${TAG} && sha256sum -c SHA256SUMS)
+(cd /tmp/verify-${TAG} && sha256sum -c SHA256SUMS \
+  && sha256sum -c sinter-v${VERSION}-acceptance-SHA256SUMS)
 ```
+
+- [ ] Commit the manifest copy to
+      `release/evidence/v${VERSION}/acceptance-manifest.json` (byte-identical
+      to the published asset) in a docs-only commit.
 
 ## Partial publish failure
 
@@ -443,6 +490,11 @@ Abnormalities *after* publish has started → partial-publish procedure above.
 Keep (no secrets): `RELEASE_MANIFEST.md`, `RELEASE_NOTES.md`, `SHA256SUMS`,
 final RC hash, tag, release URL, build-environment summary, and the
 acceptance/check reports that authorized the release.
+
+From v1.0.0 candidates on, the acceptance evidence itself is retained
+publicly and permanently as release assets (manifest, evidence bundle,
+acceptance checksums), with a tracked manifest copy under
+`release/evidence/v${VERSION}/`. See `release/ACCEPTANCE_EVIDENCE.md`.
 
 ## Future fast path (conditional)
 

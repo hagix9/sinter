@@ -35,15 +35,16 @@ supported x86_64 version lines. The executable is unified; runtime platform
 detection still selects APT on Ubuntu and DNF on RHEL-family targets. This
 is not a claim of support for arbitrary Linux systems or architectures.
 
-Sinter v0.4.1 was acceptance-tested on eight real x86_64 Linux hosts.
-All eight hosts executed the same frozen candidate binary and the same
-logical acceptance scenario. **Result: 344/344 checks passed.** The tested
-point releases were Ubuntu 24.04.5 LTS, Ubuntu 26.04.1 LTS,
-Rocky Linux 9.8, Rocky Linux 10.2, RHEL 9.8, RHEL 10.2, AlmaLinux 9.8,
-and AlmaLinux 10.2, all x86_64. The canonical archive was verified to
-extract to that exact binary, which was transferred and executed
-identically on all eight hosts. Other and future point releases have not
-each been independently validated.
+The current release, Sinter v0.5.1, was acceptance-tested as its exact
+release artifact, `sinter-v0.5.1-linux-x86_64.tar.gz`, on eight real x86_64
+Linux hosts. The tested point releases were Ubuntu 24.04.5 LTS,
+Ubuntu 26.04.1 LTS, Rocky Linux 9.8, Rocky Linux 10.2, RHEL 9.8, RHEL 10.2,
+AlmaLinux 9.8, and AlmaLinux 10.2, all x86_64. On every host the extracted
+executable was verified byte-identical (SHA-256) and ran the same logical
+acceptance scenario. **Result: 344 checks passed, 0 failed.** Sinter v0.4.1
+passed the same eight-host acceptance earlier (344/344); that record is
+historical. Other and future point releases have not each been independently
+validated.
 Historical v0.2.1 retains its distro-specific assets; see
 [Installation](https://sinter.fulltrust.co.jp/en/getting-started/installation/)
 for current downloads.

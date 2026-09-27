@@ -84,7 +84,7 @@ curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
 $HOME/.local/bin/sinter --version
 ```
 
-Acceptance-tested point releases (v0.4.1): Ubuntu 24.04.5 LTS,
+Acceptance-tested point releases (v0.5.1 release artifact): Ubuntu 24.04.5 LTS,
 Ubuntu 26.04.1 LTS, Rocky Linux 9.8, Rocky Linux 10.2, RHEL 9.8, RHEL 10.2,
 AlmaLinux 9.8 and AlmaLinux 10.2, all x86_64. Other point releases have not
 each been independently accepted.
@@ -228,11 +228,13 @@ DNF backend. It is expected to be compatible with the corresponding Red
 Hat-family implementation, but it is not currently part of Sinter's
 real-host acceptance matrix.
 
-Sinter v0.4.1 was acceptance-tested on eight real x86_64 Linux hosts — the
-exact point releases listed under [Install](#install). All eight hosts
-executed the same frozen candidate binary and the same logical acceptance
-scenario: **344/344 checks passed**. Earlier VM and release evidence remains
-historical.
+The current release, Sinter v0.5.1, was acceptance-tested as its exact
+release artifact (`sinter-v0.5.1-linux-x86_64.tar.gz`) on eight real x86_64
+Linux hosts — the exact point releases listed under [Install](#install). On
+every host the extracted binary was verified byte-identical (SHA-256) and ran
+the same logical acceptance scenario: **344 checks passed, 0 failed**.
+Sinter v0.4.1 passed the same eight-host acceptance (344/344); that record and
+earlier VM and release evidence remain historical.
 
 All managed targets require systemd, an OpenSSH server, `/bin/sh`, the `attr`
 package (`/usr/bin/getfattr`, used to inspect extended attributes and POSIX

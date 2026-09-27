@@ -84,7 +84,7 @@ curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
 $HOME/.local/bin/sinter --version
 ```
 
-受入検証したpoint release（v0.4.1）は Ubuntu 24.04.5 LTS、
+受入検証したpoint release（v0.5.1 リリース成果物）は Ubuntu 24.04.5 LTS、
 Ubuntu 26.04.1 LTS、Rocky Linux 9.8、Rocky Linux 10.2、RHEL 9.8、
 RHEL 10.2、AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64）です。
 他の各point releaseを個別に受入検証したという意味ではありません。
@@ -229,11 +229,13 @@ Oracle LinuxはRHEL系platformとして認識され、SinterのDNF backendを
 使用します。対応するRHEL系実装と互換性があると見込まれますが、現在
 Sinterの実ホスト受入マトリクスには含まれていません。
 
-Sinter v0.4.1は8台の実x86_64 Linuxホストで受入検証を実施しました —
-[インストール](#インストール)に記載のpoint releaseです。8台すべてが
-同一の凍結済みcandidateバイナリと同一の論理受入シナリオを実行し、
-**344/344チェックが通過**しました。以前のVM検証とリリース証跡は
-履歴として保持します。
+現行リリースの Sinter v0.5.1 は、リリース成果物そのもの
+（`sinter-v0.5.1-linux-x86_64.tar.gz`）を8台の実x86_64 Linuxホストで
+受入検証しました — [インストール](#インストール)に記載のpoint releaseです。
+各ホストで展開したバイナリがバイト単位で同一（SHA-256）であることを確認し、
+同一の論理受入シナリオを実行して、**344チェックが通過、失敗0**でした。
+Sinter v0.4.1 も同じ8台での受入検証（344/344）を通過しています。その記録と
+以前のVM検証・リリース証跡は履歴として保持します。
 
 すべてのmanaged targetには、systemd、OpenSSH server、`/bin/sh`、
 `attr` package（`/usr/bin/getfattr`。書き込み前に拡張属性とPOSIX ACLを

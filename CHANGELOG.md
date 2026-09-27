@@ -4,6 +4,26 @@ All notable changes to Sinter are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Documented the v1 machine-readable output contract for `--format json` on
+  `validate`, `plan`, `apply`, and `audit`, with 1.x compatibility rules, and
+  added contract tests for it. Output is unchanged.
+- Acceptance evidence retention for v1.0.0 candidates onward
+  (`release/ACCEPTANCE_EVIDENCE.md`): an Evidence Manifest, a published
+  evidence bundle, acceptance checksums, and a checker
+  (`release/check_acceptance_manifest.py`). `RELEASE.md` now includes these
+  steps.
+
+### Fixed
+
+- Documentation now attributes the current support claim to the v0.5.1
+  release artifact (eight hosts, 344 checks passed, 0 failed); the v0.4.1
+  acceptance is kept as history.
+- The documentation site no longer defines each legacy redirect twice, which
+  removes the route-collision warnings from the docs build. The generated
+  site is unchanged.
+
 ## [0.5.1] - 2026-09-27
 
 MCP tool annotations for the read-only `sinter mcp` interface, plus ChatGPT

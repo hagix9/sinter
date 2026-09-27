@@ -152,8 +152,8 @@ the output and summary so unverified resources cannot silently pass.
 
 With `--format json`, audit emits `{"mode", "status", "summary",
 "resources"}` where per-resource `status` is one of `compliant`, `drift`,
-`not_auditable`, `not_applicable`, `error`. This JSON shape is intentionally
-minimal and is **not** a stable, versioned schema in v0.x.
+`not_auditable`, `not_applicable`, `error`. See
+[JSON output contract](#json-output-contract) for the full, stable shape.
 
 Sensitive resources never print raw values: drift details render as
 `redacted` and secrets never appear in text, JSON, reasons, or stderr.
@@ -169,6 +169,114 @@ Sensitive resources never print raw values: drift details render as
 | 5 | Apply failed |
 | 6 | Indeterminate — apply became indeterminate, or audit recorded one or more `ERROR` results (errors dominate drift) |
 | 7 | Audit detected drift with no observation errors |
+
+## JSON output contract
+
+`--format json` is available on `validate`, `plan`, `apply`, and `audit`.
+From v1.0.0, everything documented in this section is a stable interface for
+the whole 1.x series. `sinter mcp` is governed by the
+[Core MCP](/en/reference/mcp/) reference instead.
+
+### Framing and errors
+
+- Output is one JSON object on stdout, followed by a newline. Nothing else is
+  written to stdout in JSON mode.
+- A document is written only when the command produces a report: `validate`
+  on success (exit 0); `plan` and `apply` when the run completed (exit 0, 4,
+  5, or 6); `audit` when the audit completed (exit 0, 6, or 7).
+- When a command fails before producing a report — for example a schema
+  error (exit 2) or a connection, capability, or security error (exit 3) —
+  stdout is empty and one `sinter: …` line is written to stderr. The
+  [exit code](#exit-codes) is the machine-readable error class; the stderr
+  wording is not part of the contract.
+
+### validate
+
+| Field | Type | Values |
+|-------|------|--------|
+| `command` | string | `"validate"` |
+| `status` | string | `"ok"` |
+| `resources` | integer | Number of resources in the recipe. |
+| `handlers` | integer | Number of handlers. |
+| `vars` | integer | Number of vars. |
+
+### plan and apply
+
+| Field | Type | Values |
+|-------|------|--------|
+| `mode` | string | `"plan"` or `"apply"` |
+| `status` | string | `success` (exit 0), `plan_error` (exit 4), `apply_failed` (exit 5), `indeterminate` (exit 6) |
+| `facts` | object | `hostname`, `os_name`, `os_family`, `os_version`, `arch` — strings, as detected on the target |
+| `resources` | array | One resource object per resource, in execution order. |
+| `handlers` | array | Handler objects for handlers that ran (always empty in `plan`). |
+| `handlers_pending` | array of strings | IDs of notified handlers that did not run. A `plan` lists every notified handler here. |
+
+Resource object (`plan` and `apply`):
+
+| Field | Type | Values |
+|-------|------|--------|
+| `id` | string | Resource ID from the recipe. |
+| `type` | string | Resource type, e.g. `file`, `package`. |
+| `loop_index` | integer or null | Iteration index for a loop-expanded resource; `null` otherwise. |
+| `origin` | string | Where the resource was declared. The field is stable; its text is informational. |
+| `execution` | string | `not_run`, `succeeded`, `failed`, `indeterminate` |
+| `change` | string | `none`, `changed`, `possible` |
+| `verification` | string | `not_applicable`, `not_performed`, `verified`, `failed`, `unknown` |
+| `disposition` | string | `normal`, `skipped_by_condition`, `guard_satisfied`, `blocked_by_dependency`, `blocked_by_fail_fast` |
+| `unknown` | boolean | `true` when current state was not fully observed (`?` in text output). |
+| `sensitive` | boolean | `true` for a sensitive resource. |
+| `reason` | string or null | Human-readable explanation; `"<redacted>"` for a sensitive resource. |
+| `diff` | object or null | `null`, or an object whose `type` is `"redacted"`, `"summary"` (with `current`, `desired`), or `"text"` (with `removed`, `added`). |
+| `notes` | array of strings | Human-readable notes; each is `"<redacted>"` for a sensitive resource. |
+
+A resource is identified by `id` together with `loop_index`.
+
+Handler object: `id` (string), `service` (string), `action` (string),
+`state` (string: `NotRun`, `Succeeded`, `Failed`, or `Indeterminate`,
+capitalized exactly as shown), and `reason` (string or null).
+
+### audit
+
+| Field | Type | Values |
+|-------|------|--------|
+| `mode` | string | `"audit"` |
+| `status` | string | `no_drift` (exit 0), `drift` (exit 7), `indeterminate` (exit 6) |
+| `summary` | object | Integers `total`, `compliant`, `drifted`, `not_auditable`, `not_applicable`, `errors`. |
+| `resources` | array | One object per resource, in dependency/execution order. |
+
+Resource object (`audit`): `id` (string), `type` (string), `loop_index`
+(integer or null), `origin` (string, informational text), `status` (string:
+`compliant`, `drift`, `not_auditable`, `not_applicable`, `error`),
+`sensitive` (boolean), `reason` (string or null), and `details` (array of
+objects with string fields `dimension`, `observed`, and `desired`; the
+`observed` and `desired` values are human-readable and are `"[redacted]"`
+for a sensitive resource).
+
+### Compatibility rules
+
+- **Stable in 1.x:** every field listed above, with its name, type,
+  nullability, and documented values and their meaning; the status-to-exit-code
+  mapping; the framing and error rules; resource identity; and resource
+  order.
+- **Additive changes** may appear in a 1.x minor release: new fields in any
+  object, and JSON output for new commands. Consumers must ignore fields they
+  do not recognize.
+- **Breaking changes** happen only in a new major version:
+  - removing or renaming a documented field;
+  - changing a documented field's type or nullability;
+  - removing a documented value or changing its meaning;
+  - adding a value to a documented value set (the `status`, `execution`,
+    `change`, `verification`, `disposition`, audit `status`, handler `state`,
+    and `diff.type` sets are closed, so consumers can match them exhaustively);
+  - changing the exit code of a status.
+- **Not guaranteed:**
+  - object key order, whitespace, and indentation;
+  - undocumented fields;
+  - the wording of human-readable text (`reason`, `notes`, diff bodies, audit
+    `details` values, `origin`, and the formatting of `facts` values);
+  - stderr messages and text-mode output.
+- **Redaction is part of the contract.** Sensitive values never appear in
+  JSON output; they are replaced by the markers listed above.
 
 ## SSH identity rules
 

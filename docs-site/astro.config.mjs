@@ -9,13 +9,12 @@ const basePrefix = base === '/' ? '' : base;
 
 // English docs live under /en/; legacy unprefixed paths redirect there.
 // With a root deployment, sources and destinations are root-relative.
+// One source per page: Astro treats `/x` and `/x/` as the same route, and the
+// static redirect page it emits (`x/index.html`) serves both forms.
 const legacyRedirects = Object.fromEntries(
   docIndex.pages
     .filter((p) => p.path !== '')
-    .flatMap((p) => [
-      [`/${p.path}/`, `${basePrefix}/en/${p.path}/`],
-      [`/${p.path}`, `${basePrefix}/en/${p.path}/`],
-    ]),
+    .map((p) => [`/${p.path}/`, `${basePrefix}/en/${p.path}/`]),
 );
 legacyRedirects['/'] = `${basePrefix}/en/`;
 

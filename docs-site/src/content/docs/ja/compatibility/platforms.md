@@ -33,15 +33,16 @@ Sinter v0.5.1では、対応するすべてのx86_64向けバージョンライ�
 実行ファイルは共通ですが、実行時の検出により Ubuntu は APT、RHEL系は
 DNF を使います。任意の Linux や他のアーキテクチャへの対応を意味しません。
 
-Sinter v0.4.1は8台の実x86_64 Linuxホストで受入検証を実施しました。
-8台すべてが同一の凍結済みcandidateバイナリと同一の論理受入シナリオを
-実行しました。**結果: 344/344チェックが通過。** 検証したpoint releaseは
-Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、Rocky Linux 9.8、
-Rocky Linux 10.2、RHEL 9.8、RHEL 10.2、AlmaLinux 9.8、
-AlmaLinux 10.2（すべてx86_64）です。正規アーカイブはその正規バイナリへ
-展開されることが検証され、そのバイナリが8台すべてのホストで同一に
-転送・実行されました。他の各point releaseや将来のリリースを個別に
-検証したという意味ではありません。
+現行リリースの Sinter v0.5.1 は、リリース成果物そのもの
+（`sinter-v0.5.1-linux-x86_64.tar.gz`）を8台の実x86_64 Linuxホストで
+受入検証しました。検証したpoint releaseは Ubuntu 24.04.5 LTS、
+Ubuntu 26.04.1 LTS、Rocky Linux 9.8、Rocky Linux 10.2、RHEL 9.8、
+RHEL 10.2、AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64）です。各ホストで
+展開した実行ファイルがバイト単位で同一（SHA-256）であることを確認し、
+同一の論理受入シナリオを実行しました。**結果: 344チェックが通過、失敗0。**
+Sinter v0.4.1 も以前に同じ8台での受入検証（344/344）を通過しており、
+その記録は履歴として保持します。他の各point releaseや将来のリリースを
+個別に検証したという意味ではありません。
 過去の v0.2.1 は従来のディストリビューション別アセットのままです。
 現在のダウンロードは[インストール](https://sinter.fulltrust.co.jp/ja/getting-started/installation/)
 を参照してください。

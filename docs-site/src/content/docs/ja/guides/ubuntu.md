@@ -14,9 +14,9 @@ Sinter v0.5.1では、対応するすべてのx86_64向けバージョンライ�
 実行ファイルは共通ですが、実行時の検出により Ubuntu は APT、RHEL系は
 DNF を使います。任意の Linux や他のアーキテクチャへの対応を意味しません。
 
-Sinter v0.4.1 は Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、
+Sinter v0.5.1 のリリース成果物は Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、
 Rocky Linux 9.8、Rocky Linux 10.2、RHEL 9.8、RHEL 10.2、
-AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64、344/344チェック）の
+AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64、344チェック通過・失敗0）の
 8実ホストで受入検証済みです。
 他の各point releaseや将来のリリースを個別に検証したという意味ではありません。
 過去の v0.2.1 は従来のディストリビューション別アセットのままです。
