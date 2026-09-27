@@ -1,0 +1,6 @@
+interface:
+  display_name: "Sinter"
+  short_description: "Write, check, and run Sinter recipes safely"
+  icon_small: "./assets/sinter-icon.png"
+  icon_large: "./assets/sinter-logo.png"
+  default_prompt: "Use $sinter to review this recipe and show what a plan would change before anything is applied."
