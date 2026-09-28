@@ -2,7 +2,7 @@
 
 All notable changes to Sinter are documented in this file.
 
-## [Unreleased]
+## [1.1.0] - Unreleased
 
 A small, fail-closed foundation for managing several hosts, plus SSH that
 follows the operator's OpenSSH setup. Existing single-host command lines,
