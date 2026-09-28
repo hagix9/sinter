@@ -2,6 +2,39 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [1.1.1] - 2026-09-29
+
+Fail-closed validation fixes. Valid recipes, command lines, and `--format
+json` documents are unchanged; recipes that could never run correctly are
+now rejected by `validate` (exit 2) before anything connects, or fail
+before any change is made.
+
+### Fixed
+
+- A `template` whose `state` resolved to a value other than `present` or
+  `absent` was written as if it were `present`. It now fails before
+  anything is observed or changed: `plan` exits 4 and `apply` reports the
+  resource as failed.
+- A `link` `state` other than `present` or `absent` was applied as
+  `present`. It is now rejected.
+- `validate` now rejects: a `file`, `directory`, `link`, or `template`
+  `state` other than `present` or `absent`; a `link` whose `state` is
+  `present` (or omitted) without a `target`; a literal string as a
+  `service` `enabled` value; and a handler with an empty `service`.
+  Previously these were accepted and failed only when the resource ran. An
+  interpolated value is still checked when it is resolved.
+- Mutating `systemctl` calls (`start`, `stop`, `enable`, `disable`,
+  `reset-failed`, and handler `restart`/`reload`) now pass the unit name
+  after `--`, as service observation already did, so a unit name beginning
+  with `-` can never be read as a `systemctl` option.
+- Documentation: corrected stale statements (the current release in
+  `llms.txt`, the `validate` summary in the CLI reference, the WebMCP page's
+  description of Sinter's own MCP server, hashed `known_hosts` and inventory
+  on the supported-platforms page, `link` `target` requiredness in the
+  resource metadata, and the agent skill's top-level recipe fields and
+  target-option defaults) and four GitHub links missing the repository
+  name.
+
 ## [1.1.0] - 2026-09-28
 
 A small, fail-closed foundation for managing several hosts, plus SSH that
