@@ -65,6 +65,10 @@ are reported as `blocked`.
 ## Target-side execution
 
 - Local targets are used when `--host` is omitted; SSH otherwise.
+- From v1.1.0, `--inventory` runs a recipe on several hosts — only on the
+  hosts its own `targets` select. Being in the inventory never authorizes
+  execution; a recipe without `targets` is an error. See
+  [Multiple hosts](/en/reference/cli/#multiple-hosts).
 - Remote commands run with exact argv — no unintended shell evaluation; NUL
   bytes are rejected.
 - `--sudo` runs every target-side operation as root via non-interactive

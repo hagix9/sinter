@@ -1,0 +1,13 @@
+# Which hosts exist. Listing a host here never makes it a target: each
+# recipe selects its own hosts with `targets`.
+hosts:
+  web01: { address: 10.0.0.11, user: ubuntu }
+  web02: { address: 10.0.0.12, user: ubuntu }
+  db01: { address: 10.0.0.21, user: rocky }
+  # No address: the name itself is used, so an ~/.ssh/config `Host` alias
+  # (HostName, User, Port, IdentityFile) works as-is.
+  cache01: {}
+groups:
+  web: { hosts: [web01, web02] }
+  db: { hosts: [db01] }
+  linux: { hosts: [web01, web02, db01, cache01] }

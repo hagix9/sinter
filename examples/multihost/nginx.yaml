@@ -1,0 +1,17 @@
+version: 1
+
+# Runs only on the web group; db01 and cache01 are skipped.
+targets:
+  groups: [web]
+
+# Copied on each selected host before apply changes anything.
+backup:
+  paths:
+    - /etc/nginx/nginx.conf
+
+resources:
+  - id: nginx
+    type: package
+    with:
+      name: nginx
+      state: present

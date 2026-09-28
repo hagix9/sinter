@@ -1,4 +1,4 @@
-use crate::document::{parse_document, Document};
+use crate::document::{parse_document, Document, TargetSelector};
 use crate::error::{Result, SinterError};
 use crate::expressions::{
     collect_register_refs, eval_value_interpolated, parse_expr, EvalVal, Expr, Scope,
@@ -62,6 +62,11 @@ pub struct Model {
     pub handlers: Vec<FrozenHandler>,
     pub handler_index: BTreeMap<String, usize>,
     pub register_producers: BTreeMap<String, String>,
+    /// Paths to back up on the target before apply mutates anything
+    /// (`backup.paths`, include-expanded in document order, unique).
+    pub backups: Vec<String>,
+    /// Explicit execution targets (`targets`), from the entry recipe only.
+    pub targets: Option<TargetSelector>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +117,9 @@ pub fn load_model(entry: &Path) -> Result<Model> {
         var_names: HashSet::new(),
         declarations: Vec::new(),
         global_sensitive_vars,
+        backups: Vec::new(),
+        entry: None,
+        targets: None,
     };
     state.load(entry)?;
     freeze(state, entry)
@@ -163,6 +171,12 @@ struct LoadState {
     /// a pre-pass. Sensitivity decisions use this set so they never depend on
     /// the order in which documents happen to be expanded.
     global_sensitive_vars: BTreeSet<String>,
+    /// `backup.paths` across the include graph: (path, declaring origin).
+    backups: Vec<(String, String)>,
+    /// Canonical path of the entry recipe (the first document loaded).
+    entry: Option<PathBuf>,
+    /// `targets` of the entry recipe.
+    targets: Option<TargetSelector>,
 }
 
 /// A resource declaration as written, retained for declaration-level
@@ -189,6 +203,17 @@ impl LoadState {
             )));
         }
         let doc = parse_document(&canon)?;
+        if self.entry.is_none() {
+            self.entry = Some(canon.clone());
+            self.targets = doc.targets.clone();
+        } else if doc.targets.is_some() {
+            // Execution targets belong to the recipe that is run, never to a
+            // fragment pulled in by `include` (no implicit merging).
+            return Err(SinterError::schema(format!(
+                "{}: targets may only be declared in the top-level recipe, not in an included file",
+                canon.display()
+            )));
+        }
         expand_document(&canon, doc, self)
     }
 }
@@ -209,7 +234,19 @@ fn expand_document(canon: &Path, doc: Document, state: &mut LoadState) -> Result
         };
         state.load(&inc_path)?;
     }
-    // Then the declaring document's own variables, resources, handlers.
+    // Then the declaring document's own backups, variables, resources,
+    // handlers.
+    for p in &doc.backup_paths {
+        if let Some((_, first)) = state.backups.iter().find(|(q, _)| q == p) {
+            return Err(SinterError::schema(format!(
+                "duplicate backup path {} (declared in {} and {})",
+                p,
+                first,
+                canon.display()
+            )));
+        }
+        state.backups.push((p.clone(), canon.display().to_string()));
+    }
     for v in &doc.vars {
         if !state.var_names.insert(v.name.clone()) {
             return Err(SinterError::schema(format!(
@@ -1487,6 +1524,8 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
         handlers: state.handlers,
         handler_index,
         register_producers,
+        backups: state.backups.into_iter().map(|(p, _)| p).collect(),
+        targets: state.targets,
     })
 }
 

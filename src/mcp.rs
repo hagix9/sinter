@@ -1074,6 +1074,7 @@ mod tests {
                 user: "LEAK-admin".to_string(),
                 known_hosts: PathBuf::from("/tmp/secret"),
                 identity_files: vec![PathBuf::from("/tmp/secret/key")],
+                ..Default::default()
             },
             sudo: false,
         }
@@ -1232,6 +1233,7 @@ mod tests {
             },
             status: AggregateStatus::Success,
             commands: vec![],
+            backup: None,
         };
         // Host boundary: no content, whatever the caller's sensitive flags.
         let host = serde_json::to_string(&plan_report_json(&report, true)).unwrap();

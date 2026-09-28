@@ -362,9 +362,9 @@ http_request
 
 remote_directory synchronization
 
-inventory files
+dynamic inventory, host and group variables, nested groups, and host patterns (a static inventory with flat host groups and explicit recipe targets exists; DESIGN §19.2)
 
-multiple targets
+parallel or orchestrated execution across multiple targets
 
 parallelism
 

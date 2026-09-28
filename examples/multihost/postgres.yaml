@@ -1,0 +1,15 @@
+version: 1
+
+targets:
+  hosts: [db01]
+
+backup:
+  paths:
+    - /etc/postgresql
+
+resources:
+  - id: postgresql
+    type: package
+    with:
+      name: postgresql
+      state: present

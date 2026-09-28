@@ -110,7 +110,11 @@ handlers:
     service: nginx
     action: restart
 
-Top-level fields allowed in v0.1:
+backup:
+  paths:
+    - /etc/nginx/nginx.conf
+
+Top-level fields allowed:
 
 version
 
@@ -121,6 +125,10 @@ include
 resources
 
 handlers
+
+backup (optional; §4.12)
+
+targets (optional; §19.2)
 
 All other top-level fields are validation errors.
 
@@ -327,6 +335,35 @@ directory
 link
 
 No field-level ownership merging exists in v0.1.
+
+4.12 Backup declaration
+
+`backup` is an optional top-level map whose only field is `paths`, a non-empty list of target paths to copy before apply mutates anything:
+
+backup:
+  paths:
+    - /etc/ssh/sshd_config
+    - /etc/nginx
+
+Each path is a static target identifier (§4.9): a literal canonical absolute path (§4.10), never interpolated. `/` is rejected. A path may appear only once across the include graph; declarations from included files are merged in include-expansion order.
+
+Semantics:
+
+validate checks the declaration only; it never contacts a target or checks path existence.
+
+plan lists each declared path as planned; it observes nothing and creates nothing.
+
+apply copies every declared path, in order, on the target before the first resource is evaluated. Any backup failure aborts the invocation before any resource runs (exit 5); a partially written run directory is left in place and named in the error.
+
+audit ignores the declaration; backups are not desired state.
+
+Store: with --sudo `/var/lib/sinter/backups/<run-id>/`, otherwise `<target-user-home>/.sinter/backups/<run-id>/`, on the target. Inside the run directory the original absolute path is reproduced. `<run-id>` is `<UTC YYYYMMDDTHHMMSSZ>-<8 hex>`, one per invocation and shared by all its targets; when several recipes run (§19.3) it is suffixed `-<NN>-<recipe>` per recipe. Backups run only for executions selected by target resolution (§19.2). Store directories created by Sinter are mode 0700; every ancestor of the run directory and of each source path must pass the §23 trust check. An existing run directory is a collision and fails. A declared path that contains, or lies inside, the store fails.
+
+Copy rules: regular files, directories (recursively) and symlinks (as links, never followed) are copied; mode (including POSIX ACLs), ownership and timestamps must be preserved or the backup fails; other extended attributes and SELinux labels are preserved on a best-effort basis. Other object types fail. An absent path is recorded as absent and is not a failure.
+
+Backup content is never read by the controller and never appears in any output; only paths, object kinds and store locations do.
+
+A backup is not a rollback. Sinter never restores, prunes, or reads back backups.
 
 5. Ordering
 
@@ -1065,6 +1102,93 @@ A portless `host` entry must not authorize a connection to a non-default port.
 
 An explicit matching-identity mismatch must never be bypassed by another host form.
 
+Hashed (`|1|...`) known_hosts entries are matched against the same exact identity.
+
+A presented key listed on any `@revoked` line of the selected file is refused.
+
+When known_hosts already records one or more key types for the identity, those host-key algorithms are negotiated first; the presented key must still match exactly.
+
+19.1 OpenSSH client configuration (CLI only)
+
+For a CLI SSH target, Sinter asks the installed OpenSSH client to evaluate its configuration (`ssh -G <host>`, no connection) and inherits HostName, User, Port, IdentityFile, IdentitiesOnly, IdentityAgent, HostKeyAlias and the first UserKnownHostsFile. When a HostKeyAlias is set it replaces `host` in the known_hosts identity.
+
+Host-key policy settings are never inherited (StrictHostKeyChecking, UpdateHostKeys, CheckHostIP, GlobalKnownHostsFile); this section never weakens §19.
+
+A ProxyJump or ProxyCommand for the host is a connection error; Sinter never silently connects directly instead.
+
+`--no-ssh-config` disables inheritance. When no `ssh` client is installed, built-in defaults apply.
+
+Precedence per field: explicit CLI option > inventory host field (§19.2) > OpenSSH configuration > built-in default ($USER, 22, ~/.ssh/known_hosts, ~/.ssh/id_ed25519, id_ecdsa, id_rsa).
+
+Private keys are never decrypted by Sinter; an encrypted key is usable only through ssh-agent.
+
+MCP target profiles never consult the OpenSSH configuration.
+
+19.2 Inventory, host groups, recipe targets (CLI)
+
+An inventory defines which hosts exist. It never selects a host for execution.
+
+Inventory file (YAML, or TOML by extension), passed to plan/apply/audit with `--inventory <path>` (alias `--hosts`):
+
+hosts:
+  web01:
+    address: 10.0.0.11
+    user: ubuntu
+  db01:
+    address: 10.0.0.21
+    port: 2222
+groups:
+  web:
+    hosts: [web01]
+
+Host fields, all optional: address (default: the host name, which may be an OpenSSH `Host` alias), port, user, known_hosts, identity_files. `groups.<name>.hosts` is a non-empty list of defined hosts without repeats. Names match `[A-Za-z0-9._-]`, start alphanumeric, at most 64 characters. Unknown fields, undefined group members, an empty host set, and parse errors are validation errors (exit 2). There are no nested groups, variables, patterns, dynamic inventory, per-host sudo, or implicit "all" group.
+
+A recipe names the hosts it may run on with a top-level `targets` map:
+
+targets:
+  groups: [web]
+  hosts: [db01]
+
+The selected set is the union of the named hosts and the members of the named groups. At least one name is required. `targets` may appear only in the recipe that is run, never in an included file. `targets` has no effect without an inventory; an explicit `--host` (or localhost) keeps the single-target behavior.
+
+Target resolution fails closed. With `--inventory`, before anything connects:
+
+a recipe without `targets` is an error (exit 2) — an inventory never implies "all hosts";
+
+a target name the inventory does not define is an error (exit 2);
+
+a selection that matches no host is an error (exit 2);
+
+every selected host (and only selected hosts) is resolved per §19.1; two selected hosts resolving to the same address and port are an error (exit 2).
+
+`--host` and `--inventory` are mutually exclusive (exit 2).
+
+19.3 Recipe bundles
+
+A bundle lists recipes to run as one invocation:
+
+version: 1
+name: web-stack
+recipes:
+  - common.yaml
+  - nginx.yaml
+
+A file whose top level has `recipes` is a bundle. Paths are relative to the bundle file. Each listed recipe must exist, load, and validate; a recipe may be listed once; bundles do not nest. A bundle adds no targets: with an inventory each recipe is resolved against its own `targets` (§19.2), and a recipe without `targets` fails the whole invocation before anything runs. Without an inventory, every recipe runs, in order, on the one explicit target.
+
+19.4 Multi-target execution
+
+Executions are (recipe, host) pairs: recipes in bundle order, hosts in name order within each recipe. They run one at a time.
+
+plan and audit are read-only and attempt every execution.
+
+apply fail-fast: during apply, an execution whose exit code is not 0 — for any reason: validation (2), connection or capability (3), plan (4), backup or apply failure (5), indeterminate outcome (6) — stops the sequence. The failed execution keeps its own result or error. Every later execution, whether a later host of the same recipe or any execution of a later recipe, is reported as not run with the name of the failed execution as its reason: it is never contacted, and neither its backups nor its resources run. Executions completed before the failure keep their results; nothing is rolled back.
+
+The invocation exit code is the most severe exit code among executions that ran, in the order 6, 5, 4, 3, 2, 7, 0; not-run executions contribute none. A partial failure never exits 0. The summary counts executions that exited 0, exited non-zero, and were not run.
+
+Text output shows the target resolution (MATCH with reasons / SKIP per host and recipe) before running and an execution summary after. JSON output is one document for the invocation with the resolution and, per execution, the recipe, the target identity (inventory name, address, port, user), status, exit code, the single-target document or error, and an execution-level backup record (§4.12): null when the recipe declares no backup or in audit; otherwise its status (planned, completed, failed, not_started, not_run) with run id, run directory and per-path entries — never content.
+
+`validate` accepts every target option and ignores it; it reads no inventory.
+
 20. Remote argv contract
 
 command represents program + argv, not a shell command string.
@@ -1622,6 +1746,8 @@ Stable v0.1 meanings:
 
 Plan finding desired-state differences still exits 0.
 
+With an inventory or a bundle (§19.4) the exit code is the most severe execution exit code (6 > 5 > 4 > 3 > 2 > 7 > 0).
+
 34. Acceptance tests
 
 Tests must include normative fixtures rather than only round-tripping two frontends.
@@ -1986,7 +2112,11 @@ make recursive directory deletion implicit
 
 add shell as a separate v0.1 resource
 
-add generic handlers, roles, plugins, inventory, orchestration, or scripting
+add generic handlers, roles, plugins, orchestration, or scripting
+
+add inventory features beyond §19.2–19.4 (no host or group variables, nested groups, patterns, implicit all-hosts selection, dynamic inventory, or parallel execution)
+
+add automatic rollback or restore of §4.12 backups
 
 introduce Rhai
 

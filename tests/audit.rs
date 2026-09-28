@@ -2412,6 +2412,7 @@ fn audit_cli_text(report: &AuditReport) -> String {
         &sinter::output::RenderOptions {
             verbose: false,
             format: sinter::output::OutputFormat::Text,
+            color: false,
         },
         &mut buf,
     )
@@ -2426,6 +2427,7 @@ fn audit_cli_json(report: &AuditReport) -> serde_json::Value {
         &sinter::output::RenderOptions {
             verbose: false,
             format: sinter::output::OutputFormat::Json,
+            color: false,
         },
         &mut buf,
     )

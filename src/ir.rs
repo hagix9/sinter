@@ -46,7 +46,19 @@ pub enum HandlerAction {
     Reload,
 }
 
-pub const TOP_LEVEL_FIELDS: &[&str] = &["version", "vars", "include", "resources", "handlers"];
+pub const TOP_LEVEL_FIELDS: &[&str] = &[
+    "version",
+    "vars",
+    "include",
+    "resources",
+    "handlers",
+    "backup",
+    "targets",
+];
+/// Fields of the top-level `backup` map.
+pub const BACKUP_FIELDS: &[&str] = &["paths"];
+/// Fields of the top-level `targets` map.
+pub const TARGET_FIELDS: &[&str] = &["hosts", "groups"];
 pub const COMMON_RESOURCE_FIELDS: &[&str] = &[
     "id",
     "type",

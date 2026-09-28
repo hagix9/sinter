@@ -3,11 +3,16 @@ use crate::diff::sanitize_line;
 use crate::engine::{AggregateStatus, RunReport};
 use crate::result::DiffBody;
 use crate::result::*;
+use crate::style;
 use std::io::Write;
 
 pub struct RenderOptions {
     pub verbose: bool,
     pub format: OutputFormat,
+    /// Paint fixed status tokens with ANSI color. Only honored by the `text`
+    /// format; the CLI sets it from [`crate::style::stdout_color`]. JSON output
+    /// ignores it unconditionally.
+    pub color: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,15 +55,26 @@ pub fn render_audit(
     match opts.format {
         OutputFormat::Text => {
             for line in report.render_text().lines() {
-                writeln!(out, "{}", sanitize_line(line))?;
+                // Color is applied strictly after sanitization and only to a
+                // leading Sinter status token (or the aggregate status value).
+                let clean = sanitize_line(line);
+                let painted = match clean.strip_prefix("status: ") {
+                    Some(v) => format!("status: {}", style::status(v, opts.color)),
+                    None => style::leading_token(&clean, opts.color),
+                };
+                writeln!(out, "{}", painted)?;
             }
             Ok(())
         }
-        OutputFormat::Json => render_audit_json(report, out),
+        OutputFormat::Json => {
+            let doc = audit_report_json(report);
+            writeln!(out, "{}", serde_json::to_string_pretty(&doc).unwrap())
+        }
     }
 }
 
-fn render_audit_json(report: &AuditReport, out: &mut dyn Write) -> std::io::Result<()> {
+/// The machine-readable audit document (`sinter audit --format json`).
+pub fn audit_report_json(report: &AuditReport) -> serde_json::Value {
     use serde_json::json;
     let resources: Vec<serde_json::Value> = report
         .resources
@@ -94,7 +110,7 @@ fn render_audit_json(report: &AuditReport, out: &mut dyn Write) -> std::io::Resu
         })
         .collect();
     let s = &report.summary;
-    let doc = json!({
+    json!({
         "mode": "audit",
         "status": report.aggregate_label(),
         "summary": {
@@ -106,9 +122,7 @@ fn render_audit_json(report: &AuditReport, out: &mut dyn Write) -> std::io::Resu
             "errors": s.errors,
         },
         "resources": resources,
-    });
-    writeln!(out, "{}", serde_json::to_string_pretty(&doc).unwrap())?;
-    Ok(())
+    })
 }
 
 fn render_text(
@@ -129,8 +143,13 @@ fn render_text(
     )?;
     writeln!(out)?;
 
+    if let Some(b) = &report.backup {
+        render_backup_text(b, opts, out)?;
+        writeln!(out)?;
+    }
+
     for r in &report.resources {
-        let status = human_status(r);
+        let status = style::status(human_status(r), opts.color);
         let reason = if r.sensitive {
             r.reason.as_ref().map(|_| "<redacted>".to_string())
         } else {
@@ -248,17 +267,81 @@ fn render_text(
     writeln!(
         out,
         "status: {}",
-        match report.status {
-            AggregateStatus::Success => "success",
-            AggregateStatus::PlanError => "plan_error",
-            AggregateStatus::ApplyFailed => "apply_failed",
-            AggregateStatus::Indeterminate => "indeterminate",
-        }
+        style::status(aggregate_label(report.status), opts.color)
     )?;
     Ok(())
 }
 
+/// Backup lines: paths, kinds and store locations only — never content.
+fn render_backup_text(
+    b: &crate::backup::BackupReport,
+    opts: &RenderOptions,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    match (&b.run_id, &b.directory) {
+        (Some(id), Some(dir)) => writeln!(
+            out,
+            "backup: run {} -> {}",
+            sanitize_line(id),
+            sanitize_line(dir)
+        )?,
+        _ => writeln!(out, "backup: planned (nothing is copied during plan)")?,
+    }
+    for e in &b.entries {
+        let detail = match (e.status, e.kind, &e.destination) {
+            (crate::backup::BackupStatus::BackedUp, Some(k), Some(d)) => {
+                format!("[{}] -> {}", k, sanitize_line(d))
+            }
+            (crate::backup::BackupStatus::Absent, _, _) => {
+                "[absent] nothing to back up".to_string()
+            }
+            (crate::backup::BackupStatus::Failed, _, _) => "[failed]".to_string(),
+            (crate::backup::BackupStatus::NotRun, _, _) => "[not_run]".to_string(),
+            _ => "[planned]".to_string(),
+        };
+        writeln!(
+            out,
+            "{}  {} {}",
+            style::status("BACKUP", opts.color),
+            sanitize_line(&e.path),
+            detail
+        )?;
+    }
+    Ok(())
+}
+
+/// The `backup` object of plan/apply documents (paths, statuses, kinds and
+/// locations only).
+pub fn backup_json(b: &crate::backup::BackupReport) -> serde_json::Value {
+    serde_json::json!({
+        "run_id": b.run_id,
+        "directory": b.directory,
+        "entries": b.entries.iter().map(|e| serde_json::json!({
+            "path": e.path,
+            "status": e.status.label(),
+            "kind": e.kind,
+            "destination": e.destination,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn aggregate_label(status: AggregateStatus) -> &'static str {
+    match status {
+        AggregateStatus::Success => "success",
+        AggregateStatus::PlanError => "plan_error",
+        AggregateStatus::ApplyFailed => "apply_failed",
+        AggregateStatus::Indeterminate => "indeterminate",
+    }
+}
+
 fn render_json(report: &RunReport, mode: &str, out: &mut dyn Write) -> std::io::Result<()> {
+    let doc = run_report_json(report, mode);
+    writeln!(out, "{}", serde_json::to_string_pretty(&doc).unwrap())?;
+    Ok(())
+}
+
+/// The machine-readable plan/apply document (`--format json`).
+pub fn run_report_json(report: &RunReport, mode: &str) -> serde_json::Value {
     use serde_json::json;
     let resources: Vec<serde_json::Value> = report
         .resources
@@ -322,7 +405,7 @@ fn render_json(report: &RunReport, mode: &str, out: &mut dyn Write) -> std::io::
             })
         })
         .collect();
-    let doc = json!({
+    let mut doc = json!({
         "mode": mode,
         "status": match report.status {
             AggregateStatus::Success => "success",
@@ -341,8 +424,12 @@ fn render_json(report: &RunReport, mode: &str, out: &mut dyn Write) -> std::io::
         "handlers": handlers,
         "handlers_pending": report.handlers_pending,
     });
-    writeln!(out, "{}", serde_json::to_string_pretty(&doc).unwrap())?;
-    Ok(())
+    // Present only when the recipe declares backups, so documents for
+    // recipes without a backup section are unchanged.
+    if let Some(b) = &report.backup {
+        doc["backup"] = backup_json(b);
+    }
+    doc
 }
 
 fn human_status(r: &ResourceResult) -> &'static str {

@@ -37,6 +37,9 @@ pub struct SinterError {
     pub kind: ErrorKind,
     pub message: String,
     pub mutation: MutationState,
+    /// Structured pre-apply backup report when this error is a backup
+    /// failure (`None` otherwise). Never contains file content.
+    pub backup: Option<Box<crate::backup::BackupReport>>,
 }
 
 impl SinterError {
@@ -45,6 +48,7 @@ impl SinterError {
             kind: ErrorKind::Schema,
             message: msg.into(),
             mutation: MutationState::None,
+            backup: None,
         }
     }
     pub fn connect(msg: impl Into<String>) -> Self {
@@ -52,6 +56,7 @@ impl SinterError {
             kind: ErrorKind::Connect,
             message: msg.into(),
             mutation: MutationState::None,
+            backup: None,
         }
     }
     pub fn plan(msg: impl Into<String>) -> Self {
@@ -59,6 +64,7 @@ impl SinterError {
             kind: ErrorKind::Plan,
             message: msg.into(),
             mutation: MutationState::None,
+            backup: None,
         }
     }
     pub fn apply(msg: impl Into<String>) -> Self {
@@ -66,6 +72,7 @@ impl SinterError {
             kind: ErrorKind::Apply,
             message: msg.into(),
             mutation: MutationState::None,
+            backup: None,
         }
     }
     pub fn indeterminate(msg: impl Into<String>) -> Self {
@@ -73,6 +80,7 @@ impl SinterError {
             kind: ErrorKind::Indeterminate,
             message: msg.into(),
             mutation: MutationState::Possible,
+            backup: None,
         }
     }
     pub fn unknown(msg: impl Into<String>) -> Self {
@@ -80,6 +88,7 @@ impl SinterError {
             kind: ErrorKind::Unknown,
             message: msg.into(),
             mutation: MutationState::None,
+            backup: None,
         }
     }
 

@@ -75,8 +75,10 @@ sinter audit --host server.example.com --sudo recipe.yaml
 このリポジトリは、`GOALS.md`と`DESIGN.md`で定義された
 **Sinter v0.2**を実装しています。これら2ファイルが正式な仕様であり、
 v0.2はv0.1のcontractにRHEL系platform対応（Rocky Linux、RHEL、
-AlmaLinux — `dnf`）を追加しています。roles、plugins、inventory、orchestration、
-embedded scriptingは依然として実装対象に含めません。
+AlmaLinux — `dnf`）を追加しています。roles、plugins、orchestration、
+embedded scriptingは依然として実装対象に含めません。複数ホストは、意図的に
+小さくフェイルクローズなinventory（ホスト、フラットなグループ、レシピごとの
+明示的な `targets`）で扱います（[複数ホスト](#複数ホストバンドルバックアップ)参照）。
 
 ## インストール
 
@@ -129,6 +131,63 @@ sinter audit --host host.example recipe.yaml
 
 `--host`を省略した場合はローカルホストが対象になります。
 SSHおよびpasswordless `sudo -n`は`--host … --sudo`で利用できます。
+v1.1.0 以降、`ssh <host>` で接続できる環境なら、`--host <host>` も同じ `~/.ssh/config`
+の設定（HostName、User、Port、IdentityFile、ssh-agent）を使います。
+ホスト鍵は従来どおり `known_hosts` に登録済みである必要があります。
+
+v1.1.0 以降、`validate` はレシピだけを検証します。`--host`、`--inventory`、SSH関連の
+オプションはすべてのコマンドで受け付け、`validate` では無視するため、同じ
+コマンドラインを全フェーズで使えます。状態語の色付けはターミナル出力時のみ
+です（パイプ、`NO_COLOR`、`--format json` では色なし）。
+
+### 複数ホスト、バンドル、バックアップ
+
+Sinter v1.1.0 以降で利用できます。既存の単一ホスト用レシピと `--host` の
+コマンドラインはそのまま使えます。
+
+```yaml
+# hosts.yaml — 存在するホスト
+hosts:
+  web01: { address: 10.0.0.11, user: ubuntu }
+  db01:  { address: 10.0.0.21, user: rocky }
+groups:
+  web: { hosts: [web01] }
+```
+
+```yaml
+# nginx.yaml — このレシピを実行してよいホストと、変更前に退避するパス
+version: 1
+targets:
+  groups: [web]
+backup:
+  paths: [/etc/nginx/nginx.conf]
+resources:
+  - id: nginx
+    type: package
+    with:
+      name: nginx
+      state: present
+```
+
+```sh
+sinter plan  nginx.yaml --inventory hosts.yaml   # ホストごとに MATCH/SKIP を表示
+sinter apply nginx.yaml --inventory hosts.yaml
+```
+
+- inventoryにあるだけのホストは実行対象になりません。`--inventory` 使用時に
+  `targets` のないレシピはエラーで、どのレシピにも選ばれないホストには接続
+  しません。
+- バンドル（`version: 1` + `recipes: [common.yaml, nginx.yaml]`）は複数の
+  レシピを実行し、各レシピはそれぞれ自身の `targets` で解決されます。
+- `apply` は（理由を問わず）終了コードが 0 でない最初の実行で止まり残りを
+  `not_run` とし、`plan`/`audit` は選択された全ホストを
+  回ります。一部が失敗して終了コード 0 になることはありません。
+- `backup.paths` は、`apply` が何かを変更する前に選択された各ホスト上で
+  コピーされます（`~/.sinter/backups/<run-id>/`、`--sudo` 時は
+  `/var/lib/sinter/backups/<run-id>/`）。バックアップが失敗すると apply は
+  止まります。バックアップはロールバックではありません。
+
+詳細: [CLIリファレンス](https://sinter.fulltrust.co.jp/ja/reference/cli/)。
 
 ### CLI終了コード
 

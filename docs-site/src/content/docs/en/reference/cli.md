@@ -21,11 +21,15 @@ See [Core MCP](/en/reference/mcp/) for the `mcp` subcommand and `--targets-file`
 ## validate
 
 ```sh
-sinter validate <RECIPE> [--format text|json]
+sinter validate <RECIPE|BUNDLE> [--format text|json] [target options]
 ```
 
 Checks recipe structure and semantics without contacting any target. Exits 0
-on success.
+on success. The result depends only on the recipe: the
+[target options](#target-options) are accepted so the same command line works
+for every phase, and are ignored — no host is contacted, no inventory,
+key, or `known_hosts` file is read, and `ssh` is not run. Unknown or
+misspelled options are still rejected.
 
 ## plan
 
@@ -61,18 +65,218 @@ recipe describes, not a separate policy baseline. A recipe that manages
 declarations; sshd run state is audited through the `service` resource.
 There is no SSH-specific audit logic.
 
-## Target options (plan / apply / audit)
+## Target options
+
+Accepted by `validate`, `plan`, `apply` and `audit`; `validate` ignores them.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--host <HOST>` | localhost | SSH host. Omit for local execution. |
-| `--port <PORT>` | `22` | SSH port. |
-| `--user <USER>` | `$USER` | SSH user. |
-| `--known-hosts <PATH>` | `~/.ssh/known_hosts` | Host-key database (strict). |
-| `--identity <PATH>` | — | Identity file; repeatable. |
+| `--host <HOST>` | localhost | SSH host or `~/.ssh/config` `Host` alias. Omit for local execution. |
+| `--inventory <PATH>` (alias `--hosts`) | — | Hosts and groups; each recipe runs only on the hosts its `targets` select. See [Multiple hosts](#multiple-hosts). Mutually exclusive with `--host`. |
+| `--port <PORT>` | inventory, ssh_config `Port`, else `22` | SSH port. |
+| `--user <USER>` | inventory, ssh_config `User`, else `$USER` | SSH user. |
+| `--known-hosts <PATH>` | inventory, ssh_config `UserKnownHostsFile`, else `~/.ssh/known_hosts` | Host-key database (strict). |
+| `--identity <PATH>` | inventory, ssh_config `IdentityFile`, else `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa` | Identity file; repeatable; replaces the inherited list. |
+| `--no-ssh-config` | off | Do not consult the OpenSSH client configuration. |
 | `--sudo` | off | Run target-side operations via `sudo -n`. |
 | `--verbose` | off | Verbose output. |
 | `--format` | `text` | `text` or `json`. |
+
+### OpenSSH configuration
+
+*Available from Sinter v1.1.0.*
+
+If `ssh <host>` works, `sinter plan recipe.yaml --host <host>` uses the same
+connection parameters. Sinter asks the installed OpenSSH client to evaluate
+its configuration (`ssh -G <host>`, which does not connect) and inherits
+`HostName`, `User`, `Port`, `IdentityFile`, `IdentitiesOnly`, `IdentityAgent`,
+`HostKeyAlias` and the first `UserKnownHostsFile`. The SSH connection itself
+is still made by Sinter's built-in transport.
+
+- Precedence, per setting: explicit CLI option > inventory host field >
+  OpenSSH configuration > built-in default.
+- Host-key policy is never inherited: `StrictHostKeyChecking`,
+  `UpdateHostKeys` and similar settings cannot relax the rules in
+  [SSH identity rules](#ssh-identity-rules).
+- `ProxyJump` / `ProxyCommand` are not supported; a host that uses them fails
+  with exit 3 instead of being connected to directly.
+- Keys: Ed25519, ECDSA and RSA keys (OpenSSH or PEM format) work from files.
+  Passphrase-protected keys are used only through `ssh-agent` (`ssh-add`
+  them first); Sinter never prompts. Agent keys are tried first, keys that
+  match configured identity files before others; `IdentitiesOnly yes` offers
+  only those.
+- `--no-ssh-config` skips all of this. Without an installed `ssh` client,
+  the built-in defaults apply.
+
+## Multiple hosts
+
+*Available from Sinter v1.1.0.*
+
+Three pieces, each explicit:
+
+1. an **inventory** says which hosts exist (and groups of them);
+2. each **recipe** says which of them it may run on (`targets`);
+3. the command line names both.
+
+A host being in the inventory never makes it a target.
+
+```yaml
+# hosts.yaml
+hosts:
+  web01:
+    address: 10.0.0.11     # optional; defaults to the name (can be an ~/.ssh/config alias)
+    user: ubuntu           # optional: port, user, known_hosts, identity_files
+  web02:
+    address: 10.0.0.12
+  db01:
+    address: 10.0.0.21
+    user: rocky
+groups:
+  web:
+    hosts: [web01, web02]
+  db:
+    hosts: [db01]
+```
+
+```yaml
+# nginx.yaml
+version: 1
+targets:
+  groups: [web]            # union with any listed hosts: hosts: [db01]
+resources:
+  - id: nginx
+    type: package
+    with:
+      name: nginx
+      state: present
+```
+
+```sh
+sinter plan  nginx.yaml --inventory hosts.yaml
+sinter apply nginx.yaml --hosts hosts.yaml
+```
+
+Plan (and apply/audit) first print the target resolution:
+
+```text
+== target resolution ==
+recipe nginx (nginx.yaml)
+  db01   SKIP   no matching target
+  web01  MATCH  group:web
+  web02  MATCH  group:web
+  selected 2, excluded 1
+executions: 2 (1 recipe(s), 3 host(s))
+```
+
+Fail-closed rules (all exit 2, before anything connects):
+
+- a recipe without `targets` used with `--inventory`;
+- a target host or group the inventory does not define;
+- targets that select no host;
+- two selected hosts that resolve to the same address and port;
+- a malformed inventory: unknown fields, a group listing an undefined host
+  or the same host twice, no hosts, parse errors;
+- `--host` together with `--inventory`.
+
+Hosts that no recipe selects are never resolved or contacted. `targets`
+only apply with an inventory: `--host` (or no host, i.e. localhost) keeps
+the single-target behavior and ignores `targets`.
+
+There are no nested groups, host or group variables, patterns, an implicit
+"all" group, dynamic inventory or parallel runs.
+
+### Bundles
+
+A bundle runs several recipes as one invocation:
+
+```yaml
+# web-stack.yaml
+version: 1
+name: web-stack            # optional; defaults to the file name
+recipes:                   # relative to this file
+  - common.yaml
+  - nginx.yaml
+  - app.yaml
+```
+
+```sh
+sinter validate web-stack.yaml
+sinter apply web-stack.yaml --inventory hosts.yaml
+```
+
+Each recipe is resolved against its **own** `targets`: `common` on
+`groups: [linux]` and `nginx` on `groups: [web]` give different host sets —
+never "every recipe on every host". A recipe without `targets` fails the
+whole bundle before anything runs. Every listed recipe must exist and
+validate; a recipe may be listed once; bundles do not nest. Without an
+inventory, each recipe runs in order on the one `--host` (or localhost).
+
+### Execution and failures
+
+- Executions are (recipe, host) pairs: recipes in bundle order, hosts in name
+  order. They run one at a time.
+- `plan` and `audit` are read-only and attempt every execution.
+- `apply` is fail-fast: the first execution that exits non-zero, for any
+  reason (2 validation, 3 connection, 4 plan, 5 backup or apply failure,
+  6 indeterminate), stops the sequence. That execution keeps its own result
+  or error; every later execution — later hosts of the same recipe and all
+  later recipes — is reported `not_run` (reason names the failed execution),
+  is never contacted, and runs neither backups nor resources. Earlier
+  executions keep their results; nothing is rolled back.
+- The exit code is the most severe code among executions that ran, in the
+  order 6, 5, 4, 3, 2, 7, 0 (`not_run` contributes none). A partial failure
+  never exits 0. The summary line counts `exit 0`, `non-zero` and `not run`.
+- Text output prints `== <recipe> @ <host> (<user>@<address>:<port>) ==`
+  before each execution's normal report and an `== executions ==` summary at
+  the end.
+
+## Backups before apply
+
+*Available from Sinter v1.1.0.*
+
+A recipe may declare paths to copy on the target before `apply` changes
+anything:
+
+```yaml
+version: 1
+backup:
+  paths:
+    - /etc/ssh/sshd_config
+    - /etc/nginx
+resources:
+  - id: nginx
+    type: package
+    with:
+      name: nginx
+      state: present
+```
+
+- `validate` checks the declaration only. `plan` lists the paths
+  (`BACKUP  <path> [planned]`) and copies nothing. `audit` ignores backups.
+- `apply` copies every path before the first resource runs, into
+  `/var/lib/sinter/backups/<run-id>/<original path>` with `--sudo`, or
+  `~/.sinter/backups/<run-id>/<original path>` of the target user otherwise.
+  One `<run-id>` (`<UTC timestamp>-<random>`) is shared by all hosts of an
+  invocation (suffixed `-<NN>-<recipe>` per recipe of a bundle); each host
+  keeps its backup on itself, and only selected hosts are backed up.
+- Files, directories (recursively) and symlinks (as links) are copied with
+  mode, ACLs, ownership and timestamps preserved; other extended attributes
+  and SELinux labels are best effort. A path that does not exist is recorded
+  as `absent`.
+- If any backup fails, apply stops before any resource runs (exit 5) and the
+  error names the partial run directory, which is kept.
+- Backup content never appears in output. Sinter never restores, rotates or
+  deletes backups: a backup is not a rollback.
+
+## Terminal colors
+
+*Available from Sinter v1.1.0.*
+
+Text output colors status words (`ok`/`CHANGED`/`PASS`/`success` green,
+`POSSIBLE`/`DRIFT`/`blocked` yellow, `FAILED`/`ERROR`/`INDET` and error
+messages red) only when the stream is a terminal. Pipes, redirects and CI
+logs get plain text; `NO_COLOR` (any non-empty value) and `TERM=dumb` turn
+color off. `--format json` output never contains color codes.
 
 ## Reading plan / apply output
 
@@ -252,6 +456,57 @@ objects with string fields `dimension`, `observed`, and `desired`; the
 `observed` and `desired` values are human-readable and are `"[redacted]"`
 for a sensitive resource).
 
+### backup (plan and apply)
+
+*Available from Sinter v1.1.0.*
+
+Present only when the recipe declares `backup`:
+
+| Field | Type | Values |
+|-------|------|--------|
+| `backup.run_id` | string or null | Run id (`apply`); `null` in `plan`. |
+| `backup.directory` | string or null | Run directory on the target (`apply`); `null` in `plan`. |
+| `backup.entries` | array | One object per declared path, in declaration order: `path` (string), `status` (`planned`, `backed_up`, `absent`), `kind` (`file`, `directory`, `symlink`, or null), `destination` (string or null). |
+
+### Inventory and bundles
+
+*Available from Sinter v1.1.0.*
+
+With `--inventory`, or with a bundle, `plan`, `apply` and `audit` print one
+document for the whole invocation once every execution has been attempted:
+
+| Field | Type | Values |
+|-------|------|--------|
+| `mode` | string | `"plan"`, `"apply"` or `"audit"` |
+| `exit_code` | integer | The invocation exit code. |
+| `bundle` | object or null | `name`, `path` for a bundle. |
+| `inventory` | string or null | Inventory path. |
+| `resolution` | array or null | With an inventory: per recipe, `recipe`, `path`, and `hosts` (every inventory host: `name`, `selected` boolean, `reasons` such as `"group:web"`). |
+| `executions` | array | One object per (recipe, host), in execution order. |
+
+Execution object: `recipe` (string), `target` (`name`, and `host`, `port`,
+`user` — null for localhost), `exit_code` (integer, or null when not run),
+`status` (the document's `status`, or `error`, or `not_run`), `backup` (see
+below), and one of `result` (the document a single-target run would print),
+`error` (`kind`: `schema`, `connect`, `plan`, `apply`, `indeterminate`;
+`message`), or `reason` (why it was not run).
+
+Execution `backup`: `null` when the recipe declares no backup or in `audit`;
+otherwise an object with `status` — `planned` (plan), `completed` (apply
+copied every path), `failed` (the backup step failed; no resource ran),
+`not_started` (the execution failed before the backup step, e.g. connection),
+`not_run` (the execution was not run) — plus `run_id`, `directory` (string
+or null), and `entries` (`path`, `status`: `planned`, `backed_up`, `absent`,
+`failed`, `not_run`; `kind`; `destination`). It is built only from that
+execution, so recipe, host and backup never mix; it never contains file
+content. For a completed run it repeats `result.backup`. A problem found before any execution
+(inventory, targets, resolution, duplicate hosts) prints no document and
+exits as described in [Framing and errors](#framing-and-errors).
+
+`validate` on a bundle adds `bundle` (string) and `recipes` (per recipe:
+`recipe`, `path`, `resources`, `handlers`, `vars`, `targets`) to its document;
+`resources`, `handlers` and `vars` are then totals.
+
 ### Compatibility rules
 
 - **Stable in 1.x:** every field listed above, with its name, type,
@@ -283,4 +538,10 @@ for a sensitive resource).
 - The selected `known_hosts` file is authoritative — unknown or changed host
   keys fail; there is no auto-enrollment or insecure fallback.
 - Port 22 uses a portless `host` entry; other ports require `[host]:port`.
-- Hashed `known_hosts` entries are not supported.
+- Hashed (`|1|…`) `known_hosts` entries are supported and matched against
+  the same exact identity.
+- A key listed on an `@revoked` line is refused.
+- Host-key algorithms already recorded for the host are negotiated first, so
+  a host enrolled with only its Ed25519 (or only its RSA) key is accepted.
+- With an OpenSSH `HostKeyAlias`, the alias replaces the host name in the
+  identity.

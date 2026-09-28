@@ -833,6 +833,59 @@ impl TargetFs {
         Ok(())
     }
 
+    /// `mkdir -p` for directories inside a freshly created private backup
+    /// run directory (never used on managed paths).
+    pub(crate) fn mkdir_p(&mut self, _permit: &MutationPermit, path: &str) -> Result<()> {
+        self.run_argv_ok_mutating(
+            "/bin/mkdir",
+            &["-p".to_string(), "--".to_string(), path.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Copy `src` to exactly `dest` for a pre-apply backup: `cp -a` never
+    /// follows a symlink and recurses into directories; the explicit
+    /// `--preserve` list makes a failure to keep mode (incl. ACLs), ownership
+    /// or timestamps fatal. Any completion other than exit 0 is an error.
+    /// Output is not captured into results; only stderr text of a failure is
+    /// reported (it never contains file content).
+    pub(crate) fn backup_copy(
+        &mut self,
+        _permit: &MutationPermit,
+        src: &str,
+        dest: &str,
+    ) -> Result<()> {
+        let mut req = ExecRequest::new("/bin/cp");
+        req.args = vec![
+            "-a".to_string(),
+            "--preserve=mode,ownership,timestamps".to_string(),
+            "--no-target-directory".to_string(),
+            "--".to_string(),
+            src.to_string(),
+            dest.to_string(),
+        ];
+        req.env = base_env();
+        req.env.insert("HOME".to_string(), self.home_env());
+        req.timeout_secs = BACKUP_COPY_TIMEOUT_SECS;
+        let out = self.ex.run(&req)?;
+        match out.completion {
+            Completion::Exited(0) => Ok(()),
+            Completion::Exited(c) => Err(SinterError::apply(format!(
+                "copy failed (exit {}): {}",
+                c,
+                crate::diff::sanitize_line(String::from_utf8_lossy(&out.stderr).trim())
+            ))),
+            Completion::Signaled(s) => Err(SinterError::apply(format!(
+                "copy terminated by signal {}; the backup copy may be incomplete",
+                s
+            ))),
+            Completion::Indeterminate { reason, .. } => Err(SinterError::apply(format!(
+                "copy did not complete ({}); the backup copy may be incomplete",
+                reason
+            ))),
+        }
+    }
+
     pub fn rmdir(&mut self, _permit: &MutationPermit, path: &str) -> Result<()> {
         self.run_argv_ok_mutating("/bin/rmdir", &["--".to_string(), path.to_string()])?;
         Ok(())
@@ -1791,6 +1844,9 @@ pub fn q(s: &str) -> String {
     out
 }
 
+/// Bound for one backup copy (a directory tree may be large).
+pub const BACKUP_COPY_TIMEOUT_SECS: u64 = 1800;
+
 pub fn b64_encode(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
@@ -1815,9 +1871,60 @@ pub fn b64_encode(data: &[u8]) -> String {
     out
 }
 
+/// Strict standard-alphabet base64 decoder (padding required). Returns None
+/// on any malformed input.
+pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let b = s.as_bytes();
+    if !b.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(b.len() / 4 * 3);
+    for (i, chunk) in b.chunks(4).enumerate() {
+        let last = i == b.len() / 4 - 1;
+        let pad = chunk.iter().rev().take_while(|&&c| c == b'=').count();
+        if pad > 2 || (pad > 0 && !last) {
+            return None;
+        }
+        let mut n = 0u32;
+        for (j, &c) in chunk.iter().enumerate() {
+            let v = if j >= 4 - pad { 0 } else { val(c)? };
+            n = (n << 6) | v;
+        }
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_decode_roundtrip() {
+        for data in [&b""[..], b"f", b"fo", b"foo", b"hello\n", &[0, 255, 1]] {
+            assert_eq!(b64_decode(&b64_encode(data)).unwrap(), data);
+        }
+        assert!(b64_decode("Zg=").is_none());
+        assert!(b64_decode("Z===").is_none());
+        assert!(b64_decode("Zg==Zg==").is_none());
+        assert!(b64_decode("Zm9v!").is_none());
+    }
 
     #[test]
     fn base64_roundtrip_known() {

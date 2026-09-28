@@ -802,6 +802,9 @@
   .p-back    { animation-name: p-back-y; }
   .p-conv    { animation-name: p-conv-y; }
   .p-audit   { animation-name: p-audit-y; }
+  /* the base `.e-ssh .p-audit` rule is more specific than `.p-audit`, so the
+     vertical keyframes must be restated at that specificity */
+  .e-ssh .p-audit { animation-name: p-audit-y; }
 
   .flow-modes {
     flex-direction: column;

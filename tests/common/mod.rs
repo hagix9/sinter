@@ -293,6 +293,7 @@ pub fn ssh_spec() -> Option<SshSpec> {
         user,
         known_hosts,
         identity_files,
+        ..Default::default()
     })
 }
 
@@ -354,13 +355,7 @@ use sinter::executor::{ExecRequest, Executor, SshConfig, SshExecutor};
 
 /// Connect an executor to an explicit SSH target spec.
 pub fn executor_for(spec: &SshSpec, sudo: bool) -> Option<Executor> {
-    let cfg = SshConfig {
-        host: spec.host.clone(),
-        port: spec.port,
-        user: spec.user.clone(),
-        known_hosts: spec.known_hosts.clone(),
-        identity_files: spec.identity_files.clone(),
-    };
+    let cfg = SshConfig::from(spec);
     SshExecutor::connect(&cfg, sudo).ok().map(Executor::Ssh)
 }
 

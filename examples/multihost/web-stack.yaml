@@ -1,0 +1,8 @@
+# A bundle: recipes run in this order, each on the hosts its own `targets`
+# select (common: 4 hosts, nginx: 2, postgres: 1 -> 7 executions).
+version: 1
+name: web-stack
+recipes:
+  - common.yaml
+  - nginx.yaml
+  - postgres.yaml

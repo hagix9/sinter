@@ -24,13 +24,35 @@ pub struct TargetSpec {
     pub ssh: Option<SshSpec>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SshSpec {
+    /// Network address to connect to (after any OpenSSH `HostName` mapping).
     pub host: String,
     pub port: u16,
     pub user: String,
     pub known_hosts: PathBuf,
+    /// Private key files, tried in order after the agent. Empty means the
+    /// built-in defaults (`~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`).
     pub identity_files: Vec<PathBuf>,
+    /// known_hosts lookup name instead of `host` (OpenSSH `HostKeyAlias`).
+    pub host_key_alias: Option<String>,
+    /// Which ssh-agent to consult.
+    pub agent: AgentSource,
+    /// OpenSSH `IdentitiesOnly`: offer only agent keys whose public half
+    /// matches one of `identity_files` (`<file>.pub`).
+    pub identities_only: bool,
+}
+
+/// ssh-agent selection (OpenSSH `IdentityAgent`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum AgentSource {
+    /// `SSH_AUTH_SOCK` from the environment (default).
+    #[default]
+    Env,
+    /// Do not use an agent (`IdentityAgent none`).
+    Disabled,
+    /// An explicit agent socket path.
+    Socket(PathBuf),
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +77,8 @@ pub struct RunReport {
     pub status: AggregateStatus,
     /// Full audit log of raw command invocations (instrumentation).
     pub commands: Vec<crate::executor::CommandRecord>,
+    /// Pre-apply backup outcome; `None` when the recipe declares no backup.
+    pub backup: Option<crate::backup::BackupReport>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +96,9 @@ pub struct Engine {
     pub(crate) vars: BTreeMap<String, EvalVal>,
     pub(crate) registers: BTreeMap<String, EvalVal>,
     pub(crate) opts: RunOptions,
+    /// Backup run id shared across one invocation's targets; generated on
+    /// demand when unset.
+    pub(crate) backup_run_id: Option<String>,
 }
 
 impl Engine {
@@ -140,7 +167,15 @@ impl Engine {
             vars,
             registers: BTreeMap::new(),
             opts,
+            backup_run_id: None,
         })
+    }
+
+    /// Use `id` as the backup run id (one id per CLI invocation, so every
+    /// target's backup directory carries the same name).
+    pub fn with_backup_run_id(mut self, id: String) -> Self {
+        self.backup_run_id = Some(id);
+        self
     }
 
     /// Internal execution audit log for acceptance/instrumentation tests.
@@ -150,6 +185,20 @@ impl Engine {
 
     pub fn run(mut self) -> Result<RunReport> {
         let order = execution_order(&self.model)?;
+        // Declared backups run before any resource. Plan only lists them;
+        // apply copies them and aborts on any backup failure.
+        let backup = if self.model.backups.is_empty() {
+            None
+        } else if self.opts.mode == Mode::Apply {
+            let id = self
+                .backup_run_id
+                .clone()
+                .unwrap_or_else(crate::backup::new_run_id);
+            let paths = self.model.backups.clone();
+            Some(crate::backup::perform(&mut self.fs, &paths, &id)?)
+        } else {
+            Some(crate::backup::planned(&self.model.backups))
+        };
         let mut results: BTreeMap<String, usize> = BTreeMap::new();
         let mut out_results: Vec<ResourceResult> = Vec::new();
         // Handlers queued for the handler phase. The bool records whether the
@@ -411,6 +460,7 @@ impl Engine {
             facts: self.facts,
             status,
             commands,
+            backup,
         })
     }
 
@@ -645,13 +695,7 @@ fn build_executor(opts: &RunOptions) -> Result<Executor> {
     match &opts.target.ssh {
         None => Ok(Executor::Local(LocalExecutor::new(opts.sudo)?)),
         Some(s) => {
-            let cfg = SshConfig {
-                host: s.host.clone(),
-                port: s.port,
-                user: s.user.clone(),
-                known_hosts: s.known_hosts.clone(),
-                identity_files: s.identity_files.clone(),
-            };
+            let cfg = SshConfig::from(s);
             Ok(Executor::Ssh(SshExecutor::connect(&cfg, opts.sudo)?))
         }
     }

@@ -19,10 +19,50 @@ include: [...]                # 省略可。レシピファイルのリスト
 resources: [...]              # 省略可。リソースのリスト
 
 handlers: [...]               # 省略可。ハンドラのリスト
+
+targets: { hosts: [...], groups: [...] }   # 省略可。v1.1.0 以降（インベントリ実行）
+
+backup: { paths: [...] }      # 省略可。v1.1.0 以降（apply 前にコピー）
 ```
 
 許可されるトップレベルフィールド: `version`、`vars`、`include`、
-`resources`、`handlers`。それ以外はスキーマエラーです。
+`resources`、`handlers`、および（v1.1.0 以降）`targets` と `backup`。
+それ以外はスキーマエラーです。
+
+## targets
+
+*Sinter v1.1.0 以降で利用できます。*
+
+```yaml
+targets:
+  groups: [web]        # インベントリのグループ名
+  hosts: [db01]        # インベントリのホスト名（グループとの和集合）
+```
+
+`--inventory` と組み合わせたときに、このレシピを実行してよいインベントリの
+ホストを指定します。1 つ以上の名前が必要で、名前は静的です。`targets` は
+実行するレシピにだけ書け、include されるファイルには書けません。
+`--inventory` 使用時に `targets` の**ない**レシピはエラーです（インベントリに
+あることは実行の許可になりません）。インベントリなし（`--host` または
+localhost）では `targets` は無視され、従来の単一ターゲット動作のままです。
+[複数ホスト](/ja/reference/cli/#複数ホスト)参照。
+
+## backup
+
+*Sinter v1.1.0 以降で利用できます。*
+
+```yaml
+backup:
+  paths:
+    - /etc/ssh/sshd_config
+    - /etc/nginx
+```
+
+`apply` が何かを変更する前に、選択された各ターゲット上でコピーする静的な
+絶対パスです。バックアップが失敗すると、リソースを 1 つも実行せずに apply
+が止まります。`plan` は一覧表示のみ、`audit` は扱いません。include された
+ファイルにも書けますが重複は不可で、`/` は指定できません。
+[apply 前のバックアップ](/ja/reference/cli/#apply-前のバックアップ)参照。
 
 ## vars
 

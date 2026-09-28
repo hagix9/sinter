@@ -75,8 +75,10 @@ This repository implements **Sinter v0.2** as specified by `GOALS.md` and
 `DESIGN.md`, which are the authoritative specification; v0.2 extends the v0.1
 contract with RHEL-family platform support (Rocky Linux, RHEL, AlmaLinux —
 `dnf`). The
-implementation still adds no features beyond that scope: no roles, plugins,
-inventory, orchestration, or embedded scripting.
+implementation still adds no roles, plugins, orchestration, or embedded
+scripting. Multiple hosts are handled by a deliberately small, fail-closed
+inventory (hosts, flat groups, explicit per-recipe `targets`) — see
+[Multiple hosts](#multiple-hosts-bundles-and-backups).
 
 ## Install
 
@@ -130,7 +132,63 @@ sinter audit --host host.example recipe.yaml
   drift or 6 on observation errors.
 
 Local targets are used when `--host` is omitted. SSH and passwordless `sudo -n`
-are supported with `--host … --sudo`.
+are supported with `--host … --sudo`. From v1.1.0, if `ssh <host>` works,
+`--host <host>` uses the same `~/.ssh/config` settings (HostName, User, Port, IdentityFile,
+ssh-agent); host keys must still already be in `known_hosts`.
+
+From v1.1.0, `validate` checks only the recipe: `--host`, `--inventory` and SSH options are
+accepted on every command and ignored by `validate`, so one command line works
+for every phase. Status words are colored on a terminal only (never in pipes,
+with `NO_COLOR`, or in `--format json`).
+
+### Multiple hosts, bundles and backups
+
+Available from Sinter v1.1.0. Existing single-host recipes and `--host`
+command lines work unchanged.
+
+```yaml
+# hosts.yaml — which hosts exist
+hosts:
+  web01: { address: 10.0.0.11, user: ubuntu }
+  db01:  { address: 10.0.0.21, user: rocky }
+groups:
+  web: { hosts: [web01] }
+```
+
+```yaml
+# nginx.yaml — where this recipe may run, and what to save first
+version: 1
+targets:
+  groups: [web]
+backup:
+  paths: [/etc/nginx/nginx.conf]
+resources:
+  - id: nginx
+    type: package
+    with:
+      name: nginx
+      state: present
+```
+
+```sh
+sinter plan  nginx.yaml --inventory hosts.yaml   # shows MATCH/SKIP per host
+sinter apply nginx.yaml --inventory hosts.yaml
+```
+
+- A host in the inventory is never a target by itself: with `--inventory`, a
+  recipe without `targets` is an error, and hosts no recipe selects are never
+  contacted.
+- A bundle (`version: 1` + `recipes: [common.yaml, nginx.yaml]`) runs several
+  recipes; each is resolved against its own `targets`.
+- `apply` stops at the first execution that exits non-zero (for any reason)
+  and reports the rest `not_run`; `plan`/`audit` visit every selected host;
+  a partial failure never exits 0.
+- `backup.paths` are copied on each selected host before `apply` changes
+  anything (under `~/.sinter/backups/<run-id>/`, or
+  `/var/lib/sinter/backups/<run-id>/` with `--sudo`); a failed backup stops
+  the apply. Backups are not a rollback.
+
+Details: [CLI reference](https://sinter.fulltrust.co.jp/en/reference/cli/).
 
 ### CLI exit codes
 

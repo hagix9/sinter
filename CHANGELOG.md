@@ -2,6 +2,76 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+A small, fail-closed foundation for managing several hosts, plus SSH that
+follows the operator's OpenSSH setup. Existing single-host command lines,
+recipes, and `--format json` documents are unchanged.
+
+### Added
+
+- Inventory (`--inventory <file>`, alias `--hosts`): hosts and flat host
+  groups in YAML or TOML. A host in the inventory is never a target by
+  itself.
+- Recipe `targets` (`hosts` / `groups`, union). With `--inventory`, a recipe
+  without `targets`, an unknown host or group name, or a selection of zero
+  hosts is an error before anything connects. Plan/apply/audit print the
+  target resolution (MATCH/SKIP per host).
+- Recipe bundles (`version: 1`, `recipes: [...]`): several recipes in one
+  invocation, each resolved against its own `targets`; no nesting.
+- Multi-host execution: (recipe, host) pairs run one at a time; `plan` and
+  `audit` visit every selected host, `apply` stops at the first execution
+  that exits non-zero (later executions are `not_run`); the
+  exit code is the most severe execution code, so a partial failure is never
+  0. JSON output is one document per invocation.
+- Recipe `backup.paths`: copied on each selected target before `apply`
+  changes anything (`~/.sinter/backups/<run-id>/` or, with `--sudo`,
+  `/var/lib/sinter/backups/<run-id>/`), preserving mode, ACLs, ownership and
+  timestamps. A failed backup stops the apply before any resource runs.
+  Backups are not a rollback.
+- OpenSSH client configuration inheritance for `--host` and inventory hosts
+  through `ssh -G`: HostName, User, Port, IdentityFile, IdentitiesOnly,
+  IdentityAgent, HostKeyAlias, UserKnownHostsFile. `--no-ssh-config`
+  disables it. ProxyJump/ProxyCommand fail closed.
+- Structured multi-host evidence: with `--inventory` or a bundle, `--format
+  json` prints one document per invocation with the target resolution
+  (selected/excluded hosts and why) and, per execution, the recipe, the
+  target identity (inventory name, address, port, user), status, exit code,
+  the single-target document or error, and a backup record (`planned`,
+  `completed`, `failed`, `not_started`, `not_run`, or `null`). File content
+  never appears in it. Single-target documents are unchanged.
+- Colored status words on terminals only (respects `NO_COLOR`, `TERM=dumb`;
+  never in pipes or JSON).
+
+### Changed
+
+- `validate` accepts every target option (`--host`, `--inventory`, SSH
+  options) and ignores it; it reads no inventory, key or known_hosts file.
+  Unknown options are still rejected.
+- `--port` no longer defaults to 22 on the command line; the default comes
+  from the inventory or OpenSSH configuration, then 22.
+- Default identity files are `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`
+  (`id_ecdsa` was not tried before).
+- SSH authentication failures now say what was tried (agent, key files) and
+  that passphrase-protected keys need ssh-agent.
+
+### Fixed
+
+- A host enrolled in `known_hosts` with only its Ed25519 or RSA key was
+  refused as a "host key mismatch" when the server also offered ECDSA:
+  known key types are now negotiated first.
+- Hashed (`|1|...`) `known_hosts` entries are supported.
+- Keys on `@revoked` lines in `known_hosts` are refused (they were ignored).
+- Landing page: on narrow screens the audit pulse of the architecture
+  diagram moved sideways across the vertical SSH line; it now travels along
+  it like the other pulses.
+
+### Not included
+
+ProxyJump/ProxyCommand (such hosts fail closed), dynamic inventory, nested
+groups, host or group variables, host patterns, parallel execution,
+rollback or restore, and backup retention are not part of this release.
+
 ## [1.0.0] - 2026-09-27
 
 First stable release. It declares the 1.x compatibility contract for the

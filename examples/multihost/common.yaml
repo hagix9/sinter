@@ -1,0 +1,12 @@
+version: 1
+
+targets:
+  groups: [linux]
+
+resources:
+  - id: motd
+    type: file
+    with:
+      path: /etc/motd
+      content: "Managed by Sinter\n"
+      mode: "0644"

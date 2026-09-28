@@ -19,10 +19,50 @@ include: [...]                # optional list of recipe files
 resources: [...]              # optional list of resources
 
 handlers: [...]               # optional list of handlers
+
+targets: { hosts: [...], groups: [...] }   # optional, v1.1.0+ (inventory runs)
+
+backup: { paths: [...] }      # optional, v1.1.0+ (copied before apply)
 ```
 
 Top-level fields allowed: `version`, `vars`, `include`, `resources`,
-`handlers`. Anything else is a schema error.
+`handlers`, and (from v1.1.0) `targets` and `backup`. Anything else is a
+schema error.
+
+## targets
+
+*Available from Sinter v1.1.0.*
+
+```yaml
+targets:
+  groups: [web]        # inventory group names
+  hosts: [db01]        # inventory host names (union with the groups)
+```
+
+Names the inventory hosts this recipe may run on when it is used with
+`--inventory`. At least one name is required; names are static. `targets` is
+allowed only in the recipe that is run, not in an included file. With
+`--inventory`, a recipe **without** `targets` is an error — inventory
+membership never authorizes execution. Without an inventory (`--host` or
+localhost), `targets` is ignored and the single-target behavior is unchanged.
+See [Multiple hosts](/en/reference/cli/#multiple-hosts).
+
+## backup
+
+*Available from Sinter v1.1.0.*
+
+```yaml
+backup:
+  paths:
+    - /etc/ssh/sshd_config
+    - /etc/nginx
+```
+
+Static absolute paths that `apply` copies on each selected target before it
+changes anything; a failed backup stops the apply before any resource runs.
+`plan` only lists them; `audit` ignores them. Paths may come from included
+files but must be unique; `/` is rejected. See
+[Backups before apply](/en/reference/cli/#backups-before-apply).
 
 ## vars
 

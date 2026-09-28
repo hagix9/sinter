@@ -120,6 +120,7 @@ impl TargetRegistry {
                         user: p.user,
                         known_hosts: p.known_hosts,
                         identity_files: p.identity_files,
+                        ..Default::default()
                     },
                     sudo: p.sudo,
                 },

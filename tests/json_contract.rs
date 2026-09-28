@@ -52,6 +52,7 @@ fn json_opts() -> RenderOptions {
     RenderOptions {
         verbose: false,
         format: OutputFormat::Json,
+        color: false,
     }
 }
 

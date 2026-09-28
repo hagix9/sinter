@@ -2,7 +2,7 @@ use crate::error::{Result, SinterError};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub const MAX_CAPTURE: usize = 1024 * 1024;
@@ -146,6 +146,24 @@ pub struct SshConfig {
     pub user: String,
     pub known_hosts: PathBuf,
     pub identity_files: Vec<PathBuf>,
+    pub host_key_alias: Option<String>,
+    pub agent: crate::engine::AgentSource,
+    pub identities_only: bool,
+}
+
+impl From<&crate::engine::SshSpec> for SshConfig {
+    fn from(s: &crate::engine::SshSpec) -> Self {
+        SshConfig {
+            host: s.host.clone(),
+            port: s.port,
+            user: s.user.clone(),
+            known_hosts: s.known_hosts.clone(),
+            identity_files: s.identity_files.clone(),
+            host_key_alias: s.host_key_alias.clone(),
+            agent: s.agent.clone(),
+            identities_only: s.identities_only,
+        }
+    }
 }
 
 pub enum Executor {
@@ -586,6 +604,12 @@ impl SshExecutor {
         let mut session = ssh2::Session::new()
             .map_err(|e| SinterError::connect(format!("cannot create SSH session: {}", e)))?;
         session.set_tcp_stream(tcp);
+        // Prefer host-key algorithms already recorded for this host in
+        // known_hosts (OpenSSH behavior). Without this, libssh2 negotiates
+        // ECDSA first and a host enrolled only with its Ed25519 or RSA key
+        // is reported as a key mismatch. Ordering never widens trust: the
+        // presented key must still match known_hosts exactly.
+        prefer_known_hostkey_types(&session, cfg)?;
         // Configure the libssh2 timeout before any blocking handshake call so
         // the handshake itself cannot hang past the setup budget.
         let handshake_timeout = setup_remaining(setup_deadline)?;
@@ -597,32 +621,28 @@ impl SshExecutor {
             ))
         })?;
 
-        // Host-key identity is always the originally requested host string,
-        // never a resolved IP (SSH known_hosts semantics).
+        // Host-key identity is the requested host string (or the OpenSSH
+        // HostKeyAlias), never a resolved IP (SSH known_hosts semantics).
         verify_host_key(&session, cfg)?;
 
         let auth_timeout = setup_remaining(setup_deadline)?;
         session.set_timeout(auth_timeout.as_millis().clamp(1, u32::MAX as u128) as u32);
-        let mut authed = false;
-        if session.userauth_agent(&cfg.user).is_ok() && session.authenticated() {
-            authed = true;
-        }
+        let identities = identity_candidates(cfg);
+        let mut attempts = AuthAttempts::default();
+        let mut authed = try_agent_auth(&session, cfg, &identities, &mut attempts);
         if !authed {
-            let mut identities = cfg.identity_files.clone();
-            if identities.is_empty() {
-                if let Some(home) = std::env::var_os("HOME") {
-                    let h = PathBuf::from(home);
-                    identities.push(h.join(".ssh/id_ed25519"));
-                    identities.push(h.join(".ssh/id_rsa"));
-                }
-            }
             for id in &identities {
                 let auth_timeout = setup_remaining(setup_deadline)?;
                 session.set_timeout(auth_timeout.as_millis().clamp(1, u32::MAX as u128) as u32);
-                if id.exists()
-                    && session
-                        .userauth_pubkey_file(&cfg.user, None, id, None)
-                        .is_ok()
+                if !id.exists() {
+                    continue;
+                }
+                attempts.files.push(id.display().to_string());
+                // No passphrase is ever supplied: Sinter is non-interactive.
+                // An encrypted key is usable only through ssh-agent.
+                if session
+                    .userauth_pubkey_file(&cfg.user, None, id, None)
+                    .is_ok()
                     && session.authenticated()
                 {
                     authed = true;
@@ -632,8 +652,10 @@ impl SshExecutor {
         }
         if !authed {
             return Err(SinterError::connect(format!(
-                "SSH authentication failed for {}@{}",
-                cfg.user, cfg.host
+                "SSH authentication failed for {}@{} ({})",
+                cfg.user,
+                cfg.host,
+                attempts.describe()
             )));
         }
 
@@ -1277,7 +1299,8 @@ fn parse_signal(name: &str) -> Option<i32> {
     table.iter().find(|(k, _)| *k == n).map(|(_, v)| *v)
 }
 
-fn verify_host_key(session: &ssh2::Session, cfg: &SshConfig) -> Result<()> {
+/// Load the selected known_hosts file into a libssh2 collection.
+fn load_known_hosts(session: &ssh2::Session, cfg: &SshConfig) -> Result<ssh2::KnownHosts> {
     let mut known = session
         .known_hosts()
         .map_err(|e| SinterError::connect(format!("cannot read known hosts: {}", e)))?;
@@ -1290,55 +1313,314 @@ fn verify_host_key(session: &ssh2::Session, cfg: &SshConfig) -> Result<()> {
                 e
             ))
         })?;
-    let (key, _key_type) = session
-        .host_key()
-        .ok_or_else(|| SinterError::connect("server did not present a host key"))?;
+    Ok(known)
+}
 
-    // OpenSSH identity (DESIGN §19): default port uses `host`; non-default
-    // port uses `[host]:port` only. A portless host entry must not authorize
-    // a non-default-port connection. Identity-scoped matching prevents a
-    // conflicting explicit entry from being bypassed by another host form.
-    let identity = if cfg.port == 22 {
-        cfg.host.clone()
+/// The exact known_hosts identity for a connection (DESIGN §19): default
+/// port uses `host`; a non-default port uses `[host]:port` only. `host` is the
+/// OpenSSH `HostKeyAlias` when one is configured.
+pub fn known_hosts_identity(host: &str, port: u16, alias: Option<&str>) -> String {
+    let name = alias.unwrap_or(host);
+    if port == 22 {
+        name.to_string()
     } else {
-        format!("[{}]:{}", cfg.host, cfg.port)
-    };
-    let presented = crate::targetfs::b64_encode(key);
+        format!("[{}]:{}", name, port)
+    }
+}
+
+fn cfg_identity(cfg: &SshConfig) -> String {
+    known_hosts_identity(&cfg.host, cfg.port, cfg.host_key_alias.as_deref())
+}
+
+/// SSH wire key type (`ssh-ed25519`, `ecdsa-sha2-nistp256`, `ssh-rsa`, ...)
+/// from a public key blob.
+pub fn ssh_key_type(blob: &[u8]) -> Option<&str> {
+    let len = u32::from_be_bytes(blob.get(0..4)?.try_into().ok()?) as usize;
+    std::str::from_utf8(blob.get(4..4 + len)?).ok()
+}
+
+/// Host-key algorithm names that can present a key of `key_type`.
+fn hostkey_algorithms_for(key_type: &str) -> Vec<&str> {
+    match key_type {
+        "ssh-rsa" => vec!["rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"],
+        other => vec![other],
+    }
+}
+
+/// Order `supported` so algorithms for already-known key types come first,
+/// keeping libssh2's own order within each group. Returns None when nothing
+/// is known (the default order is then left untouched).
+pub fn hostkey_preference(known_types: &[String], supported: &[&str]) -> Option<String> {
+    let mut first: Vec<&str> = Vec::new();
+    for t in known_types {
+        for alg in hostkey_algorithms_for(t) {
+            if supported.contains(&alg) && !first.contains(&alg) {
+                first.push(alg);
+            }
+        }
+    }
+    if first.is_empty() {
+        return None;
+    }
+    let rest = supported.iter().copied().filter(|a| !first.contains(a));
+    Some(
+        first
+            .iter()
+            .copied()
+            .chain(rest)
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+/// Key types recorded in known_hosts for the connection identity, including
+/// hashed (`|1|...`) entries: each distinct stored key is tested against the
+/// exact identity through libssh2's own matcher.
+fn known_key_types(known: &ssh2::KnownHosts, identity: &str) -> Result<Vec<String>> {
     let entries = known
         .iter()
         .map_err(|e| SinterError::connect(format!("cannot enumerate known hosts: {}", e)))?;
-
-    let mut saw_identity = false;
-    let mut identity_match = false;
+    let mut seen_keys: Vec<String> = Vec::new();
+    let mut types: Vec<String> = Vec::new();
     for h in &entries {
-        let Some(name) = h.name() else { continue };
-        if name != identity {
+        let k = h.key().to_string();
+        if seen_keys.contains(&k) {
             continue;
         }
-        saw_identity = true;
-        if h.key() == presented {
-            identity_match = true;
-            break;
+        seen_keys.push(k.clone());
+        let Some(blob) = crate::targetfs::b64_decode(&k) else {
+            continue;
+        };
+        let Some(t) = ssh_key_type(&blob) else {
+            continue;
+        };
+        if types.iter().any(|x| x == t) {
+            continue;
+        }
+        if matches!(known.check(identity, &blob), ssh2::CheckResult::Match) {
+            types.push(t.to_string());
         }
     }
-    if saw_identity {
-        if identity_match {
-            return Ok(());
-        }
+    Ok(types)
+}
+
+fn prefer_known_hostkey_types(session: &ssh2::Session, cfg: &SshConfig) -> Result<()> {
+    let known = load_known_hosts(session, cfg)?;
+    let types = known_key_types(&known, &cfg_identity(cfg))?;
+    let supported = session
+        .supported_algs(ssh2::MethodType::HostKey)
+        .map_err(|e| SinterError::connect(format!("cannot list host key algorithms: {}", e)))?;
+    if let Some(pref) = hostkey_preference(&types, &supported) {
+        session
+            .method_pref(ssh2::MethodType::HostKey, &pref)
+            .map_err(|e| SinterError::connect(format!("cannot set host key preference: {}", e)))?;
+    }
+    Ok(())
+}
+
+/// Base64 keys listed on `@revoked` marker lines. libssh2 has no marker
+/// support, so revocation is enforced here: a presented key that appears on
+/// any `@revoked` line is refused regardless of its host pattern (stricter
+/// than, never weaker than, OpenSSH).
+pub fn revoked_keys(known_hosts_text: &str) -> Vec<String> {
+    known_hosts_text
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            if f.next()? != "@revoked" {
+                return None;
+            }
+            let _hosts = f.next()?;
+            let _type = f.next()?;
+            Some(f.next()?.to_string())
+        })
+        .collect()
+}
+
+fn verify_host_key(session: &ssh2::Session, cfg: &SshConfig) -> Result<()> {
+    let known = load_known_hosts(session, cfg)?;
+    let (key, _key_type) = session
+        .host_key()
+        .ok_or_else(|| SinterError::connect("server did not present a host key"))?;
+    let identity = cfg_identity(cfg);
+    let presented = crate::targetfs::b64_encode(key);
+
+    let raw = std::fs::read(&cfg.known_hosts).map_err(|e| {
+        SinterError::connect(format!(
+            "cannot read known_hosts file {}: {}",
+            cfg.known_hosts.display(),
+            e
+        ))
+    })?;
+    let text = String::from_utf8_lossy(&raw);
+    if revoked_keys(&text).contains(&presented) {
         return Err(SinterError::connect(format!(
-            "SSH host key mismatch for {} (possible man-in-the-middle)",
-            identity
+            "SSH host key for {} is marked @revoked in {}",
+            identity,
+            cfg.known_hosts.display()
         )));
     }
 
-    // No entry for the required identity. For non-default ports a portless
-    // `host` entry is a different identity and must not authorize the
-    // connection (DESIGN §19).
-    Err(SinterError::connect(format!(
-        "SSH host key for {} is not present in {}; enrollment is not automatic",
-        identity,
-        cfg.known_hosts.display()
-    )))
+    // Exact-identity lookup (libssh2 `check` without a port performs no
+    // portless fallback), covering plain and hashed entries alike. A
+    // portless `host` entry therefore never authorizes a non-default port,
+    // and an explicit matching-identity mismatch is never bypassed by
+    // another host form (DESIGN §19).
+    match known.check(&identity, key) {
+        ssh2::CheckResult::Match => Ok(()),
+        ssh2::CheckResult::Mismatch => {
+            let presented_type = ssh_key_type(key).unwrap_or("unknown");
+            let known_types = known_key_types(&known, &identity).unwrap_or_default();
+            let detail = if known_types.iter().any(|t| t == presented_type) {
+                String::new()
+            } else {
+                format!(
+                    "; the server presented a {} key and known_hosts only records {} for this host",
+                    presented_type,
+                    known_types.join(", ")
+                )
+            };
+            Err(SinterError::connect(format!(
+                "SSH host key mismatch for {} (possible man-in-the-middle){}",
+                identity, detail
+            )))
+        }
+        ssh2::CheckResult::NotFound => Err(SinterError::connect(format!(
+            "SSH host key for {} is not present in {}; enrollment is not automatic",
+            identity,
+            cfg.known_hosts.display()
+        ))),
+        ssh2::CheckResult::Failure => Err(SinterError::connect(format!(
+            "cannot check SSH host key for {} against {}",
+            identity,
+            cfg.known_hosts.display()
+        ))),
+    }
+}
+
+/// Private key files to try: the configured list, or the built-in defaults.
+fn identity_candidates(cfg: &SshConfig) -> Vec<PathBuf> {
+    if !cfg.identity_files.is_empty() {
+        return cfg.identity_files.clone();
+    }
+    match std::env::var_os("HOME") {
+        Some(home) => {
+            let h = PathBuf::from(home);
+            DEFAULT_IDENTITY_FILES
+                .iter()
+                .map(|n| h.join(".ssh").join(n))
+                .collect()
+        }
+        None => Vec::new(),
+    }
+}
+
+/// Built-in default key files when neither the CLI, a targets file, nor the
+/// OpenSSH client configuration names any.
+pub const DEFAULT_IDENTITY_FILES: &[&str] = &["id_ed25519", "id_ecdsa", "id_rsa"];
+
+/// What authentication tried, for a truthful failure message. Never holds
+/// key material or the agent socket path.
+#[derive(Default)]
+struct AuthAttempts {
+    agent: Option<String>,
+    files: Vec<String>,
+}
+
+impl AuthAttempts {
+    fn describe(&self) -> String {
+        let agent = self
+            .agent
+            .clone()
+            .unwrap_or_else(|| "agent: not used".to_string());
+        let files = if self.files.is_empty() {
+            "no key file found".to_string()
+        } else {
+            format!("key files tried: {}", self.files.join(", "))
+        };
+        format!(
+            "{}; {}; encrypted private keys are usable only through ssh-agent (ssh-add)",
+            agent, files
+        )
+    }
+}
+
+/// Public key blob of `<identity>.pub`, when present and well-formed.
+fn identity_public_blob(identity: &Path) -> Option<Vec<u8>> {
+    let mut p = identity.as_os_str().to_owned();
+    p.push(".pub");
+    let text = std::fs::read_to_string(PathBuf::from(p)).ok()?;
+    let b64 = text.split_whitespace().nth(1)?;
+    crate::targetfs::b64_decode(b64)
+}
+
+/// ssh-agent authentication. Agent keys matching a configured identity file
+/// are offered first (OpenSSH order); with `identities_only`, only those.
+fn try_agent_auth(
+    session: &ssh2::Session,
+    cfg: &SshConfig,
+    identities: &[PathBuf],
+    attempts: &mut AuthAttempts,
+) -> bool {
+    use crate::engine::AgentSource;
+    if cfg.agent == AgentSource::Disabled {
+        attempts.agent = Some("agent: disabled by IdentityAgent none".to_string());
+        return false;
+    }
+    let Ok(mut agent) = session.agent() else {
+        attempts.agent = Some("agent: unavailable".to_string());
+        return false;
+    };
+    if let AgentSource::Socket(p) = &cfg.agent {
+        if agent.set_identity_path(p).is_err() {
+            attempts.agent = Some("agent: unavailable".to_string());
+            return false;
+        }
+    }
+    if agent.connect().is_err() {
+        attempts.agent = Some("agent: unavailable".to_string());
+        return false;
+    }
+    let keys = match agent.list_identities().and_then(|_| agent.identities()) {
+        Ok(k) => k,
+        Err(_) => {
+            let _ = agent.disconnect();
+            attempts.agent = Some("agent: unavailable".to_string());
+            return false;
+        }
+    };
+    let wanted: Vec<Vec<u8>> = identities
+        .iter()
+        .filter_map(|p| identity_public_blob(p))
+        .collect();
+    let (preferred, others): (Vec<_>, Vec<_>) = keys
+        .into_iter()
+        .partition(|k| wanted.iter().any(|w| w.as_slice() == k.blob()));
+    let order: Vec<_> = if cfg.identities_only {
+        preferred
+    } else {
+        preferred.into_iter().chain(others).collect()
+    };
+    let mut offered = 0usize;
+    let mut authed = false;
+    for key in &order {
+        offered += 1;
+        if agent.userauth(&cfg.user, key).is_ok() && session.authenticated() {
+            authed = true;
+            break;
+        }
+    }
+    let _ = agent.disconnect();
+    attempts.agent = Some(format!(
+        "agent: {} key(s) offered{}",
+        offered,
+        if cfg.identities_only {
+            " (IdentitiesOnly)"
+        } else {
+            ""
+        }
+    ));
+    authed
 }
 
 pub fn build_remote_command(req: &ExecRequest, sudo: bool, home: &str) -> String {
@@ -2452,6 +2734,87 @@ impl FakeExecutor {
             }
         }
         Self::exited(0, String::new(), String::new())
+    }
+}
+
+#[cfg(test)]
+mod hostkey_tests {
+    use super::*;
+
+    fn blob(t: &str) -> Vec<u8> {
+        let mut b = (t.len() as u32).to_be_bytes().to_vec();
+        b.extend_from_slice(t.as_bytes());
+        b.extend_from_slice(&[0, 0, 0, 1, 7]);
+        b
+    }
+
+    #[test]
+    fn key_type_from_blob() {
+        assert_eq!(ssh_key_type(&blob("ssh-ed25519")), Some("ssh-ed25519"));
+        assert_eq!(
+            ssh_key_type(&blob("ecdsa-sha2-nistp256")),
+            Some("ecdsa-sha2-nistp256")
+        );
+        assert_eq!(ssh_key_type(&[0, 0, 0, 9, b'x']), None);
+        assert_eq!(ssh_key_type(&[]), None);
+    }
+
+    #[test]
+    fn identity_is_port_scoped_and_alias_aware() {
+        assert_eq!(known_hosts_identity("h", 22, None), "h");
+        assert_eq!(known_hosts_identity("h", 2222, None), "[h]:2222");
+        assert_eq!(known_hosts_identity("10.0.0.1", 22, Some("web01")), "web01");
+        assert_eq!(
+            known_hosts_identity("10.0.0.1", 2222, Some("web01")),
+            "[web01]:2222"
+        );
+    }
+
+    const LIBSSH2_DEFAULT: &[&str] = &[
+        "ecdsa-sha2-nistp256",
+        "ecdsa-sha2-nistp384",
+        "ssh-ed25519",
+        "rsa-sha2-512",
+        "rsa-sha2-256",
+        "ssh-rsa",
+    ];
+
+    #[test]
+    fn known_types_are_preferred_without_dropping_others() {
+        let p = hostkey_preference(&["ssh-ed25519".to_string()], LIBSSH2_DEFAULT).unwrap();
+        assert_eq!(
+            p,
+            "ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,rsa-sha2-512,rsa-sha2-256,ssh-rsa"
+        );
+        let p = hostkey_preference(&["ssh-rsa".to_string()], LIBSSH2_DEFAULT).unwrap();
+        assert!(p.starts_with("rsa-sha2-512,rsa-sha2-256,ssh-rsa,ecdsa-sha2-nistp256"));
+        // Nothing known: leave libssh2's default order untouched.
+        assert_eq!(hostkey_preference(&[], LIBSSH2_DEFAULT), None);
+        // Unsupported known type: nothing to prefer.
+        assert_eq!(
+            hostkey_preference(&["ssh-dss".to_string()], LIBSSH2_DEFAULT),
+            None
+        );
+    }
+
+    #[test]
+    fn revoked_marker_lines_are_collected() {
+        let text = "# c\n@revoked * ssh-ed25519 AAAAREVOKED c\nh ssh-ed25519 AAAAOK\n@cert-authority * ssh-rsa AAAACA\n";
+        assert_eq!(revoked_keys(text), vec!["AAAAREVOKED".to_string()]);
+        assert!(revoked_keys("h ssh-ed25519 AAAA\n").is_empty());
+    }
+
+    #[test]
+    fn auth_failure_message_never_names_agent_socket() {
+        let a = AuthAttempts {
+            agent: Some("agent: 3 key(s) offered".to_string()),
+            files: vec!["/home/u/.ssh/id_rsa".to_string()],
+        };
+        let d = a.describe();
+        assert!(d.contains("3 key(s) offered"));
+        assert!(d.contains("/home/u/.ssh/id_rsa"));
+        assert!(d.contains("ssh-agent"));
+        assert!(!d.contains("SSH_AUTH_SOCK"));
     }
 }
 
