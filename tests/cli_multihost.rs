@@ -284,6 +284,29 @@ fn validate_rejects_a_present_link_without_a_target() {
 }
 
 #[test]
+fn validate_rejects_invalid_link_state_and_empty_handler_service() {
+    let f = Fx::new();
+    for (name, body, message) in [
+        (
+            "state.yaml",
+            "version: 1\nresources:\n  - id: l\n    type: link\n    with:\n      path: /tmp/l\n      target: /tmp/t\n      state: presnet\n",
+            "link state must be present or absent",
+        ),
+        (
+            "handler.yaml",
+            "version: 1\nresources:\n  - id: c\n    type: command\n    with:\n      program: /bin/true\n    notify:\n      - h\nhandlers:\n  - id: h\n    service: \"\"\n    action: restart\n",
+            "service must not be empty",
+        ),
+    ] {
+        let p = f.write(name, body);
+        let o = f.run(&["validate", &p]);
+        assert_eq!(o.status.code(), Some(2), "{name}: {o:?}");
+        assert!(stdout(&o).is_empty(), "{name}: {o:?}");
+        assert!(stderr(&o).contains(message), "{name}: {o:?}");
+    }
+}
+
+#[test]
 fn targets_in_an_included_file_are_rejected() {
     let f = Fx::new();
     f.write("frag.yaml", "version: 1\ntargets:\n  groups: [web]\n");

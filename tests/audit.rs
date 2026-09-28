@@ -2744,3 +2744,38 @@ fn package_name_option_injection_stays_rejected() {
         err.message
     );
 }
+
+#[test]
+fn audit_interpolated_invalid_link_state_is_error_not_compliant() {
+    // A runtime-resolved link state outside present/absent must not be
+    // audited as `present`.
+    let dir = trusted_root("audit-link-state-invalid");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nvars:\n  s:\n    value: banana\nresources:\n  - id: l\n    type: link\n    with:\n      path: /opt/link\n      target: /desired/target\n      state: \"{{ vars.s }}\"\n",
+    );
+    let r = audit_fake(&recipe, FakeTarget::ubuntu2404());
+    let l = afind(&r, "l");
+    assert_eq!(l.status, AuditResourceStatus::Error);
+    assert_eq!(
+        l.reason.as_deref(),
+        Some("link state must be present or absent")
+    );
+}
+
+#[test]
+fn audit_interpolated_valid_link_state_is_unchanged() {
+    let dir = trusted_root("audit-link-state-valid");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nvars:\n  s:\n    value: present\nresources:\n  - id: l\n    type: link\n    with:\n      path: /opt/link\n      target: /desired/target\n      state: \"{{ vars.s }}\"\n",
+    );
+    let mut fake = FakeTarget::ubuntu2404();
+    fake = fake.with_observations("stat", vec![exited(0, &format!("{}\n", STAT_SYMLINK), "")]);
+    fake = fake.with_observations("readlink", vec![exited(0, "/desired/target", "")]);
+    let r = audit_fake(&recipe, fake);
+    assert_eq!(afind(&r, "l").status, AuditResourceStatus::Compliant);
+    assert_observation_only(&r);
+}

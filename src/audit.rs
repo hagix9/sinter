@@ -808,6 +808,11 @@ fn audit_link(
         Ok(s) => s.map(|(s, _)| s).unwrap_or_else(|| "present".to_string()),
         Err(r) => return *r,
     };
+    if state != "present" && state != "absent" {
+        let mut r = AuditResourceResult::base(res, AuditResourceStatus::Error, sensitive);
+        r.reason = Some("link state must be present or absent".to_string());
+        return r;
+    }
     let target = match obs_or_error(res, sensitive, ev_str(&vals, "target")) {
         Ok(t) => t,
         Err(r) => return *r,

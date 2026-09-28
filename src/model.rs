@@ -538,6 +538,21 @@ fn validate_declaration_shape(
             validate_with_fields(&d.with, LINK_FIELDS, ctx)?;
             require_static_string_field(&d.with, "path", ctx, field_sensitive("path"))?;
             require_optional_static_string(&d.with, "target", ctx, field_sensitive("target"))?;
+            // An omitted or null state means present; an interpolated state is
+            // checked against the same domain when it is evaluated.
+            match d.with.get("state") {
+                None | Some(Value::Null) => {}
+                Some(Value::Str(s))
+                    if crate::expressions::has_interpolation(s)
+                        || s == "present"
+                        || s == "absent" => {}
+                Some(_) => {
+                    return Err(SinterError::schema(format!(
+                        "{}: link state must be present or absent",
+                        ctx
+                    )))
+                }
+            }
             // Execution requires `target` unless `state` is `absent`
             // (`run_link`). Enforce it here whenever the state is statically
             // known; an interpolated state is still checked when evaluated.

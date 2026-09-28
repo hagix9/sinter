@@ -1089,3 +1089,67 @@ fn systemctl_mutation_argv_keeps_ordinary_unit_names() {
         ]
     );
 }
+
+// ---------------------------------------------------------------------------
+// link state: a runtime-resolved value outside present/absent fails closed
+// ---------------------------------------------------------------------------
+
+fn interpolated_link_state(dir: &std::path::Path, state: &str) -> std::path::PathBuf {
+    write_recipe(
+        dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nvars:\n  s:\n    value: \"{state}\"\nresources:\n  - id: l\n    type: link\n    with:\n      path: /opt/link\n      target: /opt/target\n      state: \"{{{{ vars.s }}}}\"\n"
+        ),
+    )
+}
+
+#[test]
+fn interpolated_invalid_link_state_fails_closed_at_runtime() {
+    // Validation cannot know an interpolated value; the resolved value must
+    // never fall back to `present`.
+    let dir = trusted_root("plat-link-state-runtime");
+    let recipe = interpolated_link_state(&dir, "banana");
+    load_model(&recipe).expect("an interpolated state is resolved at runtime");
+
+    let Err(e) = try_run_recipe_fake(&recipe, Mode::Plan, false, FakeTarget::ubuntu2404()) else {
+        panic!("plan must not preview an unknown link state");
+    };
+    assert_eq!(e.kind, ErrorKind::Plan);
+    assert!(
+        e.message.contains("link state must be present or absent"),
+        "{}",
+        e.message
+    );
+
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, FakeTarget::ubuntu2404());
+    let l = find(&r, "l");
+    assert_eq!(l.execution, Execution::Failed);
+    assert_eq!(l.change, Change::None);
+    assert!(
+        !r.commands.iter().any(|c| c.program == "/bin/ln"),
+        "no link may be created for an unknown state"
+    );
+    assert_eq!(r.status, AggregateStatus::ApplyFailed);
+}
+
+#[test]
+fn blank_handler_service_fails_without_a_mutating_systemctl() {
+    // A whitespace-only handler service is passed through unchanged (as a
+    // service resource name is); systemd reports it not-found, so the handler
+    // fails before any restart is dispatched.
+    let dir = trusted_root("plat-handler-blank");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nresources:\n  - id: s\n    type: service\n    with:\n      name: fakehttpd\n      state: running\n    notify:\n      - h\nhandlers:\n  - id: h\n    service: \"   \"\n    action: restart\n",
+    );
+    let t = FakeTarget::rocky9().with_service("fakehttpd", ("loaded", "inactive", "enabled"));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_eq!(r.handlers_run.len(), 1);
+    assert_eq!(
+        r.handlers_run[0].state,
+        sinter::result::HandlerOutcomeState::Failed
+    );
+    assert_eq!(systemctl_mutations(&r), [argv("start", "fakehttpd")]);
+}

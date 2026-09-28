@@ -438,6 +438,12 @@ fn parse_handler(item: &Value, origin: &str, idx: usize) -> Result<HandlerDecl> 
         }
     };
     let service = match map.get("service") {
+        Some(Value::Str(s)) if s.is_empty() => {
+            return Err(SinterError::schema(format!(
+                "{}: service must not be empty",
+                ctx
+            )))
+        }
         Some(Value::Str(s)) => s.clone(),
         _ => {
             return Err(SinterError::schema(format!(

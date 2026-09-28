@@ -1385,6 +1385,12 @@ impl Engine {
         let state = ev_str(&vals, "state")?
             .map(|(s, _)| s)
             .unwrap_or_else(|| "present".to_string());
+        if state != "present" && state != "absent" {
+            return Err(SinterError::schema(format!(
+                "{}: link state must be present or absent",
+                res.id
+            )));
+        }
         let target = ev_str(&vals, "target")?;
         let stat = self.fs.inspect(&path)?;
 

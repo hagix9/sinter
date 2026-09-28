@@ -112,5 +112,5 @@ AlmaLinux 9、AlmaLinux 10、その他バイナリがビルドできる x86_64 L
 
 Sinter のスコープには動的インベントリ、ロール、プラグイン、
 オーケストレーション、組み込みスクリプトは含まれません。リリース履歴は
-[CHANGELOG](https://github.com/hagix9/blob/main/CHANGELOG.md)を
+[CHANGELOG](https://github.com/hagix9/sinter/blob/main/CHANGELOG.md)を
 参照してください。

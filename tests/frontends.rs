@@ -336,3 +336,84 @@ fn every_template_field_in_the_field_table_is_accepted() {
     );
     load_model(&p).unwrap_or_else(|e| panic!("{}", e.message));
 }
+
+#[test]
+fn link_state_outside_present_or_absent_is_a_validation_error() {
+    // Anything other than `absent` used to be applied as `present`.
+    let dir = trusted_root("link-state-domain");
+    for (name, state) in [
+        ("typo.yaml", "presnet"),
+        ("word.yaml", "banana"),
+        ("empty.yaml", "\"\""),
+        ("bool.yaml", "true"),
+    ] {
+        let with = format!("      path: /tmp/l\n      target: /tmp/t\n      state: {state}\n");
+        let e = load_model(&link_recipe(&dir, name, &with)).expect_err(name);
+        assert!(
+            e.message.contains("link state must be present or absent"),
+            "{name}: {}",
+            e.message
+        );
+    }
+}
+
+#[test]
+fn link_state_valid_forms_stay_valid() {
+    let dir = trusted_root("link-state-valid");
+    for (name, with) in [
+        ("omitted.yaml", "      path: /tmp/l\n      target: /tmp/t\n"),
+        (
+            "null.yaml",
+            "      path: /tmp/l\n      target: /tmp/t\n      state: null\n",
+        ),
+        (
+            "present.yaml",
+            "      path: /tmp/l\n      target: /tmp/t\n      state: present\n",
+        ),
+        ("absent.yaml", "      path: /tmp/l\n      state: absent\n"),
+    ] {
+        load_model(&link_recipe(&dir, name, with))
+            .unwrap_or_else(|e| panic!("{name}: {}", e.message));
+    }
+    // An interpolated state is resolved when the resource runs.
+    let p = write_recipe(
+        &dir,
+        "interpolated.yaml",
+        "version: 1\nvars:\n  s:\n    value: present\nresources:\n  - id: l\n    type: link\n    with:\n      path: /tmp/l\n      target: /tmp/t\n      state: \"{{ vars.s }}\"\n",
+    );
+    load_model(&p).unwrap_or_else(|e| panic!("interpolated: {}", e.message));
+}
+
+fn handler_recipe(dir: &std::path::Path, name: &str, service: &str) -> std::path::PathBuf {
+    write_recipe(
+        dir,
+        name,
+        &format!(
+            "version: 1\nresources:\n  - id: c\n    type: command\n    with:\n      program: /bin/true\n    notify:\n      - h\nhandlers:\n  - id: h\n    service: \"{service}\"\n    action: restart\n"
+        ),
+    )
+}
+
+#[test]
+fn handler_empty_service_is_a_validation_error() {
+    let dir = trusted_root("handler-empty-service");
+    let e = load_model(&handler_recipe(&dir, "r.yaml", "")).expect_err("empty service");
+    assert!(
+        e.message.contains("service must not be empty"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn handler_service_names_are_otherwise_unchanged() {
+    // Names are not trimmed or narrowed, as for a service resource `name`:
+    // an ordinary unit validates, and a blank one is left to systemd, which
+    // reports it not-found so the handler fails (see tests/platform.rs).
+    let dir = trusted_root("handler-service-names");
+    for (name, service) in [("unit.yaml", "app.service"), ("blank.yaml", "   ")] {
+        let m = load_model(&handler_recipe(&dir, name, service))
+            .unwrap_or_else(|e| panic!("{name}: {}", e.message));
+        assert_eq!(m.handlers[0].service, service);
+    }
+}

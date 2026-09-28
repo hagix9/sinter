@@ -112,5 +112,5 @@ published v0.2.1 retains distro-specific assets (see
 
 Sinter scope does not include dynamic inventory, roles, plugins,
 orchestration, or embedded scripting. See the
-[CHANGELOG](https://github.com/hagix9/blob/main/CHANGELOG.md) for
+[CHANGELOG](https://github.com/hagix9/sinter/blob/main/CHANGELOG.md) for
 release history.
