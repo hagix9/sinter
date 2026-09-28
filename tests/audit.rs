@@ -2779,3 +2779,27 @@ fn audit_interpolated_valid_link_state_is_unchanged() {
     assert_eq!(afind(&r, "l").status, AuditResourceStatus::Compliant);
     assert_observation_only(&r);
 }
+
+#[test]
+fn audit_interpolated_invalid_state_is_error_for_every_path_resource() {
+    // Unknown state is never audited as compliant or as drift.
+    for kind in ["file", "directory", "template"] {
+        let dir = trusted_root(&format!("audit-{kind}-state-invalid"));
+        std::fs::write(dir.join("t.conf"), "x\n").unwrap();
+        let base = match kind {
+            "file" => "      path: /opt/f\n",
+            "directory" => "      path: /opt/d\n",
+            _ => "      path: /opt/t\n      source: t.conf\n",
+        };
+        let recipe = write_recipe(
+            &dir,
+            "r.yaml",
+            &format!(
+                "version: 1\nvars:\n  s:\n    value: banana\nresources:\n  - id: r\n    type: {kind}\n    with:\n{base}      state: \"{{{{ vars.s }}}}\"\n"
+            ),
+        );
+        let r = audit_fake(&recipe, FakeTarget::ubuntu2404());
+        assert_eq!(afind(&r, "r").status, AuditResourceStatus::Error, "{kind}");
+        assert_observation_only(&r);
+    }
+}

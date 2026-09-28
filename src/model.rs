@@ -510,6 +510,7 @@ fn validate_declaration_shape(
     match d.type_.as_str() {
         "file" => {
             validate_with_fields(&d.with, FILE_FIELDS, ctx)?;
+            validate_path_state(&d.with, "file", ctx)?;
             require_static_string_field(&d.with, "path", ctx, field_sensitive("path"))?;
             require_optional_static_string(&d.with, "source", ctx, field_sensitive("source"))?;
             require_optional_mode(
@@ -524,6 +525,7 @@ fn validate_declaration_shape(
         }
         "directory" => {
             validate_with_fields(&d.with, DIR_FIELDS, ctx)?;
+            validate_path_state(&d.with, "directory", ctx)?;
             require_static_string_field(&d.with, "path", ctx, field_sensitive("path"))?;
             require_optional_mode(
                 &d.with,
@@ -538,21 +540,7 @@ fn validate_declaration_shape(
             validate_with_fields(&d.with, LINK_FIELDS, ctx)?;
             require_static_string_field(&d.with, "path", ctx, field_sensitive("path"))?;
             require_optional_static_string(&d.with, "target", ctx, field_sensitive("target"))?;
-            // An omitted or null state means present; an interpolated state is
-            // checked against the same domain when it is evaluated.
-            match d.with.get("state") {
-                None | Some(Value::Null) => {}
-                Some(Value::Str(s))
-                    if crate::expressions::has_interpolation(s)
-                        || s == "present"
-                        || s == "absent" => {}
-                Some(_) => {
-                    return Err(SinterError::schema(format!(
-                        "{}: link state must be present or absent",
-                        ctx
-                    )))
-                }
-            }
+            validate_path_state(&d.with, "link", ctx)?;
             // Execution requires `target` unless `state` is `absent`
             // (`run_link`). Enforce it here whenever the state is statically
             // known; an interpolated state is still checked when evaluated.
@@ -576,6 +564,7 @@ fn validate_declaration_shape(
                 )));
             }
             validate_with_fields(&d.with, TEMPLATE_FIELDS, ctx)?;
+            validate_path_state(&d.with, "template", ctx)?;
             require_static_string_field(&d.with, "path", ctx, field_sensitive("path"))?;
             require_static_string_field(&d.with, "source", ctx, field_sensitive("source"))?;
             require_optional_mode(
@@ -710,7 +699,9 @@ fn validate_declaration_shape(
                 )?;
             }
             if let Some(e) = enabled {
-                if e.as_bool().is_none() && !matches!(e, Value::Str(_)) {
+                if e.as_bool().is_none()
+                    && !matches!(e, Value::Str(s) if crate::expressions::has_interpolation(s))
+                {
                     return Err(SinterError::schema(format!(
                         "{}: service enabled must be a boolean",
                         ctx
@@ -780,6 +771,24 @@ fn validate_package_name(name: &str, ctx: &str, sensitive: bool) -> Result<()> {
         }));
     }
     Ok(())
+}
+
+/// `state` of file, directory, link and template: omitted or null means
+/// present; an interpolated value is checked against the same domain when
+/// the resource runs.
+fn validate_path_state(with: &BTreeMap<String, Value>, kind: &str, ctx: &str) -> Result<()> {
+    match with.get("state") {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::Str(s))
+            if crate::expressions::has_interpolation(s) || s == "present" || s == "absent" =>
+        {
+            Ok(())
+        }
+        Some(_) => Err(SinterError::schema(format!(
+            "{}: {} state must be present or absent",
+            ctx, kind
+        ))),
+    }
 }
 
 fn validate_desired_enum(
@@ -1398,7 +1407,9 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                     )?;
                 }
                 if let Some(e) = enabled {
-                    if e.as_bool().is_none() && !matches!(e, Value::Str(_)) {
+                    if e.as_bool().is_none()
+                        && !matches!(e, Value::Str(s) if crate::expressions::has_interpolation(s))
+                    {
                         return Err(SinterError::schema(format!(
                             "{}: service enabled must be a boolean",
                             resource_ctx

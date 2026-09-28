@@ -417,3 +417,93 @@ fn handler_service_names_are_otherwise_unchanged() {
         assert_eq!(m.handlers[0].service, service);
     }
 }
+
+/// A one-resource recipe of `kind` whose `with` block ends in `extra`. A
+/// template source file `t.conf` is created next to it.
+fn state_recipe(dir: &std::path::Path, name: &str, kind: &str, extra: &str) -> std::path::PathBuf {
+    std::fs::write(dir.join("t.conf"), "x\n").unwrap();
+    let base = match kind {
+        "file" => "      path: /tmp/f\n",
+        "directory" => "      path: /tmp/d\n",
+        "template" => "      path: /tmp/t\n      source: t.conf\n",
+        other => panic!("no base for {other}"),
+    };
+    write_recipe(
+        dir,
+        name,
+        &format!(
+            "version: 1\nvars:\n  s:\n    value: present\nresources:\n  - id: r\n    type: {kind}\n    with:\n{base}{extra}"
+        ),
+    )
+}
+
+#[test]
+fn file_directory_template_state_outside_present_or_absent_is_a_validation_error() {
+    // A literal that can never be valid is rejected before any target is
+    // contacted (runtime used to be the first place it was noticed).
+    let dir = trusted_root("state-domain-invalid");
+    for kind in ["file", "directory", "template"] {
+        for (n, state) in [("typo", "presnet"), ("empty", "\"\""), ("bool", "true")] {
+            let name = format!("{kind}-{n}.yaml");
+            let p = state_recipe(&dir, &name, kind, &format!("      state: {state}\n"));
+            let e = load_model(&p).expect_err(&name);
+            assert!(
+                e.message
+                    .contains(&format!("{kind} state must be present or absent")),
+                "{name}: {}",
+                e.message
+            );
+        }
+    }
+}
+
+#[test]
+fn file_directory_template_valid_states_stay_valid() {
+    let dir = trusted_root("state-domain-valid");
+    for kind in ["file", "directory", "template"] {
+        for (n, extra) in [
+            ("omitted", ""),
+            ("null", "      state: null\n"),
+            ("present", "      state: present\n"),
+            ("absent", "      state: absent\n"),
+            ("interpolated", "      state: \"{{ vars.s }}\"\n"),
+        ] {
+            let name = format!("{kind}-{n}.yaml");
+            load_model(&state_recipe(&dir, &name, kind, extra))
+                .unwrap_or_else(|e| panic!("{name}: {}", e.message));
+        }
+    }
+}
+
+fn service_enabled_recipe(dir: &std::path::Path, name: &str, enabled: &str) -> std::path::PathBuf {
+    write_recipe(
+        dir,
+        name,
+        &format!(
+            "version: 1\nvars:\n  b:\n    value: true\nresources:\n  - id: s\n    type: service\n    with:\n      name: app\n      enabled: {enabled}\n"
+        ),
+    )
+}
+
+#[test]
+fn service_enabled_literal_string_is_a_validation_error() {
+    // Only a boolean (or an interpolation resolving to one) is accepted when
+    // the resource runs; a literal string never is.
+    let dir = trusted_root("service-enabled-string");
+    for (name, enabled) in [("yes.yaml", "\"yes\""), ("quoted-true.yaml", "\"true\"")] {
+        let e = load_model(&service_enabled_recipe(&dir, name, enabled)).expect_err(name);
+        assert!(
+            e.message.contains("service enabled must be a boolean"),
+            "{name}: {}",
+            e.message
+        );
+    }
+    for (name, enabled) in [
+        ("true.yaml", "true"),
+        ("false.yaml", "false"),
+        ("interpolated.yaml", "\"{{ vars.b }}\""),
+    ] {
+        load_model(&service_enabled_recipe(&dir, name, enabled))
+            .unwrap_or_else(|e| panic!("{name}: {}", e.message));
+    }
+}

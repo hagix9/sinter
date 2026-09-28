@@ -1580,6 +1580,12 @@ impl Engine {
         let state = ev_str(&vals, "state")?
             .map(|(s, _)| s)
             .unwrap_or_else(|| "present".to_string());
+        if state != "present" && state != "absent" {
+            return Err(SinterError::schema(format!(
+                "{}: template state must be present or absent",
+                res.id
+            )));
+        }
         if state == "absent" {
             // Delegate to file_absent semantics.
             let stat = self.fs.inspect(&path)?;

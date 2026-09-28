@@ -1153,3 +1153,78 @@ fn blank_handler_service_fails_without_a_mutating_systemctl() {
     );
     assert_eq!(systemctl_mutations(&r), [argv("start", "fakehttpd")]);
 }
+
+// ---------------------------------------------------------------------------
+// file / directory / template: a runtime-resolved state outside
+// present/absent fails closed before anything is observed or changed
+// ---------------------------------------------------------------------------
+
+fn interpolated_state(dir: &std::path::Path, kind: &str, state: &str) -> std::path::PathBuf {
+    std::fs::write(dir.join("t.conf"), "x\n").unwrap();
+    let base = match kind {
+        "file" => "      path: /opt/f\n      content: x\n",
+        "directory" => "      path: /opt/d\n",
+        "template" => "      path: /opt/t\n      source: t.conf\n",
+        other => panic!("no base for {other}"),
+    };
+    write_recipe(
+        dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nvars:\n  s:\n    value: \"{state}\"\nresources:\n  - id: r\n    type: {kind}\n    with:\n{base}      state: \"{{{{ vars.s }}}}\"\n"
+        ),
+    )
+}
+
+#[test]
+fn interpolated_invalid_resource_state_fails_closed_at_runtime() {
+    for kind in ["file", "directory", "template"] {
+        let dir = trusted_root(&format!("plat-{kind}-state-runtime"));
+        let recipe = interpolated_state(&dir, kind, "banana");
+        load_model(&recipe).expect("an interpolated state is resolved at runtime");
+        let message = format!("{kind} state must be present or absent");
+
+        let Err(e) = try_run_recipe_fake(&recipe, Mode::Plan, false, FakeTarget::ubuntu2404())
+        else {
+            panic!("{kind}: plan must not preview an unknown state");
+        };
+        assert_eq!(e.kind, ErrorKind::Plan, "{kind}");
+        assert!(e.message.contains(&message), "{kind}: {}", e.message);
+
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, FakeTarget::ubuntu2404());
+        let res = find(&r, "r");
+        assert_eq!(res.execution, Execution::Failed, "{kind}");
+        assert_eq!(res.change, Change::None, "{kind}");
+        assert!(
+            res.reason.as_deref().unwrap_or("").contains(&message),
+            "{kind}: {:?}",
+            res.reason
+        );
+        // Nothing was even observed: the state is checked first.
+        assert!(
+            r.commands.is_empty()
+                || r.commands
+                    .iter()
+                    .all(|c| !c.args.iter().any(|a| a.starts_with("/opt/"))),
+            "{kind}: {:?}",
+            r.commands
+        );
+    }
+}
+
+#[test]
+fn interpolated_non_boolean_service_enabled_fails_closed_at_runtime() {
+    let dir = trusted_root("plat-service-enabled-runtime");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nvars:\n  b:\n    value: \"yes\"\nresources:\n  - id: s\n    type: service\n    with:\n      name: fakehttpd\n      enabled: \"{{ vars.b }}\"\n",
+    );
+    load_model(&recipe).expect("an interpolated value is resolved at runtime");
+    let t = FakeTarget::rocky9().with_service("fakehttpd", ("loaded", "active", "disabled"));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let s = find(&r, "s");
+    assert_eq!(s.execution, Execution::Failed);
+    assert_eq!(s.change, Change::None);
+    assert!(systemctl_mutations(&r).is_empty());
+}

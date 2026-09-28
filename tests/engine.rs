@@ -954,3 +954,26 @@ resources:
     assert_eq!(find(&r, "default_code").execution, Execution::Succeeded);
     assert_eq!(find(&r, "custom_code").execution, Execution::Succeeded);
 }
+
+#[test]
+fn template_unknown_runtime_state_writes_nothing() {
+    // A resolved state other than present/absent used to render and publish
+    // the template as if it were `present`.
+    let dir = trusted_root("template-unknown-state");
+    std::fs::write(dir.join("t.tmpl"), "port=8080\n").unwrap();
+    let out = dir.join("out.conf");
+    let recipe = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nvars:\n  s:\n    value: banana\nresources:\n  - id: t\n    type: template\n    with:\n      path: {}\n      source: t.tmpl\n      state: \"{{{{ vars.s }}}}\"\n",
+            out.display()
+        ),
+    );
+    let r = run_recipe(&recipe, Mode::Apply, false);
+    let t = find(&r, "t");
+    assert_eq!(t.execution, Execution::Failed);
+    assert_eq!(t.change, Change::None);
+    assert_eq!(mutation_command_count(&r), 0);
+    assert!(!out.exists(), "an unknown state must not create the file");
+}
