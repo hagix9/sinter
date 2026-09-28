@@ -537,9 +537,10 @@ pub fn skip(reason: &str) {
     skip_or_fail(reason);
 }
 
-/// A cross-process advisory lock protecting tests that mutate the shared
-/// systemd `ssh` service. Tests running in parallel (within or across test
-/// binaries) would otherwise interfere by restarting/stopping the same unit.
+/// A cross-process advisory lock protecting tests that mutate systemd
+/// services (a `ServiceFixture`, or `ssh` in the package/service test).
+/// Tests running in parallel (within or across test binaries) would
+/// otherwise interfere by restarting/stopping units and reloading systemd.
 pub struct ServiceGuard {
     file: std::fs::File,
 }
@@ -566,6 +567,82 @@ pub fn lock_service() -> ServiceGuard {
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
     assert_eq!(rc, 0, "could not acquire service lock");
     ServiceGuard { file }
+}
+
+/// A dedicated, disposable systemd service for service and handler lifecycle
+/// tests, so they never stop, restart, disable or re-enable the host's own
+/// SSH service. On the Linux gate that service is the host's control plane
+/// and SSH reference target, and on Ubuntu 24.04 `ssh.service` carries
+/// `Alias=sshd.service`: disabling and re-enabling it can leave the unit
+/// inactive while sshd keeps its ports, after which it cannot start again.
+///
+/// The fixture is a plain long-running unit with a reload action and no
+/// alias, created running and enabled (the state these tests start from) and
+/// removed on drop. Hold `lock_service()` for its whole lifetime.
+pub struct ServiceFixture {
+    name: String,
+}
+
+impl ServiceFixture {
+    /// Create `sinter-test-<label>.service`, running and enabled. `label`
+    /// must be a plain `[a-z0-9-]` word.
+    pub fn create(label: &str) -> ServiceFixture {
+        assert!(
+            !label.is_empty()
+                && label
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+            "invalid fixture label {label:?}"
+        );
+        let name = format!("sinter-test-{label}");
+        let setup = std::process::Command::new("sudo")
+            .args(["-n", "/bin/sh", "-c"])
+            .arg(format!(
+                "printf '%s\\n' '[Unit]' 'Description=Sinter test fixture {name}' '[Service]' 'Type=simple' 'ExecStart=/bin/sleep infinity' 'ExecReload=/bin/true' '[Install]' 'WantedBy=multi-user.target' > /etc/systemd/system/{name}.service && systemctl daemon-reload && systemctl reset-failed {name}.service >/dev/null 2>&1; systemctl enable {name}.service && systemctl restart {name}.service"
+            ))
+            .status();
+        assert!(
+            setup.map(|s| s.success()).unwrap_or(false),
+            "could not create service fixture {name}"
+        );
+        let fixture = ServiceFixture { name };
+        assert_eq!(fixture.property("ActiveState"), "active");
+        assert_eq!(fixture.property("UnitFileState"), "enabled");
+        fixture
+    }
+
+    /// The unit name as a recipe refers to it (no `.service` suffix, like
+    /// `local_ssh_unit()`).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// One `systemctl show` property of the fixture unit.
+    pub fn property(&self, property: &str) -> String {
+        let out = std::process::Command::new("/usr/bin/systemctl")
+            .args([
+                "show",
+                "-p",
+                property,
+                "--value",
+                &format!("{}.service", self.name),
+            ])
+            .output()
+            .expect("systemctl show");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+}
+
+impl Drop for ServiceFixture {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("sudo")
+            .args(["-n", "/bin/sh", "-c"])
+            .arg(format!(
+                "systemctl stop {n}.service >/dev/null 2>&1; systemctl disable {n}.service >/dev/null 2>&1; systemctl reset-failed {n}.service >/dev/null 2>&1; rm -f /etc/systemd/system/{n}.service; systemctl daemon-reload",
+                n = self.name
+            ))
+            .status();
+    }
 }
 
 /// A cross-process advisory lock protecting tests that mutate the shared
@@ -608,4 +685,40 @@ pub fn lock_package_database() -> PackageDatabaseGuard {
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
     assert_eq!(rc, 0, "could not acquire package database lock");
     PackageDatabaseGuard { file }
+}
+
+/// A cross-process advisory lock protecting tests that use the per-user
+/// Sinter backup store (`$HOME/.sinter/backups`). Every non-sudo apply with a
+/// `backup` section creates or traverses that shared store; when two such
+/// tests create it for the first time concurrently, one can observe the
+/// directory between its creation and its `chmod 0700` and (correctly)
+/// refuse it as group-writable under a permissive umask. This is test
+/// infrastructure only — it serializes those tests and never alters product
+/// behavior.
+pub struct BackupStoreGuard {
+    file: std::fs::File,
+}
+
+impl Drop for BackupStoreGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.file), libc::LOCK_UN);
+        }
+    }
+}
+
+/// Acquire the backup-store lock, blocking until available.
+pub fn lock_backup_store() -> BackupStoreGuard {
+    use std::os::fd::AsRawFd;
+    let path = std::env::temp_dir().join(".sinter-test-backup-store.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .expect("could not open backup store lock file");
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    assert_eq!(rc, 0, "could not acquire backup store lock");
+    BackupStoreGuard { file }
 }

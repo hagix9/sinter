@@ -135,11 +135,13 @@ resources:
 
 #[test]
 fn service_all_four_state_enabled_combinations() {
-    if !apt_available() {
-        skip_or_fail("requires apt and sudo");
+    if !sudo_available() || !std::path::Path::new("/run/systemd/system").exists() {
+        skip_or_fail("requires systemd and passwordless sudo");
         return;
     }
     let _svc = lock_service();
+    // A dedicated unit, never the host's own ssh (see `ServiceFixture`).
+    let fx = ServiceFixture::create("svc-combos");
     let dir = trusted_root("svc-combos");
     for (state, enabled) in [
         ("running", true),
@@ -160,16 +162,30 @@ resources:
       state: {state}
       enabled: {enabled}
 "#,
-                svc = local_ssh_unit()
+                svc = fx.name()
             ),
         );
         let r = run_recipe(&recipe, Mode::Apply, true);
         assert_success(&r);
         assert_eq!(find(&r, "s").verification, Verification::Verified);
-        // Restore to running/enabled. ssh is socket-activated: `enable` alone
-        // can leave the unit inactive, so first request a clean stop then
-        // running so the product is allowed to issue start.
-        let svc_name = local_ssh_unit();
+        // Independent check of the unit systemd reports.
+        assert_eq!(
+            fx.property("ActiveState"),
+            if state == "running" {
+                "active"
+            } else {
+                "inactive"
+            },
+            "{state}/{enabled}"
+        );
+        assert_eq!(
+            fx.property("UnitFileState"),
+            if enabled { "enabled" } else { "disabled" },
+            "{state}/{enabled}"
+        );
+        // Restore to running/enabled through the product: first a clean stop
+        // with enabled, then running.
+        let svc_name = fx.name();
         let restore_stop = write_recipe(
             &dir,
             "r1.yaml",

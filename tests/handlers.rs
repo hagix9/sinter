@@ -5,6 +5,11 @@ use common::*;
 use sinter::engine::Mode;
 use sinter::result::{Change, Disposition, Execution, HandlerOutcomeState, Verification};
 
+/// The service fixture needs a running systemd and passwordless sudo.
+fn fixture_available() -> bool {
+    std::path::Path::new("/run/systemd/system").exists() && sudo_available()
+}
+
 fn unit_test_service_available() -> bool {
     // A restartable service that exists on the reference target.
     std::path::Path::new("/usr/lib/systemd/system/ssh.service").exists()
@@ -14,11 +19,12 @@ fn unit_test_service_available() -> bool {
 
 #[test]
 fn one_source_change_triggers_one_handler() {
-    if !unit_test_service_available() || !sudo_available() {
-        skip_or_fail("requires ssh systemd unit and sudo");
+    if !fixture_available() {
+        skip_or_fail("requires systemd and passwordless sudo");
         return;
     }
     let _svc = lock_service();
+    let fx = ServiceFixture::create("handler-one");
     let dir = trusted_root("handler-one");
     let outdir = trusted_root_sudo("handler-one");
     let out = outdir.join("conf");
@@ -39,7 +45,7 @@ handlers:
     service: {svc}
     action: restart
 "#,
-            svc = local_ssh_unit(),
+            svc = fx.name(),
             out = out.display()
         ),
     );
@@ -60,11 +66,12 @@ handlers:
 
 #[test]
 fn multiple_sources_deduplicate_handler() {
-    if !unit_test_service_available() || !sudo_available() {
-        skip_or_fail("requires ssh systemd unit and sudo");
+    if !fixture_available() {
+        skip_or_fail("requires systemd and passwordless sudo");
         return;
     }
     let _svc = lock_service();
+    let fx = ServiceFixture::create("handler-dedup");
     let dir = trusted_root("handler-dedup");
     let outdir = trusted_root_sudo("handler-dedup");
     let a = outdir.join("a");
@@ -92,7 +99,7 @@ handlers:
     service: {svc}
     action: restart
 "#,
-            svc = local_ssh_unit(),
+            svc = fx.name(),
             a = a.display(),
             b = b.display()
         ),
@@ -187,11 +194,12 @@ handlers:
 
 #[test]
 fn condition_skipped_resource_does_not_suppress_valid_handler() {
-    if !unit_test_service_available() || !sudo_available() {
-        skip_or_fail("requires ssh systemd unit and sudo");
+    if !fixture_available() {
+        skip_or_fail("requires systemd and passwordless sudo");
         return;
     }
     let _svc = lock_service();
+    let fx = ServiceFixture::create("handler-skip");
     let dir = trusted_root("handler-skip");
     let outdir = trusted_root_sudo("handler-skip");
     let out = outdir.join("conf");
@@ -218,7 +226,7 @@ handlers:
     service: {svc}
     action: restart
 "#,
-            svc = local_ssh_unit(),
+            svc = fx.name(),
             other = dir.join("other").display(),
             out = out.display()
         ),
@@ -373,6 +381,7 @@ fn service_mutation_then_reobserve_failure_keeps_changed() {
         return;
     }
     let _svc = lock_service();
+    let fx = ServiceFixture::create("svc-reobserve");
     let dir = trusted_root("svc-reobserve");
     let recipe = write_recipe(
         &dir,
@@ -386,37 +395,23 @@ resources:
       name: {svc}
       enabled: false
 "#,
-            svc = local_ssh_unit()
+            svc = fx.name()
         ),
     );
-    // Capture enabled state before.
-    let svc = local_ssh_unit();
-    let before = std::process::Command::new("/usr/bin/systemctl")
-        .args(["is-enabled", &svc])
-        .output()
-        .unwrap();
-    let before = String::from_utf8_lossy(&before.stdout).trim().to_string();
+    // The fixture starts enabled, so `enabled: false` must dispatch a
+    // mutation before the injected re-observation fault fires.
+    assert_eq!(fx.property("UnitFileState"), "enabled");
     let r = run_recipe_fault_sudo(&recipe, Mode::Apply, "service_reobserve_fail", true);
     let s = find(&r, "s");
-    // If a mutation was dispatched (enabled state needed changing), change must
-    // be reported. The fault fires after mutation decisions; if already in the
-    // desired enabled state the resource is unchanged and the fault never runs.
-    if before == "enabled" {
-        assert_eq!(
-            s.change,
-            Change::Changed,
-            "enable/disable mutation then reobserve failure must keep changed: {:?}",
-            s
-        );
-        assert_eq!(s.execution, Execution::Failed);
-    }
-    // Restore
-    let _ = std::process::Command::new("sudo")
-        .args(["-n", "systemctl", "enable", &svc])
-        .status();
-    let _ = std::process::Command::new("sudo")
-        .args(["-n", "systemctl", "start", &svc])
-        .status();
+    assert_eq!(
+        s.change,
+        Change::Changed,
+        "enable/disable mutation then reobserve failure must keep changed: {:?}",
+        s
+    );
+    assert_eq!(s.execution, Execution::Failed);
+    // The mutation really happened; the fixture is removed on drop.
+    assert_eq!(fx.property("UnitFileState"), "disabled");
 }
 
 #[test]
@@ -565,11 +560,12 @@ resources:
 
 #[test]
 fn reload_handler_verifies_active_service() {
-    if !unit_test_service_available() || !sudo_available() {
-        skip_or_fail("requires ssh systemd unit and sudo");
+    if !fixture_available() {
+        skip_or_fail("requires systemd and passwordless sudo");
         return;
     }
     let _svc = lock_service();
+    let fx = ServiceFixture::create("handler-reload");
     let dir = trusted_root("handler-reload");
     let out = trusted_root_sudo("handler-reload").join("conf");
     let recipe = write_recipe(
@@ -589,14 +585,14 @@ handlers:
     service: {svc}
     action: reload
 "#,
-            svc = local_ssh_unit(),
+            svc = fx.name(),
             out = out.display()
         ),
     );
     let r = run_recipe(&recipe, Mode::Apply, true);
-    // Either reload succeeds or the unit reports it cannot reload; in the
-    // success case the service must remain active.
-    if r.handlers_run.len() == 1 {
-        assert_eq!(r.handlers_run[0].state, HandlerOutcomeState::Succeeded);
-    }
+    // The fixture supports reload, so the notified handler must run, succeed,
+    // and leave the service active.
+    assert_eq!(r.handlers_run.len(), 1);
+    assert_eq!(r.handlers_run[0].state, HandlerOutcomeState::Succeeded);
+    assert_eq!(fx.property("ActiveState"), "active");
 }

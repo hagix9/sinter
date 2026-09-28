@@ -192,6 +192,16 @@ The gateway crate (`gateway/`) is not part of the release artifact. It is
 validated here anyway so that a release never ships from a commit whose
 workspace fails on the reference platform.
 
+Gate host: the host's own SSH service is its control plane and, in strict
+mode, the SSH reference target. After preparing the host, reboot it and,
+before the first gate command, confirm that `ssh.service` is active, no
+`ssh.socket` is active, and ports 22 and 2222 are owned by the
+`ssh.service` main process (a stray sshd from an earlier socket activation
+makes later SSH tests fail). Tests never use the host's SSH service as
+mutable state; service and handler lifecycle tests use a dedicated fixture
+unit. A gate failure that disturbs the host's SSH control plane is still a
+STOP: diagnose it on the evidence, never retry in place.
+
 Capture the full output of all of the above into one log
 (`validation/linux-gate.log` in the evidence bundle) and record, as they are
 produced, the `linux_validation` fields of the Evidence Manifest:

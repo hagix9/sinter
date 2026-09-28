@@ -203,6 +203,8 @@ mod target {
 
     #[test]
     fn apply_backs_up_before_changing_and_preserves_metadata() {
+        // Shares the per-user backup store with the other apply tests.
+        let _store = lock_backup_store();
         let dir = trusted_root("backup-apply");
         let f = dir.join("conf");
         std::fs::write(&f, format!("old {}", CANARY)).unwrap();
@@ -286,6 +288,8 @@ mod target {
 
     #[test]
     fn backup_failure_prevents_every_change() {
+        // Shares the per-user backup store with the other apply tests.
+        let _store = lock_backup_store();
         let dir = trusted_root("backup-fail");
         let f = dir.join("conf");
         std::fs::write(&f, "old").unwrap();
@@ -326,6 +330,8 @@ mod target {
 
     #[test]
     fn unsupported_object_type_fails_backup() {
+        // Shares the per-user backup store with the other apply tests.
+        let _store = lock_backup_store();
         let dir = trusted_root("backup-fifo");
         let fifo = dir.join("fifo");
         let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
@@ -347,6 +353,8 @@ mod target {
 
     #[test]
     fn run_directory_collision_fails_without_changes() {
+        // Shares the per-user backup store with the other apply tests.
+        let _store = lock_backup_store();
         let dir = trusted_root("backup-collide");
         let f = dir.join("conf");
         std::fs::write(&f, "old").unwrap();
@@ -361,6 +369,8 @@ mod target {
 
     #[test]
     fn backup_of_the_store_itself_is_rejected() {
+        // Shares the per-user backup store with the other apply tests.
+        let _store = lock_backup_store();
         let dir = trusted_root("backup-overlap");
         let f = dir.join("conf");
         std::fs::write(&f, "old").unwrap();
