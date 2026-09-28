@@ -8,7 +8,7 @@
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/hagix9/sinter?quickstart=1)
 
-Try Sinter v1.0.0 in a disposable Ubuntu container in your browser — nothing to
+Try Sinter v1.1.0 in a disposable Ubuntu container in your browser — nothing to
 install locally, no SSH, no servers. See the [start guide](examples/start/README.md).
 
 Sinter is a lightweight, agentless configuration-management tool inspired by Itamae.
@@ -82,7 +82,7 @@ inventory (hosts, flat groups, explicit per-recipe `targets`) — see
 
 ## Install
 
-Sinter **v1.0.0** ships one `sinter-v1.0.0-linux-x86_64.tar.gz` artifact
+Sinter **v1.1.0** ships one `sinter-v1.1.0-linux-x86_64.tar.gz` artifact
 covering every supported Linux x86_64 platform line: Ubuntu, Rocky Linux,
 RHEL 9 / 10, and AlmaLinux 9 / 10.
 
@@ -91,7 +91,7 @@ curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
 $HOME/.local/bin/sinter --version
 ```
 
-Acceptance-tested point releases (v1.0.0 release artifact): Ubuntu 24.04.5 LTS,
+Acceptance-tested point releases (v1.1.0 release artifact): Ubuntu 24.04.5 LTS,
 Ubuntu 26.04.1 LTS, Rocky Linux 9.8, Rocky Linux 10.2, RHEL 9.8, RHEL 10.2,
 AlmaLinux 9.8 and AlmaLinux 10.2, all x86_64. Other point releases have not
 each been independently accepted.
@@ -294,16 +294,16 @@ real-host acceptance matrix.
 Each release from v1.0.0 on is acceptance-tested as its exact release
 artifact on the eight supported targets before it is published, and its
 acceptance evidence (manifest, raw logs, checksums) is published with the
-release. The current release, Sinter v1.0.0, passed the Linux x86_64
+release. The current release, Sinter v1.1.0, passed the Linux x86_64
 validation gate and was then acceptance-tested as its exact release artifact
-(`sinter-v1.0.0-linux-x86_64.tar.gz`) on eight real x86_64 Linux hosts — the
+(`sinter-v1.1.0-linux-x86_64.tar.gz`) on eight real x86_64 Linux hosts — the
 exact point releases listed under [Install](#install). On every host the
 tarball and the extracted binary were verified byte-identical (SHA-256) and
 ran the same logical acceptance scenario plus artifact-identity and MCP
 checks: **408 checks passed, 0 failed** (see the
-[v1.0.0 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.0.0)).
-Sinter v0.5.1 and v0.4.1 each passed the earlier eight-host acceptance
-(344/344); those records and earlier VM and release evidence remain
+[v1.1.0 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.1.0)).
+Sinter v1.0.0 passed the same eight-host acceptance (408/408), and v0.5.1
+and v0.4.1 each passed the earlier one (344/344); those records and earlier VM and release evidence remain
 historical.
 
 All managed targets require systemd, an OpenSSH server, `/bin/sh`, the `attr`
