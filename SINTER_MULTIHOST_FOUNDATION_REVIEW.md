@@ -1110,3 +1110,76 @@ Git history and the final report, not in this file.
   more prominent would be a design change and was not made.
 - `tests/installer/test_install.py` is Linux-only in practice (GNU `stat`);
   pre-existing.
+
+# v1.1.0 release record (RELEASE.md steps 3–17)
+
+Recorded after publication. The sections above, and the independent focused
+re-audit (`SINTER_MULTIHOST_FOUNDATION_FOCUSED_REAUDIT.md`), predate the
+release and are unchanged. No credentials, project identifiers or VM
+addresses are recorded.
+
+## P.1 Release identity
+
+| | |
+|---|---|
+| RC / tag target | `b977e28f299f7a65da759c1b2b46bb612cec6043` ("docs: date v1.1.0 release", CHANGELOG date only; SOURCE_CANDIDATE `54b242b`, version bump `bb5e21e`) |
+| Tag | `v1.1.0`, annotated ("Sinter v1.1.0"), peels to the RC on the remote |
+| GitHub Release | "Sinter v1.1.0" at `github.com/hagix9/sinter/releases/tag/v1.1.0` — latest, not draft, not prerelease |
+| Artifact | `sinter-v1.1.0-linux-x86_64.tar.gz` (Linux x86_64, one artifact for all eight targets), 1652719 bytes, SHA-256 `7ef366418d0267272b11cdb88accd9dcebee10572688da46ac1da17a57683cf7` |
+| Executable | `sinter` SHA-256 `c7cbb2de9a68b1059863dd9a9125e3d6b6e8dff230b5d9300c1f92cea6f4a057`, `sinter 1.1.0`, built once on Rocky Linux 9.8 (rustc 1.98.1), max GLIBC_2.34 |
+| Other assets | `SHA256SUMS`; `sinter-v1.1.0-acceptance-manifest.json` (`dd280102…8383`); `sinter-v1.1.0-acceptance-evidence.tar.gz` (`1b34e5eb…6318`); `sinter-v1.1.0-acceptance-SHA256SUMS` |
+| Metadata commit | `22b0289` "docs: publish v1.1.0 release metadata" (WebMCP metadata, install/current-release docs EN/JA, Codespaces pin, `release/evidence/v1.1.0/acceptance-manifest.json`) |
+
+## P.2 Gates
+
+- Source validation (macOS, RC): fmt/clippy PASS, 591/0 (Linux-only suites
+  compile out), checker 54 OK, gateway 196/0, `git diff --check` clean.
+- Linux gate (Ubuntu 24.04 x86_64, clean clone of the RC, strict:
+  `SINTER_TEST_STRICT=1`, `SINTER_TEST_LOCAL_SSHD=1`, the host as SSH
+  reference target): root 797 passed / 0 failed / 0 ignored / 0 filtered,
+  installer 18, checker 54, gateway 196; an unmet prerequisite would have
+  failed, so 0 skipped.
+- Acceptance of the frozen artifact: 8/8 targets PASS, 408/408 checks
+  (Ubuntu 24.04.5, 26.04.1, Rocky 9.8, 10.2, RHEL 9.8, 10.2, AlmaLinux 9.8,
+  10.2). Full-mode checker `OK … (verdict GO)`, exit 0 — on the staged files
+  and again on the files downloaded from the public release.
+- Deviation: on rocky9, rocky10 and rhel10 an automatic OS security update
+  (dnf-automatic catch-up after boot) started at the instant the harness's
+  quiesce check passed and broke the package checks; rhel9 was stopped before
+  its scenario. With maintainer approval these four were re-run on the same
+  artifact with a stricter quiesce driver (rocky9/rocky10 a second time after
+  the payloads left in the dnf cache by the interrupted update were cleared).
+  Earlier attempts are in the public logs as "NOT COUNTED". Two fleet VMs
+  that had been stopped mid-update were repaired (previous kernel,
+  regenerated initramfs, `rpm -V` clean, clean reboot).
+- Finding (pre-existing, not a regression): Sinter v1.0.0 and v1.1.0 both
+  refuse a DNF package change, fail-closed, while the dnf package cache holds
+  payloads left by an interrupted transaction. Listed as a known limitation.
+
+## P.3 Publication checks
+
+| Check | Result |
+|---|---|
+| Public download (anonymous, all 5 assets) | HTTP 200, sizes as staged; `SHA256SUMS` and acceptance checksums OK; `SHA256SUMS` byte-identical to staging |
+| Public artifact on Linux (Ubuntu 24.04 x86_64) | checksum OK, executable `c7cbb2de…a057`, linkage resolved, `sinter 1.1.0` |
+| WebMCP metadata | `resources.json` 1.1.0; `build-webmcp.ts` release `v1.1.0`, artifact `sinter-v1.1.0-linux-x86_64.tar.gz`; `webmcp:check` OK; the URLs derived from the generated `webmcp*.json` return the real asset (HTTP 200, SHA-256 matches) |
+| Docs (Node 22.23.2) | `npm run check` 0 errors / 0 warnings / 0 hints; `npm run build` 61 pages; `git diff --check` clean |
+| Docs deployment | "Deploy documentation site" run 36432710694 on `22b0289`: check, webmcp:check, build, deploy — success. "Start environment" run 36432710599 (Codespaces container asserts `sinter 1.1.0`) — success |
+| Public site | EN/JA home, installation, platforms, CLI and guides 200; installation pages reference only v1.1.0; public `webmcp.json` only 1.1.0; all 60 sitemap pages and 74 internal links/assets resolve; served `install.sh` identical to the repository |
+| Landing page (live, EN/JA, Chromium) | mobile: 5 pulses running, audit pulse `p-audit-y` moves vertically only; 1440×900 and 1920×1080: 5 running, horizontal travel; reduced motion: 0 animations, toggle hidden; 0 px overflow and 0 console errors everywhere |
+| Installer smoke (Ubuntu 24.04 x86_64, fresh directory) | `install.sh` latest → `sinter 1.1.0`; `SINTER_VERSION=v1.1.0` → `sinter 1.1.0`; archive/executable SHA-256 as released; `validate` exit 0 |
+
+## P.4 Remaining limitations
+
+- ProxyJump/ProxyCommand (fail closed), dynamic inventory, nested groups,
+  host/group variables, host patterns, parallel execution, rollback and
+  backup retention are not implemented.
+- The per-target release acceptance scenario is single-host; multi-host
+  behavior is covered by the strict gate suites and the two-host feature
+  acceptance in §V (candidate source, not the release artifact).
+- DNF package changes are refused while the dnf cache holds leftover payloads
+  (pre-existing; `dnf clean packages` clears it).
+- RELEASE.md has no rule yet for infrastructure re-tests, and the fleet's
+  automatic updates must be quiesced by the harness (quiesce2 driver).
+- FIDO keys and OpenSSH certificates remain unverified; landing-page desktop
+  pulses are intentionally unchanged.
