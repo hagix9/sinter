@@ -19,10 +19,10 @@ Target options for plan, apply, and audit:
 | Flag | Default | Meaning |
 |---|---|---|
 | `--host <HOST>` | local machine | SSH target. Omitted: the machine running `sinter`. |
-| `--port <PORT>` | `22` | SSH port. |
-| `--user <USER>` | current user | SSH user. |
-| `--known-hosts <PATH>` | `~/.ssh/known_hosts` | Strict host-key database; unknown or changed keys fail. |
-| `--identity <PATH>` | — | Extra identity file; repeatable. |
+| `--port <PORT>` | inventory, then OpenSSH config, then `22` | SSH port. |
+| `--user <USER>` | inventory, then OpenSSH config, then current user | SSH user. |
+| `--known-hosts <PATH>` | inventory, then OpenSSH config, then `~/.ssh/known_hosts` | Strict host-key database; unknown or changed keys fail. |
+| `--identity <PATH>` | inventory, then OpenSSH config, then `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa` | Identity file; repeatable. Replaces the defaults. |
 | `--sudo` | off | Every target-side operation via non-interactive `sudo -n`. |
 | `--verbose` | off | Verbose output. |
 

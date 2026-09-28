@@ -41,6 +41,6 @@ the tools fall back to the English data rather than failing.
 
 ## Scope
 
-This is a **documentation-site feature only**. Sinter itself does not
-currently expose any runtime or execution MCP tools; if that ever changes, it
-will be a separate, explicitly documented feature.
+This is a **documentation-site feature only**. Sinter's own read-only MCP
+server (`sinter mcp`) is a separate, explicitly documented feature: see
+[Core MCP](/en/reference/mcp/).

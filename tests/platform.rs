@@ -995,3 +995,97 @@ fn apt_backend_mutation_args_unchanged() {
     assert_eq!(apt.len(), 1);
     assert_eq!(apt[0].args, vec!["-y", "install", "nano"]);
 }
+
+// ---------------------------------------------------------------------------
+// Mutating systemctl argv: the unit name is an operand after `--`
+// ---------------------------------------------------------------------------
+
+/// Every mutating (non-`show`) systemctl argv of a run, in dispatch order.
+fn systemctl_mutations(r: &sinter::engine::RunReport) -> Vec<Vec<String>> {
+    commands_with(r, "/usr/bin/systemctl")
+        .into_iter()
+        .filter(|c| c.args.first().map(|a| a.as_str()) != Some("show"))
+        .map(|c| c.args.clone())
+        .collect()
+}
+
+fn argv(verb: &str, unit: &str) -> Vec<String> {
+    vec![verb.to_string(), "--".to_string(), unit.to_string()]
+}
+
+fn service_with_handler(
+    dir: &std::path::Path,
+    unit: &str,
+    state: &str,
+    enabled: bool,
+) -> std::path::PathBuf {
+    write_recipe(
+        dir,
+        "r.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: s\n    type: service\n    with:\n      name: \"{unit}\"\n      state: {state}\n      enabled: {enabled}\n    notify:\n      - h\nhandlers:\n  - id: h\n    service: \"{unit}\"\n    action: restart\n"
+        ),
+    )
+}
+
+#[test]
+fn systemctl_mutation_argv_is_option_injection_safe() {
+    // A manifest-controlled unit name must only ever occupy the operand slot
+    // after `--`, as the observation argv already does. A leading-dash name
+    // would otherwise be parsed by systemctl as an option (-H selects a host).
+    let hostile = "-Hevil.invalid";
+
+    // enable, start, then the notified handler's restart.
+    let dir = trusted_root("plat-svc-hostile-start");
+    let recipe = service_with_handler(&dir, hostile, "running", true);
+    let t = FakeTarget::rocky9().with_service(hostile, ("loaded", "inactive", "disabled"));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_success(&r);
+    assert_eq!(
+        systemctl_mutations(&r),
+        [
+            argv("enable", hostile),
+            argv("start", hostile),
+            argv("restart", hostile)
+        ]
+    );
+
+    // stop (with its reset-failed), then disable.
+    let dir = trusted_root("plat-svc-hostile-stop");
+    let recipe = service_with_handler(&dir, hostile, "stopped", false);
+    let t = FakeTarget::rocky9().with_service(hostile, ("loaded", "active", "enabled"));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_eq!(find(&r, "s").change, Change::Changed);
+    let muts = systemctl_mutations(&r);
+    assert_eq!(
+        muts[..3],
+        [
+            argv("stop", hostile),
+            argv("reset-failed", hostile),
+            argv("disable", hostile)
+        ]
+    );
+    assert!(muts
+        .iter()
+        .all(|a| a[1] == "--" && a[2] == hostile && a.len() == 3));
+}
+
+#[test]
+fn systemctl_mutation_argv_keeps_ordinary_unit_names() {
+    let dir = trusted_root("plat-svc-normal-argv");
+    let recipe = service_with_handler(&dir, "fakehttpd", "running", true);
+    let t = FakeTarget::rocky9().with_service("fakehttpd", ("loaded", "inactive", "disabled"));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_success(&r);
+    let s = find(&r, "s");
+    assert_eq!(s.change, Change::Changed);
+    assert_eq!(s.verification, Verification::Verified);
+    assert_eq!(
+        systemctl_mutations(&r),
+        [
+            argv("enable", "fakehttpd"),
+            argv("start", "fakehttpd"),
+            argv("restart", "fakehttpd")
+        ]
+    );
+}

@@ -2710,7 +2710,18 @@ impl FakeExecutor {
                 ),
             };
         }
-        let name = args.get(1).cloned().unwrap_or_default();
+        // Mutating argv is `<verb> -- <unit>`; any other shape is refused so
+        // a unit name can never be dispatched where systemctl parses options.
+        let name = match args {
+            [_, sep, unit] if sep == "--" => unit.clone(),
+            _ => {
+                return Self::exited(
+                    1,
+                    String::new(),
+                    format!("fake systemctl: expected `{} -- <unit>`", verb),
+                )
+            }
+        };
         let Some(entry) = self.target.services.get_mut(&name) else {
             return Self::exited(1, String::new(), format!("Unit {} not found", name));
         };

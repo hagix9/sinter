@@ -105,13 +105,12 @@ published v0.2.1 retains distro-specific assets (see
 
 - Other distributions / releases (fail closed with a capability error rather
   than guessing a backend).
-- Hashed `known_hosts` entries.
 - aarch64 artifacts are not validated — presence of a build does not imply
   support.
 
 ## Scope
 
-Sinter scope does not include inventory, roles, plugins, orchestration, or
-embedded scripting. See the
+Sinter scope does not include dynamic inventory, roles, plugins,
+orchestration, or embedded scripting. See the
 [CHANGELOG](https://github.com/hagix9/blob/main/CHANGELOG.md) for
 release history.

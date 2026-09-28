@@ -267,6 +267,23 @@ fn validate_still_fails_on_bad_recipes() {
 }
 
 #[test]
+fn validate_rejects_a_present_link_without_a_target() {
+    // Previously accepted by validate and refused only when executed.
+    let f = Fx::new();
+    let p = f.write(
+        "l.yaml",
+        "version: 1\nresources:\n  - id: l\n    type: link\n    with:\n      path: /tmp/l\n",
+    );
+    let o = f.run(&["validate", &p]);
+    assert_eq!(o.status.code(), Some(2), "{o:?}");
+    assert!(stdout(&o).is_empty(), "{o:?}");
+    assert!(
+        stderr(&o).contains("link target is required when present"),
+        "{o:?}"
+    );
+}
+
+#[test]
 fn targets_in_an_included_file_are_rejected() {
     let f = Fx::new();
     f.write("frag.yaml", "version: 1\ntargets:\n  groups: [web]\n");

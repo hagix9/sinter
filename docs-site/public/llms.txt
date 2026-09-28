@@ -2,7 +2,7 @@
 
 > Sinter is an agentless configuration-management tool for Linux, built in
 > Rust. Recipes are YAML or TOML; execution is local or over SSH. Current
-> release: v0.4.1 (Linux x86_64).
+> release: v1.1.0 (Linux x86_64).
 
 ## Documentation
 

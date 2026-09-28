@@ -10,8 +10,8 @@ WebMCP `sinter_get_resource` tool) instead of guessing.
 ## Structure
 
 YAML and TOML compile to the same model. Allowed top-level fields are
-`version`, `vars`, `include`, `resources`, and `handlers`; anything else is a
-schema error.
+`version`, `vars`, `include`, `resources`, `handlers`, `backup`, and `targets`;
+anything else is a schema error.
 
 ```yaml
 version: 1                  # required; the only supported value

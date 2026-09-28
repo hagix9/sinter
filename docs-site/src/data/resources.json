@@ -37,7 +37,7 @@
       "docPath": "reference/resources/link",
       "parameters": [
         { "name": "path", "required": true, "type": "string (absolute path)", "default": null, "description": "Absolute path of the symlink." },
-        { "name": "target", "required": true, "type": "string", "default": null, "description": "Symlink target. Required when state is present." },
+        { "name": "target", "required": false, "type": "string", "default": null, "description": "Symlink target. Required when state is present." },
         { "name": "state", "required": false, "type": "string", "default": "present", "description": "present or absent." }
       ],
       "platforms": ["ubuntu", "rocky", "rhel", "almalinux"],

@@ -3437,17 +3437,19 @@ impl Engine {
         // a later step cannot erase an earlier successful mutation.
         // systemctl start/stop/enable/disable can change unit state even when
         // the command exits nonzero (e.g. start transitions inactive -> failed).
-        let runit = |e: &mut Self, args: &[&str]| -> Result<()> {
+        // The unit name follows `--`, as in `systemctl_show`: a
+        // manifest-controlled name like `-H…` can never become an option.
+        let runit = |e: &mut Self, verb: &str| -> Result<()> {
             let permit = e.fs.mutation_permit()?;
             let mut req = ExecRequest::new("/usr/bin/systemctl");
-            req.args = args.iter().map(|s| s.to_string()).collect();
+            req.args = vec![verb.to_string(), "--".to_string(), name.clone()];
             req.env = baseline_env(e.fs.home_env());
             req.sensitive = sensitive;
             let out = e.fs.exec(&permit, &req)?;
             let action = if sensitive {
                 "[redacted]".to_string()
             } else {
-                args.join(" ")
+                format!("{} {}", verb, name)
             };
             match out.completion {
                 Completion::Exited(0) => Ok(()),
@@ -3480,13 +3482,13 @@ impl Engine {
         match (desired_state, desired_enabled) {
             ("running", Some(en)) => {
                 if enabled_needs {
-                    if let Err(e) = runit(self, &[if en { "enable" } else { "disable" }, &name]) {
+                    if let Err(e) = runit(self, if en { "enable" } else { "disable" }) {
                         return Ok(service_step_failure(res, e, mutated, sensitive));
                     }
                     mutated = true;
                 }
                 if state_needs == Some(true) {
-                    if let Err(e) = runit(self, &["start", &name]) {
+                    if let Err(e) = runit(self, "start") {
                         return Ok(service_step_failure(res, e, mutated, sensitive));
                     }
                     mutated = true;
@@ -3500,7 +3502,7 @@ impl Engine {
                     mutated = true;
                 }
                 if enabled_needs {
-                    if let Err(e) = runit(self, &[if en { "enable" } else { "disable" }, &name]) {
+                    if let Err(e) = runit(self, if en { "enable" } else { "disable" }) {
                         return Ok(service_step_failure(res, e, mutated, sensitive));
                     }
                     mutated = true;
@@ -3508,7 +3510,7 @@ impl Engine {
             }
             ("running", None) => {
                 if state_needs == Some(true) {
-                    if let Err(e) = runit(self, &["start", &name]) {
+                    if let Err(e) = runit(self, "start") {
                         return Ok(service_step_failure(res, e, mutated, sensitive));
                     }
                     mutated = true;
@@ -3524,7 +3526,7 @@ impl Engine {
             }
             ("", Some(en)) => {
                 if enabled_needs {
-                    if let Err(e) = runit(self, &[if en { "enable" } else { "disable" }, &name]) {
+                    if let Err(e) = runit(self, if en { "enable" } else { "disable" }) {
                         return Ok(service_step_failure(res, e, mutated, sensitive));
                     }
                     mutated = true;
@@ -3586,7 +3588,7 @@ impl Engine {
     fn stop_and_reset(&mut self, name: &str, sensitive: bool) -> Result<()> {
         let permit = self.fs.mutation_permit()?;
         let mut req = ExecRequest::new("/usr/bin/systemctl");
-        req.args = vec!["stop".to_string(), name.to_string()];
+        req.args = vec!["stop".to_string(), "--".to_string(), name.to_string()];
         req.env = baseline_env(self.fs.home_env());
         req.sensitive = sensitive;
         let out = self.fs.exec(&permit, &req)?;
@@ -3618,7 +3620,11 @@ impl Engine {
         }
         // Clear a failed state so that "stopped" is clean, not failed.
         let mut req = ExecRequest::new("/usr/bin/systemctl");
-        req.args = vec!["reset-failed".to_string(), name.to_string()];
+        req.args = vec![
+            "reset-failed".to_string(),
+            "--".to_string(),
+            name.to_string(),
+        ];
         req.env = baseline_env(self.fs.home_env());
         req.sensitive = sensitive;
         let reset = match self.fs.exec(&permit, &req) {
@@ -3819,7 +3825,7 @@ impl Engine {
         }
         let permit = self.fs.mutation_permit()?;
         let mut req = ExecRequest::new("/usr/bin/systemctl");
-        req.args = vec![action.to_string(), name.to_string()];
+        req.args = vec![action.to_string(), "--".to_string(), name.to_string()];
         req.env = baseline_env(self.fs.home_env());
         req.sensitive = sensitive;
         let out = self.fs.exec(&permit, &req)?;

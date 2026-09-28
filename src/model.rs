@@ -538,8 +538,28 @@ fn validate_declaration_shape(
             validate_with_fields(&d.with, LINK_FIELDS, ctx)?;
             require_static_string_field(&d.with, "path", ctx, field_sensitive("path"))?;
             require_optional_static_string(&d.with, "target", ctx, field_sensitive("target"))?;
+            // Execution requires `target` unless `state` is `absent`
+            // (`run_link`). Enforce it here whenever the state is statically
+            // known; an interpolated state is still checked when evaluated.
+            let state_present = match d.with.get("state") {
+                None | Some(Value::Null) => true,
+                Some(Value::Str(s)) if !crate::expressions::has_interpolation(s) => s != "absent",
+                Some(_) => false,
+            };
+            if state_present && matches!(d.with.get("target"), None | Some(Value::Null)) {
+                return Err(SinterError::schema(format!(
+                    "{}: link target is required when present",
+                    ctx
+                )));
+            }
         }
         "template" => {
+            if d.with.contains_key("content") {
+                return Err(SinterError::schema(format!(
+                    "{}: template does not support content; use source",
+                    ctx
+                )));
+            }
             validate_with_fields(&d.with, TEMPLATE_FIELDS, ctx)?;
             require_static_string_field(&d.with, "path", ctx, field_sensitive("path"))?;
             require_static_string_field(&d.with, "source", ctx, field_sensitive("source"))?;
@@ -551,12 +571,6 @@ fn validate_declaration_shape(
                         .get("mode")
                         .is_some_and(|v| value_references_sensitive_var(v, sensitive_var_names)),
             )?;
-            if d.with.contains_key("content") {
-                return Err(SinterError::schema(format!(
-                    "{}: template does not support content; use source",
-                    ctx
-                )));
-            }
         }
         "command" => {
             validate_with_fields(&d.with, COMMAND_FIELDS, ctx)?;
@@ -1209,6 +1223,12 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                 fr.path = Some(path);
             }
             "template" => {
+                if r.with.contains_key("content") {
+                    return Err(SinterError::schema(format!(
+                        "{}: template does not support content; use source",
+                        resource_ctx
+                    )));
+                }
                 validate_with_fields(&r.with, TEMPLATE_FIELDS, &resource_ctx)?;
                 let path = static_string(
                     &r.with,
@@ -1241,12 +1261,6 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                         e
                     }
                 })?);
-                if r.with.contains_key("content") {
-                    return Err(SinterError::schema(format!(
-                        "{}: template does not support content; use source",
-                        resource_ctx
-                    )));
-                }
                 validate_file_common(
                     &r.with,
                     &scope,
@@ -2064,9 +2078,7 @@ pub const FILE_FIELDS: &[&str] = &[
 ];
 pub const DIR_FIELDS: &[&str] = &["path", "state", "owner", "group", "mode"];
 pub const LINK_FIELDS: &[&str] = &["path", "target", "state"];
-pub const TEMPLATE_FIELDS: &[&str] = &[
-    "path", "state", "content", "source", "owner", "group", "mode", "vars",
-];
+pub const TEMPLATE_FIELDS: &[&str] = &["path", "state", "source", "owner", "group", "mode", "vars"];
 pub const COMMAND_FIELDS: &[&str] = &[
     "program",
     "args",

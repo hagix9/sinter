@@ -239,3 +239,100 @@ fn relative_source_relative_to_recipe() {
         .unwrap()
         .ends_with("sub/t"));
 }
+
+fn link_recipe(dir: &std::path::Path, name: &str, with: &str) -> std::path::PathBuf {
+    write_recipe(
+        dir,
+        name,
+        &format!("version: 1\nresources:\n  - id: l\n    type: link\n    with:\n{with}"),
+    )
+}
+
+#[test]
+fn link_without_target_when_present_is_a_validation_error() {
+    // Execution refuses a present link without a target; validation rejects
+    // it before any target is contacted. An omitted state means present.
+    let dir = trusted_root("link-target-required");
+    for (name, with) in [
+        ("omitted-state.yaml", "      path: /tmp/l\n"),
+        ("present.yaml", "      path: /tmp/l\n      state: present\n"),
+        (
+            "null-target.yaml",
+            "      path: /tmp/l\n      state: present\n      target: null\n",
+        ),
+    ] {
+        let e = load_model(&link_recipe(&dir, name, with)).expect_err(name);
+        assert!(
+            e.message.contains("link target is required when present"),
+            "{name}: {}",
+            e.message
+        );
+    }
+}
+
+#[test]
+fn link_target_rule_keeps_valid_links_valid() {
+    let dir = trusted_root("link-target-valid");
+    for (name, with) in [
+        (
+            "with-target.yaml",
+            "      path: /tmp/l\n      target: /tmp/t\n",
+        ),
+        (
+            "present-with-target.yaml",
+            "      path: /tmp/l\n      state: present\n      target: /tmp/t\n",
+        ),
+        // Removing a link never needed a target.
+        ("absent.yaml", "      path: /tmp/l\n      state: absent\n"),
+    ] {
+        load_model(&link_recipe(&dir, name, with))
+            .unwrap_or_else(|e| panic!("{name}: {}", e.message));
+    }
+}
+
+#[test]
+fn template_rejects_content() {
+    let dir = trusted_root("template-content");
+    std::fs::write(dir.join("t.conf"), "x\n").unwrap();
+    let p = write_recipe(
+        &dir,
+        "r.yaml",
+        "version: 1\nresources:\n  - id: t\n    type: template\n    with:\n      path: /tmp/t.conf\n      source: t.conf\n      content: inline\n",
+    );
+    let e = load_model(&p).expect_err("template content must be rejected");
+    assert!(
+        e.message
+            .contains("template does not support content; use source"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn every_template_field_in_the_field_table_is_accepted() {
+    // The field table must not advertise a field that validation rejects.
+    let dir = trusted_root("template-fields");
+    std::fs::write(dir.join("t.conf"), "x\n").unwrap();
+    let mut with = String::new();
+    for field in sinter::model::TEMPLATE_FIELDS {
+        let value = match *field {
+            "path" => "/tmp/t.conf",
+            "state" => "present",
+            "source" => "t.conf",
+            "owner" => "root",
+            "group" => "root",
+            "mode" => "\"0644\"",
+            "vars" => "{ k: v }",
+            other => {
+                panic!("no sample value for template field {other}; add one if it is supported")
+            }
+        };
+        with.push_str(&format!("      {field}: {value}\n"));
+    }
+    let p = write_recipe(
+        &dir,
+        "r.yaml",
+        &format!("version: 1\nresources:\n  - id: t\n    type: template\n    with:\n{with}"),
+    );
+    load_model(&p).unwrap_or_else(|e| panic!("{}", e.message));
+}

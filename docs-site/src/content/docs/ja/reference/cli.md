@@ -7,7 +7,7 @@ description: sinter validate、plan、apply、audit、mcp — フラグと終了
 sinter <COMMAND>
 
 Commands:
-  validate  Validate a recipe without connecting to a target
+  validate  Validate a recipe or bundle without connecting to a target
   plan      Preview changes against a target without mutating it
   apply     Apply a recipe to a target
   audit     Audit whether a target already satisfies a recipe. Read-only.
