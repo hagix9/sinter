@@ -4,7 +4,7 @@ description: Rocky Linux 9 / 10 x86_64 管理対象ガイド — dnf バック�
 ---
 
 Rocky Linux 9 x86_64 は v0.2.0 から、Rocky Linux 10 x86_64 は v0.4.0 から
-サポートされています。両version lineは v1.1.0 で受入検証済みであり、
+サポートされています。両version lineは v1.1.1 で受入検証済みであり、
 どちらも **dnf** パッケージバックエンドを使います。
 
 **受入基準環境:** Rocky Linux 9.8 x86_64（DNF 4.14.0）— 実際の SSH と
@@ -16,12 +16,12 @@ purge の収束/冪等性について検証済みです。Rocky 9/10 は対応�
 
 ## 統一 Linux x86_64 配布
 
-Sinter v1.1.0では、対応するすべてのx86_64向けバージョンラインに
+Sinter v1.1.1では、対応するすべてのx86_64向けバージョンラインに
 `sinter-v<VERSION>-linux-x86_64.tar.gz` を1つ配布します。
 実行ファイルは共通ですが、実行時の検出により Ubuntu は APT、RHEL系は
 DNF を使います。任意の Linux や他のアーキテクチャへの対応を意味しません。
 
-Sinter v1.1.0 のリリース成果物は Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、
+Sinter v1.1.1 のリリース成果物は Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、
 Rocky Linux 9.8、Rocky Linux 10.2、RHEL 9.8、RHEL 10.2、
 AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64、408チェック通過・失敗0）の
 8実ホストで受入検証済みです。

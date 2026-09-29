@@ -4,7 +4,7 @@ description: Rocky Linux 9 and 10 x86_64 managed-target guide — dnf backend.
 ---
 
 Rocky Linux 9 x86_64 has been supported since v0.2.0; Rocky Linux 10 x86_64
-since v0.4.0. Both lines are acceptance-tested in v1.1.0 and use the **dnf**
+since v0.4.0. Both lines are acceptance-tested in v1.1.1 and use the **dnf**
 package backend.
 
 **Acceptance references:** Rocky Linux 9.8 x86_64 with DNF 4.14.0 — verified
@@ -16,12 +16,12 @@ references, not independent evidence for every other minor release.
 
 ## Unified Linux x86_64 distribution
 
-Sinter v1.1.0 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for all
+Sinter v1.1.1 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for all
 supported x86_64 version lines. The executable is unified; runtime platform
 detection still selects APT on Ubuntu and DNF on RHEL-family targets. This
 is not a claim of support for arbitrary Linux systems or architectures.
 
-The Sinter v1.1.0 release artifact passed eight-real-host acceptance on
+The Sinter v1.1.1 release artifact passed eight-real-host acceptance on
 Ubuntu 24.04.5 LTS, Ubuntu 26.04.1 LTS, Rocky Linux 9.8, Rocky Linux 10.2,
 RHEL 9.8, RHEL 10.2, AlmaLinux 9.8, and AlmaLinux 10.2 — all x86_64, 408 checks
 passed, 0 failed.

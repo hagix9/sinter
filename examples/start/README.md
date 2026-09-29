@@ -4,7 +4,7 @@
 
 This codespace is a disposable Ubuntu 24.04 x86_64 container in your own
 GitHub account. When it was created, it installed the published Sinter
-v1.1.0 release into `~/.local/bin` with the repository's `install.sh`, which
+v1.1.1 release into `~/.local/bin` with the repository's `install.sh`, which
 verifies the download against the release `SHA256SUMS`, and added the `attr`
 package that Sinter requires on every machine it manages. Nothing connects to
 any other machine.
