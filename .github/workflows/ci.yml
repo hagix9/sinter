@@ -92,3 +92,86 @@ jobs:
           sudo apt-get install -y attr
 
       - run: cargo test --locked --all-targets --all-features
+
+  runner-trust-diagnostics:
+    # TEMPORARY (WP-N runner trust diagnostic). Read-only inspection of
+    # candidate passwd-home locations against Sinter's parent-path trust rule
+    # (src/targetfs.rs check_trusted_parents). Prints owner, mode, ACL entry
+    # tags and extended-attribute names only, never attribute values. It
+    # changes nothing on the runner except installing attr/acl if missing.
+    name: runner trust diagnostics (temporary, read-only)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Require a GitHub-hosted runner
+        env:
+          RUNNER_ENVIRONMENT_CONTEXT: ${{ runner.environment }}
+        run: |
+          if [ "$RUNNER_ENVIRONMENT_CONTEXT" != github-hosted ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ]; then
+            echo "::error::this job runs only on GitHub-hosted runners (runner.environment=$RUNNER_ENVIRONMENT_CONTEXT, RUNNER_ENVIRONMENT=${RUNNER_ENVIRONMENT:-unset})"
+            exit 1
+          fi
+
+      - name: Inspection tools
+        run: |
+          missing=()
+          command -v getfattr >/dev/null || missing+=(attr)
+          command -v getfacl >/dev/null || missing+=(acl)
+          echo "missing before install: ${missing[*]:-none}"
+          if [ "${#missing[@]}" -gt 0 ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq "${missing[@]}"
+          fi
+          dpkg-query -W -f='${Package} ${Version}\n' attr acl
+
+      - name: Inspect candidate paths (read-only)
+        run: |
+          # Diagnostic only: keep inspecting every path even when a single
+          # inspection command fails (for example grep finding no names).
+          set +e -u
+          me="$(id -u)"
+          # Sinter's unsafe_attr(): security.* except security.selinux,
+          # trusted.*, system.posix_acl*, system.nfs4_acl*.
+          unsafe() { grep -E '^(security\.|trusted\.|system\.posix_acl|system\.nfs4_acl)' | grep -vx 'security.selinux' || true; }
+          names() { "$@" 2>/dev/null | grep -v '^#' | grep -v '^$' | sort | tr '\n' ' '; }
+          inspect() {
+            local d="$1" v=""
+            if [ ! -e "$d" ] && ! sudo test -e "$d"; then echo "$d | absent"; return; fi
+            local st; st="$(sudo stat -c 'uid=%u(%U) gid=%g(%G) mode=%a type=%F' -- "$d")"
+            local fs; fs="$(findmnt -n -o FSTYPE -T "$d" 2>/dev/null || echo '?')"
+            local acl; acl="$(sudo getfacl -p -c --skip-base -- "$d" 2>/dev/null \
+              | sed -E 's/^(default:)?([a-z]+):[^:]+:/\1\2:<named>:/' | tr '\n' ' ')"
+            local ux rx; ux="$(names getfattr -m - --absolute-names -- "$d")"
+            rx="$(names sudo getfattr -m - --absolute-names -- "$d")"
+            local uid mode; uid="$(sudo stat -c %u -- "$d")"; mode="$(sudo stat -c %a -- "$d")"
+            [ -L "$d" ] && v="$v symlink;"
+            [ "$uid" = 0 ] || [ "$uid" = "$me" ] || v="$v owner-uid-$uid;"
+            [ $(( 8#$mode & 8#022 )) -eq 0 ] || v="$v group/other-writable;"
+            [ -z "$acl" ] || v="$v posix-acl;"
+            local bad; bad="$(printf '%s\n' $rx | unsafe | tr '\n' ' ')"
+            [ -z "$bad" ] || v="$v unsafe-xattr:[${bad% }];"
+            echo "$d | fs=$fs $st | acl=[${acl% }] | xattr(user)=[${ux% }] | xattr(root)=[${rx% }] | ${v:- TRUST-COMPATIBLE}"
+          }
+          chain() {
+            local p="$1" cur="" part
+            inspect /
+            IFS=/ read -ra parts <<< "${p#/}"
+            for part in "${parts[@]}"; do
+              [ -n "$part" ] || continue
+              cur="$cur/$part"
+              inspect "$cur"
+            done
+          }
+          echo "== identity"
+          getent passwd runner | cut -d: -f1,3,4,6,7
+          id -nG runner
+          sudo -n true && echo "passwordless sudo: yes"
+          echo "RUNNER_TEMP=$RUNNER_TEMP CARGO_HOME=${CARGO_HOME:-unset} RUSTUP_HOME=${RUSTUP_HOME:-unset}"
+          echo "useradd: $(command -v useradd || echo absent)"
+          echo "== candidate chains (for uid $me, non-sudo view; trusted owners are uid 0 and uid $me)"
+          for c in / /home /home/runner /srv /root /var/lib "$RUNNER_TEMP"; do
+            echo "-- $c"
+            chain "$c"
+          done
+          echo "== toolchain locations"
+          for t in "${CARGO_HOME:-$HOME/.cargo}" "${RUSTUP_HOME:-$HOME/.rustup}"; do inspect "$t"; done
