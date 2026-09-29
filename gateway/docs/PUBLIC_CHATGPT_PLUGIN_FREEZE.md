@@ -191,6 +191,7 @@ These results describe Rauthy only. They do not change the classification of the
 - **Do not** create the reviewer VM or any Rauthy infrastructure.
 - **Do not** submit the plugin, request review, or set up domain verification.
 - **Do not** delete the Gateway, bridge or MCP code, tests, or documents.
+- **Do not** start the production Gateway VM, or its `sinter-gateway` service, with the binary it holds. See [Restart guard (CVE-2026-25537)](#restart-guard-cve-2026-25537).
 
 ## Security boundary to keep if work resumes
 
@@ -201,6 +202,39 @@ These results describe Rauthy only. They do not change the classification of the
 - Per-account dispatch and session ownership.
 - PKCE S256 and exact redirect-URI matching at the authorization server.
 - Never widen the Gateway's algorithm allowlist, and never accept an unvalidated audience, just to fit a provider.
+
+## Restart guard (CVE-2026-25537)
+
+**The frozen Gateway deployment must not be restarted with its existing binary.** Before the production Gateway VM or its public Gateway service returns to service, the binary must be replaced with a patched, validated build.
+
+**Why.** From `22edea2` (the production executables) through `c88d646`, `gateway/Cargo.lock` pins `jsonwebtoken` 9.3.1. That version is affected by CVE-2026-25537 (type confusion, CWE-843): an `nbf` claim of the wrong JSON type, such as the string `"99999999999"`, is not enforced, so a token that is not yet valid can be accepted. The Gateway's OAuth validator reaches this path. `525a23d` moves to a patched `jsonwebtoken` and adds regression tests.
+
+**The existing binary is unverified.** It was built from uncommitted source (see [Not completed](#not-completed)), and the VM has been stopped since 2026-09-27, so its dependency versions have not been checked. Treat it as potentially affected. Nothing has patched it, and having been stopped does not make it safe to reuse.
+
+**Booting is itself exposure.** The VM boots with `caddy` and `sinter-gateway` enabled, and its public HTTPS firewall rule and DNS record are still in place. Booting it unchanged starts the existing binary on the public endpoint, so replacing the binary after boot is too late.
+
+Before the Gateway returns to service, in this order:
+
+1. Use Sinter source at `525a23d` or a later commit on `main`; the CVE-2026-25537 fix must be included.
+2. Build with the committed lockfile: `cargo build --release --locked --bin sinter-gateway` in `gateway/`. Do not build without `--locked`, and do not run `cargo update` as part of the restart.
+3. Confirm that the production dependency set uses a patched `jsonwebtoken`: in `gateway/`, `cargo tree --locked -e normal,build -i jsonwebtoken` must show a patched version (upstream first patched: 10.3.0). The currently approved and tested candidate is `jsonwebtoken` 10.4.0 with the `aws_lc_rs` backend. A later patched version is acceptable only if it meets the backend requirement below and passes step 6.
+4. Confirm that `jsonwebtoken` 9.3.1 is absent: `cargo tree --locked --target all -i jsonwebtoken@9.3.1` must match no package.
+5. Confirm that the `rsa` crate (RUSTSEC-2023-0071) is absent from the production graph: `cargo tree --locked --target all -e normal,build -i rsa` must print nothing. It may appear only as a test dev-dependency.
+6. Validate the replacement before any public exposure:
+   - `cargo test --locked --test oauth_reason` in `gateway/` passes from the same source and lockfile, including `valid_token_accepted`, `nbf_temporal_contract` and `rsa_keys_below_2048_bits_are_rejected`.
+   - The replacement binary itself, run in a production-equivalent setup that is not publicly reachable, accepts a valid token and rejects:
+     - a token whose numeric `nbf` is in the future, beyond the 60 s leeway;
+     - a token whose `nbf` is malformed or of the wrong type, including at least the string `"99999999999"`.
+   - A rejected token must not authenticate. Expect 401, never success.
+7. Install the replacement at `/usr/local/bin/sinter-gateway`, and record its SHA-256 and `--version` output (`test-auth: off`). This must happen before `sinter-gateway` is started and before the public route serves traffic. If the VM has to be booted to do this, first make sure, through an owner-approved change, that the existing binary can neither start nor be reached publicly.
+8. Only after steps 1–7 pass may the service be started and exposed.
+
+**Backend requirement.** The JWT backend must preserve the existing cryptographic contract; it is not pinned to a particular library:
+
+- The accepted algorithms stay exactly RS256 and ES256 (`ALLOWED_ALGS` in `gateway/src/oauth.rs`).
+- RSA keys below 2048 bits stay rejected (`rsa_keys_below_2048_bits_are_rejected`).
+
+`aws_lc_rs` is selected today because it meets both requirements. The `rust_crypto` backend of `jsonwebtoken` 10.4.0 accepted a 1024-bit RSA key, so it does not meet them.
 
 ## Conditions for resuming
 
@@ -224,7 +258,7 @@ Also the platform "developer mode" guide on static credentials.
 
 | Resource | State | Note |
 |---|---|---|
-| Production Gateway VM and its static IP, disk, firewall rules, uptime check and alert | running | Not stopped by this freeze. It still costs money. Stopping or deleting it needs an explicit owner decision. |
+| Production Gateway VM and its static IP, disk, firewall rules, uptime check and alert | stopped since 2026-09-27 | Not stopped by this freeze itself. Its resources still cost money. **Do not restart it with its existing binary**; see [Restart guard (CVE-2026-25537)](#restart-guard-cve-2026-25537). Deleting it needs an explicit owner decision. |
 | Developer-machine `sinter-bridge` (test account) connected to the production Gateway | running | Not a spike artifact. Stop it when you no longer need the connection. |
 | Logto Cloud development tenant | active (free) | Users older than 90 days are deleted automatically. |
 | Acceptance-test VMs (8, stopped) | not part of this lane | They are Sinter release infrastructure. Their disks and daily snapshots still cost money. |

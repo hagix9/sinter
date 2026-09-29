@@ -18,9 +18,14 @@ lives in the executables.
 
 | Binary | Role | Built by |
 |---|---|---|
-| `sinter-gateway` | central HTTPS ingress + work broker | `cargo build --release --bin sinter-gateway` (in `gateway/`) |
-| `sinter-bridge` | customer-side controller | `cargo build --release --bin sinter-bridge` |
+| `sinter-gateway` | central HTTPS ingress + work broker | `cargo build --release --locked --bin sinter-gateway` (in `gateway/`) |
+| `sinter-bridge` | customer-side controller | `cargo build --release --locked --bin sinter-bridge` |
 | `sinter` | MCP/tool authority on the controller | repo-root `cargo build --release` |
+
+Build the `gateway/` binaries with `--locked` so that the committed
+`gateway/Cargo.lock` is used as reviewed. The frozen production deployment
+must not be restarted with its existing binary; see the restart guard in
+[`PUBLIC_CHATGPT_PLUGIN_FREEZE.md`](PUBLIC_CHATGPT_PLUGIN_FREEZE.md#restart-guard-cve-2026-25537).
 
 `sinter-gateway --version` prints version + whether the `test-auth`
 feature is compiled in. Production artifacts must report `test-auth:
