@@ -50,6 +50,34 @@ cargo test --locked
 git diff --check
 ```
 
+### 継続的インテグレーション
+
+push と pull request のたびに、2 つの GitHub Actions ワークフローが実行されます。
+
+- **CI** は、リリースゲートの Linux ビルドとテストのコマンドを、ルートの crate と
+  `gateway/` に対して GitHub ホストの Ubuntu ランナーで実行します。ルートの一部の
+  テストは実行するマシン自体を変更します（apt、systemd ユニット、ホストの SSH
+  サービス）。そのため、このジョブは GitHub ホストのランナー以外では実行を拒否します。
+- **Dependency advisories** は、`Cargo.lock` と `gateway/Cargo.lock` を OSV.dev
+  と照合します。OSV.dev には GitHub がレビューした advisory と RustSec の advisory
+  が含まれます。依存関係が変わらなくても新しい advisory に気付けるよう、毎週も
+  実行されます。Dependabot alerts もリポジトリを監視しています。
+
+これらのチェックが報告するのは、各データベースで公開済みの advisory だけで、
+バージョン範囲もデータベースの記録どおりです。データベースには反映の遅れや、
+範囲の記録漏れがあり得ます。失敗した実行は、後続のコミットで修正します。テストは
+自動では再試行しません。CI は `RELEASE.md` のリリースゲートやターゲットでの受け入れ
+検証の代わりにはなりません。
+
+advisory の例外は、lockfile と同じディレクトリの `osv-scanner.toml` に、理由と
+期限（`ignoreUntil`。その日付以降は実行が失敗します）を付けて記録します。現在の
+例外は、gateway のテストだけが使う依存 `rsa` に対する RUSTSEC-2023-0071 の 1 件
+だけです。`rsa` が gateway の normal または build の依存グラフに入ると、
+ワークフローは失敗します。
+
+GitHub は、公開リポジトリで 60 日間活動がないと、スケジュール実行のワークフローを
+無効にします。その間は Dependabot alerts だけが監視を続けます。
+
 ## テスト構成
 
 | スイート | 範囲 |

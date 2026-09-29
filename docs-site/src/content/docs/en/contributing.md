@@ -49,6 +49,34 @@ cargo test --locked
 git diff --check
 ```
 
+### Continuous integration
+
+Every push and pull request runs two GitHub Actions workflows:
+
+- **CI** runs the release gate's Linux build and test commands for the root
+  crate and `gateway/` on GitHub-hosted Ubuntu runners. Some root tests change
+  the machine they run on (apt, systemd units, the host's SSH service), so
+  that job refuses to run anywhere but on a GitHub-hosted runner.
+- **Dependency advisories** checks `Cargo.lock` and `gateway/Cargo.lock`
+  against OSV.dev, which carries GitHub-reviewed and RustSec advisories. It
+  also runs weekly, so a new advisory against unchanged dependencies is
+  noticed. Dependabot alerts watch the repository as well.
+
+These checks report only advisories that are already published in those
+databases, with the version ranges the databases record. Databases can lag or
+record incomplete ranges. A failing run is fixed forward; tests are not
+retried automatically. CI does not replace the release gate or target
+acceptance in `RELEASE.md`.
+
+Advisory exceptions live in an `osv-scanner.toml` next to the lockfile, each
+with a reason and an expiry date (`ignoreUntil`; the run fails from that date
+on). The only exception today is RUSTSEC-2023-0071 for `rsa`, a test-only
+dependency of the gateway. The workflow fails if `rsa` enters the gateway's
+normal or build dependency graph.
+
+GitHub disables scheduled workflows in a public repository after 60 days
+without activity. During such a period only Dependabot alerts keep watching.
+
 ## Test layout
 
 | Suite | Scope |

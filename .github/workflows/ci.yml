@@ -1,0 +1,82 @@
+name: CI
+
+# Runs the release gate's Linux build and test commands (RELEASE.md step 4)
+# for the root crate and gateway/ on every push and pull request. It does not
+# replace the release gate or target acceptance. Failures are fixed forward;
+# nothing is retried automatically.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  RUSTUP_TOOLCHAIN: 1.98.1
+
+jobs:
+  checks:
+    name: fmt, clippy, gateway tests, installer and release tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Require a GitHub-hosted runner
+        env:
+          RUNNER_ENVIRONMENT_CONTEXT: ${{ runner.environment }}
+        run: |
+          if [ "$RUNNER_ENVIRONMENT_CONTEXT" != github-hosted ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ]; then
+            echo "::error::this job runs only on GitHub-hosted runners (runner.environment=$RUNNER_ENVIRONMENT_CONTEXT, RUNNER_ENVIRONMENT=${RUNNER_ENVIRONMENT:-unset})"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt,clippy
+
+      - name: Record the environment
+        run: |
+          cat /etc/os-release; uname -m; rustc --version; cargo --version
+
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: python3 tests/installer/test_install.py
+      - run: python3 -m unittest discover -s release/tests
+      - run: cargo fmt --manifest-path gateway/Cargo.toml --check
+      - run: cargo clippy --manifest-path gateway/Cargo.toml --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --manifest-path gateway/Cargo.toml --locked --all-targets --all-features
+
+  linux-tests:
+    # The root test suite changes the host it runs on: apt installs and
+    # removals, systemd fixture units, and the host's own SSH service
+    # (install, enable, restart). It must only run on a GitHub-hosted runner,
+    # which is a fresh virtual machine per job.
+    name: root tests (host-mutating, GitHub-hosted only)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Require a GitHub-hosted runner
+        env:
+          RUNNER_ENVIRONMENT_CONTEXT: ${{ runner.environment }}
+        run: |
+          if [ "$RUNNER_ENVIRONMENT_CONTEXT" != github-hosted ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ]; then
+            echo "::error::this job runs only on GitHub-hosted runners (runner.environment=$RUNNER_ENVIRONMENT_CONTEXT, RUNNER_ENVIRONMENT=${RUNNER_ENVIRONMENT:-unset})"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        run: rustup toolchain install 1.98.1 --profile minimal
+
+      - name: Record the environment
+        run: |
+          cat /etc/os-release; uname -m; rustc --version; cargo --version
+          grep -l '^#!\[cfg(target_os = "linux")\]' tests/*.rs
+
+      - run: cargo test --locked --all-targets --all-features

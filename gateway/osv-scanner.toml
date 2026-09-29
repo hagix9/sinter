@@ -1,0 +1,13 @@
+# osv-scanner configuration for gateway/Cargo.lock. It does not apply to the
+# root Cargo.lock. Used by .github/workflows/advisories.yml.
+#
+# RUSTSEC-2023-0071 (rsa, Marvin timing side channel) is excepted because rsa
+# is a test-only dev-dependency of the gateway. The exception holds only while
+# rsa stays out of the gateway's normal/build dependency graph: the
+# rsa-graph-guard job in advisories.yml fails if rsa enters that graph or
+# leaves the lockfile. ignoreUntil is exclusive: the scan fails from that date
+# on, and the exception must then be reviewed and renewed or removed.
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0071"
+ignoreUntil = 2026-12-21
+reason = "rsa 0.9.10 is a gateway dev-dependency used only by tests (test key generation and signing). It is absent from the normal/build production dependency graph for all targets, and no patched rsa release exists (RustSec patched = []). Valid only while rsa stays out of that graph, which the rsa-graph-guard job enforces. Ignoring this id also suppresses its aliases CVE-2023-49092, GHSA-c38w-74pg-36hr and GHSA-4grx-2x9w-596c."

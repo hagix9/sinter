@@ -1,0 +1,108 @@
+name: Dependency advisories
+
+# Checks both Cargo lockfiles against OSV.dev, which carries GitHub-reviewed
+# and RustSec advisories. No path filter: a new advisory can affect unchanged
+# dependencies. The weekly run covers weeks without commits; GitHub disables
+# scheduled workflows in public repositories after 60 days without activity.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '37 3 * * 1'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  osv-scan:
+    name: OSV scan (Cargo.lock, gateway/Cargo.lock)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download, verify and run osv-scanner
+        env:
+          OSV_SCANNER_VERSION: 2.6.0
+          OSV_SCANNER_PLATFORM: Linux/x86_64
+          OSV_SCANNER_ASSET: osv-scanner_linux_amd64
+          OSV_SCANNER_SHA256: ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108
+        run: |
+          set -euo pipefail
+          platform="$(uname -s)/$(uname -m)"
+          if [ "$platform" != "$OSV_SCANNER_PLATFORM" ]; then
+            echo "::error::unexpected runner platform $platform (expected $OSV_SCANNER_PLATFORM)"
+            exit 1
+          fi
+          bin="$(mktemp -d)/osv-scanner"
+          url="https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/${OSV_SCANNER_ASSET}"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --output "$bin" "$url"
+          # The digest pinned above is the trust anchor, not the release's own
+          # SHA256SUMS. The file is not executable until it matches.
+          if ! echo "${OSV_SCANNER_SHA256}  ${bin}" | sha256sum --check --strict -; then
+            echo "::error::osv-scanner integrity check failed; the download was not executed"
+            exit 1
+          fi
+          chmod +x "$bin"
+          # Only the exit status decides. On a network or data failure the
+          # printed summary can still say "0 known vulnerabilities", so the
+          # output is never parsed.
+          status=0
+          "$bin" scan source --lockfile Cargo.lock --lockfile gateway/Cargo.lock || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::osv-scanner exited with status $status (1: advisory found or exception expired; other: scanner or data error, no security conclusion)"
+            exit 1
+          fi
+
+  rsa-graph-guard:
+    # Independent of osv-scan so that neither result can hide the other. The
+    # RUSTSEC-2023-0071 exception in gateway/osv-scanner.toml is valid only
+    # while rsa is absent from the gateway's normal/build dependency graph.
+    name: rsa stays out of the gateway production graph
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        run: rustup toolchain install 1.98.1 --profile minimal
+
+      - name: Check the gateway dependency graph
+        run: |
+          set -euo pipefail
+          cd gateway
+          err="$(mktemp)"
+          # Control query, dev edges included: rsa must resolve. A failure or
+          # empty output means the query is broken or rsa left the lockfile
+          # (the exception is then stale).
+          if ! all_edges="$(cargo tree --locked --target all -e normal,build,dev -i rsa 2>"$err")"; then
+            cat "$err" >&2
+            echo "::error::cargo tree could not resolve rsa in gateway (query error, or the RUSTSEC-2023-0071 exception is stale); no conclusion"
+            exit 1
+          fi
+          if [ -z "$all_edges" ]; then
+            cat "$err" >&2
+            echo "::error::rsa is not in the gateway dependency graph; remove the stale RUSTSEC-2023-0071 entry from gateway/osv-scanner.toml"
+            exit 1
+          fi
+          # Presence is decided from stdout only. When rsa is absent, cargo
+          # tree exits 0 and prints "warning: nothing to print." on stderr.
+          if ! production="$(cargo tree --locked --target all -e normal,build -i rsa 2>"$err")"; then
+            cat "$err" >&2
+            echo "::error::cargo tree failed on the gateway normal/build graph; no conclusion"
+            exit 1
+          fi
+          if [ -n "$production" ]; then
+            printf '%s\n' "$production"
+            echo "::error::rsa is in the gateway normal/build graph; the RUSTSEC-2023-0071 exception in gateway/osv-scanner.toml no longer applies"
+            exit 1
+          fi
+          echo "rsa is absent from the gateway normal/build graph for all targets (dev-only); the RUSTSEC-2023-0071 exception applies."

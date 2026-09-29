@@ -197,10 +197,14 @@ mode, the SSH reference target. After preparing the host, reboot it and,
 before the first gate command, confirm that `ssh.service` is active, no
 `ssh.socket` is active, and ports 22 and 2222 are owned by the
 `ssh.service` main process (a stray sshd from an earlier socket activation
-makes later SSH tests fail). Tests never use the host's SSH service as
-mutable state; service and handler lifecycle tests use a dedicated fixture
-unit. A gate failure that disturbs the host's SSH control plane is still a
-STOP: diagnose it on the evidence, never retry in place.
+makes later SSH tests fail). Service and handler lifecycle tests use a
+dedicated fixture unit, but some tests act on the host's own SSH service:
+`tests/package_service.rs` ensures `openssh-server` is installed and the SSH
+unit is running and enabled, and `tests/remediation.rs` restarts that unit
+through a handler. Run the gate only on a host where that is acceptable; the
+per-commit CI runs these tests only on GitHub-hosted runners. A gate failure
+that disturbs the host's SSH control plane is still a STOP: diagnose it on
+the evidence, never retry in place.
 
 Capture the full output of all of the above into one log
 (`validation/linux-gate.log` in the evidence bundle) and record, as they are
