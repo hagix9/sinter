@@ -10,6 +10,7 @@ use rsa::pkcs8::{EncodePrivateKey, LineEnding};
 use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sinter_gateway::mcp::PublicAuthError;
 use sinter_gateway::oauth::{
     InvalidReason, JwksSource, OAuthConfig, OAuthValidator, TokenRejection,
@@ -224,6 +225,114 @@ fn claim_classes() {
         })),
         InvalidReason::SubInvalid,
     );
+}
+
+/// `nbf` is optional, but a present `nbf` must be a valid NumericDate:
+/// one of the wrong JSON type must fail closed, never be treated as absent
+/// (the same rule as `iat`, F-11). The token is otherwise valid and signed
+/// by the trusted issuer's key.
+#[test]
+fn nbf_temporal_contract() {
+    let v = validator();
+    // Absent and past nbf are accepted; a future nbf is not yet valid.
+    for tok in [
+        mint(&claims()),
+        mint(&with(|c| {
+            c.insert("nbf".into(), json!(now() - 3600));
+        })),
+    ] {
+        assert!(v.evaluate_token(&tok).is_ok());
+        assert!(public(&v, &tok).is_ok());
+    }
+    expect_invalid(
+        &mint(&with(|c| {
+            c.insert("nbf".into(), json!(now() + 3600));
+        })),
+        InvalidReason::NotYetValid,
+    );
+
+    let malformed = [
+        json!("99999999999"),
+        json!((now() + 3600).to_string()),
+        json!("tomorrow"),
+        json!(-1),
+        json!(null),
+        json!(true),
+        json!({"t": now() + 3600}),
+        json!([now() + 3600]),
+    ];
+    let mut accepted = Vec::new();
+    for bad in malformed {
+        let tok = mint(&with(|c| {
+            c.insert("nbf".into(), bad.clone());
+        }));
+        match v.evaluate_token(&tok) {
+            Ok(_) => accepted.push(bad.to_string()),
+            Err(r) => {
+                // Scalars fail claim validation; objects and arrays already
+                // fail claim-set parsing. Neither is "missing".
+                assert!(
+                    matches!(
+                        r,
+                        TokenRejection::Invalid(
+                            InvalidReason::OtherValidationFailure | InvalidReason::MalformedToken
+                        )
+                    ),
+                    "nbf {bad}: {r:?}"
+                );
+                assert_eq!(public(&v, &tok).err(), Some(PublicAuthError::Invalid));
+            }
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "malformed nbf accepted as absent: {accepted:?}"
+    );
+
+    // exp is required, so a wrong-type exp is rejected as missing.
+    expect_invalid(
+        &mint(&with(|c| {
+            c.insert("exp".into(), json!("never"));
+        })),
+        InvalidReason::MissingRequiredClaim,
+    );
+}
+
+/// RS256 keys below 2048 bits are never accepted, even when the JWKS
+/// publishes one and the signature over the token is correct. The token is
+/// signed directly because the JWT library refuses to sign with such a key.
+#[test]
+fn rsa_keys_below_2048_bits_are_rejected() {
+    let k = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 1024).unwrap();
+    let pubk = RsaPublicKey::from(&k);
+    let jwks = json!({"keys": [{
+        "kty": "RSA", "use": "sig", "kid": KID,
+        "n": URL_SAFE_NO_PAD.encode(pubk.n().to_bytes_be()),
+        "e": URL_SAFE_NO_PAD.encode(pubk.e().to_bytes_be()),
+    }]});
+    let v = validator_with(Box::new(StaticJwks(jwks.to_string().into_bytes())));
+
+    let e = |b: &[u8]| URL_SAFE_NO_PAD.encode(b);
+    let header = json!({"alg": "RS256", "typ": "JWT", "kid": KID}).to_string();
+    let msg = format!(
+        "{}.{}",
+        e(header.as_bytes()),
+        e(claims().to_string().as_bytes())
+    );
+    // PKCS#1 v1.5 DigestInfo prefix for SHA-256.
+    let prefix = hex::decode("3031300d060960864801650304020105000420").unwrap();
+    let scheme = rsa::Pkcs1v15Sign {
+        hash_len: Some(32),
+        prefix: prefix.into_boxed_slice(),
+    };
+    let sig = k.sign(scheme, &Sha256::digest(msg.as_bytes())).unwrap();
+    let tok = format!("{msg}.{}", e(&sig));
+
+    assert_eq!(
+        v.evaluate_token(&tok).err(),
+        Some(TokenRejection::Invalid(InvalidReason::SignatureInvalid))
+    );
+    assert_eq!(public(&v, &tok).err(), Some(PublicAuthError::Invalid));
 }
 
 #[test]

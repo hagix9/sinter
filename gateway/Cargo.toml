@@ -48,7 +48,9 @@ hex = "0.4"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 axum = "0.8.9"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
-jsonwebtoken = "9"
+# aws_lc_rs keeps the RS256 (2048–8192-bit) and ES256 verifiers of the
+# previous ring backend.
+jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 url = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
