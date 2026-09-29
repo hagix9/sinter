@@ -49,6 +49,11 @@ jobs:
       - run: python3 -m unittest discover -s release/tests
       - run: cargo fmt --manifest-path gateway/Cargo.toml --check
       - run: cargo clippy --manifest-path gateway/Cargo.toml --locked --all-targets --all-features -- -D warnings
+      # gateway/tests/assembly.rs runs the bridge against ../target/debug/sinter.
+      # In the release gate the root tests build it first; here it is built
+      # explicitly.
+      - name: Build the sinter binary for the gateway tests
+        run: cargo build --locked --all-features
       - run: cargo test --manifest-path gateway/Cargo.toml --locked --all-targets --all-features
 
   linux-tests:
@@ -78,5 +83,12 @@ jobs:
         run: |
           cat /etc/os-release; uname -m; rustc --version; cargo --version
           grep -l '^#!\[cfg(target_os = "linux")\]' tests/*.rs
+
+      # Sinter requires getfattr (package attr) on a target; the runner image
+      # does not ship it.
+      - name: Install attr
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y attr
 
       - run: cargo test --locked --all-targets --all-features
