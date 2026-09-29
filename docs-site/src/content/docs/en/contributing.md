@@ -3,6 +3,34 @@ title: Contributing
 description: Build, test, and contribution workflow for Sinter.
 ---
 
+## Reporting bugs
+
+Report bugs in the
+[GitHub issue tracker](https://github.com/hagix9/sinter/issues). Include
+the Sinter version (`sinter --version`), the controller and target OS, the
+smallest recipe and command line that reproduce the problem, and the
+output (`--verbose` or `--format json` helps). Replace real hostnames,
+credentials, keys, and tokens with placeholders.
+
+## Reporting security vulnerabilities
+
+Do not open a public issue for a suspected vulnerability. Report it
+privately through
+[GitHub private vulnerability reporting](https://github.com/hagix9/sinter/security/advisories/new),
+as described in
+[SECURITY.md](https://github.com/hagix9/sinter/blob/main/SECURITY.md).
+
+## Proposing changes
+
+Open an issue first for anything larger than a small fix, so the approach
+can be agreed before you write it. Submit changes as a pull request against
+`main`. Before submitting:
+
+- run the [quality gates](#quality-gates) and include tests for any change
+  in behavior;
+- for documentation changes, run `npm run check`, `npm run webmcp:check`,
+  and `npm run build` in `docs-site/` (see [Documentation](#documentation)).
+
 ## Build
 
 ```sh

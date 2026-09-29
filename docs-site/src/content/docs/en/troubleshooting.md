@@ -91,7 +91,7 @@ inspect the target state first, then re-apply if safe.
 
 Installs use a private metadata snapshot under `/var/tmp/sinter-dnf.*`
 (mode 0700). Snapshot residues should not persist after runs — if any remain,
-report it as a bug.
+[report it as a bug](/en/contributing/#reporting-bugs).
 
 ## Getting more detail
 

@@ -3,6 +3,35 @@ title: コントリビューション
 description: Sinter のビルド、テスト、コントリビューションのワークフロー。
 ---
 
+## バグの報告
+
+バグは
+[GitHub の Issue トラッカー](https://github.com/hagix9/sinter/issues)
+に報告してください。Sinter のバージョン（`sinter --version`）、
+コントローラとターゲットの OS、問題を再現する最小の recipe とコマンドライン、
+出力（`--verbose` や `--format json` が役立ちます）を含めてください。
+実際のホスト名、認証情報、鍵、トークンはプレースホルダに置き換えてください。
+
+## セキュリティ脆弱性の報告
+
+脆弱性の疑いがある問題を公開 Issue に書かないでください。
+[GitHub のプライベート脆弱性報告](https://github.com/hagix9/sinter/security/advisories/new)
+から非公開で報告してください。詳細は
+[SECURITY.md](https://github.com/hagix9/sinter/blob/main/SECURITY.md)
+を参照してください。
+
+## 変更の提案
+
+小さな修正を超える変更は、実装する前に Issue を開いて方針を合意して
+ください。変更は `main` に対する pull request として提出してください。
+提出する前に:
+
+- [品質ゲート](#品質ゲート)を実行し、動作を変える変更にはテストを
+  含めてください。
+- ドキュメントを変更した場合は、`docs-site/` で `npm run check`、
+  `npm run webmcp:check`、`npm run build` を実行してください
+  （[ドキュメント](#ドキュメント)を参照）。
+
 ## ビルド
 
 ```sh

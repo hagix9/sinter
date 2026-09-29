@@ -498,6 +498,16 @@ ChatGPT → Sinter Plugin → 公開 Gateway (https://gateway.fulltrust.co.jp/mc
 セットアップ、トラブルシューティング、セキュリティ / プライバシーの詳細:
 [ChatGPT Plugin ガイド](https://sinter.fulltrust.co.jp/ja/guides/chatgpt-plugin/)
 
+## バグと脆弱性の報告
+
+- バグ: [Issue トラッカー](https://github.com/hagix9/sinter/issues)に
+  Issue を作成してください。
+- セキュリティ脆弱性の疑い: 公開 Issue にせず、[SECURITY.md](SECURITY.md)
+  の手順に従って非公開で報告してください。
+- コントリビューション:
+  [コントリビューションガイド](https://sinter.fulltrust.co.jp/ja/contributing/)
+  を参照してください。
+
 ## ライセンス
 
 Sinterは以下のいずれかを選択できるデュアルライセンスです。

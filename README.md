@@ -500,6 +500,15 @@ ChatGPT → Sinter plugin → public Gateway (https://gateway.fulltrust.co.jp/mc
 Setup, troubleshooting, and security/privacy details:
 [ChatGPT Plugin guide](https://sinter.fulltrust.co.jp/en/guides/chatgpt-plugin/).
 
+## Reporting bugs and vulnerabilities
+
+- Bugs: open an issue in the
+  [issue tracker](https://github.com/hagix9/sinter/issues).
+- Suspected security vulnerabilities: do not open a public issue; report
+  privately as described in [SECURITY.md](SECURITY.md).
+- Contributing: see the
+  [contributing guide](https://sinter.fulltrust.co.jp/en/contributing/).
+
 ## License
 
 Sinter is licensed under either of:
