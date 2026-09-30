@@ -53,10 +53,10 @@ git diff --check
 
 Every push and pull request runs two GitHub Actions workflows:
 
-- **CI** runs the release gate's Linux build and test commands for the root
-  crate and `gateway/` on GitHub-hosted Ubuntu runners. Some root tests change
-  the machine they run on (apt, systemd units, the host's SSH service), so
-  that job refuses to run anywhere but on a GitHub-hosted runner.
+- **CI** checks formatting and clippy for the root crate and `gateway/`,
+  builds the root test binaries without running them, and runs the gateway
+  tests and the installer and release-checker tests. None of these change
+  the machine they run on.
 - **Dependency advisories** checks `Cargo.lock` and `gateway/Cargo.lock`
   against OSV.dev, which carries GitHub-reviewed and RustSec advisories. It
   also runs weekly, so a new advisory against unchanged dependencies is
@@ -67,6 +67,12 @@ databases, with the version ranges the databases record. Databases can lag or
 record incomplete ranges. A failing run is fixed forward; tests are not
 retried automatically. CI does not replace the release gate or target
 acceptance in `RELEASE.md`.
+
+The root test suite (`cargo test` in the repository root) runs in the release
+gate, not in CI. With passwordless sudo, some of its tests change the machine
+they run on: they install and remove apt packages, create systemd units, and
+enable or restart the host's SSH service. Run it only on a dedicated,
+disposable Linux machine.
 
 Advisory exceptions live in an `osv-scanner.toml` next to the lockfile, each
 with a reason and an expiry date (`ignoreUntil`; the run fails from that date

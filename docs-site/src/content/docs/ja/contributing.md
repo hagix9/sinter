@@ -54,10 +54,9 @@ git diff --check
 
 push と pull request のたびに、2 つの GitHub Actions ワークフローが実行されます。
 
-- **CI** は、リリースゲートの Linux ビルドとテストのコマンドを、ルートの crate と
-  `gateway/` に対して GitHub ホストの Ubuntu ランナーで実行します。ルートの一部の
-  テストは実行するマシン自体を変更します（apt、systemd ユニット、ホストの SSH
-  サービス）。そのため、このジョブは GitHub ホストのランナー以外では実行を拒否します。
+- **CI** は、ルートの crate と `gateway/` のフォーマットと clippy を確認し、ルートの
+  テストバイナリをビルドだけして（実行はしません）、gateway のテスト、インストーラと
+  リリースチェッカーのテストを実行します。いずれも実行するマシンを変更しません。
 - **Dependency advisories** は、`Cargo.lock` と `gateway/Cargo.lock` を OSV.dev
   と照合します。OSV.dev には GitHub がレビューした advisory と RustSec の advisory
   が含まれます。依存関係が変わらなくても新しい advisory に気付けるよう、毎週も
@@ -68,6 +67,12 @@ push と pull request のたびに、2 つの GitHub Actions ワークフロー�
 範囲の記録漏れがあり得ます。失敗した実行は、後続のコミットで修正します。テストは
 自動では再試行しません。CI は `RELEASE.md` のリリースゲートやターゲットでの受け入れ
 検証の代わりにはなりません。
+
+ルートのテストスイート（リポジトリ直下での `cargo test`）は、CI ではなくリリース
+ゲートで実行します。パスワードなしの sudo が使える環境では、一部のテストが実行する
+マシン自体を変更します（apt パッケージのインストールと削除、systemd ユニットの作成、
+ホストの SSH サービスの有効化と再起動）。専用の使い捨て Linux マシンでだけ実行して
+ください。
 
 advisory の例外は、lockfile と同じディレクトリの `osv-scanner.toml` に、理由と
 期限（`ignoreUntil`。その日付以降は実行が失敗します）を付けて記録します。現在の

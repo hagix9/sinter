@@ -201,8 +201,9 @@ makes later SSH tests fail). Service and handler lifecycle tests use a
 dedicated fixture unit, but some tests act on the host's own SSH service:
 `tests/package_service.rs` ensures `openssh-server` is installed and the SSH
 unit is running and enabled, and `tests/remediation.rs` restarts that unit
-through a handler. Run the gate only on a host where that is acceptable; the
-per-commit CI runs these tests only on GitHub-hosted runners. A gate failure
+through a handler. Run the gate only on a dedicated, disposable Linux host.
+The per-commit CI builds the root test binaries but does not run them; this
+gate is where the root test suite runs. A gate failure
 that disturbs the host's SSH control plane is still a STOP: diagnose it on
 the evidence, never retry in place.
 
