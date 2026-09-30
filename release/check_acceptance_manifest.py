@@ -5,13 +5,19 @@ Usage:
   check_acceptance_manifest.py MANIFEST.json
       (--bundle-archive BUNDLE.tar.gz | --bundle DIR)
       --artifact sinter-vX.Y.Z-linux-x86_64.tar.gz
-      [--sums sinter-vX.Y.Z-acceptance-SHA256SUMS]
+      [--sums sinter-vX.Y.Z-acceptance-SHA256SUMS] [--repo DIR]
   check_acceptance_manifest.py --template release/acceptance-manifest.template.json
 
 A real manifest passes only when all of the following hold (see
 release/ACCEPTANCE_EVIDENCE.md):
   - the schema and every consistency rule, including the Linux validation
     gate, the required target set, and a GO verdict;
+  - the gate log shows the full root test suite: every test harness that
+    `cargo test --all-targets` runs at the candidate commit, with pass counts
+    that add up to the recorded root-test counts, and linux_only_suites names
+    exactly the Linux-only suites at that commit. Both lists are derived from
+    the repository (--repo, default: this checkout) with git and cargo, never
+    from the manifest;
   - the evidence bundle is safe and complete: only regular files, every path
     stays inside the bundle, no links or special files, the bundle holds
     exactly the manifest copy plus every referenced file, and every
@@ -20,21 +26,27 @@ release/ACCEPTANCE_EVIDENCE.md):
   - optionally, the acceptance SHA256SUMS covers the manifest and the bundle;
   - the manifest and every bundle file pass the sensitive-data scan.
 
-The bundle archive is inspected in memory; nothing is extracted to disk.
+The bundle archive is inspected in memory; nothing from it is extracted to
+disk. Only the candidate commit's own tree is exported, to a temporary
+directory, so that cargo can list its targets.
 --template checks only the structure of the placeholder template.
 
-Standard library only. Exit 0 = valid, 1 = invalid, 2 = usage error.
+Standard library only (plus the git and cargo executables).
+Exit 0 = valid, 1 = invalid, 2 = usage error.
 """
 import argparse
 import datetime
 import hashlib
+import io
 import ipaddress
 import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import tarfile
+import tempfile
 import zlib
 
 SCHEMA = "sinter-acceptance-manifest/1"
@@ -82,6 +94,16 @@ LINUX_GATE_STEPS = {
     ),
     "gateway-test": ("cargo test --manifest-path gateway/Cargo.toml --locked --all-targets --all-features", True),
 }
+
+# The root-test step must be evidenced for the whole suite. What that suite is
+# comes from the repository at the candidate commit, not from the manifest:
+# cargo's target list gives the test harnesses `cargo test --all-targets` runs,
+# and a tests/*.rs file carrying this attribute is a Linux-only suite (the same
+# rule as the grep in RELEASE.md step 4).
+ROOT_TEST_STEP = "root-test"
+LINUX_ONLY_ATTR = re.compile(r'(?m)^#!\[cfg\(target_os = "linux"\)\]')
+LIB_KINDS = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
+DEFAULT_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class Invalid(Exception):
@@ -537,6 +559,8 @@ def check_linux_gate(lv, commit, run_start, template, errors, refs, facts):
             errors.append(f"{sw}.failed: must be 0")
         if is_test and counts["passed"] == 0:
             errors.append(f"{sw}.passed: a test step must run tests")
+        if name == ROOT_TEST_STEP:
+            facts["root_test_counts"] = counts
     if template:
         return
     for name in LINUX_GATE_STEPS:
@@ -556,7 +580,135 @@ def check_linux_gate(lv, commit, run_start, template, errors, refs, facts):
         if not isinstance(s, str) or not re.match(r"^tests/[a-z0-9_]+\.rs$", s):
             errors.append(f"{w}.linux_only_suites[{i}]: must be tests/<name>.rs")
     facts["linux_suites"] = [s for s in suites if isinstance(s, str)]
+    facts["commit"] = commit
     check_ref(lp, ls, f"{w}.log", errors, refs, exact=LINUX_GATE_LOG)
+
+
+def root_test_inventory(repo, commit):
+    """Test harnesses and Linux-only suites of the root crate at `commit`.
+
+    Returns (labels, linux_suites): labels as cargo prints them after
+    "Running" ("unittests src/lib.rs", "tests/engine.rs"). Raises Invalid
+    when the inventory cannot be established, so acceptance fails closed.
+    """
+    where = "linux_validation: root test inventory"
+    try:
+        tar = subprocess.run(
+            ["git", "-C", repo, "archive", "--format=tar", commit],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        raise Invalid(f"{where}: cannot read commit {commit} from {repo} "
+                      "(run the checker from a clone that contains the candidate commit)")
+    with tempfile.TemporaryDirectory(prefix="sinter-root-inventory-") as tmp:
+        with tarfile.open(fileobj=io.BytesIO(tar)) as tf:
+            for m in tf.getmembers():
+                norm = os.path.normpath(m.name)
+                if (m.isdir() or m.isreg()) and not os.path.isabs(norm) and not norm.startswith(".."):
+                    tf.extract(m, tmp)
+        try:
+            meta = json.loads(subprocess.run(
+                ["cargo", "metadata", "--no-deps", "--offline", "--format-version", "1",
+                 "--manifest-path", os.path.join(tmp, "Cargo.toml")],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+            ).stdout)
+        except (OSError, subprocess.CalledProcessError, ValueError):
+            raise Invalid(f"{where}: cargo metadata failed at commit {commit}")
+        root = os.path.realpath(tmp)
+        pkgs = [p for p in meta.get("packages", [])
+                if os.path.realpath(os.path.dirname(p.get("manifest_path", ""))) == root]
+        if len(pkgs) != 1:
+            raise Invalid(f"{where}: expected exactly one root package at commit {commit}")
+        labels, linux = set(), set()
+        for t in pkgs[0].get("targets", []):
+            kinds = set(t.get("kind", []))
+            if kinds == {"custom-build"}:
+                continue
+            rel = os.path.relpath(os.path.realpath(t["src_path"]), root).replace(os.sep, "/")
+            if not t.get("test", True):
+                raise Invalid(f"{where}: target {rel} sets test = false, which this checker does not handle")
+            if kinds <= LIB_KINDS or kinds == {"bin"}:
+                labels.add("unittests " + rel)
+            elif kinds == {"test"}:
+                labels.add(rel)
+                with open(t["src_path"], encoding="utf-8", errors="replace") as f:
+                    if LINUX_ONLY_ATTR.search(f.read()):
+                        linux.add(rel)
+            else:
+                raise Invalid(f"{where}: target {rel} of kind {sorted(kinds)} is not handled by this checker")
+        if not labels:
+            raise Invalid(f"{where}: no test harness found at commit {commit}")
+        return labels, linux
+
+
+def check_linux_suite_inventory(facts, errors):
+    """linux_only_suites must name exactly the Linux-only suites at the commit."""
+    inv = facts.get("root_inventory")
+    if inv is None:
+        return
+    w = "linux_validation.linux_only_suites"
+    declared = set()
+    for s in facts.get("linux_suites", []):
+        if s in declared:
+            errors.append(f"{w}: {s} is listed twice")
+        declared.add(s)
+    for s in sorted(inv[1] - declared):
+        errors.append(f"{w}: missing {s}, a Linux-only suite at the candidate commit")
+    for s in sorted(declared - inv[1]):
+        errors.append(f"{w}: {s} is not a Linux-only suite at the candidate commit")
+
+
+def check_root_test_log(text, facts, errors):
+    """The root-test section of the gate log must show the full root suite."""
+    inv = facts.get("root_inventory")
+    if inv is None:
+        return
+    labels, linux = inv
+    w = f"{LINUX_GATE_LOG}: root-test"
+    starts = re.findall(r"(?m)^== step root-test start ", text)
+    ends = re.findall(r"(?m)^== step root-test rc=", text)
+    m = re.search(r"(?ms)^== step root-test start [^\n]*\n(.*?)^== step root-test rc=(\d+) end\b", text)
+    if len(starts) != 1 or len(ends) != 1 or m is None:
+        errors.append(f"{w}: the log must contain exactly one section from "
+                      "'== step root-test start' to '== step root-test rc=N end'")
+        return
+    body, rc = m.group(1), m.group(2)
+    first = next((ln for ln in body.splitlines() if ln.strip()), "")
+    want = "$ " + LINUX_GATE_STEPS[ROOT_TEST_STEP][0]
+    if first != want:
+        errors.append(f"{w}: the section must start with '{want}'")
+    if rc != "0":
+        errors.append(f"{w}: the step exited with rc={rc}")
+    heads = list(re.finditer(r"(?m)^\s+Running (\S+(?: \S+)?) \([^)\n]*\)[ \t]*$", body))
+    ran, passed, ignored = {}, 0, 0
+    for i, h in enumerate(heads):
+        label = h.group(1)
+        chunk = body[h.end():heads[i + 1].start() if i + 1 < len(heads) else len(body)]
+        res = re.findall(r"(?m)^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored", chunk)
+        if label in ran:
+            errors.append(f"{w}: {label} appears more than once")
+            continue
+        if len(res) != 1:
+            errors.append(f"{w}: {label} must have exactly one test result line")
+            continue
+        status, p, f, ig = res[0][0], int(res[0][1]), int(res[0][2]), int(res[0][3])
+        ran[label] = p
+        if status != "ok" or f:
+            errors.append(f"{w}: {label} did not pass")
+        passed += p
+        ignored += ig
+    for label in sorted(labels - ran.keys()):
+        errors.append(f"{w}: {label} did not run (the full root suite is required)")
+    for label in sorted(ran.keys() - labels):
+        errors.append(f"{w}: {label} is not a test harness of the candidate commit")
+    for s in sorted(linux & ran.keys()):
+        if ran[s] == 0:
+            errors.append(f"{w}: Linux-only suite {s} ran no tests")
+    counts = facts.get("root_test_counts") or {}
+    if counts.get("passed") != passed:
+        errors.append(f"{w}: recorded passed={counts.get('passed')} but the log shows {passed}")
+    if counts.get("ignored") != ignored:
+        errors.append(f"{w}: recorded ignored={counts.get('ignored')} but the log shows {ignored}")
 
 
 # ---------------------------------------------------------------------------
@@ -741,6 +893,7 @@ def check_bundle(files, manifest_raw, refs, facts, errors):
                     break
             if not ran:
                 errors.append(f"{LINUX_GATE_LOG}: Linux-only suite {s} did not run tests on the gate host")
+        check_root_test_log(text, facts, errors)
 
 
 def check_artifact(path, facts, errors):
@@ -835,6 +988,12 @@ def run(args):
     version = facts.get("version")
     if not version:
         return errors + ["candidate.version: required before the bundle can be checked"]
+    if facts.get("commit") and HEX40.match(facts["commit"]):
+        try:
+            facts["root_inventory"] = root_test_inventory(args.repo, facts["commit"])
+        except Invalid as e:
+            errors.append(str(e))
+        check_linux_suite_inventory(facts, errors)
 
     if args.bundle_archive:
         stem = (facts.get("bundle_name") or "")[: -len(".tar.gz")]
@@ -870,6 +1029,8 @@ def main(argv):
     ap.add_argument("--bundle-archive", metavar="TAR_GZ", help="evidence bundle archive (inspected in memory)")
     ap.add_argument("--artifact", metavar="TAR_GZ", help="the release artifact the manifest describes")
     ap.add_argument("--sums", metavar="FILE", help="the acceptance SHA256SUMS asset")
+    ap.add_argument("--repo", metavar="DIR", default=DEFAULT_REPO,
+                    help="Sinter repository containing the candidate commit (default: this checkout)")
     args = ap.parse_args(argv)
     if not args.template:
         if bool(args.bundle) == bool(args.bundle_archive):

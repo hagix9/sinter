@@ -27,7 +27,11 @@ VERSION = "9.9.9"  # synthetic candidate version
 STEM = f"sinter-v{VERSION}-acceptance-evidence"
 BUNDLE_NAME = STEM + ".tar.gz"
 ARTIFACT_NAME = f"sinter-v{VERSION}-linux-x86_64.tar.gz"
-COMMIT = "0123456789abcdef0123456789abcdef01234567"
+# Set by setUpModule: commits of a small fixture crate in a temporary git
+# repository, from which the checker derives the root test inventory.
+REPO = None
+COMMIT = None
+COMMIT_ADDED = COMMIT_UNGATED = COMMIT_RENAMED = None
 TARGETS = {
     "ubuntu2404": ("Ubuntu", "24.04"),
     "ubuntu2604": ("Ubuntu", "26.04"),
@@ -49,6 +53,79 @@ GATE_STEPS = [
     ("gateway-test", "cargo test --manifest-path gateway/Cargo.toml --locked --all-targets --all-features", 300),
 ]
 SUITES = ["tests/audit.rs", "tests/cli.rs"]
+ROOT_CMD = "cargo test --locked --all-targets --all-features"
+# The root test harnesses of the fixture crate and their pass counts; the sum
+# (900) is the root-test count recorded in the synthetic manifest.
+ROOT_BLOCKS = [
+    ("unittests src/lib.rs", 400),
+    ("unittests src/main.rs", 0),
+    ("tests/audit.rs", 10),
+    ("tests/cli.rs", 10),
+    ("tests/frontends.rs", 480),
+]
+LINUX_SUITE = '#![cfg(target_os = "linux")]\n#[test]\nfn t() {}\n'
+FIXTURE_CRATE = {
+    "Cargo.toml": '[package]\nname = "fixture"\nversion = "0.1.0"\nedition = "2021"\n',
+    "src/lib.rs": "pub fn f() {}\n",
+    "src/main.rs": "fn main() {}\n",
+    "tests/audit.rs": LINUX_SUITE,
+    "tests/cli.rs": LINUX_SUITE,
+    "tests/frontends.rs": "#[test]\nfn t() {}\n",
+}
+_repo_tmp = None
+
+
+def _git(*args):
+    return subprocess.run(
+        ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+         "-c", "commit.gpgsign=false", "-C", REPO, *args],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
+    ).stdout.strip()
+
+
+def _commit(base, write=None, remove=(), message="fixture"):
+    if base:
+        _git("checkout", "-q", "--detach", base)
+    for rel, text in (write or {}).items():
+        path = os.path.join(REPO, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+    for rel in remove:
+        os.remove(os.path.join(REPO, *rel.split("/")))
+    _git("add", "-A")
+    _git("commit", "-q", "-m", message)
+    return _git("rev-parse", "HEAD")
+
+
+def setUpModule():
+    global REPO, COMMIT, COMMIT_ADDED, COMMIT_UNGATED, COMMIT_RENAMED, _repo_tmp
+    _repo_tmp = tempfile.TemporaryDirectory(prefix="sinter-fixture-repo-")
+    REPO = _repo_tmp.name
+    _git("init", "-q")
+    COMMIT = _commit(None, FIXTURE_CRATE, message="fixture crate")
+    COMMIT_ADDED = _commit(COMMIT, {"tests/extra.rs": LINUX_SUITE}, message="add a Linux-only suite")
+    COMMIT_UNGATED = _commit(COMMIT, {"tests/cli.rs": "#[test]\nfn t() {}\n"}, message="cli runs everywhere")
+    COMMIT_RENAMED = _commit(COMMIT, {"tests/audit_renamed.rs": LINUX_SUITE}, ["tests/audit.rs"], "rename audit")
+
+
+def tearDownModule():
+    _repo_tmp.cleanup()
+
+
+def gate_log(blocks=None, command=ROOT_CMD, rc=0):
+    """A gate log with one root-test section, as the gate harness writes it."""
+    lines = ["== step root-test start 2026-09-01T00:10:00Z", "$ " + command]
+    for label, n in ROOT_BLOCKS if blocks is None else blocks:
+        lines += [
+            f"     Running {label} (target/debug/deps/x-0000)",
+            "",
+            f"running {n} tests",
+            f"test result: ok. {n} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out",
+            "",
+        ]
+    lines.append(f"== step root-test rc={rc} end 2026-09-01T00:20:00Z")
+    return ("\n".join(lines) + "\n").encode()
 
 
 def sha(b):
@@ -88,13 +165,7 @@ class Evidence:
         self.exe = b"synthetic sinter executable\n"
         self.files = {
             "harness/run.sh": b"#!/bin/sh\necho synthetic acceptance harness\n",
-            "validation/linux-gate.log": (
-                "".join(
-                    f"     Running {s} (target/debug/deps/x-0000)\n\nrunning 10 tests\n"
-                    "test result: ok. 10 passed; 0 failed; 0 ignored\n"
-                    for s in SUITES
-                )
-            ).encode(),
+            "validation/linux-gate.log": gate_log(),
         }
         for label in TARGETS:
             self.files[f"logs/{label}.log"] = (
@@ -218,7 +289,7 @@ class Evidence:
 
 def run_checker(*args):
     p = subprocess.run(
-        [sys.executable, CHECKER, *args],
+        [sys.executable, CHECKER, *args, "--repo", REPO],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         universal_newlines=True,
@@ -657,6 +728,113 @@ class SensitiveData(Base):
                 {"path": "harness/web01.fixture-corp.io/run.sh", "sha256": sha(b"echo synthetic\n")}
             )
         self.assertReject(self.check(doc, files), "bundle paths:")
+
+
+class RootTestEvidence(Base):
+    """The gate log must show the full root suite of the candidate commit (F-1).
+
+    The expected harnesses and Linux-only suites come from the fixture
+    repository, so a partial run cannot be recorded as the full suite.
+    """
+
+    def set_log(self, blocks=None, **kw):
+        self.ev.files["validation/linux-gate.log"] = gate_log(blocks, **kw)
+
+    @staticmethod
+    def root(d):
+        return next(s for s in d["linux_validation"]["steps"] if s["name"] == "root-test")
+
+    @staticmethod
+    def at(commit):
+        def doc(d):
+            d["candidate"]["source_commit"] = commit
+            d["linux_validation"]["source_commit"] = commit
+        return doc
+
+    def test_full_suite_passes(self):
+        self.assertPass(self.check())
+
+    def test_single_suite_log_is_rejected(self):
+        # The F-1 exploit: one suite in the log, declared as the only
+        # Linux-only suite, and root-test recorded as passed: 1.
+        self.set_log([("tests/audit.rs", 1)])
+
+        def doc(d):
+            d["linux_validation"]["linux_only_suites"] = ["tests/audit.rs"]
+            self.root(d)["passed"] = 1
+        self.assertReject(self.check(doc), "unittests src/lib.rs did not run", "missing tests/cli.rs")
+
+    def test_subset_of_harnesses_is_rejected(self):
+        self.set_log([b for b in ROOT_BLOCKS if b[0] != "tests/frontends.rs"])
+        self.assertReject(self.check(lambda d: self.root(d).update(passed=420)),
+                          "tests/frontends.rs did not run")
+
+    def test_subset_of_linux_suites_is_rejected(self):
+        self.assertReject(
+            self.check(lambda d: d["linux_validation"].update(linux_only_suites=["tests/cli.rs"])),
+            "missing tests/audit.rs",
+        )
+
+    def test_inflated_count_is_rejected(self):
+        self.assertReject(self.check(lambda d: self.root(d).update(passed=901)),
+                          "recorded passed=901 but the log shows 900")
+
+    def test_deflated_count_is_rejected(self):
+        self.assertReject(self.check(lambda d: self.root(d).update(passed=899)),
+                          "recorded passed=899 but the log shows 900")
+
+    def test_missing_linux_suite_in_log_is_rejected(self):
+        self.set_log([b for b in ROOT_BLOCKS if b[0] != "tests/cli.rs"])
+        self.assertReject(self.check(lambda d: self.root(d).update(passed=890)), "tests/cli.rs did not run")
+
+    def test_unknown_linux_suite_is_rejected(self):
+        def doc(d):
+            d["linux_validation"]["linux_only_suites"] += ["tests/frontends.rs", "tests/unknown.rs"]
+        self.assertReject(self.check(doc), "tests/frontends.rs is not a Linux-only suite",
+                          "tests/unknown.rs is not a Linux-only suite")
+
+    def test_duplicate_linux_suite_is_rejected(self):
+        self.assertReject(
+            self.check(lambda d: d["linux_validation"]["linux_only_suites"].append("tests/cli.rs")),
+            "tests/cli.rs is listed twice",
+        )
+
+    def test_zero_execution_is_rejected(self):
+        self.set_log([(label, 0) for label, _ in ROOT_BLOCKS])
+        self.assertReject(self.check(lambda d: self.root(d).update(passed=0)),
+                          "a test step must run tests", "Linux-only suite tests/audit.rs ran no tests")
+
+    def test_log_command_mismatch_is_rejected(self):
+        self.set_log(command="cargo test --locked --all-targets --all-features --test cli")
+        self.assertReject(self.check(), "the section must start with '$ " + ROOT_CMD + "'")
+
+    def test_nonzero_rc_is_rejected(self):
+        self.set_log(rc=101)
+        self.assertReject(self.check(), "the step exited with rc=101")
+
+    def test_unsectioned_log_is_rejected(self):
+        self.ev.files["validation/linux-gate.log"] = gate_log().replace(b"== step root-test", b"== step other")
+        self.assertReject(self.check(), "exactly one section")
+
+    def test_unknown_and_duplicate_harness_in_log_are_rejected(self):
+        self.set_log(ROOT_BLOCKS + [("tests/other.rs", 0), ("tests/audit.rs", 0)])
+        self.assertReject(self.check(), "tests/other.rs is not a test harness of the candidate commit",
+                          "tests/audit.rs appears more than once")
+
+    def test_stale_evidence_for_added_suite_is_rejected(self):
+        self.assertReject(self.check(self.at(COMMIT_ADDED)), "tests/extra.rs did not run",
+                          "missing tests/extra.rs")
+
+    def test_stale_evidence_for_ungated_suite_is_rejected(self):
+        self.assertReject(self.check(self.at(COMMIT_UNGATED)), "tests/cli.rs is not a Linux-only suite")
+
+    def test_stale_evidence_for_renamed_suite_is_rejected(self):
+        self.assertReject(self.check(self.at(COMMIT_RENAMED)),
+                          "tests/audit.rs is not a test harness of the candidate commit",
+                          "tests/audit_renamed.rs did not run")
+
+    def test_commit_missing_from_repository_is_rejected(self):
+        self.assertReject(self.check(self.at("e" * 40)), "cannot read commit")
 
 
 if __name__ == "__main__":

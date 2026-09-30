@@ -208,8 +208,11 @@ that disturbs the host's SSH control plane is still a STOP: diagnose it on
 the evidence, never retry in place.
 
 Capture the full output of all of the above into one log
-(`validation/linux-gate.log` in the evidence bundle) and record, as they are
-produced, the `linux_validation` fields of the Evidence Manifest:
+(`validation/linux-gate.log` in the evidence bundle), delimiting each step
+with `== step <name> start <time>`, `$ <command>` and
+`== step <name> rc=<rc> end <time>` lines as the gate harness does, and
+record, as they are produced, the `linux_validation` fields of the Evidence
+Manifest:
 OS name/version/architecture, `RC_COMMIT`, `rustc`/`cargo` versions, start
 and finish times, the Linux-only suites, and for each step its name, pinned
 command, result, and passed/failed/ignored counts.
@@ -218,7 +221,13 @@ GO only when every step PASSes, every Linux-only suite ran at least one
 test, and nothing failed. **Any FAIL is a STOP:** no build, no acceptance,
 no tag; return to step 1. The checker enforces this record at step 12
 (`linux_validation`: pinned commands, all PASS, x86_64, same commit,
-finished before acceptance started, Linux-only suites executed).
+finished before acceptance started, Linux-only suites executed). A partial
+root test run is not valid evidence: the log's `root-test` section must show
+every test harness of the root crate at `RC_COMMIT`, their pass counts must
+add up to the recorded `root-test` counts, and `linux_only_suites` must name
+exactly the Linux-only suites at `RC_COMMIT`. The checker derives both lists
+from the repository with git and cargo, so run it from a clone that contains
+`RC_COMMIT`.
 
 ## Steps 5–6 — Build once and freeze the artifact
 

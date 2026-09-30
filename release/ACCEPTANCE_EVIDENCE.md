@@ -116,6 +116,7 @@ Fields for each entry in `targets`:
 - `verdict` is `GO` only when every target is `PASS`. A `NO-GO` manifest never passes the checker, because it cannot support a release.
 - Timestamps are ordered: Linux gate before the run, each target inside the run.
 - The Linux gate record has every required step with its pinned command, all `PASS` with no failures, test steps with at least one passed test, and each Linux-only suite shows executed tests in `validation/linux-gate.log`.
+- The log's `root-test` section (from `== step root-test start` to `== step root-test rc=0 end`, starting with the pinned command) shows every test harness of the root crate at `candidate.source_commit`, each passing; their pass and ignore counts add up to the recorded `root-test` counts; and `linux_only_suites` names exactly the Linux-only suites at that commit. Both lists come from the repository (git and cargo), not from the manifest, so a partial run cannot be recorded as the full suite.
 - Every referenced file exists in the bundle as a regular file and matches its SHA-256; the bundle's `acceptance-manifest.json` is byte-identical to the manifest being checked.
 - The artifact given to the checker has the recorded name, size, and SHA-256, and its `sinter-v${VERSION}-linux-x86_64/sinter` has the recorded executable SHA-256.
 - With `--sums`, the acceptance checksum file lists exactly the manifest and bundle assets, with matching hashes.
@@ -140,9 +141,9 @@ python3 release/check_acceptance_manifest.py \
   --sums sinter-v${VERSION}-acceptance-SHA256SUMS
 ```
 
-`--bundle <dir>` checks an already extracted bundle directory instead of the archive, with the same rules. Exit 0 means valid and `GO`; exit 1 prints one `FAIL` line per problem; exit 2 is a usage error.
+`--bundle <dir>` checks an already extracted bundle directory instead of the archive, with the same rules. The checker needs `git`, `cargo` and a clone of the repository that contains `candidate.source_commit`: by default the checkout it runs from, otherwise `--repo <dir>`. Exit 0 means valid and `GO`; exit 1 prints one `FAIL` line per problem; exit 2 is a usage error.
 
-The checker's own threat-model tests run with `python3 -m unittest discover -s release/tests` (offline, synthetic fixtures only).
+The checker's own threat-model tests run with `python3 -m unittest discover -s release/tests` (offline, synthetic fixtures only; they need `git` and `cargo`).
 
 ## Sensitive-data exclusion
 
