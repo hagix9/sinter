@@ -2,9 +2,12 @@
 //! instances on loopback act as two inventory hosts.
 //!
 //! Opt-in and Linux-only (the target must be a supported Linux system):
-//! `SINTER_TEST_LOCAL_SSHD=1`. Each sshd writes its own log, so "which host
-//! was contacted" is observed from the server side.
+//! `SINTER_TEST_LOCAL_SSHD=1`; without it the tests skip, and under
+//! `SINTER_TEST_STRICT=1` they fail. Each sshd writes its own log, so "which
+//! host was contacted" is observed from the server side.
 #![cfg(target_os = "linux")]
+
+mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -90,7 +93,7 @@ fn start(dir: &Path, name: &str) -> Server {
 impl Lab {
     fn start() -> Option<Lab> {
         if std::env::var("SINTER_TEST_LOCAL_SSHD").ok().as_deref() != Some("1") {
-            eprintln!("SINTER_TEST_SKIPPED: SINTER_TEST_LOCAL_SSHD not set");
+            common::skip_or_fail("SINTER_TEST_LOCAL_SSHD not set");
             return None;
         }
         // Files the recipes touch live under HOME, inside a private (0700)
@@ -463,4 +466,17 @@ fn plan_and_audit_report_every_selected_host() {
         .collect();
     assert_eq!(names, vec!["db01", "web01"]);
     assert!(lab.a.contacted() && lab.b.contacted());
+}
+
+/// Without `SINTER_TEST_LOCAL_SSHD=1` the lab does not start: the tests skip,
+/// and fail under `SINTER_TEST_STRICT=1` (the release gate) instead of
+/// passing without a server.
+#[test]
+fn missing_local_sshd_fails_under_strict_mode() {
+    common::assert_skips_unless_strict(
+        "plan_and_audit_report_every_selected_host",
+        "SINTER_TEST_LOCAL_SSHD not set",
+        &[],
+        &["SINTER_TEST_LOCAL_SSHD"],
+    );
 }

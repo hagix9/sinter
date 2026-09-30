@@ -45,7 +45,7 @@ STOP column, and every later output is discarded.
 | 1 | None (select commit) | `SOURCE_CANDIDATE` | Clean tree, reviewed, pushed | — |
 | 2 | Version fields, `Cargo.lock`, `CHANGELOG.md`, README platform/version text only | `RC_COMMIT` | Diff `SOURCE_CANDIDATE..RC_COMMIT` touches release metadata only | Unexpected diff → redo 2 |
 | 3 | None | Source validation report | All §3 checks pass | Any failure → 1 (remediation) or 2 |
-| 4 | None | Linux gate log + recorded results | Every step PASS on supported Linux x86_64 | Any FAIL → 1; **no build, no acceptance** |
+| 4 | None | Linux gate log + recorded results | Every step PASS on the Ubuntu 24.04 x86_64 gate host (strict mode) | Any FAIL → 1; **no build, no acceptance** |
 | 5 | Nothing in repo | Built executable | Baseline, ABI and provenance checks pass | Failure → 5, or 1 if source is wrong |
 | 6 | Nothing in repo | Tarball, `SHA256SUMS`, frozen hashes | Fresh extraction reproduces the frozen executable hash | Mismatch → 5 |
 | 7–9 | None (repository and artifact read-only) | Per-target results and raw logs | All 8 targets PASS with identical hashes | Any target FAIL or hash mismatch → NO-GO, return to 1 |
@@ -162,10 +162,19 @@ GO only when every check passes; otherwise NO-GO.
 
 ## Step 4 — Linux validation gate (mandatory, before any build)
 
-Run on a supported Linux x86_64 host (one of the eight supported
-distributions; Rocky Linux 9 x86_64 is the reference) from a clean checkout
-of exactly `RC_COMMIT`. Use a checkout path outside any home directory (for
-example `/work/sinter`) so the log contains no user paths.
+Run on the gate host, a dedicated, disposable **Ubuntu 24.04 LTS x86_64**
+host prepared as described below, from a clean checkout of exactly
+`RC_COMMIT`. Use a checkout path outside any home directory (for example
+`/work/sinter`) so the log contains no user paths.
+
+Why Ubuntu 24.04: the gate runs the root test suite in strict mode, where
+every integration test must either run or fail. Some of those tests need a
+Debian-family host: `tests/package_service.rs` installs and removes packages
+with `apt-get`, and `tests/handlers.rs` restarts the host's own `ssh.service`
+unit. On a RHEL-family host those tests fail in strict mode, and without
+strict mode they would skip and still count as passed. The other supported
+distributions are covered by the acceptance of the built artifact (steps
+7–9), not by this gate.
 
 A macOS or other non-Linux PASS is **not** a substitute. On macOS the
 Linux-only suites (`#![cfg(target_os = "linux")]`) compile to zero tests
@@ -180,7 +189,7 @@ grep -l '^#!\[cfg(target_os = "linux")\]' tests/*.rs   # → linux_only_suites
 # The commands are pinned; the checker rejects any other spelling.
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
-env SINTER_TEST_LOCAL_SSHD=1 cargo test --locked --all-targets --all-features
+env SINTER_TEST_STRICT=1 SINTER_TEST_LOCAL_SSHD=1 cargo test --locked --all-targets --all-features
 python3 tests/installer/test_install.py
 python3 -m unittest discover -s release/tests
 cargo fmt --manifest-path gateway/Cargo.toml --check
@@ -188,23 +197,82 @@ cargo clippy --manifest-path gateway/Cargo.toml --locked --all-targets --all-fea
 cargo test --manifest-path gateway/Cargo.toml --locked --all-targets --all-features
 ```
 
-`SINTER_TEST_LOCAL_SSHD=1` is part of the pinned `root-test` command. It
-enables the suites that start a throwaway unprivileged `sshd` on loopback:
-`tests/ssh_keys.rs` (key formats, host-key verification, and the SSH
-algorithm policy negotiated against a real server) and
-`tests/multihost_lab.rs`. Without it those tests return early and still
-count as passed, so a green run would not show that SSH negotiation was
-exercised. The gate host needs `sshd`, `ssh-keygen`, `ssh-agent` and
-`ssh-add`. Record and log the command exactly as written, including
-`env`, which keeps it a single command whether it is typed into a shell or
-run by a harness as an argument vector. The checker rejects `root-test`
-evidence recorded without the variable for every release after v1.1.1.
+The `root-test` command pins two variables:
+
+- `SINTER_TEST_STRICT=1` is strict mode. A test whose prerequisite is
+  missing (an SSH test input, passwordless `sudo`, a tool such as
+  `getfattr` or `script`, the local-sshd opt-in) fails with
+  `SINTER_TEST_REQUIRED: <reason>`. Without strict mode it prints
+  `SINTER_TEST_SKIPPED: <reason>` to captured stderr, returns early, and
+  still counts as passed, so pass counts cannot show that it did not run.
+  Only the value `1` enables strict mode.
+- `SINTER_TEST_LOCAL_SSHD=1` enables the suites that start a throwaway
+  unprivileged `sshd` on loopback: `tests/ssh_keys.rs` (key formats,
+  host-key verification, and the SSH algorithm policy negotiated against a
+  real server) and `tests/multihost_lab.rs`. Under strict mode these suites
+  fail without it.
+
+Together they make a PASS mean that every root integration test ran. Record
+and log the command exactly as written, including `env`, which keeps it a
+single command whether it is typed into a shell or run by a harness as an
+argument vector (the variables also override any value inherited from the
+environment). The checker rejects `root-test` evidence recorded with any
+other command for every release after v1.1.1; releases up to v1.1.1 keep the
+command they were pinned to.
+
+The evidence records only this command. The SSH test inputs below are
+runtime configuration of the gate host: never record their values (user
+names, key or known_hosts paths, keys) in the Evidence Manifest, and never
+put private key material in the log. The checker's sensitive-data scan
+applies to everything in the bundle.
 
 The gateway crate (`gateway/`) is not part of the release artifact. It is
 validated here anyway so that a release never ships from a commit whose
 workspace fails on the reference platform.
 
-Gate host: the host's own SSH service is its control plane and, in strict
+### Gate host
+
+In strict mode the gate host needs everything the root integration tests
+use; a missing item fails the gate rather than skipping tests:
+
+- Ubuntu 24.04 LTS x86_64 with systemd; a Rust 1.98.1 toolchain with
+  `rustfmt` and `clippy`; `build-essential`, `pkg-config`, `libssl-dev`,
+  `python3`, `git`.
+- A dedicated **non-root** gate user with passwordless `sudo -n` (the
+  unprivileged tests refuse to run as root; the privileged ones use
+  `sudo -n`). Its home directory and the path above it must carry no ACLs
+  or extended attributes (the trust checks refuse them).
+- `attr` (`/usr/bin/getfattr`, `/usr/bin/setfattr`) and `acl`
+  (`/usr/bin/getfacl`) on a filesystem with user extended attributes;
+  `apt-get` with reachable package repositories (`tests/package_service.rs`
+  installs and removes `cowsay`, or the package named by
+  `SINTER_TEST_PACKAGE`); `script(1)`; the stock masked and static systemd
+  units of the image.
+- `openssh-server` and the OpenSSH client tools (`sshd`, `ssh-keygen`,
+  `ssh-keyscan`, `ssh-agent`, `ssh-add`). The host's own `sshd` listens on
+  ports 22 and 2222 through `ssh.service` (not `ssh.socket`); the tests
+  probe the secondary port on `127.0.0.1:2222`.
+- A second user without sudo, reachable over SSH with the same key.
+- The SSH test inputs below, exported in the gate user's environment.
+
+SSH test inputs, by role. The SSH reference target is the gate host itself
+over loopback: the tests reach the secondary port and the name `localhost`
+on the same machine, so these describe the gate host, not an acceptance
+target.
+
+| Variable | Role | Required |
+|---|---|---|
+| `SINTER_TEST_SSH_HOST` | Loopback address of the gate host's own `sshd` (`127.0.0.1`) | Yes; without it the SSH tests fail in strict mode |
+| `SINTER_TEST_SSH_PORT` | Primary `sshd` port | No; defaults to 22 |
+| `SINTER_TEST_SSH_USER` | The gate user, who has passwordless sudo on the target | Yes; the default is not a gate user |
+| `SINTER_TEST_SSH_IDENTITY` | Path to the private key authorized for both test users | Yes |
+| `SINTER_TEST_SSH_KNOWN_HOSTS` | Path to a known_hosts file holding the host keys of the loopback target | Yes; the SSH tests fail without it |
+| `SINTER_TEST_SSH_NOSUDO_USER` | The user without sudo, for the sudo-denied test | No; defaults to `sinter-nosudo` |
+
+The key and the known_hosts file are created on the disposable gate host and
+never leave it.
+
+The host's own SSH service is its control plane and, in strict
 mode, the SSH reference target. After preparing the host, reboot it and,
 before the first gate command, confirm that `ssh.service` is active, no
 `ssh.socket` is active, and ports 22 and 2222 are owned by the

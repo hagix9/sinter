@@ -2,13 +2,16 @@
 //! transport against a throwaway unprivileged OpenSSH server.
 //!
 //! Opt-in: `SINTER_TEST_LOCAL_SSHD=1` (needs `sshd`, `ssh-keygen`,
-//! `ssh-agent`, `ssh-add`). The server runs as the invoking user on a free
-//! loopback port with generated host and user keys; nothing outside a
+//! `ssh-agent`, `ssh-add`); without it the tests skip, and under
+//! `SINTER_TEST_STRICT=1` they fail. The server runs as the invoking user on a
+//! free loopback port with generated host and user keys; nothing outside a
 //! temporary directory is touched.
 //!
 //! Success means "authenticated and host key verified": on a macOS server
 //! the later HOME probe fails (not a Linux target), so that specific error
 //! also counts as success.
+
+mod common;
 
 use sinter::engine::AgentSource;
 use sinter::executor::{SshConfig, SshExecutor};
@@ -56,7 +59,7 @@ impl Lab {
     /// Like `start`, with extra `sshd_config` lines (e.g. an algorithm list).
     fn start_with(extra: &str) -> Option<Lab> {
         if std::env::var("SINTER_TEST_LOCAL_SSHD").ok().as_deref() != Some("1") {
-            eprintln!("SINTER_TEST_SKIPPED: SINTER_TEST_LOCAL_SSHD not set");
+            common::skip_or_fail("SINTER_TEST_LOCAL_SSHD not set");
             return None;
         }
         let sshd = sshd_path().expect("sshd binary required");
@@ -391,4 +394,17 @@ fn server_offering_only_modern_algorithms_is_accepted() {
         connected(SshExecutor::connect(&lab.cfg(&kh, &["ed25519"]), false))
             .unwrap_or_else(|e| panic!("{what}: {e}"));
     }
+}
+
+/// Without `SINTER_TEST_LOCAL_SSHD=1` the lab does not start: the tests skip,
+/// and fail under `SINTER_TEST_STRICT=1` (the release gate) instead of
+/// passing without a server.
+#[test]
+fn missing_local_sshd_fails_under_strict_mode() {
+    common::assert_skips_unless_strict(
+        "every_common_key_format_authenticates",
+        "SINTER_TEST_LOCAL_SSHD not set",
+        &[],
+        &["SINTER_TEST_LOCAL_SSHD"],
+    );
 }

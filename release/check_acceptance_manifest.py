@@ -84,11 +84,17 @@ REQUIRED_TARGETS = {
 LINUX_GATE_STEPS = {
     "root-fmt": ("cargo fmt --check", False),
     "root-clippy": ("cargo clippy --locked --all-targets --all-features -- -D warnings", False),
-    # The throwaway local-sshd suites (tests/ssh_keys.rs, tests/multihost_lab.rs)
-    # return early and still count as passed unless SINTER_TEST_LOCAL_SSHD=1, so
-    # the variable is part of the pinned command. `env` keeps it one command
-    # whether a shell or a harness running it as argv executes the line.
-    "root-test": ("env SINTER_TEST_LOCAL_SSHD=1 cargo test --locked --all-targets --all-features", True),
+    # Integration tests whose prerequisite is missing return early and still
+    # count as passed unless SINTER_TEST_STRICT=1 turns that into a failure
+    # (tests/common skip_or_fail); the throwaway local-sshd suites
+    # (tests/ssh_keys.rs, tests/multihost_lab.rs) run only with
+    # SINTER_TEST_LOCAL_SSHD=1. Both variables are part of the pinned command.
+    # `env` keeps it one command whether a shell or a harness running it as
+    # argv executes the line.
+    "root-test": (
+        "env SINTER_TEST_STRICT=1 SINTER_TEST_LOCAL_SSHD=1 cargo test --locked --all-targets --all-features",
+        True,
+    ),
     "installer-test": ("python3 tests/installer/test_install.py", True),
     "checker-test": ("python3 -m unittest discover -s release/tests", True),
     "gateway-fmt": ("cargo fmt --manifest-path gateway/Cargo.toml --check", False),

@@ -95,6 +95,7 @@ fn user_xattrs_preserved_across_replacement() {
     if !std::path::Path::new("/usr/bin/getfattr").exists()
         || !std::path::Path::new("/usr/bin/setfattr").exists()
     {
+        skip_or_fail("requires getfattr and setfattr");
         return;
     }
     let dir = trusted_root("xattr-preserve");

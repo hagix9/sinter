@@ -46,7 +46,7 @@ TARGETS = {
 GATE_STEPS = [
     ("root-fmt", "cargo fmt --check", 0),
     ("root-clippy", "cargo clippy --locked --all-targets --all-features -- -D warnings", 0),
-    ("root-test", "env SINTER_TEST_LOCAL_SSHD=1 cargo test --locked --all-targets --all-features", 900),
+    ("root-test", "env SINTER_TEST_STRICT=1 SINTER_TEST_LOCAL_SSHD=1 cargo test --locked --all-targets --all-features", 900),
     ("installer-test", "python3 tests/installer/test_install.py", 20),
     ("checker-test", "python3 -m unittest discover -s release/tests", 60),
     ("gateway-fmt", "cargo fmt --manifest-path gateway/Cargo.toml --check", 0),
@@ -54,10 +54,45 @@ GATE_STEPS = [
     ("gateway-test", "cargo test --manifest-path gateway/Cargo.toml --locked --all-targets --all-features", 300),
 ]
 SUITES = ["tests/audit.rs", "tests/cli.rs"]
-ROOT_CMD = "env SINTER_TEST_LOCAL_SSHD=1 cargo test --locked --all-targets --all-features"
+ROOT_CMD = "env SINTER_TEST_STRICT=1 SINTER_TEST_LOCAL_SSHD=1 cargo test --locked --all-targets --all-features"
 # The root-test command without the local-sshd suites enabled: pinned for
 # releases up to v1.1.1, rejected for every later version.
 LEGACY_ROOT_CMD = "cargo test --locked --all-targets --all-features"
+# The root-test command with local sshd but without strict mode (pinned only
+# between 3cafd11 and the strict contract; no release used it).
+LOCAL_SSHD_ONLY_CMD = "env SINTER_TEST_LOCAL_SSHD=1 cargo test --locked --all-targets --all-features"
+# Spellings of the root-test command that must not pass for a release after
+# v1.1.1: each drops, weakens, reorders, or extends part of the pinned command.
+WEAKENED_ROOT_CMDS = {
+    "no env": "SINTER_TEST_STRICT=1 SINTER_TEST_LOCAL_SSHD=1 cargo test --locked --all-targets --all-features",
+    "no strict": LOCAL_SSHD_ONLY_CMD,
+    "no local sshd": "env SINTER_TEST_STRICT=1 cargo test --locked --all-targets --all-features",
+    "no variables": "env cargo test --locked --all-targets --all-features",
+    "legacy": LEGACY_ROOT_CMD,
+    "strict=0": ROOT_CMD.replace("SINTER_TEST_STRICT=1", "SINTER_TEST_STRICT=0"),
+    "strict=true": ROOT_CMD.replace("SINTER_TEST_STRICT=1", "SINTER_TEST_STRICT=true"),
+    "local sshd=0": ROOT_CMD.replace("SINTER_TEST_LOCAL_SSHD=1", "SINTER_TEST_LOCAL_SSHD=0"),
+    "misspelled strict": ROOT_CMD.replace("SINTER_TEST_STRICT", "SINTER_TEST_STRIC"),
+    "misspelled local sshd": ROOT_CMD.replace("SINTER_TEST_LOCAL_SSHD", "SINTER_TEST_LOCAL_SSH"),
+    "lowercase strict": ROOT_CMD.replace("SINTER_TEST_STRICT", "sinter_test_strict"),
+    "quoted value": ROOT_CMD.replace("SINTER_TEST_STRICT=1", "SINTER_TEST_STRICT='1'"),
+    "reordered variables": "env SINTER_TEST_LOCAL_SSHD=1 SINTER_TEST_STRICT=1 cargo test --locked --all-targets --all-features",
+    "no --locked": ROOT_CMD.replace(" --locked", ""),
+    "no --all-targets": ROOT_CMD.replace(" --all-targets", ""),
+    "no --all-features": ROOT_CMD.replace(" --all-features", ""),
+    "reordered flags": ROOT_CMD.replace("--locked --all-targets --all-features", "--all-features --all-targets --locked"),
+    "extra flag": ROOT_CMD + " --release",
+    "--no-run": ROOT_CMD + " --no-run",
+    "test filter": ROOT_CMD + " ssh",
+    "skip filter": ROOT_CMD + " -- --skip ssh",
+    "absolute env": "/usr/bin/" + ROOT_CMD,
+    "env -u": ROOT_CMD.replace("env ", "env -u SINTER_TEST_STRICT ", 1),
+    "second env": ROOT_CMD.replace(" cargo", " env SINTER_TEST_STRICT=0 cargo"),
+    "shell wrapper": "sh -c '" + ROOT_CMD + "'",
+    "shell suffix": ROOT_CMD + " || true",
+    "double space": ROOT_CMD.replace(" cargo", "  cargo"),
+    "trailing space": ROOT_CMD + " ",
+}
 # The root test harnesses of the fixture crate and their pass counts; the sum
 # (900) is the root-test count recorded in the synthetic manifest.
 ROOT_BLOCKS = [
@@ -860,10 +895,36 @@ class RootTestEvidence(Base):
         self.assertReject(self.check(self.without_local_sshd(manifest=False)),
                           "the section must start with '$ " + ROOT_CMD + "'")
 
+    def with_command(self, manifest_cmd, log_cmd):
+        self.set_log(command=log_cmd)
+        return lambda d: self.root(d).update(command=manifest_cmd)
+
+    def test_weakened_root_commands_are_rejected(self):
+        # Evidence of a run in which integration tests could skip and still
+        # count as passed, or that ran something other than the pinned command.
+        for what, cmd in WEAKENED_ROOT_CMDS.items():
+            with self.subTest(what):
+                self.assertReject(self.check(self.with_command(cmd, cmd)),
+                                  "steps[2].command: must be '" + ROOT_CMD + "'",
+                                  "the section must start with '$ " + ROOT_CMD + "'")
+
+    def test_strict_or_local_sshd_on_one_side_only_is_rejected(self):
+        # The manifest and the log are bound independently: a variable present
+        # in only one of them does not make the evidence complete.
+        for what in ("no strict", "no local sshd"):
+            weak = WEAKENED_ROOT_CMDS[what]
+            with self.subTest(what, only_in="manifest"):
+                self.assertReject(self.check(self.with_command(ROOT_CMD, weak)),
+                                  "the section must start with '$ " + ROOT_CMD + "'")
+            with self.subTest(what, only_in="log"):
+                self.assertReject(self.check(self.with_command(weak, ROOT_CMD)),
+                                  "steps[2].command: must be '" + ROOT_CMD + "'")
+
 
 class LegacyRootTestCommand(Base):
     """Published evidence up to v1.1.1 was pinned to the root-test command
-    without SINTER_TEST_LOCAL_SSHD=1; it stays valid, and only it."""
+    without SINTER_TEST_STRICT=1 and SINTER_TEST_LOCAL_SSHD=1; it stays valid,
+    and only it."""
 
     def at_version(self, version):
         names = {
@@ -887,10 +948,26 @@ class LegacyRootTestCommand(Base):
                 self.assertPass(self.check_legacy())
 
     def test_later_versions_need_local_sshd(self):
-        for version in ("1.1.2", "1.2.0", "2.0.0"):
+        for version in ("1.1.2", "1.1.10", "1.2.0", "1.10.0", "2.0.0"):
             with self.subTest(version=version):
                 self.at_version(version)
                 self.assertReject(self.check_legacy(), "must be '" + ROOT_CMD + "'")
+
+    def check_at(self, version, cmd):
+        self.at_version(version)
+        self.ev.files["validation/linux-gate.log"] = gate_log(command=cmd)
+        return self.check(lambda d: RootTestEvidence.root(d).update(command=cmd), sums=True)
+
+    def test_later_versions_need_strict_mode(self):
+        for version in ("1.1.2", "1.1.10", "1.10.0", "2.0.0"):
+            with self.subTest(version=version):
+                self.assertReject(self.check_at(version, LOCAL_SSHD_ONLY_CMD), "must be '" + ROOT_CMD + "'")
+                self.assertPass(self.check_at(version, ROOT_CMD))
+
+    def test_published_versions_do_not_take_a_later_command(self):
+        for version in ("1.0.0", "1.1.0", "1.1.1"):
+            with self.subTest(version=version):
+                self.assertReject(self.check_at(version, ROOT_CMD), "must be '" + LEGACY_ROOT_CMD + "'")
 
 
 if __name__ == "__main__":

@@ -537,6 +537,54 @@ pub fn skip(reason: &str) {
     skip_or_fail(reason);
 }
 
+/// Check how `test` (a test of the running test binary) handles a missing
+/// prerequisite, by rerunning it in a child process whose environment is
+/// changed by `set` and `remove`: without strict mode (`SINTER_TEST_STRICT`
+/// unset, `0`, or `true`) it must skip with `reason` and pass; with
+/// `SINTER_TEST_STRICT=1` it must fail with `reason`.
+pub fn assert_skips_unless_strict(test: &str, reason: &str, set: &[(&str, &str)], remove: &[&str]) {
+    for strict in [None, Some("0"), Some("true"), Some("1")] {
+        let mut c = std::process::Command::new(std::env::current_exe().unwrap());
+        c.args([test, "--exact", "--nocapture", "--test-threads=1"]);
+        c.env_remove("SINTER_TEST_STRICT");
+        for k in remove {
+            c.env_remove(k);
+        }
+        for (k, v) in set {
+            c.env(k, v);
+        }
+        if let Some(v) = strict {
+            c.env("SINTER_TEST_STRICT", v);
+        }
+        let out = c.output().expect("could not rerun the test binary");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            text.contains("running 1 test"),
+            "{test} must run on its own: {text}"
+        );
+        if strict == Some("1") {
+            assert!(
+                !out.status.success(),
+                "{test} passed under strict mode: {text}"
+            );
+            assert!(
+                text.contains(&format!("SINTER_TEST_REQUIRED: {reason}")),
+                "{test}: {text}"
+            );
+        } else {
+            assert!(out.status.success(), "{test} (strict={strict:?}): {text}");
+            assert!(
+                text.contains(&format!("SINTER_TEST_SKIPPED: {reason}")),
+                "{test} (strict={strict:?}): {text}"
+            );
+        }
+    }
+}
+
 /// A cross-process advisory lock protecting tests that mutate systemd
 /// services (a `ServiceFixture`, or `ssh` in the package/service test).
 /// Tests running in parallel (within or across test binaries) would

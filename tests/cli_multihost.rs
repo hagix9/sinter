@@ -8,6 +8,8 @@
 //! aggregate. `ssh -G` is replaced by a scripted `ssh` on PATH that records
 //! every host it was asked about.
 
+mod common;
+
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
@@ -977,7 +979,7 @@ macro_rules! pty_or_skip {
         match $e {
             Some(o) => o,
             None => {
-                eprintln!("SINTER_TEST_SKIPPED: script(1) unavailable");
+                common::skip_or_fail("script(1) unavailable");
                 return;
             }
         }
@@ -1200,5 +1202,17 @@ fn overlapping_selection_executes_each_host_once() {
     assert_eq!(
         web01["reasons"],
         serde_json::json!(["host:web01", "group:web", "group:linux"])
+    );
+}
+
+/// Without `script(1)` the terminal tests skip, and fail under
+/// `SINTER_TEST_STRICT=1` (the release gate) instead of passing unchecked.
+#[test]
+fn missing_script_fails_under_strict_mode() {
+    common::assert_skips_unless_strict(
+        "tty_output_is_colored",
+        "script(1) unavailable",
+        &[("PATH", "/nonexistent")],
+        &[],
     );
 }
