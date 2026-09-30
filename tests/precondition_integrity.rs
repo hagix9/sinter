@@ -13,8 +13,26 @@ use common::*;
 use std::cell::RefCell;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+/// Linux refuses `execve` (ETXTBSY) of a file that any process still holds
+/// open for writing, and a child forked while such a handle is open inherits
+/// it until its own exec. The tests here write fake tools and spawn children
+/// on parallel threads, so a fork from one test could make another test's
+/// fake tool "text file busy". Writing a fake tool and every spawn of a fake
+/// tool (`Lab::establish`, the only place these tests fork) therefore never
+/// overlap; nothing else is serialized.
+static FAKE_TOOL_SPAWN: Mutex<()> = Mutex::new(());
+
+fn fake_tool_section() -> MutexGuard<'static, ()> {
+    // A failed test must not turn into failures of every later test.
+    FAKE_TOOL_SPAWN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
 
 fn script(dir: &Path, name: &str, body: &str) -> String {
+    let _section = fake_tool_section();
     let path = dir.join(name);
     std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -69,6 +87,7 @@ exit 2"#
     }
 
     fn establish(&self) -> Result<(), UnitPreconditionError> {
+        let _section = fake_tool_section();
         establish_unit_not_found(&self.tools, UNIT, &self.unit_path)
     }
 }
