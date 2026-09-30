@@ -84,7 +84,11 @@ REQUIRED_TARGETS = {
 LINUX_GATE_STEPS = {
     "root-fmt": ("cargo fmt --check", False),
     "root-clippy": ("cargo clippy --locked --all-targets --all-features -- -D warnings", False),
-    "root-test": ("cargo test --locked --all-targets --all-features", True),
+    # The throwaway local-sshd suites (tests/ssh_keys.rs, tests/multihost_lab.rs)
+    # return early and still count as passed unless SINTER_TEST_LOCAL_SSHD=1, so
+    # the variable is part of the pinned command. `env` keeps it one command
+    # whether a shell or a harness running it as argv executes the line.
+    "root-test": ("env SINTER_TEST_LOCAL_SSHD=1 cargo test --locked --all-targets --all-features", True),
     "installer-test": ("python3 tests/installer/test_install.py", True),
     "checker-test": ("python3 -m unittest discover -s release/tests", True),
     "gateway-fmt": ("cargo fmt --manifest-path gateway/Cargo.toml --check", False),
@@ -101,6 +105,11 @@ LINUX_GATE_STEPS = {
 # and a tests/*.rs file carrying this attribute is a Linux-only suite (the same
 # rule as the grep in RELEASE.md step 4).
 ROOT_TEST_STEP = "root-test"
+# Releases up to v1.1.1 were accepted when root-test was pinned without the
+# variable (their gate harness exported it instead). Their published evidence
+# is checked against the command they were pinned to; every later version
+# needs the current one.
+LEGACY_ROOT_TEST = ((1, 1, 1), "cargo test --locked --all-targets --all-features")
 LINUX_ONLY_ATTR = re.compile(r'(?m)^#!\[cfg\(target_os = "linux"\)\]')
 LIB_KINDS = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
 DEFAULT_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -516,6 +525,14 @@ def check(doc, template, errors, refs):
     return facts
 
 
+def pinned_command(name, version):
+    """The pinned command of gate step `name` for candidate `version`."""
+    max_version, legacy = LEGACY_ROOT_TEST
+    if name == ROOT_TEST_STEP and version and tuple(map(int, version.split("."))) <= max_version:
+        return legacy
+    return LINUX_GATE_STEPS[name][0]
+
+
 def check_linux_gate(lv, commit, run_start, template, errors, refs, facts):
     w = "linux_validation"
     for k in ("os_name", "os_version", "rustc", "cargo"):
@@ -550,7 +567,7 @@ def check_linux_gate(lv, commit, run_start, template, errors, refs, facts):
         if name not in LINUX_GATE_STEPS:
             errors.append(f"{sw}.name: unknown step {name}")
             continue
-        want_cmd, is_test = LINUX_GATE_STEPS[name]
+        want_cmd, is_test = pinned_command(name, facts.get("version")), LINUX_GATE_STEPS[name][1]
         if cmd != want_cmd:
             errors.append(f"{sw}.command: must be '{want_cmd}'")
         if result != "PASS":
@@ -674,7 +691,7 @@ def check_root_test_log(text, facts, errors):
         return
     body, rc = m.group(1), m.group(2)
     first = next((ln for ln in body.splitlines() if ln.strip()), "")
-    want = "$ " + LINUX_GATE_STEPS[ROOT_TEST_STEP][0]
+    want = "$ " + pinned_command(ROOT_TEST_STEP, facts.get("version"))
     if first != want:
         errors.append(f"{w}: the section must start with '{want}'")
     if rc != "0":

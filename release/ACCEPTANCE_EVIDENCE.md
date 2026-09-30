@@ -89,7 +89,7 @@ Fields of `linux_validation`:
 | `rustc`, `cargo` | Toolchain versions on the gate host |
 | `started_at`, `finished_at` | RFC 3339 UTC; the gate must finish before `run.started_at` |
 | `linux_only_suites` | The `tests/<name>.rs` suites gated by `#![cfg(target_os = "linux")]` |
-| `steps` | One `{name, command, result, passed, failed, ignored}` per required step: `root-fmt`, `root-clippy`, `root-test`, `installer-test`, `checker-test`, `gateway-fmt`, `gateway-clippy`, `gateway-test`. Commands are pinned (see `RELEASE.md` step 4). |
+| `steps` | One `{name, command, result, passed, failed, ignored}` per required step: `root-fmt`, `root-clippy`, `root-test`, `installer-test`, `checker-test`, `gateway-fmt`, `gateway-clippy`, `gateway-test`. Commands are pinned (see `RELEASE.md` step 4). `root-test` is `env SINTER_TEST_LOCAL_SSHD=1 cargo test --locked --all-targets --all-features`; evidence for v1.1.1 and earlier was pinned without `env SINTER_TEST_LOCAL_SSHD=1` and is checked against that command. |
 | `verdict` | `"PASS"` |
 | `log` | `{path, sha256}` of `validation/linux-gate.log` |
 

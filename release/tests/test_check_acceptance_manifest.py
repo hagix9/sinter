@@ -18,6 +18,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CHECKER = os.path.join(os.path.dirname(HERE), "check_acceptance_manifest.py")
@@ -45,7 +46,7 @@ TARGETS = {
 GATE_STEPS = [
     ("root-fmt", "cargo fmt --check", 0),
     ("root-clippy", "cargo clippy --locked --all-targets --all-features -- -D warnings", 0),
-    ("root-test", "cargo test --locked --all-targets --all-features", 900),
+    ("root-test", "env SINTER_TEST_LOCAL_SSHD=1 cargo test --locked --all-targets --all-features", 900),
     ("installer-test", "python3 tests/installer/test_install.py", 20),
     ("checker-test", "python3 -m unittest discover -s release/tests", 60),
     ("gateway-fmt", "cargo fmt --manifest-path gateway/Cargo.toml --check", 0),
@@ -53,7 +54,10 @@ GATE_STEPS = [
     ("gateway-test", "cargo test --manifest-path gateway/Cargo.toml --locked --all-targets --all-features", 300),
 ]
 SUITES = ["tests/audit.rs", "tests/cli.rs"]
-ROOT_CMD = "cargo test --locked --all-targets --all-features"
+ROOT_CMD = "env SINTER_TEST_LOCAL_SSHD=1 cargo test --locked --all-targets --all-features"
+# The root-test command without the local-sshd suites enabled: pinned for
+# releases up to v1.1.1, rejected for every later version.
+LEGACY_ROOT_CMD = "cargo test --locked --all-targets --all-features"
 # The root test harnesses of the fixture crate and their pass counts; the sum
 # (900) is the root-test count recorded in the synthetic manifest.
 ROOT_BLOCKS = [
@@ -835,6 +839,58 @@ class RootTestEvidence(Base):
 
     def test_commit_missing_from_repository_is_rejected(self):
         self.assertReject(self.check(self.at("e" * 40)), "cannot read commit")
+
+    def without_local_sshd(self, manifest=True, log=True):
+        if log:
+            self.set_log(command=LEGACY_ROOT_CMD)
+        return (lambda d: self.root(d).update(command=LEGACY_ROOT_CMD)) if manifest else None
+
+    def test_root_suite_without_local_sshd_is_rejected(self):
+        # Otherwise identical evidence of a run in which the local-sshd
+        # negotiation suites returned early and still counted as passed.
+        self.assertReject(self.check(self.without_local_sshd()),
+                          "steps[2].command: must be '" + ROOT_CMD + "'",
+                          "the section must start with '$ " + ROOT_CMD + "'")
+
+    def test_manifest_without_local_sshd_is_rejected(self):
+        self.assertReject(self.check(self.without_local_sshd(log=False)),
+                          "steps[2].command: must be '" + ROOT_CMD + "'")
+
+    def test_log_without_local_sshd_is_rejected(self):
+        self.assertReject(self.check(self.without_local_sshd(manifest=False)),
+                          "the section must start with '$ " + ROOT_CMD + "'")
+
+
+class LegacyRootTestCommand(Base):
+    """Published evidence up to v1.1.1 was pinned to the root-test command
+    without SINTER_TEST_LOCAL_SSHD=1; it stays valid, and only it."""
+
+    def at_version(self, version):
+        names = {
+            "VERSION": version,
+            "STEM": f"sinter-v{version}-acceptance-evidence",
+            "BUNDLE_NAME": f"sinter-v{version}-acceptance-evidence.tar.gz",
+            "ARTIFACT_NAME": f"sinter-v{version}-linux-x86_64.tar.gz",
+        }
+        patcher = mock.patch.multiple(sys.modules[__name__], **names)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def check_legacy(self):
+        self.ev.files["validation/linux-gate.log"] = gate_log(command=LEGACY_ROOT_CMD)
+        return self.check(lambda d: RootTestEvidence.root(d).update(command=LEGACY_ROOT_CMD), sums=True)
+
+    def test_published_versions_keep_their_pinned_command(self):
+        for version in ("1.0.0", "1.1.0", "1.1.1"):
+            with self.subTest(version=version):
+                self.at_version(version)
+                self.assertPass(self.check_legacy())
+
+    def test_later_versions_need_local_sshd(self):
+        for version in ("1.1.2", "1.2.0", "2.0.0"):
+            with self.subTest(version=version):
+                self.at_version(version)
+                self.assertReject(self.check_legacy(), "must be '" + ROOT_CMD + "'")
 
 
 if __name__ == "__main__":

@@ -180,13 +180,25 @@ grep -l '^#!\[cfg(target_os = "linux")\]' tests/*.rs   # → linux_only_suites
 # The commands are pinned; the checker rejects any other spelling.
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-targets --all-features
+env SINTER_TEST_LOCAL_SSHD=1 cargo test --locked --all-targets --all-features
 python3 tests/installer/test_install.py
 python3 -m unittest discover -s release/tests
 cargo fmt --manifest-path gateway/Cargo.toml --check
 cargo clippy --manifest-path gateway/Cargo.toml --locked --all-targets --all-features -- -D warnings
 cargo test --manifest-path gateway/Cargo.toml --locked --all-targets --all-features
 ```
+
+`SINTER_TEST_LOCAL_SSHD=1` is part of the pinned `root-test` command. It
+enables the suites that start a throwaway unprivileged `sshd` on loopback:
+`tests/ssh_keys.rs` (key formats, host-key verification, and the SSH
+algorithm policy negotiated against a real server) and
+`tests/multihost_lab.rs`. Without it those tests return early and still
+count as passed, so a green run would not show that SSH negotiation was
+exercised. The gate host needs `sshd`, `ssh-keygen`, `ssh-agent` and
+`ssh-add`. Record and log the command exactly as written, including
+`env`, which keeps it a single command whether it is typed into a shell or
+run by a harness as an argument vector. The checker rejects `root-test`
+evidence recorded without the variable for every release after v1.1.1.
 
 The gateway crate (`gateway/`) is not part of the release artifact. It is
 validated here anyway so that a release never ships from a commit whose
