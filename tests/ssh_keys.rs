@@ -50,6 +50,11 @@ const PASS: &str = "correct-horse-1";
 
 impl Lab {
     fn start() -> Option<Lab> {
+        Self::start_with("")
+    }
+
+    /// Like `start`, with extra `sshd_config` lines (e.g. an algorithm list).
+    fn start_with(extra: &str) -> Option<Lab> {
         if std::env::var("SINTER_TEST_LOCAL_SSHD").ok().as_deref() != Some("1") {
             eprintln!("SINTER_TEST_SKIPPED: SINTER_TEST_LOCAL_SSHD not set");
             return None;
@@ -90,7 +95,7 @@ impl Lab {
         let cfg = format!(
             "Port {port}\nListenAddress 127.0.0.1\nHostKey {d}/hk_ed25519\nHostKey {d}/hk_ecdsa\nHostKey {d}/hk_rsa\n\
              AuthorizedKeysFile {d}/authorized_keys\nPidFile {d}/sshd.pid\nUsePAM no\nStrictModes no\n\
-             PasswordAuthentication no\nKbdInteractiveAuthentication no\n",
+             PasswordAuthentication no\nKbdInteractiveAuthentication no\n{extra}",
             d = d.display()
         );
         std::fs::write(d.join("sshd_config"), cfg).unwrap();
@@ -311,4 +316,79 @@ fn host_key_alias_selects_the_known_hosts_name() {
     assert!(connected(SshExecutor::connect(&cfg, false)).is_err());
     cfg.host_key_alias = Some("web01-key".into());
     connected(SshExecutor::connect(&cfg, false)).unwrap();
+}
+
+/// A server that offers only an algorithm outside Sinter's SSH policy
+/// cannot establish a session: the handshake fails before any
+/// authentication. Each case restricts exactly one negotiated category.
+#[test]
+fn server_offering_only_legacy_algorithms_is_refused() {
+    for (what, extra, host_key) in [
+        (
+            "kex group1-sha1",
+            "KexAlgorithms diffie-hellman-group1-sha1\n",
+            "ed25519",
+        ),
+        (
+            "kex group14-sha1",
+            "KexAlgorithms diffie-hellman-group14-sha1\n",
+            "ed25519",
+        ),
+        (
+            "kex gex-sha1",
+            "KexAlgorithms diffie-hellman-group-exchange-sha1\n",
+            "ed25519",
+        ),
+        ("cipher 3des-cbc", "Ciphers 3des-cbc\n", "ed25519"),
+        ("cipher aes256-cbc", "Ciphers aes256-cbc\n", "ed25519"),
+        (
+            "mac hmac-md5",
+            "Ciphers aes128-ctr\nMACs hmac-md5\n",
+            "ed25519",
+        ),
+        (
+            "mac hmac-sha1",
+            "Ciphers aes128-ctr\nMACs hmac-sha1\n",
+            "ed25519",
+        ),
+        ("host key ssh-rsa", "HostKeyAlgorithms ssh-rsa\n", "rsa"),
+    ] {
+        let Some(lab) = Lab::start_with(extra) else {
+            return;
+        };
+        let kh = lab.known_hosts("kh", &lab.host_line(host_key));
+        let e =
+            connected(SshExecutor::connect(&lab.cfg(&kh, &["ed25519"]), false)).expect_err(what);
+        assert!(e.contains("handshake"), "{what}: {e}");
+    }
+}
+
+/// A server restricted to algorithms inside the policy is accepted, for the
+/// AEAD path, the CTR + HMAC-SHA2 path, and RSA host keys via rsa-sha2.
+#[test]
+fn server_offering_only_modern_algorithms_is_accepted() {
+    for (what, extra, host_key) in [
+        (
+            "curve25519 + chacha20-poly1305",
+            "KexAlgorithms curve25519-sha256\nCiphers chacha20-poly1305@openssh.com\n",
+            "ed25519",
+        ),
+        (
+            "group14-sha256 + aes128-ctr + hmac-sha2-256",
+            "KexAlgorithms diffie-hellman-group14-sha256\nCiphers aes128-ctr\nMACs hmac-sha2-256\n",
+            "ecdsa",
+        ),
+        (
+            "rsa-sha2-512 host key",
+            "HostKeyAlgorithms rsa-sha2-512\n",
+            "rsa",
+        ),
+    ] {
+        let Some(lab) = Lab::start_with(extra) else {
+            return;
+        };
+        let kh = lab.known_hosts("kh", &lab.host_line(host_key));
+        connected(SshExecutor::connect(&lab.cfg(&kh, &["ed25519"]), false))
+            .unwrap_or_else(|e| panic!("{what}: {e}"));
+    }
 }

@@ -2,6 +2,24 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+### Security
+
+- SSH connections negotiate only modern algorithms. Key exchange, host key,
+  cipher and MAC negotiation are restricted to explicit allowlists:
+  curve25519, ECDH and SHA-2 Diffie-Hellman key exchange (group exchange
+  with at least 2048-bit groups); Ed25519, ECDSA and RSA host keys with
+  SHA-2 signatures; ChaCha20-Poly1305, AES-GCM and AES-CTR; HMAC-SHA2.
+  The legacy fallbacks that the bundled libssh2 offered by default can no
+  longer be negotiated: 1024-bit and SHA-1 key exchange, SHA-1 `ssh-rsa`
+  host key signatures, CBC, RC4, Blowfish, CAST and 3DES ciphers, and MD5,
+  SHA-1 and RIPEMD-160 MACs. There is no option to re-enable them. A server
+  that offers only legacy algorithms is refused at the handshake (`Unable to
+  exchange encryption keys`); current OpenSSH releases offer the allowed
+  algorithms by default. The policy is installed before every handshake,
+  and a failure to install it fails the connection.
+
 ## [1.1.1] - 2026-09-29
 
 Fail-closed validation fixes. Valid recipes, command lines, and `--format

@@ -604,12 +604,10 @@ impl SshExecutor {
         let mut session = ssh2::Session::new()
             .map_err(|e| SinterError::connect(format!("cannot create SSH session: {}", e)))?;
         session.set_tcp_stream(tcp);
-        // Prefer host-key algorithms already recorded for this host in
-        // known_hosts (OpenSSH behavior). Without this, libssh2 negotiates
-        // ECDSA first and a host enrolled only with its Ed25519 or RSA key
-        // is reported as a key mismatch. Ordering never widens trust: the
-        // presented key must still match known_hosts exactly.
-        prefer_known_hostkey_types(&session, cfg)?;
+        // Restrict every negotiated algorithm category to Sinter's SSH
+        // policy before the handshake. Fails closed: if the policy cannot
+        // be installed, no connection is attempted.
+        apply_ssh_algorithm_policy(&session, cfg)?;
         // Configure the libssh2 timeout before any blocking handshake call so
         // the handshake itself cannot hang past the setup budget.
         let handshake_timeout = setup_remaining(setup_deadline)?;
@@ -1347,30 +1345,133 @@ fn hostkey_algorithms_for(key_type: &str) -> Vec<&str> {
     }
 }
 
-/// Order `supported` so algorithms for already-known key types come first,
-/// keeping libssh2's own order within each group. Returns None when nothing
-/// is known (the default order is then left untouched).
-pub fn hostkey_preference(known_types: &[String], supported: &[&str]) -> Option<String> {
+/// Order the allowed host-key algorithms so those for already-known key
+/// types come first (OpenSSH behavior), keeping the policy order within
+/// each group. Without this, libssh2 negotiates ECDSA first and a host
+/// enrolled only with its Ed25519 or RSA key is reported as a key mismatch.
+/// Ordering never widens trust: the presented key must still match
+/// known_hosts exactly, and nothing outside `allowed` is ever offered.
+pub fn hostkey_preference(known_types: &[String], allowed: &[&str]) -> String {
     let mut first: Vec<&str> = Vec::new();
     for t in known_types {
         for alg in hostkey_algorithms_for(t) {
-            if supported.contains(&alg) && !first.contains(&alg) {
+            if allowed.contains(&alg) && !first.contains(&alg) {
                 first.push(alg);
             }
         }
     }
-    if first.is_empty() {
-        return None;
-    }
-    let rest = supported.iter().copied().filter(|a| !first.contains(a));
-    Some(
-        first
-            .iter()
-            .copied()
-            .chain(rest)
-            .collect::<Vec<_>>()
-            .join(","),
-    )
+    let rest = allowed.iter().copied().filter(|a| !first.contains(a));
+    first
+        .iter()
+        .copied()
+        .chain(rest)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+// SSH algorithm policy. This is security policy, not tuning.
+//
+// Each negotiated category gets a positive allowlist, so the legacy
+// algorithms that the bundled libssh2 still offers by default (1024-bit
+// and SHA-1 key exchange, SHA-1 `ssh-rsa` host-key signatures, CBC, RC4,
+// Blowfish, CAST and 3DES ciphers, MD5, SHA-1 and RIPEMD-160 MACs) can
+// never be negotiated. There is deliberately no option to re-enable them.
+//
+// Every name must be supported by the linked libssh2 (a unit test checks
+// this): libssh2 silently drops names it does not know. The supported
+// targets run OpenSSH 8.7 or later, whose default configurations offer
+// algorithms from every list. Changing a list needs a security and
+// interoperability review.
+//
+// libssh2 adds its own KEX extensions (`ext-info-c` and the Terrapin
+// countermeasure `kex-strict-c-v00@openssh.com`) to any KEX preference, so
+// they are not listed here. Compression is not configured: the build
+// supports only `none`.
+
+/// Key exchange. Group exchange requests at least 2048-bit groups.
+pub const SSH_KEX_ALGORITHMS: &[&str] = &[
+    "curve25519-sha256",
+    "curve25519-sha256@libssh.org",
+    "ecdh-sha2-nistp256",
+    "ecdh-sha2-nistp384",
+    "ecdh-sha2-nistp521",
+    "diffie-hellman-group-exchange-sha256",
+    "diffie-hellman-group16-sha512",
+    "diffie-hellman-group18-sha512",
+    "diffie-hellman-group14-sha256",
+];
+
+/// Host-key signature algorithms. RSA host keys use rsa-sha2-*, never the
+/// SHA-1 `ssh-rsa` signature. Certificate types are omitted: known_hosts
+/// verification cannot validate host certificates.
+pub const SSH_HOSTKEY_ALGORITHMS: &[&str] = &[
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "ssh-ed25519",
+    "rsa-sha2-512",
+    "rsa-sha2-256",
+];
+
+/// Ciphers (both directions): AEAD first, then CTR. No CBC or stream ciphers.
+pub const SSH_CIPHERS: &[&str] = &[
+    "chacha20-poly1305@openssh.com",
+    "aes256-gcm@openssh.com",
+    "aes128-gcm@openssh.com",
+    "aes256-ctr",
+    "aes192-ctr",
+    "aes128-ctr",
+];
+
+/// MACs (both directions), used with the CTR ciphers: encrypt-then-MAC
+/// first, SHA-2 only.
+pub const SSH_MACS: &[&str] = &[
+    "hmac-sha2-256-etm@openssh.com",
+    "hmac-sha2-512-etm@openssh.com",
+    "hmac-sha2-256",
+    "hmac-sha2-512",
+];
+
+/// Install one category's preference list. Any failure is an error; the
+/// session must then not be used.
+fn set_algorithm_pref(
+    session: &ssh2::Session,
+    method: ssh2::MethodType,
+    category: &str,
+    prefs: &str,
+) -> Result<()> {
+    session.method_pref(method, prefs).map_err(|e| {
+        SinterError::connect(format!(
+            "cannot apply the SSH {} algorithm policy: {}",
+            category, e
+        ))
+    })
+}
+
+/// Restrict key exchange, host key, cipher and MAC negotiation to the
+/// allowlists above, with host-key types already in known_hosts first.
+fn apply_ssh_algorithm_policy(session: &ssh2::Session, cfg: &SshConfig) -> Result<()> {
+    let known = load_known_hosts(session, cfg)?;
+    let types = known_key_types(&known, &cfg_identity(cfg))?;
+    let hostkeys = hostkey_preference(&types, SSH_HOSTKEY_ALGORITHMS);
+    set_algorithm_pref(session, ssh2::MethodType::HostKey, "host key", &hostkeys)?;
+    apply_fixed_algorithm_policy(session)
+}
+
+/// The categories whose lists do not depend on known_hosts.
+fn apply_fixed_algorithm_policy(session: &ssh2::Session) -> Result<()> {
+    let ciphers = SSH_CIPHERS.join(",");
+    let macs = SSH_MACS.join(",");
+    set_algorithm_pref(
+        session,
+        ssh2::MethodType::Kex,
+        "key exchange",
+        &SSH_KEX_ALGORITHMS.join(","),
+    )?;
+    set_algorithm_pref(session, ssh2::MethodType::CryptCs, "cipher", &ciphers)?;
+    set_algorithm_pref(session, ssh2::MethodType::CryptSc, "cipher", &ciphers)?;
+    set_algorithm_pref(session, ssh2::MethodType::MacCs, "MAC", &macs)?;
+    set_algorithm_pref(session, ssh2::MethodType::MacSc, "MAC", &macs)
 }
 
 /// Key types recorded in known_hosts for the connection identity, including
@@ -1402,20 +1503,6 @@ fn known_key_types(known: &ssh2::KnownHosts, identity: &str) -> Result<Vec<Strin
         }
     }
     Ok(types)
-}
-
-fn prefer_known_hostkey_types(session: &ssh2::Session, cfg: &SshConfig) -> Result<()> {
-    let known = load_known_hosts(session, cfg)?;
-    let types = known_key_types(&known, &cfg_identity(cfg))?;
-    let supported = session
-        .supported_algs(ssh2::MethodType::HostKey)
-        .map_err(|e| SinterError::connect(format!("cannot list host key algorithms: {}", e)))?;
-    if let Some(pref) = hostkey_preference(&types, &supported) {
-        session
-            .method_pref(ssh2::MethodType::HostKey, &pref)
-            .map_err(|e| SinterError::connect(format!("cannot set host key preference: {}", e)))?;
-    }
-    Ok(())
 }
 
 /// Base64 keys listed on `@revoked` marker lines. libssh2 has no marker
@@ -2781,30 +2868,169 @@ mod hostkey_tests {
         );
     }
 
-    const LIBSSH2_DEFAULT: &[&str] = &[
-        "ecdsa-sha2-nistp256",
-        "ecdsa-sha2-nistp384",
-        "ssh-ed25519",
-        "rsa-sha2-512",
-        "rsa-sha2-256",
-        "ssh-rsa",
+    #[test]
+    fn known_types_are_preferred_within_the_allowlist() {
+        let p = hostkey_preference(&["ssh-ed25519".to_string()], SSH_HOSTKEY_ALGORITHMS);
+        assert_eq!(
+            p,
+            "ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,rsa-sha2-512,rsa-sha2-256"
+        );
+        // An RSA host key is reached through rsa-sha2-*, never SHA-1 ssh-rsa.
+        let p = hostkey_preference(&["ssh-rsa".to_string()], SSH_HOSTKEY_ALGORITHMS);
+        assert!(
+            p.starts_with("rsa-sha2-512,rsa-sha2-256,ecdsa-sha2-nistp256"),
+            "{p}"
+        );
+        assert!(!p.split(',').any(|a| a == "ssh-rsa"), "{p}");
+        // Nothing known, or an unsupported known type: the allowlist order.
+        let all = SSH_HOSTKEY_ALGORITHMS.join(",");
+        assert_eq!(hostkey_preference(&[], SSH_HOSTKEY_ALGORITHMS), all);
+        assert_eq!(
+            hostkey_preference(&["ssh-dss".to_string()], SSH_HOSTKEY_ALGORITHMS),
+            all
+        );
+    }
+
+    const POLICY: &[(&str, &[&str])] = &[
+        ("kex", SSH_KEX_ALGORITHMS),
+        ("hostkey", SSH_HOSTKEY_ALGORITHMS),
+        ("cipher", SSH_CIPHERS),
+        ("mac", SSH_MACS),
     ];
 
     #[test]
-    fn known_types_are_preferred_without_dropping_others() {
-        let p = hostkey_preference(&["ssh-ed25519".to_string()], LIBSSH2_DEFAULT).unwrap();
-        assert_eq!(
-            p,
-            "ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,rsa-sha2-512,rsa-sha2-256,ssh-rsa"
-        );
-        let p = hostkey_preference(&["ssh-rsa".to_string()], LIBSSH2_DEFAULT).unwrap();
-        assert!(p.starts_with("rsa-sha2-512,rsa-sha2-256,ssh-rsa,ecdsa-sha2-nistp256"));
-        // Nothing known: leave libssh2's default order untouched.
-        assert_eq!(hostkey_preference(&[], LIBSSH2_DEFAULT), None);
-        // Unsupported known type: nothing to prefer.
-        assert_eq!(
-            hostkey_preference(&["ssh-dss".to_string()], LIBSSH2_DEFAULT),
-            None
+    fn ssh_policy_lists_are_well_formed() {
+        for (cat, list) in POLICY {
+            assert!(!list.is_empty(), "{cat}: empty");
+            for (i, a) in list.iter().enumerate() {
+                assert!(
+                    !a.is_empty() && !a.contains(',') && !a.contains(char::is_whitespace),
+                    "{cat}: bad name {a:?}"
+                );
+                assert!(!list[..i].contains(a), "{cat}: duplicate {a}");
+            }
+        }
+    }
+
+    /// Every policy name is supported by the linked libssh2 (which silently
+    /// drops unknown names), and every supported name left out of the
+    /// policy is one of the known legacy algorithms, never a modern one
+    /// dropped by accident.
+    #[test]
+    fn ssh_policy_matches_the_linked_libssh2() {
+        let s = ssh2::Session::new().unwrap();
+        let cats = [
+            (ssh2::MethodType::Kex, SSH_KEX_ALGORITHMS),
+            (ssh2::MethodType::HostKey, SSH_HOSTKEY_ALGORITHMS),
+            (ssh2::MethodType::CryptCs, SSH_CIPHERS),
+            (ssh2::MethodType::CryptSc, SSH_CIPHERS),
+            (ssh2::MethodType::MacCs, SSH_MACS),
+            (ssh2::MethodType::MacSc, SSH_MACS),
+        ];
+        // Supported names deliberately excluded. `ext-info-c` and
+        // `kex-strict-c-v00@openssh.com` are KEX extensions that libssh2
+        // adds to any KEX preference itself.
+        let excluded = [
+            "diffie-hellman-group1-sha1",
+            "diffie-hellman-group14-sha1",
+            "diffie-hellman-group-exchange-sha1",
+            "ext-info-c",
+            "kex-strict-c-v00@openssh.com",
+            "ssh-rsa",
+            "aes256-cbc",
+            "rijndael-cbc@lysator.liu.se",
+            "aes192-cbc",
+            "aes128-cbc",
+            "blowfish-cbc",
+            "arcfour128",
+            "arcfour",
+            "cast128-cbc",
+            "3des-cbc",
+            "hmac-sha1",
+            "hmac-sha1-etm@openssh.com",
+            "hmac-sha1-96",
+            "hmac-md5",
+            "hmac-md5-96",
+            "hmac-ripemd160",
+            "hmac-ripemd160@openssh.com",
+        ];
+        for (t, list) in cats {
+            let supported = s.supported_algs(t).unwrap();
+            for a in list {
+                assert!(
+                    supported.contains(a),
+                    "{a} not supported by the linked libssh2"
+                );
+            }
+            for a in &supported {
+                if !list.contains(a) {
+                    assert!(
+                        excluded.contains(a) || a.ends_with("-cert-v01@openssh.com"),
+                        "{a} is supported but neither allowed nor a known exclusion"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ssh_policy_excludes_legacy_and_keeps_modern_algorithms() {
+        let all: Vec<&str> = POLICY.iter().flat_map(|(_, l)| l.iter().copied()).collect();
+        for weak in [
+            "diffie-hellman-group1-sha1",
+            "diffie-hellman-group14-sha1",
+            "diffie-hellman-group-exchange-sha1",
+            "ssh-rsa",
+            "3des-cbc",
+            "aes128-cbc",
+            "aes256-cbc",
+            "blowfish-cbc",
+            "cast128-cbc",
+            "arcfour",
+            "arcfour128",
+            "hmac-md5",
+            "hmac-sha1",
+            "hmac-ripemd160",
+        ] {
+            assert!(!all.contains(&weak), "{weak} must not be allowed");
+        }
+        assert!(!all.iter().any(|a| a.ends_with("-cbc") || a.contains("md5")));
+        for (cat, list, want) in [
+            ("kex", SSH_KEX_ALGORITHMS, "curve25519-sha256"),
+            ("kex", SSH_KEX_ALGORITHMS, "ecdh-sha2-nistp256"),
+            ("kex", SSH_KEX_ALGORITHMS, "diffie-hellman-group14-sha256"),
+            ("hostkey", SSH_HOSTKEY_ALGORITHMS, "ssh-ed25519"),
+            ("hostkey", SSH_HOSTKEY_ALGORITHMS, "ecdsa-sha2-nistp256"),
+            ("hostkey", SSH_HOSTKEY_ALGORITHMS, "rsa-sha2-256"),
+            ("cipher", SSH_CIPHERS, "chacha20-poly1305@openssh.com"),
+            ("cipher", SSH_CIPHERS, "aes256-gcm@openssh.com"),
+            ("cipher", SSH_CIPHERS, "aes128-ctr"),
+            ("mac", SSH_MACS, "hmac-sha2-256-etm@openssh.com"),
+            ("mac", SSH_MACS, "hmac-sha2-256"),
+        ] {
+            assert!(list.contains(&want), "{cat}: {want} missing");
+        }
+    }
+
+    #[test]
+    fn ssh_policy_installs_on_a_session() {
+        let s = ssh2::Session::new().unwrap();
+        apply_fixed_algorithm_policy(&s).unwrap();
+        let hostkeys = hostkey_preference(&[], SSH_HOSTKEY_ALGORITHMS);
+        set_algorithm_pref(&s, ssh2::MethodType::HostKey, "host key", &hostkeys).unwrap();
+    }
+
+    #[test]
+    fn ssh_policy_failure_is_an_error() {
+        let s = ssh2::Session::new().unwrap();
+        let e = set_algorithm_pref(&s, ssh2::MethodType::CryptCs, "cipher", "no-such-cipher")
+            .unwrap_err();
+        assert_eq!(e.kind, crate::error::ErrorKind::Connect);
+        assert!(
+            e.message
+                .contains("cannot apply the SSH cipher algorithm policy"),
+            "{}",
+            e.message
         );
     }
 
