@@ -243,7 +243,9 @@ use; a missing item fails the gate rather than skipping tests:
   `sudo -n`). Its home directory and the path above it must carry no ACLs
   or extended attributes (the trust checks refuse them).
 - `attr` (`/usr/bin/getfattr`, `/usr/bin/setfattr`) and `acl`
-  (`/usr/bin/getfacl`) on a filesystem with user extended attributes;
+  (`/usr/bin/getfacl`) on a filesystem with user extended attributes, where
+  `sudo` can also set `security.*` attributes (a failure to prepare that
+  fixture fails the gate);
   `apt-get` with reachable package repositories (`tests/package_service.rs`
   installs and removes `cowsay`, or the package named by
   `SINTER_TEST_PACKAGE`); `script(1)`; the stock masked and static systemd
