@@ -235,15 +235,14 @@ fn previously_absent_unit_appears_and_service_verifies() {
     }
     let unit = "sinter-r4-new-unit.service";
     let unit_path = format!("/etc/systemd/system/{}", unit);
-    // Ensure the unit is currently absent.
-    let _ = std::process::Command::new("sudo")
-        .args(["-n", "/bin/sh", "-c"])
-        .arg(format!(
-            "systemctl stop {unit} >/dev/null 2>&1; systemctl disable {unit} >/dev/null 2>&1; systemctl reset-failed {unit} >/dev/null 2>&1; rm -f {unit_path}; systemctl daemon-reload",
-            unit = unit
-        ))
-        .status();
     let _svc = lock_service();
+    // The behavior under test starts from a unit that is genuinely not-found.
+    // Removing a leftover is attempted, then the state is proven; if it cannot
+    // be, the test is skipped with a marker (failed under SINTER_TEST_STRICT=1)
+    // instead of running against whatever unit state happens to be there.
+    if !require_unit_not_found(unit, &unit_path) {
+        return;
+    }
     let dir = trusted_root("absent-unit-appears");
     // Unit body is written by the test, then a command resource "installs" it
     // (controlled fixture standing in for a package that ships a new unit).
@@ -405,4 +404,57 @@ fn package_install_success_then_reobserve_fail_keeps_changed() {
     let _ = std::process::Command::new("sudo")
         .args(["-n", "apt-get", "remove", "-y", &pkg])
         .status();
+}
+
+/// The not-found precondition of `previously_absent_unit_appears_and_service_verifies`
+/// must be established and proven, or the test skips (fails under
+/// `SINTER_TEST_STRICT=1`, the release gate) rather than run from an unproven
+/// initial state. Each case breaks exactly one step of the setup reversibly:
+/// the removal command, the state that the read-back reports, and the read-back
+/// itself.
+fn assert_unit_precondition_fails_unless_strict(reason: &str, set: &[(&str, &str)]) {
+    if !sudo_available() || !std::path::Path::new("/run/systemd/system").exists() {
+        skip_or_fail("requires systemd and passwordless sudo");
+        return;
+    }
+    assert_skips_unless_strict(
+        "previously_absent_unit_appears_and_service_verifies",
+        &format!("unit precondition not established (sinter-r4-new-unit.service): {reason}"),
+        set,
+        &[],
+    );
+}
+
+#[test]
+fn failing_unit_removal_fails_under_strict_mode() {
+    assert_unit_precondition_fails_unless_strict(
+        "unit removal failed",
+        &[("SINTER_TEST_UNIT_SUDO", "/bin/false")],
+    );
+}
+
+#[test]
+fn unremoved_unit_after_removal_fails_under_strict_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    // The removal "succeeds" but systemd still reports the unit as loaded.
+    let dir = trusted_root("f03-still-loaded");
+    let query = dir.join("systemctl-still-loaded");
+    std::fs::write(
+        &query,
+        "#!/bin/sh\necho LoadState=loaded\necho ActiveState=active\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&query, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_unit_precondition_fails_unless_strict(
+        "unit not absent after removal",
+        &[("SINTER_TEST_UNIT_QUERY", query.to_str().unwrap())],
+    );
+}
+
+#[test]
+fn unreadable_unit_state_fails_under_strict_mode() {
+    assert_unit_precondition_fails_unless_strict(
+        "unit state could not be determined",
+        &[("SINTER_TEST_UNIT_QUERY", "/nonexistent/systemctl")],
+    );
 }

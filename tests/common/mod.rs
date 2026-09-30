@@ -462,9 +462,37 @@ pub fn target_sudo_available() -> bool {
     matches!(target_run("/usr/bin/id", &["-u"], true), Ok((0, ref s, _)) if s.trim() == "0")
 }
 
+/// What `target_run` returns: `Ok` means the command ran to completion (with
+/// any exit code), `Err` that it could not be run or did not complete.
+pub type TargetRunResult = std::result::Result<(i32, String, String), String>;
+
+/// Require that a target command ran *and* exited 0, returning its
+/// `(stdout, stderr)`. `target_run`'s `Ok` alone is not success: a fixture step
+/// that exited non-zero is still `Ok((code, ..))`, so checking `is_ok()` lets a
+/// failed setup pass. Setup steps must go through this instead.
+pub fn require_target_success(what: &str, result: TargetRunResult) -> (String, String) {
+    match result {
+        Ok((0, stdout, stderr)) => (stdout, stderr),
+        Ok((code, stdout, stderr)) => {
+            panic!("{what} failed with exit {code}: stdout={stdout:?} stderr={stderr:?}")
+        }
+        Err(e) => panic!("{what} could not run: {e}"),
+    }
+}
+
 /// Create a private (0700) directory on the target and return its absolute path.
 /// The parent chain is made non-writable by untrusted principals.
 pub fn target_private_dir(label: &str, sudo: bool) -> String {
+    target_private_dir_with(label, sudo, &mut target_run)
+}
+
+/// `target_private_dir` over an explicit command runner, so its failure
+/// handling can be exercised without a target.
+pub fn target_private_dir_with(
+    label: &str,
+    sudo: bool,
+    run: &mut dyn FnMut(&str, &[&str], bool) -> TargetRunResult,
+) -> String {
     let base = if sudo {
         "/root".to_string()
     } else {
@@ -474,19 +502,53 @@ pub fn target_private_dir(label: &str, sudo: bool) -> String {
     let dir = format!("{}/{}-{}", root, label, std::process::id());
     // Create parent then child with restrictive modes. install -d is used
     // because it creates parents and sets the mode atomically.
-    let root_status = target_run("/usr/bin/install", &["-d", "-m", "0700", &root], sudo);
-    assert!(
-        root_status.is_ok(),
-        "could not create target test root: {:?}",
-        root_status
+    require_target_success(
+        "creating the target test root",
+        run("/usr/bin/install", &["-d", "-m", "0700", &root], sudo),
     );
-    let child = target_run("/usr/bin/install", &["-d", "-m", "0700", &dir], sudo);
-    assert!(
-        child.is_ok(),
-        "could not create target test dir: {:?}",
-        child
+    require_target_success(
+        "creating the target test dir",
+        run("/usr/bin/install", &["-d", "-m", "0700", &dir], sudo),
     );
     dir
+}
+
+/// Put `content` at `path` on the target, then read it back and require an
+/// exact match. A fixture that "was seeded" without this proof would let the
+/// test pass from an unprepared initial state.
+pub fn target_seed_file(path: &str, content: &str, sudo: bool) {
+    target_seed_file_with(path, content, sudo, &mut target_run)
+}
+
+/// `target_seed_file` over an explicit command runner.
+pub fn target_seed_file_with(
+    path: &str,
+    content: &str,
+    sudo: bool,
+    run: &mut dyn FnMut(&str, &[&str], bool) -> TargetRunResult,
+) {
+    let script = format!(
+        "printf '%s' {} > {}",
+        sh_single_quote(content),
+        sh_single_quote(path)
+    );
+    require_target_success(
+        "seeding the target fixture file",
+        run("/bin/sh", &["-c", &script], sudo),
+    );
+    let (stdout, _) = require_target_success(
+        "reading the seeded target fixture file back",
+        run("/bin/cat", &["--", path], sudo),
+    );
+    assert_eq!(
+        stdout, content,
+        "the target fixture file must hold the seeded content"
+    );
+}
+
+/// POSIX single-quote `s` for use inside a `sh -c` script.
+pub fn sh_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Read a file *on the target* via SSH. Never uses the controller filesystem.
@@ -769,4 +831,147 @@ pub fn lock_backup_store() -> BackupStoreGuard {
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
     assert_eq!(rc, 0, "could not acquire backup store lock");
     BackupStoreGuard { file }
+}
+
+// ---------------------------------------------------------------------------
+// Verified fixture preconditions
+// ---------------------------------------------------------------------------
+
+/// The programs that put a systemd unit into the "not-found" state and prove
+/// it got there. Tests use `UnitSetupTools::host()`; the two
+/// `SINTER_TEST_UNIT_*` variables let a test substitute a failing program only
+/// to prove that a setup failure fails the test under `SINTER_TEST_STRICT=1`
+/// instead of leaving an unprepared fixture behind.
+pub struct UnitSetupTools {
+    /// Privilege wrapper: the removal script runs as `<sudo> -n /bin/sh -c <script>`.
+    pub sudo: String,
+    /// `systemctl` as the removal script (running as root) invokes it.
+    pub admin_systemctl: String,
+    /// `systemctl` for the read-only state query that proves the result.
+    pub query_systemctl: String,
+}
+
+impl UnitSetupTools {
+    pub fn host() -> Self {
+        UnitSetupTools {
+            sudo: std::env::var("SINTER_TEST_UNIT_SUDO").unwrap_or_else(|_| "sudo".to_string()),
+            admin_systemctl: "systemctl".to_string(),
+            query_systemctl: std::env::var("SINTER_TEST_UNIT_QUERY")
+                .unwrap_or_else(|_| "/usr/bin/systemctl".to_string()),
+        }
+    }
+}
+
+/// Why "the unit is not-found" could not be established. Each variant's
+/// message starts with a fixed phrase so a test can name the failing step.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UnitPreconditionError {
+    /// The removal command could not be started.
+    RemovalNotRun(String),
+    /// The removal command ran and exited unsuccessfully.
+    RemovalFailed(String),
+    /// The removal reported success but the unit file is still there.
+    UnitFileStillPresent(String),
+    /// The state could not be read, so absence is unproven (never "absent").
+    StateUnknown(String),
+    /// The state was read and the unit is not not-found/inactive.
+    NotAbsent(String),
+}
+
+impl std::fmt::Display for UnitPreconditionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UnitPreconditionError::RemovalNotRun(m) => {
+                write!(f, "unit removal could not run: {m}")
+            }
+            UnitPreconditionError::RemovalFailed(m) => write!(f, "unit removal failed: {m}"),
+            UnitPreconditionError::UnitFileStillPresent(m) => {
+                write!(f, "unit file still present after removal: {m}")
+            }
+            UnitPreconditionError::StateUnknown(m) => {
+                write!(f, "unit state could not be determined: {m}")
+            }
+            UnitPreconditionError::NotAbsent(m) => {
+                write!(f, "unit not absent after removal: {m}")
+            }
+        }
+    }
+}
+
+/// Put `unit` (`<name>.service`, installed at `unit_path`) into the state
+/// "not-found and inactive", and *prove* that state before returning `Ok`.
+///
+/// `stop`/`disable`/`reset-failed` legitimately fail for a unit that is already
+/// not-found, so their exit status is not the setup result; removing the file
+/// and reloading systemd are, and the resulting state is then read back
+/// independently: the unit file must be gone and systemd must report
+/// `LoadState=not-found`, `ActiveState=inactive`. A state that cannot be read
+/// is an error, never "absent".
+pub fn establish_unit_not_found(
+    tools: &UnitSetupTools,
+    unit: &str,
+    unit_path: &str,
+) -> Result<(), UnitPreconditionError> {
+    use UnitPreconditionError::*;
+    let (sc, u, p) = (
+        sh_single_quote(&tools.admin_systemctl),
+        sh_single_quote(unit),
+        sh_single_quote(unit_path),
+    );
+    let script = format!(
+        "{sc} stop {u} >/dev/null 2>&1; {sc} disable {u} >/dev/null 2>&1; {sc} reset-failed {u} >/dev/null 2>&1; rm -f {p} && {sc} daemon-reload"
+    );
+    let status = std::process::Command::new(&tools.sudo)
+        .args(["-n", "/bin/sh", "-c"])
+        .arg(script)
+        .status()
+        .map_err(|e| RemovalNotRun(format!("{}: {e}", tools.sudo)))?;
+    if !status.success() {
+        return Err(RemovalFailed(format!("{unit}: {status}")));
+    }
+    match std::fs::symlink_metadata(unit_path) {
+        Ok(_) => return Err(UnitFileStillPresent(unit_path.to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(StateUnknown(format!("{unit_path}: {e}"))),
+    }
+    let out = std::process::Command::new(&tools.query_systemctl)
+        .args(["show", "-p", "LoadState", "-p", "ActiveState", unit])
+        .output()
+        .map_err(|e| StateUnknown(format!("{}: {e}", tools.query_systemctl)))?;
+    if !out.status.success() {
+        return Err(StateUnknown(format!(
+            "systemctl show {unit}: {}",
+            out.status
+        )));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let prop = |key: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(&format!("{key}=")))
+            .map(|v| v.trim().to_string())
+    };
+    let (Some(load), Some(active)) = (prop("LoadState"), prop("ActiveState")) else {
+        return Err(StateUnknown(format!(
+            "systemctl show {unit} printed no LoadState/ActiveState: {text:?}"
+        )));
+    };
+    if load != "not-found" || active != "inactive" {
+        return Err(NotAbsent(format!(
+            "{unit}: LoadState={load} ActiveState={active}"
+        )));
+    }
+    Ok(())
+}
+
+/// Establish the not-found precondition on the host. Returns `true` when it is
+/// proven and the test may continue; otherwise the test must return, having
+/// been skipped with a marker or, under `SINTER_TEST_STRICT=1`, failed.
+pub fn require_unit_not_found(unit: &str, unit_path: &str) -> bool {
+    match establish_unit_not_found(&UnitSetupTools::host(), unit, unit_path) {
+        Ok(()) => true,
+        Err(e) => {
+            skip_or_fail(&format!("unit precondition not established ({unit}): {e}"));
+            false
+        }
+    }
 }

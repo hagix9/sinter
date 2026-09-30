@@ -1010,19 +1010,10 @@ fn ssh_sudo_privileged_file_replace_read_verify() {
     // for both read and replace.
     let outdir = target_private_dir("ssh-priv-file", true);
     let out = format!("{}/conf", outdir);
-    // Seed initial root-owned content via a target command.
-    let seed = target_run(
-        "/bin/sh",
-        &[
-            "-c",
-            &format!(
-                "printf 'initial root content' > {}",
-                shell_probe_quote(&out)
-            ),
-        ],
-        true,
-    );
-    assert!(seed.is_ok(), "failed to seed privileged file: {:?}", seed);
+    // Seed initial root-owned content and prove it is there: the property is
+    // that existing root-owned content gets replaced, which a missing seed
+    // would not exercise.
+    target_seed_file(&out, "initial root content", true);
 
     let ctrl = controller_dir("ssh-priv-file-recipe");
     let recipe = controller_recipe(
@@ -1050,18 +1041,4 @@ fn ssh_sudo_privileged_file_replace_read_verify() {
     assert_eq!(find(&r2, "f").change, Change::None);
     assert_eq!(mutation_command_count(&r2), 0, "{:?}", r2.commands);
     target_cleanup_dir(&outdir, true);
-}
-
-/// Small local shell-quoting helper for building a target probe command.
-fn shell_probe_quote(s: &str) -> String {
-    let mut out = String::from("'");
-    for c in s.chars() {
-        if c == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(c);
-        }
-    }
-    out.push('\'');
-    out
 }
