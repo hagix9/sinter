@@ -9,6 +9,7 @@ Run: python3 -m unittest discover -s release/tests
 """
 import base64
 import copy
+import gzip
 import hashlib
 import io
 import json
@@ -214,13 +215,17 @@ class Evidence:
         self.sanitize = []
 
     def artifact_bytes(self):
+        # manifest() records the hash of one call and write() writes another,
+        # so the bytes must depend only on self.exe. The gzip header carries a
+        # modification time that defaults to the current time; pin it.
         buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-            d = f"sinter-v{VERSION}-linux-x86_64"
-            tf.addfile(dir_info(d))
-            info = reg(d + "/sinter", 0o755)
-            info.size = len(self.exe)
-            tf.addfile(info, io.BytesIO(self.exe))
+        with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz:
+            with tarfile.open(fileobj=gz, mode="w") as tf:
+                d = f"sinter-v{VERSION}-linux-x86_64"
+                tf.addfile(dir_info(d))
+                info = reg(d + "/sinter", 0o755)
+                info.size = len(self.exe)
+                tf.addfile(info, io.BytesIO(self.exe))
         return buf.getvalue()
 
     def manifest(self):
@@ -392,6 +397,13 @@ class Base(unittest.TestCase):
 class Positive(Base):
     def test_valid_archive_bundle_with_sums(self):
         self.assertPass(self.check(sums=True))
+
+    def test_artifact_bytes_do_not_depend_on_the_clock(self):
+        with mock.patch("time.time", return_value=1_800_000_000.0):
+            first = self.ev.artifact_bytes()
+        with mock.patch("time.time", return_value=1_800_000_001.0):
+            second = self.ev.artifact_bytes()
+        self.assertEqual(first, second)
 
     def test_valid_directory_bundle(self):
         self.assertPass(self.check(archive=False))
