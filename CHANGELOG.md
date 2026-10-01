@@ -2,7 +2,11 @@
 
 All notable changes to Sinter are documented in this file.
 
-## [Unreleased]
+## [1.1.2] - 2026-09-30
+
+SSH security hardening, plus a stricter release validation gate. The only
+change to the `sinter` runtime is the SSH algorithm policy below. Recipes,
+command lines, and `--format json` documents are unchanged.
 
 ### Security
 
@@ -14,11 +18,47 @@ All notable changes to Sinter are documented in this file.
   The legacy fallbacks that the bundled libssh2 offered by default can no
   longer be negotiated: 1024-bit and SHA-1 key exchange, SHA-1 `ssh-rsa`
   host key signatures, CBC, RC4, Blowfish, CAST and 3DES ciphers, and MD5,
-  SHA-1 and RIPEMD-160 MACs. There is no option to re-enable them. A server
-  that offers only legacy algorithms is refused at the handshake (`Unable to
-  exchange encryption keys`); current OpenSSH releases offer the allowed
-  algorithms by default. The policy is installed before every handshake,
-  and a failure to install it fails the connection.
+  SHA-1 and RIPEMD-160 MACs. Host certificate key types are no longer
+  offered either, because `known_hosts` verification cannot validate them.
+  There is no option to re-enable any of this. A server that offers only
+  legacy algorithms is refused at the handshake (`Unable to exchange
+  encryption keys`); current OpenSSH releases offer the allowed algorithms
+  by default. RSA host keys keep working through `rsa-sha2-256` and
+  `rsa-sha2-512`, and host key types already recorded in `known_hosts` are
+  still tried first. The policy is installed before every handshake, and a
+  failure to install it fails the connection.
+- The public Gateway (`gateway/`, deployed separately and not part of the
+  release artifact) validates JWTs with `jsonwebtoken` 10 (`aws_lc_rs`
+  backend), with regression tests for `nbf` handling and the 2048-bit RSA
+  key floor.
+
+### Release validation
+
+- The Linux validation gate runs the root test suite as `env
+  SINTER_TEST_STRICT=1 SINTER_TEST_LOCAL_SSHD=1 cargo test --locked
+  --all-targets --all-features`, and the acceptance checker requires exactly
+  that command for every release after v1.1.1. In strict mode a test whose
+  prerequisite is missing fails instead of being skipped and counted as
+  passed; strict mode now also covers the throwaway-`sshd` suites and the
+  extended-attribute and `script(1)` tests, which used to skip silently. The
+  gate host is documented as Ubuntu 24.04 x86_64 with its prerequisites.
+- The checker derives the root test harnesses and Linux-only suites from the
+  candidate commit itself and requires the gate log to show every harness
+  passing, adding up to the recorded counts, instead of trusting
+  operator-supplied lists.
+- Integration tests now prove the state they depend on before running:
+  fixture setup steps that could fail silently (unit removal, private
+  directory creation, seeded file contents, extended-attribute setup) are
+  checked, and regression tests cover each.
+- Per-commit CI builds (but does not run) the root test binaries and runs the
+  gateway, installer and checker tests; a separate workflow scans
+  dependencies for known advisories. The privileged root suite runs only in
+  the release gate.
+
+### Documentation
+
+- Added `SECURITY.md` (private vulnerability reporting) and a contributing
+  guide, and linked them from the README.
 
 ## [1.1.1] - 2026-09-29
 
