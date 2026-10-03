@@ -17,6 +17,7 @@
     { "title": "ChatGPT Plugin", "path": "guides/chatgpt-plugin", "description": "一時停止中：公開 Gateway とご自身の sinter-bridge を経由する ChatGPT Plugin の経路（read-only）。CLI・sinter mcp・WebMCP には影響しません。", "keywords": "chatgpt plugin mcp gateway bridge oauth read-only" },
     { "title": "レシピ概要", "path": "recipes/overview", "description": "v1.1.3 の機能に基づくレシピ例。", "keywords": "レシピ 例 baseline" },
     { "title": "CLI リファレンス", "path": "reference/cli", "description": "sinter validate/plan/apply のフラグと終了コード。", "keywords": "cli フラグ 終了コード host port user sudo identity known_hosts format" },
+    { "title": "sinter secrets", "path": "reference/secrets", "description": "sinter secrets encrypt/decrypt/list: age 形式のシークレットファイル（未リリース、v1.1.3 より後）。", "keywords": "secrets encrypt decrypt age identity recipient passphrase unreleased" },
     { "title": "レシピフォーマット", "path": "reference/recipe-format", "description": "トップレベルフィールド、式、補間のリファレンス。", "keywords": "version vars include resources handlers 式 補間" },
     { "title": "リソースリファレンス", "path": "reference/resources", "description": "すべてのリソースタイプとパラメータ。", "keywords": "リソースタイプ パラメータ リファレンス" },
     { "title": "file リソース", "path": "reference/resources/file", "description": "file リソースのパラメータと動作。", "keywords": "file content source owner group mode path" },

@@ -217,6 +217,11 @@ account types, `group` and `user`: explicit `depends_on`, local database only,
 no renumbering, additive supplementary groups, `absent` without `-r`/`-f`. See
 the resource reference.
 
+Also after v1.1.3 (unreleased): `sinter secrets encrypt | decrypt | list`
+encrypts secret files in the standard age format (recipients or a terminal-only
+passphrase; identities outside the repository by default). It is a standalone
+command; no recipe field uses it yet. See the `sinter secrets` reference.
+
 A minimal recipe:
 
 ```yaml

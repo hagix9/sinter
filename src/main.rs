@@ -44,6 +44,73 @@ enum Command {
     Audit(TargetArgs),
     /// Serve a read-only MCP (Model Context Protocol) endpoint on stdio.
     Mcp(McpArgs),
+    /// Encrypt, decrypt and list secret files (standard age format).
+    /// Unreleased: not part of v1.1.3.
+    Secrets(SecretsArgs),
+}
+
+#[derive(Args, Debug)]
+struct SecretsArgs {
+    #[command(subcommand)]
+    command: SecretsCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum SecretsCommand {
+    /// Encrypt FILE (or stdin, `-`) to a new age file, FILE.age by default.
+    ///
+    /// With no --passphrase and no -r, the nearest recipients.txt (inside the
+    /// repository) is used; otherwise a terminal is asked. The original file
+    /// is never changed or deleted. An existing output is never replaced
+    /// silently.
+    Encrypt(SecretsEncryptArgs),
+    /// Decrypt FILE to stdout. Refuses a terminal; never writes a file.
+    ///
+    /// A passphrase-encrypted secret asks for the passphrase on the terminal.
+    /// A recipient-encrypted secret uses an identity: --identity, then
+    /// SINTER_IDENTITY (a path), then the default identity
+    /// (~/.config/sinter/identity), then a passphrase-protected identity.age in
+    /// the repository.
+    Decrypt(SecretsDecryptArgs),
+    /// List age files (derived from the files; nothing is decrypted).
+    List(SecretsListArgs),
+}
+
+#[derive(Args, Debug)]
+struct SecretsEncryptArgs {
+    /// File to encrypt, or `-` for stdin (then -o is required).
+    file: PathBuf,
+    /// Encrypt with a passphrase typed on the terminal (never argv, env or stdin).
+    #[arg(long, conflicts_with = "recipient")]
+    passphrase: bool,
+    /// age recipient (age1...); may be repeated.
+    #[arg(short = 'r', long = "recipient", value_name = "RECIPIENT")]
+    recipient: Vec<String>,
+    /// Output file [default: FILE.age].
+    #[arg(short = 'o', long, value_name = "OUT")]
+    output: Option<PathBuf>,
+    /// Replace an existing age file at the output.
+    #[arg(short = 'f', long)]
+    force: bool,
+}
+
+#[derive(Args, Debug)]
+struct SecretsDecryptArgs {
+    /// Secret file to decrypt.
+    file: PathBuf,
+    /// Identity file (private key, or passphrase-protected private key).
+    #[arg(short = 'i', long, value_name = "PATH")]
+    identity: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct SecretsListArgs {
+    /// Files or directories [default: current directory]. Directories list
+    /// their *.age files.
+    paths: Vec<PathBuf>,
+    /// Output format: text or json.
+    #[arg(long, default_value = "text")]
+    format: String,
 }
 
 #[derive(Args, Debug)]
@@ -140,6 +207,7 @@ fn run(cli: Cli) -> Result<u8, SinterError> {
         Command::Plan(a) => run_phase(Phase::Plan, &a),
         Command::Apply(a) => run_phase(Phase::Apply, &a),
         Command::Audit(a) => run_phase(Phase::Audit, &a),
+        Command::Secrets(a) => secrets_command(a),
         Command::Mcp(a) => {
             // Load once, fail closed: a missing/unreadable/malformed targets
             // file aborts startup; the registry is immutable while serving.
@@ -149,6 +217,60 @@ fn run(cli: Cli) -> Result<u8, SinterError> {
             };
             sinter::mcp::serve(targets)?;
             Ok(0)
+        }
+    }
+}
+
+fn secrets_command(a: SecretsArgs) -> Result<u8, SinterError> {
+    use sinter::secrets_cli as sc;
+    use std::io::IsTerminal;
+    let env = sc::Env::from_process();
+    // Raw, unbuffered descriptors: plaintext must not pass through the standard
+    // library's stdin/stdout buffers (extra copies that nothing zeroizes). The
+    // `File`s are not closed on drop.
+    use std::os::fd::FromRawFd;
+    let mut stdin = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(0) });
+    let stdin_is_tty = std::io::stdin().is_terminal();
+    let mut stdout = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(1) });
+    let stdout_is_tty = std::io::stdout().is_terminal();
+    let mut stderr = std::io::stderr().lock();
+    let mut prompter = sc::TtyPrompter;
+    let mut io = sc::Io {
+        stdin: &mut *stdin,
+        stdin_is_tty,
+        stdout: &mut *stdout,
+        stdout_is_tty,
+        stderr: &mut stderr,
+        prompter: &mut prompter,
+        env: &env,
+    };
+    match a.command {
+        SecretsCommand::Encrypt(e) => sc::encrypt(
+            &sc::EncryptArgs {
+                file: e.file,
+                output: e.output,
+                passphrase: e.passphrase,
+                recipients: e.recipient,
+                force: e.force,
+            },
+            &mut io,
+        ),
+        SecretsCommand::Decrypt(d) => sc::decrypt(
+            &sc::DecryptArgs {
+                file: d.file,
+                identity: d.identity,
+            },
+            &mut io,
+        ),
+        SecretsCommand::List(l) => {
+            let json = matches!(parse_format(&l.format)?, OutputFormat::Json);
+            sc::list(
+                &sc::ListArgs {
+                    paths: l.paths,
+                    json,
+                },
+                &mut io,
+            )
         }
     }
 }

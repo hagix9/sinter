@@ -416,6 +416,13 @@ fn dearmor(
     }
 }
 
+/// Largest age file (binary or armored) that [`decrypt`] and [`inspect`] will
+/// accept for the default plaintext cap. Callers reading a file should read at
+/// most this many bytes (plus one, to detect excess).
+pub fn max_file_bytes() -> usize {
+    max_ciphertext(MAX_SECRET_BYTES) / 3 * 4 * 67 / 64 + 4096
+}
+
 fn map_decrypt(e: age::DecryptError) -> SecretError {
     use age::DecryptError as D;
     match e {

@@ -21,6 +21,7 @@ pub mod platform;
 pub mod resources;
 pub mod result;
 pub mod secrets;
+pub mod secrets_cli;
 pub mod sshconfig;
 pub mod style;
 pub mod targetfs;

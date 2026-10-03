@@ -6,6 +6,27 @@ All notable changes to Sinter are documented in this file.
 
 ### Added
 
+- `sinter secrets encrypt | decrypt | list` (not part of v1.1.3): encrypt and
+  decrypt secret files in the standard age format, built on the encrypted-secret
+  core. A standalone command: no recipe, resource, `plan`/`apply`/`audit` or MCP
+  integration yet.
+  - `encrypt` takes recipients (`-r`, or the nearest `recipients.txt` up to the
+    repository root) or a passphrase (`--passphrase`, terminal only, echo off);
+    input is opaque bytes up to 16 MiB; the output is written atomically
+    (0600, synced), never replaces an existing file silently (`--force` replaces
+    only an age file) and never writes through a symbolic link; the original is
+    never changed or deleted.
+  - `decrypt` writes plaintext to stdout only and refuses a terminal. Identities
+    are found in this order: `--identity`, `SINTER_IDENTITY` (a path), the
+    default `~/.config/sinter/identity` (outside any repository), then a
+    passphrase-protected `identity.age` in the repository (explicit opt-in; a
+    plaintext identity is never discovered in a repository). Plaintext identities
+    must be mode 0600 and owned by the user.
+  - `list` derives status, method and recipient count from age headers; it
+    decrypts nothing.
+  - Passphrases are accepted only on the terminal: never from argv, the
+    environment or stdin. Automation uses recipients and identities.
+
 - `group` and `user` resource types for **local** Linux accounts (not part of
   the v1.1.3 release).
   - `group`: `name`, `state` (`present`/`absent`, default `present`), `gid`,
