@@ -2,7 +2,11 @@
 
 All notable changes to Sinter are documented in this file.
 
-## [Unreleased]
+## [1.1.3] - 2026-10-03
+
+systemd manager synchronization and a service-stop fix. There is no new resource
+type, handler action, recipe option or command-line flag; `--format json`
+documents gain one additive key.
 
 ### Changed
 
@@ -11,8 +15,13 @@ All notable changes to Sinter are documented in this file.
   manager input (a unit file, a drop-in, an alias/mask/`.wants` link, or
   `system.conf` and its drop-ins) or when a fresh observation reports
   `NeedDaemonReload=yes`: before a `service` resource decides, before each
-  notified handler runs, and at the end of a successful apply. A reload is
-  always followed by a fresh observation, `plan` and `audit` never reload, and
+  notified handler runs, and at the end of a successful apply. A `service`
+  or handler decision is always made on a fresh observation of the unit taken
+  after the manager has been synchronized. The final reload at the end of an
+  apply has no `service` or handler consumer, but it re-observes the managed
+  units it identified; only a manager-only flush with no corresponding
+  identifiable unit reports unit verification as not applicable. This is not
+  a proof of global systemd consistency. `plan` and `audit` never reload, and
   an unchanged second apply performs none. A manual `daemon-reload` command
   resource is normally no longer needed. There is no new resource type,
   handler action or recipe option.
@@ -21,7 +30,14 @@ All notable changes to Sinter are documented in this file.
   answer that is missing, duplicating or malforming any of them. `audit`
   gains an independent `manager_reload` drift dimension.
 - `--format json` plan/apply documents gain an additive top-level
-  `manager_reloads` array. Existing keys and value sets are unchanged.
+  `manager_reloads` array. Existing keys and value sets are unchanged. The
+  text output and the MCP plan tools report the reloads in the same way. A
+  `plan` is still read-only: a `service` that depends on a pending manager
+  input is reported as unknown (deferred until apply) instead of unchanged.
+- Scope: the synchronization covers the system manager only (not
+  `systemctl --user`), is local to one run, and keeps no persistent journal,
+  rollback or retry. A reload that fails is reported as a failure, and the
+  dependent `service` or handler does nothing.
 
 ### Fixed
 
@@ -29,7 +45,20 @@ All notable changes to Sinter are documented in this file.
   a unit that systemd has already unloaded (a running unit that is neither
   enabled nor referenced by another unit). `systemctl reset-failed` answering
   "Unit … not loaded." is accepted only when a fresh observation then shows the
-  unit inactive; every other `reset-failed` failure is still a failure.
+  unit inactive; every other `reset-failed` failure is still a failure. A
+  unit that is missing is still not treated as stopped.
+
+### Documentation
+
+- English and Japanese pages for the `service`, `file`, `template` and `link`
+  resources, the execution model, the CLI and MCP references and
+  troubleshooting describe the manager synchronization, its `plan` and
+  `audit` behavior, its failure modes and its limits, with a unit → service →
+  handler recipe example.
+
+### Contributors
+
+- [hagix9](https://github.com/hagix9)
 
 ## [1.1.2] - 2026-09-30
 
