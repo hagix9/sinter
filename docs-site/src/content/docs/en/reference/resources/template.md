@@ -44,6 +44,11 @@ hostname = {{ facts.hostname }}
 - Template expressions may read `vars.*`, `facts.*`, `registers.*`, and
   `template.*`. `template.*` names never shadow the other namespaces.
 - `content` is **not** supported — template resources always use `source`.
+- A template output that really changes a systemd manager input (a unit file, drop-in,
+  alias/mask/`.wants`/`.requires` link, or `system.conf`) makes Sinter run
+  `systemctl daemon-reload` automatically before the next service or handler
+  that needs it, and at the end of a successful apply. See
+  [service](/en/reference/resources/service/#automatic-manager-synchronization).
 
 ## Idempotency
 

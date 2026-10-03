@@ -117,6 +117,14 @@ fn apply_failure_exits_five() {
 
 #[test]
 fn plan_unsafe_observation_exits_four() {
+    // This tests the missing-unit plan error. A host manager that is stale
+    // (`NeedDaemonReload=yes` for every unit, as systemd 255 reports shortly
+    // after boot) would make the plan truthfully UNKNOWN instead, which is a
+    // different, separately tested behavior, so prove the manager is
+    // synchronized first rather than inherit whatever state the host is in.
+    if !require_synchronized_manager("sinter-no-such-unit.service") {
+        return;
+    }
     let dir = trusted_root("cli-plan-unsafe");
     // A missing service without a present-package dependency is a plan error.
     let recipe = write_recipe(

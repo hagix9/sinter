@@ -2,6 +2,35 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- systemd manager synchronization. Sinter now runs `systemctl daemon-reload`
+  itself when a `file`, `template` or `link` resource really changes systemd
+  manager input (a unit file, a drop-in, an alias/mask/`.wants` link, or
+  `system.conf` and its drop-ins) or when a fresh observation reports
+  `NeedDaemonReload=yes`: before a `service` resource decides, before each
+  notified handler runs, and at the end of a successful apply. A reload is
+  always followed by a fresh observation, `plan` and `audit` never reload, and
+  an unchanged second apply performs none. A manual `daemon-reload` command
+  resource is normally no longer needed. There is no new resource type,
+  handler action or recipe option.
+- Service observation now requests four properties
+  (`LoadState,ActiveState,UnitFileState,NeedDaemonReload`) and rejects an
+  answer that is missing, duplicating or malforming any of them. `audit`
+  gains an independent `manager_reload` drift dimension.
+- `--format json` plan/apply documents gain an additive top-level
+  `manager_reloads` array. Existing keys and value sets are unchanged.
+
+### Fixed
+
+- A `service` with `state: stopped` no longer fails after a successful stop of
+  a unit that systemd has already unloaded (a running unit that is neither
+  enabled nor referenced by another unit). `systemctl reset-failed` answering
+  "Unit … not loaded." is accepted only when a fresh observation then shows the
+  unit inactive; every other `reset-failed` failure is still a failure.
+
 ## [1.1.2] - 2026-09-30
 
 SSH security hardening, plus a stricter release validation gate. The only

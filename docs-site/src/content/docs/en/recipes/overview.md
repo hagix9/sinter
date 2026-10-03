@@ -62,6 +62,56 @@ handlers:
 The handler restarts `myapp` once, at the end of the apply, and only when the
 file actually changed.
 
+## systemd unit file with handler
+
+```yaml
+version: 1
+
+resources:
+  - id: app_unit
+    type: file
+    with:
+      path: /etc/systemd/system/myapp.service
+      content: |
+        [Unit]
+        Description=My app
+
+        [Service]
+        ExecStart=/opt/myapp/bin/myapp
+
+        [Install]
+        WantedBy=multi-user.target
+      mode: "0644"
+      owner: root
+      group: root
+    notify: [restart_app]
+
+  - id: app_service
+    type: service
+    with:
+      name: myapp.service
+      state: running
+      enabled: true
+    depends_on: [app_unit]
+
+handlers:
+  - id: restart_app
+    service: myapp.service
+    action: restart
+```
+
+Sinter runs `systemctl daemon-reload` for you — no `command` resource is
+needed. Because the unit file changed, the manager is reloaded before the
+`service` resource decides. The manager is checked again before the handler
+runs, but it is reloaded again only if new changes or a stale manager state
+require it; the same already-synchronized change causes no second reload.
+`depends_on` puts the unit file before the service: Sinter does not reorder
+resources. A
+reload only re-reads unit definitions; the `restart` handler is what applies a
+changed unit file to an already-running process. When nothing changed, a
+second apply performs no reload and no restart. See
+[service](/en/reference/resources/service/#automatic-manager-synchronization).
+
 ## Guarded one-shot command
 
 ```yaml

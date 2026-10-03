@@ -20,6 +20,9 @@ sinter apply --host web01 --sudo recipe.yaml   # ok — 変更ゼロ
 - すでに `running` かつ `enabled` の `service` はそのままです。
 - ハンドラは何かが変更されたときだけ実行されます。冪等な 2 回目の
   apply ではハンドラは起動しません。
+- すでに同期済みのマネージャは reload されません。保留中の systemd 入力の変更が
+  なく `NeedDaemonReload=no` であれば、2 回目の apply で `daemon-reload` は
+  1 回も実行されません。
 
 ## 再計画ではなく再観測
 

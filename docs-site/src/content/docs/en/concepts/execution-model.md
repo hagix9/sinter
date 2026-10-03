@@ -20,10 +20,18 @@ state, then reports what an apply would do. It never:
 - changes permissions or ownership
 - installs or removes packages
 - changes services
+- runs `systemctl daemon-reload`
 - executes command resources
 
 A plan is a preview, not an approval artifact — it is never replayed as
 authority.
+
+If an earlier resource in the plan changes a systemd manager input (a unit
+file, drop-in, alias link or `system.conf`), or the manager already reports
+`NeedDaemonReload=yes`, later `service` resources are reported as unknown
+(`?`, deferred until manager synchronization at apply) rather than "unchanged"
+or failed. The reloads an apply would perform are listed separately under
+`manager_reloads`.
 
 ## apply — observe, mutate, verify
 
@@ -31,6 +39,20 @@ authority.
 to mutate. After a mutation it verifies the outcome. Mutations that cannot be
 confirmed are reported as **indeterminate**, never retried automatically
 (timeout after dispatch, lost response, signal uncertainty).
+
+**Manager synchronization.** When a changed resource touches a systemd manager
+input, or a unit reports `NeedDaemonReload=yes`, `apply` runs
+`systemctl daemon-reload` at the consumer boundary: before a `service`
+resource decides, before each notified handler, and at the end of a successful
+apply. The unit is observed again after the reload, and only that fresh state
+decides what to do. A reload does not restart anything. See
+[service](/en/reference/resources/service/#automatic-manager-synchronization).
+
+**Handlers phase.** After normal traversal succeeds, handlers run in
+declaration order, each preceded by a manager reload if one is pending, then a
+fresh observation, the `restart`/`reload` action, and verification. A run that
+stopped early does not start a new reload; the report then says the manager is
+unsynchronized.
 
 ## audit — read-only verification
 
@@ -41,6 +63,10 @@ reports each resource as `PASS`, `DRIFT`, `NOT_AUDITABLE`,
 `NOT_APPLICABLE`, or `ERROR` in deterministic dependency/execution order.
 
 - Command resources are always `NOT_AUDITABLE` — audit never executes them.
+- Audit never runs `daemon-reload`. A service whose manager reports
+  `NeedDaemonReload=yes` shows an independent `manager_reload` drift, even when
+  it is active and enabled as desired. `NeedDaemonReload=no` is a limited
+  observation, not proof that the loaded definition equals the file on disk.
 - Exit codes encode the verdict: `0` when nothing drifted and no observation
   errors occurred, `7` on drift, `6` when any observation errored — errors
   dominate drift. An exit-0 audit may still contain `NOT_AUDITABLE` or

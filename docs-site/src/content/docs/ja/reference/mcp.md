@@ -89,6 +89,17 @@ sudo = true
 
 どちらもnamed targetへの実SSH観測であり、終始読み取り専用です。
 
+どちらも`systemctl daemon-reload`を実行することはありません。plan出力
+（`sinter_plan`と`sinter_plan_host`）には、追加的なトップレベルの
+`manager_reloads`リストが加わります。これはapplyが行うreloadの一覧で、各
+エントリはphaseが`planned`、executionが`not_run`、`unknown: true`です。
+保留中のsystemd入力の変更に依存するserviceのユニットは、「変更なし」ではなく
+unknown（applyでのマネージャ同期まで保留）として報告されます。
+`sinter_audit_host`は、保留中のマネージャreloadを独立した`manager_reload`
+drift次元として報告します。
+[service](/ja/reference/resources/service/#マネージャの自動同期)と
+[JSON出力の契約](/ja/reference/cli/#json-出力の契約)を参照してください。
+
 ## セキュリティモデル
 
 - **読み取り専用は構造的に強制されます。** host toolはmutation permitを

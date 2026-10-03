@@ -75,7 +75,12 @@ handlers:
 `service` は**ターゲット上の systemd ユニット名**です。Sinter のリソース id
 から解決されることはありません。ハンドラは apply の最後に 1 回だけ実行され
 ます。実際に変更があったリソースから通知された場合に限られます。同じ
-ハンドラへの複数の通知は重複排除されます。
+ハンドラへの複数の通知は重複排除されます。systemd ユニットの入力が変更された
+場合、またはユニットが `NeedDaemonReload=yes` を報告している場合、Sinter は
+ハンドラの実行前にシステムマネージャを reload します（`systemctl daemon-reload`）。
+reload は restart ではありません。
+[service](/ja/reference/resources/service/#マネージャの自動同期)を参照して
+ください。
 
 ## 式
 

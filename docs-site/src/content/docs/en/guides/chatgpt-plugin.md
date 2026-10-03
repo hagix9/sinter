@@ -177,6 +177,9 @@ calls fail with `controller_offline` about 130 seconds after its last poll.
   `systemctl --user stop sinter-bridge` stops it cleanly; failures are
   restarted after 10 seconds.
 
+  The `systemctl --user daemon-reload` above is a manual step on the bridge
+  host: Sinter manages only the systemd system manager, never the user manager.
+
 - **launchd (macOS)**: no launchd definition is provided. Run the bridge in
   the foreground; note that sleep, logout or reboot stops it.
 

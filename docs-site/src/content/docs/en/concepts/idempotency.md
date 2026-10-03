@@ -20,6 +20,9 @@ sinter apply --host web01 --sudo recipe.yaml   # ok — zero mutations
 - A `service` already `running` and `enabled` is left untouched.
 - Handlers run only when something changed — an idempotent second apply
   triggers none.
+- A manager that is already synchronized is not reloaded: with no pending
+  systemd input change and `NeedDaemonReload=no`, a second apply issues zero
+  `daemon-reload` calls.
 
 ## Re-observation, not replanning
 

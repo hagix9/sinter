@@ -40,6 +40,11 @@ and mode — or is absent.
   object kinds (directories, symlinks, devices) as a file.
 - Parent directories must already exist and pass the trust-boundary check;
   unexpected symlinks in the path are rejected.
+- A file that really changes a systemd manager input (a unit file, drop-in,
+  alias/mask/`.wants`/`.requires` link, or `system.conf`) makes Sinter run
+  `systemctl daemon-reload` automatically before the next service or handler
+  that needs it, and at the end of a successful apply. See
+  [service](/en/reference/resources/service/#automatic-manager-synchronization).
 
 ## Idempotency
 

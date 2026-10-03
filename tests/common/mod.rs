@@ -215,7 +215,14 @@ pub fn is_mutation_command(program: &str, args: &[String]) -> bool {
         "systemctl" => args.iter().any(|a| {
             matches!(
                 a.as_str(),
-                "start" | "stop" | "restart" | "reload" | "enable" | "disable" | "reset-failed"
+                "start"
+                    | "stop"
+                    | "restart"
+                    | "reload"
+                    | "enable"
+                    | "disable"
+                    | "reset-failed"
+                    | "daemon-reload"
             )
         }),
         _ => false,
@@ -876,6 +883,11 @@ pub enum UnitPreconditionError {
     StateUnknown(String),
     /// The state was read and the unit is not not-found/inactive.
     NotAbsent(String),
+    /// The manager reload needed to synchronize the manager could not run or
+    /// exited unsuccessfully.
+    SyncFailed(String),
+    /// The manager still reports `NeedDaemonReload` other than `no`.
+    NotSynchronized(String),
 }
 
 impl std::fmt::Display for UnitPreconditionError {
@@ -893,6 +905,12 @@ impl std::fmt::Display for UnitPreconditionError {
             }
             UnitPreconditionError::NotAbsent(m) => {
                 write!(f, "unit not absent after removal: {m}")
+            }
+            UnitPreconditionError::SyncFailed(m) => {
+                write!(f, "manager synchronization failed: {m}")
+            }
+            UnitPreconditionError::NotSynchronized(m) => {
+                write!(f, "manager not synchronized: {m}")
             }
         }
     }
@@ -971,6 +989,154 @@ pub fn require_unit_not_found(unit: &str, unit_path: &str) -> bool {
         Ok(()) => true,
         Err(e) => {
             skip_or_fail(&format!("unit precondition not established ({unit}): {e}"));
+            false
+        }
+    }
+}
+
+/// Parse the answer to `systemctl show -p LoadState -p NeedDaemonReload`. The
+/// precondition is a *proof*, so the answer must be exactly those two property
+/// records, each once, each non-empty, as valid UTF-8, one `Key=value` per
+/// line: a missing, repeated (identical or conflicting), empty, unexpected or
+/// malformed record means the state is not proven. There is no first-match or
+/// last-match reading, and values are not trimmed.
+pub fn parse_load_and_need(stdout: &[u8]) -> Result<(String, String), UnitPreconditionError> {
+    use UnitPreconditionError::*;
+    let text = std::str::from_utf8(stdout)
+        .map_err(|_| StateUnknown(format!("systemctl show printed invalid UTF-8: {stdout:?}")))?;
+    let body = text.strip_suffix('\n').unwrap_or(text);
+    let (mut load, mut need) = (None, None);
+    for line in body.split('\n') {
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(StateUnknown(format!(
+                "systemctl show printed a malformed line {line:?}: {text:?}"
+            )));
+        };
+        let slot = match key {
+            "LoadState" => &mut load,
+            "NeedDaemonReload" => &mut need,
+            other => {
+                return Err(StateUnknown(format!(
+                    "systemctl show printed unexpected property {other:?}: {text:?}"
+                )))
+            }
+        };
+        if slot.is_some() {
+            return Err(StateUnknown(format!(
+                "systemctl show printed {key} more than once: {text:?}"
+            )));
+        }
+        if value.is_empty() {
+            return Err(StateUnknown(format!(
+                "systemctl show printed an empty {key}: {text:?}"
+            )));
+        }
+        *slot = Some(value.to_string());
+    }
+    match (load, need) {
+        (Some(load), Some(need)) => Ok((load, need)),
+        _ => Err(StateUnknown(format!(
+            "systemctl show printed no LoadState/NeedDaemonReload: {text:?}"
+        ))),
+    }
+}
+
+/// Read `unit`'s `LoadState` and `NeedDaemonReload` from the manager (see
+/// [`parse_load_and_need`]); an answer that does not prove both is an error,
+/// never a default.
+fn observe_load_and_need(
+    tools: &UnitSetupTools,
+    unit: &str,
+) -> Result<(String, String), UnitPreconditionError> {
+    use UnitPreconditionError::*;
+    let out = std::process::Command::new(&tools.query_systemctl)
+        .args([
+            "show",
+            "-p",
+            "LoadState",
+            "-p",
+            "NeedDaemonReload",
+            "--",
+            unit,
+        ])
+        .output()
+        .map_err(|e| StateUnknown(format!("{}: {e}", tools.query_systemctl)))?;
+    if !out.status.success() {
+        return Err(StateUnknown(format!(
+            "systemctl show {unit}: {}",
+            out.status
+        )));
+    }
+    parse_load_and_need(&out.stdout)
+}
+
+/// Put the host's system manager into the state "`unit` is not loaded and the
+/// manager reports `NeedDaemonReload=no`", and *prove* it before returning.
+///
+/// Why a test needs this: a manager that was started before unit files
+/// changed (systemd 255 shortly after boot, once snapd has written mounts)
+/// answers `NeedDaemonReload=yes` for every unit, even one that does not
+/// exist. Sinter's plan is then truthfully UNKNOWN/deferred instead of the
+/// "service was not found" plan error a test of the missing-unit path expects.
+/// That is a property of the host's global manager, not of the code under
+/// test, so the test makes it explicit instead of inheriting it.
+///
+/// The state is read first. An already synchronized manager is left alone (no
+/// privilege, no mutation). Only a manager that reports `NeedDaemonReload=yes`
+/// is reloaded, as root, with the same `daemon-reload` the service fixtures
+/// above already run; the result is read back independently and anything but
+/// not-loaded + `no` is an error. This is test setup only; Sinter itself
+/// never reloads in `plan`.
+pub fn establish_synchronized_manager(
+    tools: &UnitSetupTools,
+    unit: &str,
+) -> Result<(), UnitPreconditionError> {
+    use UnitPreconditionError::*;
+    let check = |tools: &UnitSetupTools| -> Result<bool, UnitPreconditionError> {
+        let (load, need) = observe_load_and_need(tools, unit)?;
+        if load != "not-found" {
+            return Err(NotAbsent(format!("{unit}: LoadState={load}")));
+        }
+        match need.as_str() {
+            "no" => Ok(true),
+            "yes" => Ok(false),
+            other => Err(NotSynchronized(format!(
+                "{unit}: NeedDaemonReload={other:?}"
+            ))),
+        }
+    };
+    if check(tools)? {
+        return Ok(());
+    }
+    let sc = sh_single_quote(&tools.admin_systemctl);
+    let status = std::process::Command::new(&tools.sudo)
+        .args(["-n", "/bin/sh", "-c"])
+        .arg(format!("{sc} daemon-reload"))
+        .status()
+        .map_err(|e| SyncFailed(format!("{}: {e}", tools.sudo)))?;
+    if !status.success() {
+        return Err(SyncFailed(format!("daemon-reload: {status}")));
+    }
+    if check(tools)? {
+        Ok(())
+    } else {
+        Err(NotSynchronized(format!(
+            "{unit}: NeedDaemonReload=yes after daemon-reload"
+        )))
+    }
+}
+
+/// Establish the synchronized-manager precondition on the host. Returns `true`
+/// when it is proven and the test may continue; otherwise the test must
+/// return, having been skipped with a marker or, under `SINTER_TEST_STRICT=1`,
+/// failed.
+pub fn require_synchronized_manager(unit: &str) -> bool {
+    match establish_synchronized_manager(&UnitSetupTools::host(), unit) {
+        Ok(()) => true,
+        Err(e) => {
+            skip_or_fail(&format!(
+                "manager precondition not established ({unit}): {e}"
+            ));
             false
         }
     }

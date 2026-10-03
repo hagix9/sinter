@@ -80,6 +80,44 @@ trusted location.
 The unit doesn't exist on the target. Install its package first
 (`depends_on`), or check the unit name.
 
+**`daemon-reload` failed (exit 5)**
+
+Sinter reloads the systemd system manager automatically when a managed unit
+file, drop-in, alias link or `system.conf` changed, or a unit reports
+`NeedDaemonReload=yes`. A non-zero exit from `systemctl daemon-reload` fails the
+run: the dependent service resource or handler does nothing, earlier file
+changes stay `changed` (nothing is rolled back), and the reload is not retried
+in the same run. Read the reported reason (systemd rate limits such as
+`ReloadLimit*`, authorization, or a broken unit file are common causes), fix
+it, and apply again. A timed-out or lost reload is reported as indeterminate
+(exit 6) — inspect the manager before re-applying.
+
+**`NeedDaemonReload` still `yes` after a reload ("unresolved")**
+
+Sinter reloads once per cause and does not loop. If the unit still reports
+`NeedDaemonReload=yes`, something outside Sinter keeps changing the unit (or a
+fragment outside the unit load path is involved) and the apply fails. Check the
+unit's files with `systemctl show -p FragmentPath,DropInPaths <unit>` and
+`systemctl status <unit>`.
+
+**`UnitPath` could not be read or parsed**
+
+When a managed path looks like unit, drop-in or link input, Sinter asks the
+manager for its load path with `systemctl show --property=UnitPath`. If that
+fails, the resource fails before any mutation (in `plan`: a plan error; in
+`audit`: an `ERROR`). Sinter never guesses the path. Check that systemd is
+running and `systemctl` works for the connecting user (and with `--sudo` if
+used).
+
+**Manager unsynchronized after a stopped run**
+
+If an apply stopped early (a failed resource or handler) after a managed unit
+input had changed, no reload is started and the report states that the reload
+was **not** run. Re-apply, or run `systemctl daemon-reload` manually. Sinter
+keeps no journal across runs, so a later apply reloads only when it observes
+`NeedDaemonReload=yes` or makes a new change. Running `sinter audit` shows
+pending reloads as `manager_reload` drift.
+
 **Indeterminate apply (exit 6)**
 
 Sinter could not confirm whether a mutation completed. Do not retry blindly —

@@ -235,6 +235,12 @@ fn classify_acl_text(text: &str) -> AclClass {
 /// structural one.
 pub struct MutationPermit(());
 
+/// The exact property list requested for a service/unit observation. The
+/// answer must contain each of these four properties exactly once.
+/// `NeedDaemonReload` is a limited observation: `no` does not prove the
+/// loaded definition equals the bytes on disk.
+pub const SERVICE_SHOW_PROPERTIES: &str = "LoadState,ActiveState,UnitFileState,NeedDaemonReload";
+
 impl MutationPermit {
     // Only `TargetFs::mutation_permit` may construct this. Private field +
     // private constructor = code which does not call that method cannot name
@@ -452,11 +458,21 @@ impl TargetFs {
             "/usr/bin/systemctl",
             &[
                 "show".to_string(),
-                "--property=LoadState,ActiveState,UnitFileState".to_string(),
+                format!("--property={}", SERVICE_SHOW_PROPERTIES),
                 "--".to_string(),
                 name.to_string(),
             ],
             sensitive,
+        )
+    }
+
+    /// Read the system manager's unit load path. Read-only; the argv is
+    /// fixed and carries no recipe-controlled value. The property is a
+    /// manager property, so no unit operand (and no `--`) is present.
+    pub fn systemctl_show_unit_path(&mut self) -> Result<Output> {
+        self.run_argv(
+            "/usr/bin/systemctl",
+            &["show".to_string(), "--property=UnitPath".to_string()],
         )
     }
 

@@ -87,14 +87,16 @@ fn assert_observation_only(report: &AuditReport) {
             }
             // Service observation is `systemctl show` with the exact property
             // list; no other verb and no other property set is permitted.
+            // The one additional read-only manager query is the UnitPath
+            // property (no operand), used to recognize managed unit files.
             "/usr/bin/systemctl" => matches!(
                 args.as_slice(),
                 [
                     "show",
-                    "--property=LoadState,ActiveState,UnitFileState",
+                    "--property=LoadState,ActiveState,UnitFileState,NeedDaemonReload",
                     "--",
                     _
-                ]
+                ] | ["show", "--property=UnitPath"]
             ),
             _ => false,
         };
@@ -2310,7 +2312,7 @@ fn audit_allowlist_accepts_every_defined_observation_shape() {
             "/usr/bin/systemctl",
             &[
                 "show",
-                "--property=LoadState,ActiveState,UnitFileState",
+                "--property=LoadState,ActiveState,UnitFileState,NeedDaemonReload",
                 "--",
                 "svc",
             ],
@@ -2696,7 +2698,7 @@ fn systemctl_observation_argv_is_option_injection_safe() {
         args,
         [
             "show",
-            "--property=LoadState,ActiveState,UnitFileState",
+            "--property=LoadState,ActiveState,UnitFileState,NeedDaemonReload",
             "--",
             "-Hevil.invalid"
         ],
@@ -2719,7 +2721,7 @@ fn systemctl_observation_argv_is_option_injection_safe() {
         args,
         [
             "show",
-            "--property=LoadState,ActiveState,UnitFileState",
+            "--property=LoadState,ActiveState,UnitFileState,NeedDaemonReload",
             "--",
             "svc"
         ]

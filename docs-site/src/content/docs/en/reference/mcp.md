@@ -88,6 +88,16 @@ sudo = true
 
 Both are real SSH observations of the named target, read-only end to end.
 
+Neither ever runs `systemctl daemon-reload`. The plan output (`sinter_plan` and
+`sinter_plan_host`) gains an additive top-level `manager_reloads` list — the
+reloads an apply would perform, each with phase `planned`, execution `not_run`
+and `unknown: true` — and a service whose unit depends on a pending systemd
+input change is reported as unknown (deferred until manager synchronization at
+apply) rather than unchanged. `sinter_audit_host` reports a pending manager
+reload as an independent `manager_reload` drift dimension. See
+[service](/en/reference/resources/service/#automatic-manager-synchronization)
+and the [JSON output contract](/en/reference/cli/#json-output-contract).
+
 ## Security model
 
 - **Read-only is structural.** Host tools construct the engine in

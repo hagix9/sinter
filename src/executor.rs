@@ -1865,6 +1865,12 @@ pub struct FakeTarget {
     /// observation contract (IA-01 false-PASS regression suite).
     pub observation_overrides:
         std::collections::BTreeMap<String, std::collections::VecDeque<Output>>,
+    /// Scripted systemd manager state (disk / loaded / NeedDaemonReload /
+    /// reload behavior). Inert unless a test drives it.
+    pub manager: crate::fakesys::FakeManager,
+    /// Opt-in scripted filesystem. `None` keeps the historical behavior:
+    /// filesystem helpers are not modeled and fail honestly.
+    pub fs: Option<crate::fakesys::FakeFs>,
 }
 
 /// One enabled dnf repository in the fake model.
@@ -1926,6 +1932,8 @@ impl FakeTarget {
             snapshot_stat_fails: false,
             snapshot_rm_fails: false,
             observation_overrides: Default::default(),
+            manager: Default::default(),
+            fs: None,
         }
     }
 
@@ -1978,6 +1986,8 @@ impl FakeTarget {
             snapshot_stat_fails: false,
             snapshot_rm_fails: false,
             observation_overrides: Default::default(),
+            manager: Default::default(),
+            fs: None,
         }
     }
 
@@ -2016,6 +2026,8 @@ impl FakeTarget {
             snapshot_stat_fails: false,
             snapshot_rm_fails: false,
             observation_overrides: Default::default(),
+            manager: Default::default(),
+            fs: None,
         }
     }
 
@@ -2057,6 +2069,8 @@ impl FakeTarget {
             snapshot_stat_fails: false,
             snapshot_rm_fails: false,
             observation_overrides: Default::default(),
+            manager: Default::default(),
+            fs: None,
         }
     }
 
@@ -2092,6 +2106,8 @@ impl FakeTarget {
             snapshot_stat_fails: false,
             snapshot_rm_fails: false,
             observation_overrides: Default::default(),
+            manager: Default::default(),
+            fs: None,
         }
     }
 
@@ -2117,6 +2133,55 @@ impl FakeTarget {
 
     /// Declare a systemd unit. `state` is (LoadState, ActiveState, UnitFileState).
     pub fn with_service(mut self, name: &str, state: (&str, &str, &str)) -> Self {
+        self.services.insert(
+            name.to_string(),
+            (
+                state.0.to_string(),
+                state.1.to_string(),
+                state.2.to_string(),
+            ),
+        );
+        self
+    }
+
+    /// Enable the scripted filesystem (standard systemd directories) and the
+    /// attribute-inspection tool the file resources require.
+    pub fn with_fake_fs(mut self) -> Self {
+        self.executables.insert("/usr/bin/getfattr".to_string());
+        self.fs = Some(crate::fakesys::FakeFs::default());
+        self
+    }
+
+    /// Create a directory on the scripted filesystem (root-owned 0755).
+    pub fn with_fs_dir(mut self, path: &str) -> Self {
+        let fs = self.fs.get_or_insert_with(Default::default);
+        fs.mkdir_node(path, 0o755, 0, 0);
+        self
+    }
+
+    /// Put a regular file on the scripted filesystem (root-owned 0644).
+    pub fn with_fs_file(mut self, path: &str, content: &str) -> Self {
+        let fs = self.fs.get_or_insert_with(Default::default);
+        fs.put_file(path, content.as_bytes(), 0o644, 0, 0);
+        self
+    }
+
+    /// Declare a unit that exists on disk AND is loaded by the manager, with
+    /// the given (LoadState, ActiveState, UnitFileState). The unit file is
+    /// placed at `/etc/systemd/system/<name>`.
+    pub fn with_loaded_unit(
+        mut self,
+        name: &str,
+        content: &str,
+        state: (&str, &str, &str),
+    ) -> Self {
+        let path = format!("/etc/systemd/system/{}", name);
+        let fs = self.fs.get_or_insert_with(Default::default);
+        fs.put_file(&path, content.as_bytes(), 0o644, 0, 0);
+        self.executables.insert("/usr/bin/getfattr".to_string());
+        self.manager.disk_changed(name, true);
+        let rev = self.manager.disk[name];
+        self.manager.loaded.insert(name.to_string(), rev);
         self.services.insert(
             name.to_string(),
             (
@@ -2222,6 +2287,9 @@ impl FakeExecutor {
             if let Some(o) = o.pop_front() {
                 return o;
             }
+        }
+        if let Some(o) = self.run_fake_fs(&prog, req) {
+            return o;
         }
         match prog.as_str() {
             "test" => self.run_test(&req.args),
@@ -2775,26 +2843,138 @@ impl FakeExecutor {
         Self::exited(0, String::new(), String::new())
     }
 
+    /// Route a filesystem command to the scripted filesystem when one is
+    /// enabled. Returns `None` for anything the scripted filesystem does not
+    /// model (so the historical behavior is unchanged) and for the dnf
+    /// snapshot paths the existing package model owns.
+    fn run_fake_fs(&mut self, prog: &str, req: &ExecRequest) -> Option<Output> {
+        self.target.fs.as_ref()?;
+        if req.args.iter().any(|a| a.starts_with(FAKE_SNAP)) {
+            return None;
+        }
+        if prog == "cat" && req.args.iter().any(|a| a == "/etc/os-release") {
+            return None;
+        }
+        let (uid, gid) = if self.sudo {
+            (0, 0)
+        } else {
+            (self.target.uid, self.target.gid)
+        };
+        let fs = self.target.fs.as_mut()?;
+        let (out, touched) = fs.run(prog, &req.args, req.stdin.as_deref(), uid, gid)?;
+        if out.completion == Completion::Exited(0) {
+            for (path, link, present) in touched {
+                if let Some(unit) = crate::fakesys::FakeFs::unit_of_touched(&path, link) {
+                    self.target.manager.disk_changed(&unit, present);
+                }
+            }
+        }
+        Some(out)
+    }
+
+    fn show_need_record(&self, unit: &str) -> Vec<String> {
+        use crate::fakesys::NeedOverride;
+        // A unit the manager has not loaded reports no staleness.
+        let loaded = self.target.services.contains_key(unit);
+        match self.target.manager.need_override.get(unit) {
+            Some(NeedOverride::Missing) => vec![],
+            Some(NeedOverride::Duplicate) => {
+                vec![
+                    "NeedDaemonReload=no".to_string(),
+                    "NeedDaemonReload=no".to_string(),
+                ]
+            }
+            Some(NeedOverride::Value(v)) => vec![format!("NeedDaemonReload={}", v)],
+            None => vec![format!(
+                "NeedDaemonReload={}",
+                if loaded
+                    && (self.target.manager.need_daemon_reload(unit)
+                        || self.target.manager.forced_stale.contains(unit))
+                {
+                    "yes"
+                } else {
+                    "no"
+                }
+            )],
+        }
+    }
+
     fn run_systemctl(&mut self, args: &[String]) -> Output {
         let verb = args.first().map(|s| s.as_str()).unwrap_or("");
+        if verb == "show" && args.iter().any(|a| a == "--property=UnitPath") {
+            return match self.target.manager.unit_path_output.clone() {
+                Some(o) => o,
+                None => Self::exited(
+                    0,
+                    crate::fakesys::FAKE_UNIT_PATH_OUTPUT.to_string(),
+                    String::new(),
+                ),
+            };
+        }
+        if verb == "daemon-reload" {
+            if args.len() != 1 {
+                return Self::exited(1, String::new(), "fake systemctl: unexpected argv".into());
+            }
+            self.target.manager.reload_count += 1;
+            if let Some(c) = self.target.manager.reload_completion.clone() {
+                return Output {
+                    completion: c,
+                    stdout: Vec::new(),
+                    stderr: self.target.manager.reload_stderr.clone().into_bytes(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                };
+            }
+            self.target.manager.sync(&mut self.target.services);
+            self.target.manager.show_failures_left = self.target.manager.show_fail_after_reload;
+            self.target.manager.forced_stale = self.target.manager.stale_after_reload.clone();
+            return Self::exited(0, String::new(), String::new());
+        }
         if verb == "show" {
             // Observation argv is `show --property=... -- <unit>`: the unit
             // name is the operand after `--`.
             let name = args.last().cloned().unwrap_or_default();
+            if self.target.manager.show_failures_left > 0 {
+                self.target.manager.show_failures_left -= 1;
+                let stderr = self
+                    .target
+                    .manager
+                    .show_fail_stderr
+                    .clone()
+                    .unwrap_or_else(|| "Failed to get properties: connection lost".into());
+                return match self.target.manager.show_fail_completion.clone() {
+                    None => Self::exited(1, String::new(), stderr),
+                    Some(completion) => Output {
+                        completion,
+                        stdout: Vec::new(),
+                        stderr: stderr.into_bytes(),
+                        stdout_truncated: false,
+                        stderr_truncated: false,
+                    },
+                };
+            }
+            self.target
+                .manager
+                .lazy_load(&name, &mut self.target.services, true);
             return match self.target.services.get(&name) {
-                Some((load, active, unitfile)) => Self::exited(
-                    0,
-                    format!(
-                        "LoadState={}\nActiveState={}\nUnitFileState={}\n",
-                        load, active, unitfile
-                    ),
-                    String::new(),
-                ),
-                None => Self::exited(
-                    0,
-                    "LoadState=not-found\nActiveState=inactive\nUnitFileState=\n".to_string(),
-                    String::new(),
-                ),
+                Some((load, active, unitfile)) => {
+                    let mut lines = vec![
+                        format!("LoadState={}", load),
+                        format!("ActiveState={}", active),
+                        format!("UnitFileState={}", unitfile),
+                    ];
+                    lines.extend(self.show_need_record(&name));
+                    Self::exited(0, format!("{}\n", lines.join("\n")), String::new())
+                }
+                None => {
+                    let mut lines = vec![
+                        "LoadState=not-found".to_string(),
+                        "ActiveState=inactive".to_string(),
+                        "UnitFileState=".to_string(),
+                    ];
+                    lines.extend(self.show_need_record(&name));
+                    Self::exited(0, format!("{}\n", lines.join("\n")), String::new())
+                }
             };
         }
         // Mutating argv is `<verb> -- <unit>`; any other shape is refused so
@@ -2809,18 +2989,53 @@ impl FakeExecutor {
                 )
             }
         };
+        if matches!(verb, "enable" | "disable") {
+            // enable/disable read the unit from disk even when it was never
+            // loaded (or only a stale not-found stub is cached).
+            self.target
+                .manager
+                .lazy_load(&name, &mut self.target.services, false);
+        }
+        if let Some(forced) = self.target.manager.verb_override.get(verb) {
+            return forced.clone();
+        }
         let Some(entry) = self.target.services.get_mut(&name) else {
+            if verb == "reset-failed" {
+                // systemd's answer for a unit that is not in memory.
+                return Self::exited(
+                    1,
+                    String::new(),
+                    format!(
+                        "Failed to reset failed state of unit {}: Unit {} not loaded.\n",
+                        name, name
+                    ),
+                );
+            }
             return Self::exited(1, String::new(), format!("Unit {} not found", name));
         };
         match verb {
             "start" | "restart" => entry.1 = "active".to_string(),
-            "stop" => entry.1 = "inactive".to_string(),
+            "stop" => {
+                entry.1 = "inactive".to_string();
+                if self.target.manager.show_fail_after_stop > 0 {
+                    self.target.manager.show_failures_left =
+                        self.target.manager.show_fail_after_stop;
+                }
+                if self.target.manager.unload_on_stop.contains(&name) {
+                    self.target.services.remove(&name);
+                }
+            }
             "reset-failed" => {
                 if entry.1 == "failed" {
                     entry.1 = "inactive".to_string();
                 }
             }
-            "enable" => entry.2 = "enabled".to_string(),
+            "enable" => {
+                entry.2 = "enabled".to_string();
+                if self.target.manager.enable_starts.contains(&name) {
+                    entry.1 = "active".to_string();
+                }
+            }
             "disable" => entry.2 = "disabled".to_string(),
             "reload" => {}
             _ => {
@@ -2830,6 +3045,11 @@ impl FakeExecutor {
                     format!("fake systemctl: unsupported verb {}", verb),
                 )
             }
+        }
+        if matches!(verb, "enable" | "disable") && self.target.manager.implicit_reload_on_enable {
+            // Native implicit daemon-reload after the unit-file link change.
+            self.target.manager.implicit_reload_count += 1;
+            self.target.manager.sync(&mut self.target.services);
         }
         Self::exited(0, String::new(), String::new())
     }

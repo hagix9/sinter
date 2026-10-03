@@ -84,6 +84,46 @@ Oracle LinuxはRHEL系として認識されます（dnf）が、受入検証は�
 ユニットがターゲット上に存在しません。先にパッケージをインストール
 してください（`depends_on`）。またはユニット名を確認してください。
 
+**`daemon-reload` の失敗（終了コード 5）**
+
+管理対象のユニットファイル、drop-in、alias リンク、`system.conf` が変更された場合、
+またはユニットが `NeedDaemonReload=yes` を報告した場合、Sinter は systemd
+システムマネージャを自動的に reload します。`systemctl daemon-reload` が
+非ゼロで終了すると実行は失敗します。依存する service リソースやハンドラは何も
+行わず、先行するファイルの変更は `changed` のまま残り（ロールバックは
+されません）、同じ実行内で reload が再試行されることもありません。報告された
+理由を確認してください（systemd のレート制限 `ReloadLimit*`、認可、壊れた
+ユニットファイルがよくある原因です）。修正してから再度 apply してください。
+タイムアウトまたは応答を失った reload は indeterminate（終了コード 6）として
+報告されます。再適用の前にマネージャの状態を調べてください。
+
+**reload の後も `NeedDaemonReload` が `yes` のまま（"unresolved"）**
+
+Sinter は原因ごとに 1 回だけ reload し、ループしません。reload の後もユニットが
+`NeedDaemonReload=yes` を報告する場合、Sinter の外部で何かがユニットを変更し
+続けている（またはユニットロードパス外のフラグメントが関与している）ため、
+apply は失敗します。`systemctl show -p FragmentPath,DropInPaths <unit>` と
+`systemctl status <unit>` でユニットのファイルを確認してください。
+
+**`UnitPath` を読み取れない、または解析できない**
+
+管理対象のパスがユニット、drop-in、リンクの入力に見える場合、Sinter は
+`systemctl show --property=UnitPath` でマネージャのロードパスを取得します。これが
+失敗すると、そのリソースは変更の前に失敗します（`plan` では plan エラー、
+`audit` では `ERROR`）。Sinter がパスを推測することはありません。systemd が
+動作していること、接続ユーザー（`--sudo` を使う場合はそれも含む）で
+`systemctl` が使えることを確認してください。
+
+**停止した実行の後でマネージャが未同期**
+
+管理対象のユニット入力が変更された後に apply が途中で停止した場合（リソースまたは
+ハンドラの失敗）、新たな reload は開始されず、レポートには reload が実行
+**されなかった**ことが記載されます。再度 apply するか、手動で
+`systemctl daemon-reload` を実行してください。Sinter は実行をまたぐジャーナルを
+持たないため、後の apply で reload が行われるのは、`NeedDaemonReload=yes` を
+観測した場合か、新たな変更があった場合だけです。`sinter audit` を実行すると、
+保留中の reload が `manager_reload` ドリフトとして表示されます。
+
 **Indeterminate な apply（終了コード 6）**
 
 Sinter が変更が完了したか確認できませんでした。闇雲にリトライしないで

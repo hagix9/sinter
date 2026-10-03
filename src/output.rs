@@ -238,6 +238,41 @@ fn render_text(
         )?;
     }
 
+    if !report.manager_reloads.is_empty() {
+        writeln!(out)?;
+        writeln!(out, "manager reloads (systemd daemon-reload):")?;
+        for m in &report.manager_reloads {
+            let reason = if m.sensitive {
+                m.reason.as_ref().map(|_| "<redacted>".to_string())
+            } else {
+                m.reason.clone()
+            };
+            writeln!(
+                out,
+                "  {}  {} trigger={} causes=[{}]{} execution={} change={} verification={}{}",
+                manager_reload_status(m),
+                m.phase.label(),
+                m.trigger.label(),
+                m.causes
+                    .iter()
+                    .map(|c| sanitize_line(c))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                match &m.consumer {
+                    Some(c) => format!(" consumer={}", sanitize_line(c)),
+                    None => String::new(),
+                },
+                m.execution.label(),
+                m.change.label(),
+                m.verification.label(),
+                match reason {
+                    Some(r) => format!(" {}", sanitize_line(&r)),
+                    None => String::new(),
+                }
+            )?;
+        }
+    }
+
     writeln!(out)?;
     let changed = report
         .resources
@@ -423,6 +458,7 @@ pub fn run_report_json(report: &RunReport, mode: &str) -> serde_json::Value {
         "resources": resources,
         "handlers": handlers,
         "handlers_pending": report.handlers_pending,
+        "manager_reloads": manager_reloads_json(report),
     });
     // Present only when the recipe declares backups, so documents for
     // recipes without a backup section are unchanged.
@@ -430,6 +466,64 @@ pub fn run_report_json(report: &RunReport, mode: &str) -> serde_json::Value {
         doc["backup"] = backup_json(b);
     }
     doc
+}
+
+/// One-token status of a manager maintenance operation, in the vocabulary
+/// resources use (`?` unknown, `CHANGED`, `FAILED`, `INDET`, `----` not run).
+fn manager_reload_status(m: &crate::manager::ManagerReloadResult) -> &'static str {
+    if m.unknown {
+        return "?";
+    }
+    match m.execution {
+        Execution::NotRun => {
+            if m.verification == Verification::Failed {
+                "FAILED"
+            } else if m.verification == Verification::Unknown {
+                "INDET"
+            } else {
+                "----"
+            }
+        }
+        Execution::Succeeded => {
+            if m.verification == Verification::Failed {
+                "FAILED"
+            } else if m.verification == Verification::Unknown {
+                "INDET"
+            } else {
+                "CHANGED"
+            }
+        }
+        Execution::Failed => "FAILED",
+        Execution::Indeterminate => "INDET",
+    }
+}
+
+/// The `manager_reloads` array of plan/apply documents. Unit names, paths and
+/// stderr never appear; a sensitive cause or consumer redacts the reason.
+pub fn manager_reloads_json(report: &RunReport) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    report
+        .manager_reloads
+        .iter()
+        .map(|m| {
+            json!({
+                "phase": m.phase.label(),
+                "trigger": m.trigger.label(),
+                "causes": m.causes,
+                "consumer": m.consumer,
+                "execution": m.execution.label(),
+                "change": m.change.label(),
+                "verification": m.verification.label(),
+                "unknown": m.unknown,
+                "sensitive": m.sensitive,
+                "reason": if m.sensitive {
+                    m.reason.as_ref().map(|_| "<redacted>".to_string())
+                } else {
+                    m.reason.clone()
+                },
+            })
+        })
+        .collect()
 }
 
 fn human_status(r: &ResourceResult) -> &'static str {

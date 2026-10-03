@@ -492,10 +492,21 @@ fn audit_file_impl(
     if state == "absent" {
         return match stat.kind {
             ObjKind::Absent => {
-                let mut r =
-                    AuditResourceResult::base(res, AuditResourceStatus::Compliant, sensitive);
-                r.reason = Some("path is absent as desired".to_string());
-                r
+                // The path being gone from disk is the disk half only. A
+                // removed unit file/drop-in can still be loaded by the manager
+                // (stale until a daemon-reload), so a managed system-manager
+                // input gets the same read-only manager facet as a present
+                // one; audit never reloads.
+                let mut details: Vec<AuditDriftDetail> = Vec::new();
+                let note =
+                    match audit_manager_facet(engine, res, &path, sensitive, true, &mut details) {
+                        Ok(n) => n,
+                        Err(r) => return *r,
+                    };
+                append_note(
+                    finish_drift(res, sensitive, details, "path is absent as desired"),
+                    note,
+                )
             }
             other => {
                 let mut r = AuditResourceResult::base(res, AuditResourceStatus::Drift, sensitive);
@@ -589,7 +600,14 @@ fn audit_file_impl(
     };
     compare_metadata(&stat, &meta, sensitive, &mut details);
 
-    finish_drift(res, sensitive, details, "file matches desired state")
+    let note = match audit_manager_facet(engine, res, &path, sensitive, false, &mut details) {
+        Ok(n) => n,
+        Err(r) => return *r,
+    };
+    append_note(
+        finish_drift(res, sensitive, details, "file matches desired state"),
+        note,
+    )
 }
 
 fn finish_drift(
@@ -1095,5 +1113,91 @@ fn audit_service(
             ));
         }
     }
+    // The manager reload state is an independent facet: a unit whose
+    // loaded definition is stale is drift even when active/enabled match.
+    // `NeedDaemonReload=yes` is reported, never treated as repaired; audit
+    // never reloads. (`no` is a limited observation and claims nothing about
+    // the loaded bytes.)
+    if obs.need_daemon_reload {
+        details.push(manager_reload_detail(sensitive));
+    }
     finish_drift(res, sensitive, details, "service matches desired state")
+}
+
+fn manager_reload_detail(sensitive: bool) -> AuditDriftDetail {
+    AuditDriftDetail::new(
+        "manager_reload",
+        "daemon-reload pending (NeedDaemonReload=yes)".to_string(),
+        "manager synchronized".to_string(),
+        sensitive,
+    )
+}
+
+/// Read-only manager-reload facet for a managed file/template that is
+/// system-manager input. A unit file or direct drop-in names one unit whose
+/// `NeedDaemonReload` can be observed; any other recognized manager input
+/// (template, type-wide/prefix drop-in, `system.conf`) cannot be mapped to a
+/// single unit, so its manager consistency is stated as not verified rather
+/// than implied by a byte match.
+///
+/// `desired_absent`: the file is gone from disk as desired, but the manager
+/// may still hold the removed unit loaded. A stale one (`Need=yes`) is drift;
+/// otherwise the note states what the manager reported instead of letting
+/// the disk state imply manager consistency.
+fn audit_manager_facet(
+    engine: &mut Engine,
+    res: &FrozenResource,
+    path: &str,
+    sensitive: bool,
+    desired_absent: bool,
+    details: &mut Vec<AuditDriftDetail>,
+) -> std::result::Result<Option<String>, Box<AuditResourceResult>> {
+    let input = obs_or_error(
+        res,
+        sensitive,
+        engine.classify_manager_input(res, path, false),
+    )?;
+    let Some(input) = input else {
+        return Ok(None);
+    };
+    match input.unit {
+        Some(unit) => {
+            let obs = obs_or_error(
+                res,
+                sensitive,
+                engine.observe_service_sensitive(&unit, sensitive),
+            )?;
+            if obs.need_daemon_reload {
+                details.push(manager_reload_detail(sensitive));
+                return Ok(None);
+            }
+            if !desired_absent {
+                return Ok(None);
+            }
+            Ok(Some(if obs.load_state == "not-found" {
+                "manager consistency verified: the manager reports no loaded unit definition and no pending reload (run state is not assessed by this file resource)"
+                    .to_string()
+            } else {
+                // A removed override can legitimately leave a vendor unit
+                // loaded, and NeedDaemonReload=no is a limited observation:
+                // say so instead of claiming the manager matches the disk.
+                "manager still reports the unit loaded (NeedDaemonReload=no); consistency with the removed file is not verified"
+                    .to_string()
+            }))
+        }
+        None => Ok(Some(
+            "manager consistency not verified: no single unit can be derived for this managed systemd input"
+                .to_string(),
+        )),
+    }
+}
+
+fn append_note(mut r: AuditResourceResult, note: Option<String>) -> AuditResourceResult {
+    if let Some(n) = note {
+        r.reason = Some(match r.reason.take() {
+            Some(existing) => format!("{}; {}", existing, n),
+            None => n,
+        });
+    }
+    r
 }

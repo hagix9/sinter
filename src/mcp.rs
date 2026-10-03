@@ -583,6 +583,7 @@ fn plan_report_json(report: &RunReport, redact_content: bool) -> Value {
         },
         "resources": resources,
         "handlers_pending": report.handlers_pending,
+        "manager_reloads": crate::output::manager_reloads_json(report),
     })
 }
 
@@ -1234,6 +1235,7 @@ mod tests {
             status: AggregateStatus::Success,
             commands: vec![],
             backup: None,
+            manager_reloads: vec![],
         };
         // Host boundary: no content, whatever the caller's sensitive flags.
         let host = serde_json::to_string(&plan_report_json(&report, true)).unwrap();
@@ -1248,6 +1250,51 @@ mod tests {
         // The offline supplied-facts tool is unchanged.
         let offline = serde_json::to_string(&plan_report_json(&report, false)).unwrap();
         assert!(offline.contains("TARGET_SECRET_F02_6B4E"));
+    }
+
+    #[test]
+    fn plan_report_carries_manager_reloads_and_redacts_sensitive_reasons() {
+        use crate::engine::{AggregateStatus, RunReport};
+        use crate::manager::{ManagerReloadPhase, ManagerReloadResult, ManagerReloadTrigger};
+        use crate::result::{Change, Execution, Verification};
+        let mk = |sensitive: bool, reason: &str| ManagerReloadResult {
+            phase: ManagerReloadPhase::Planned,
+            trigger: ManagerReloadTrigger::PendingInput,
+            causes: vec!["unit".to_string()],
+            consumer: None,
+            execution: Execution::NotRun,
+            change: Change::None,
+            verification: Verification::NotPerformed,
+            reason: Some(reason.to_string()),
+            unknown: true,
+            sensitive,
+        };
+        let report = RunReport {
+            resources: vec![],
+            handlers_run: vec![],
+            handlers_pending: vec![],
+            facts: crate::facts::Facts {
+                hostname: "h".to_string(),
+                os_name: "ubuntu".to_string(),
+                os_family: "debian".to_string(),
+                os_version: "24.04".to_string(),
+                arch: "x86_64".to_string(),
+            },
+            status: AggregateStatus::Success,
+            commands: vec![],
+            backup: None,
+            manager_reloads: vec![
+                mk(false, "plain reason"),
+                mk(true, "MGR_SECRET_REASON_5521"),
+            ],
+        };
+        let v = plan_report_json(&report, true);
+        let m = v["manager_reloads"].as_array().unwrap();
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[0]["phase"], "planned");
+        assert_eq!(m[0]["reason"], "plain reason");
+        assert_eq!(m[1]["reason"], "<redacted>");
+        assert!(!v.to_string().contains("MGR_SECRET_REASON_5521"));
     }
 
     #[test]

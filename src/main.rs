@@ -263,7 +263,7 @@ impl Phase {
 }
 
 enum Outcome {
-    Run(RunReport),
+    Run(Box<RunReport>),
     Audit(AuditReport),
 }
 
@@ -853,7 +853,7 @@ fn execute(
     }
     Ok(match phase {
         Phase::Audit => Outcome::Audit(run_audit(engine)?),
-        _ => Outcome::Run(engine.run()?),
+        _ => Outcome::Run(Box::new(engine.run()?)),
     })
 }
 

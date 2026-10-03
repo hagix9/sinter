@@ -62,6 +62,56 @@ handlers:
 ハンドラは apply の最後に `myapp` を 1 回だけ再起動します。ファイルが
 実際に変更された場合に限られます。
 
+## ハンドラ付きの systemd ユニットファイル
+
+```yaml
+version: 1
+
+resources:
+  - id: app_unit
+    type: file
+    with:
+      path: /etc/systemd/system/myapp.service
+      content: |
+        [Unit]
+        Description=My app
+
+        [Service]
+        ExecStart=/opt/myapp/bin/myapp
+
+        [Install]
+        WantedBy=multi-user.target
+      mode: "0644"
+      owner: root
+      group: root
+    notify: [restart_app]
+
+  - id: app_service
+    type: service
+    with:
+      name: myapp.service
+      state: running
+      enabled: true
+    depends_on: [app_unit]
+
+handlers:
+  - id: restart_app
+    service: myapp.service
+    action: restart
+```
+
+`systemctl daemon-reload` は Sinter が実行するため、そのための `command`
+リソースは不要です。ユニットファイルが変更されたので、`service` リソースが
+判断する前にマネージャが reload されます。ハンドラが実行される前にもマネージャの
+状態は確認されますが、新しい変更またはマネージャの古い状態がある場合にだけ再度
+reload されます。同期済みの同じ変更では 2 回目の reload は行われません。
+`depends_on` でユニットファイルをサービスより前に置いています。Sinter は
+リソースの順序を並べ替えないためです。reload はユニット定義を読み直すだけで、
+変更したユニットファイルを稼働中のプロセスに反映するのは `restart` ハンドラ
+です。何も変更がなければ、2 回目の apply では reload も restart も行われません。
+[service](/ja/reference/resources/service/#マネージャの自動同期)を参照して
+ください。
+
 ## ガード付きのワンショットコマンド
 
 ```yaml

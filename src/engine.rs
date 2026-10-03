@@ -79,6 +79,9 @@ pub struct RunReport {
     pub commands: Vec<crate::executor::CommandRecord>,
     /// Pre-apply backup outcome; `None` when the recipe declares no backup.
     pub backup: Option<crate::backup::BackupReport>,
+    /// systemd manager maintenance operations (`daemon-reload`): neither
+    /// resources nor handlers. Apply: what ran. Plan: what apply would do.
+    pub manager_reloads: Vec<crate::manager::ManagerReloadResult>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +102,8 @@ pub struct Engine {
     /// Backup run id shared across one invocation's targets; generated on
     /// demand when unset.
     pub(crate) backup_run_id: Option<String>,
+    /// Target-local systemd manager synchronization state.
+    pub(crate) manager: crate::manager::ManagerState,
 }
 
 impl Engine {
@@ -168,6 +173,7 @@ impl Engine {
             registers: BTreeMap::new(),
             opts,
             backup_run_id: None,
+            manager: crate::manager::ManagerState::default(),
         })
     }
 
@@ -337,6 +343,9 @@ impl Engine {
                     }
                 }));
             }
+            if !is_stop && rr.change == Change::Changed && rr.execution == Execution::Succeeded {
+                self.manager.changed_ids.insert(res.id.clone());
+            }
             // Queue handler notifications for definitely-changed verified resources.
             if !is_stop
                 && rr.change == Change::Changed
@@ -428,6 +437,22 @@ impl Engine {
             }
         }
 
+        // Manager synchronization at the end of the run (apply), or the
+        // projection of it (plan). Skipped after any stop: a failed run never
+        // starts new work, it reports what was left unsynchronized.
+        let run_stopped = stopped
+            || handlers_run.iter().any(|h| {
+                matches!(
+                    h.state,
+                    HandlerOutcomeState::Failed | HandlerOutcomeState::Indeterminate
+                )
+            });
+        self.manager_finish(run_stopped);
+        let manager_failed =
+            self.opts.mode == Mode::Apply && self.manager.reloads.iter().any(|m| m.is_failure());
+        let manager_indeterminate = self.opts.mode == Mode::Apply
+            && self.manager.reloads.iter().any(|m| m.is_indeterminate());
+
         let handler_failed = handlers_run
             .iter()
             .any(|h| h.state == HandlerOutcomeState::Failed);
@@ -444,15 +469,19 @@ impl Engine {
             } else {
                 AggregateStatus::Success
             }
-        } else if handler_indeterminate || out_results.iter().any(|r| r.is_indeterminate()) {
+        } else if handler_indeterminate
+            || manager_indeterminate
+            || out_results.iter().any(|r| r.is_indeterminate())
+        {
             AggregateStatus::Indeterminate
-        } else if handler_failed || out_results.iter().any(|r| r.is_failure()) {
+        } else if handler_failed || manager_failed || out_results.iter().any(|r| r.is_failure()) {
             AggregateStatus::ApplyFailed
         } else {
             AggregateStatus::Success
         };
 
         let commands = self.fs.log();
+        let manager_reloads = std::mem::take(&mut self.manager.reloads);
         Ok(RunReport {
             resources: out_results,
             handlers_run,
@@ -461,6 +490,7 @@ impl Engine {
             status,
             commands,
             backup,
+            manager_reloads,
         })
     }
 
@@ -606,15 +636,22 @@ impl Engine {
             crate::ir::HandlerAction::Restart => "restart",
             crate::ir::HandlerAction::Reload => "reload",
         };
+        self.manager.last_handler_failure = None;
         let outcome = self.handler_service(h, action)?;
+        let detail = self
+            .manager
+            .last_handler_failure
+            .take()
+            .map(|m| format!(": {}", m))
+            .unwrap_or_default();
         let reason = match outcome {
             HandlerOutcomeState::Failed => Some(format!(
-                "handler {} for service {} {}",
-                h.id, h.service, "failed"
+                "handler {} for service {} {}{}",
+                h.id, h.service, "failed", detail
             )),
             HandlerOutcomeState::Indeterminate => Some(format!(
-                "handler {} for service {} became indeterminate",
-                h.id, h.service
+                "handler {} for service {} became indeterminate{}",
+                h.id, h.service, detail
             )),
             _ => None,
         };

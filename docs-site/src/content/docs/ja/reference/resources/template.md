@@ -47,6 +47,12 @@ hostname = {{ facts.hostname }}
   ありません。
 - `content` は**サポートされません** — template リソースは常に
   `source` を使います。
+- テンプレートの出力が systemd マネージャの入力（ユニットファイル、drop-in、
+  alias/mask/`.wants`/`.requires` リンク、`system.conf`）を実際に変更すると、
+  それを必要とする次のサービスまたはハンドラの前、および成功した apply の
+  最後に、Sinter が `systemctl daemon-reload` を自動的に実行します。
+  [service](/ja/reference/resources/service/#マネージャの自動同期)を参照して
+  ください。
 
 ## 冪等性
 

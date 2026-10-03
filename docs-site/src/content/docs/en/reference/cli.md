@@ -38,7 +38,8 @@ sinter plan <RECIPE> [target options]
 ```
 
 Observation only — connects, observes state, prints a non-authoritative
-preview. Never mutates.
+preview. Never mutates; in particular it never runs `systemctl daemon-reload`.
+The reloads an apply would perform are listed under `manager reloads`.
 
 ## apply
 
@@ -47,7 +48,11 @@ sinter apply <RECIPE> [target options]
 ```
 
 Re-observes state, applies changes, verifies outcomes, runs notified
-handlers.
+handlers. When a change touches systemd manager input (unit files, drop-ins,
+alias links, `system.conf`) or a unit reports `NeedDaemonReload=yes`, apply
+runs `systemctl daemon-reload` on the system manager before the service or
+handler that needs it, and at the end of a successful apply; see
+[service](/en/reference/resources/service/#automatic-manager-synchronization).
 
 ## audit
 
@@ -57,13 +62,19 @@ sinter audit <RECIPE> [target options] [--format text|json]
 
 Verifies whether the target already satisfies the recipe. Audit is strictly
 read-only: it uses the same observation paths as `plan`, never mutates,
-never executes `command` resources, and never runs handlers.
+never executes `command` resources, never runs handlers, and never runs
+`daemon-reload`. Besides the existing observations it runs exactly two
+read-only `systemctl show` shapes: `--property=LoadState,ActiveState,UnitFileState,NeedDaemonReload -- <unit>`
+and `--property=UnitPath`.
 
 The recipe is the sole desired-state authority — audit checks the state your
 recipe describes, not a separate policy baseline. A recipe that manages
 `/etc/ssh/sshd_config` is audited through its `file`/`template` resource
 declarations; sshd run state is audited through the `service` resource.
 There is no SSH-specific audit logic.
+
+Audit also reports systemd manager synchronization as its own drift dimension,
+`manager_reload` (see [Reading audit output](#reading-audit-output)).
 
 ## Target options
 
@@ -308,6 +319,16 @@ observed (`known`) or is partly unknown (`unknown`). Handlers, when they run,
 are listed at the end under `handlers:`; handlers queued but not executed
 appear under `pending handlers`.
 
+When a `daemon-reload` was planned, run, or skipped, the output also has a
+`manager reloads (systemd daemon-reload):` section: one entry per reload with
+its trigger (`pending_input`, `observed_stale`, `package_discovery`), the
+resources that caused it, the consumer (service resource or handler) it
+precedes, and its result. A reload is a manager operation, not a restart. In
+`plan`, a service that depends on a not-yet-applied systemd input (or that
+currently reports `NeedDaemonReload=yes`) shows `?` with a reason starting
+"deferred/unknown until manager synchronization at apply…"; that is not
+"unchanged" and not a failure.
+
 Quick answers:
 
 - **Did Sinter change anything?** Look for `CHANGED` lines; a converged run
@@ -322,7 +343,7 @@ Quick answers:
 
 `--format json` emits the same information in structured form. In a `plan`,
 notified handlers are always reported as pending — a plan never executes
-handlers.
+handlers. Manager reloads appear in the top-level `manager_reloads` array.
 
 ## Reading audit output
 
@@ -358,6 +379,20 @@ With `--format json`, audit emits `{"mode", "status", "summary",
 "resources"}` where per-resource `status` is one of `compliant`, `drift`,
 `not_auditable`, `not_applicable`, `error`. See
 [JSON output contract](#json-output-contract) for the full, stable shape.
+
+Manager synchronization is a separate drift dimension, `manager_reload`
+(observed "daemon-reload pending (NeedDaemonReload=yes)", desired "manager
+synchronized"). It appears on a `service` resource even when its active/enabled
+state matches, and on a managed unit file or drop-in that names a single unit.
+It is independent of content/mode/owner and state/enabled drift, and audit
+never reloads, so a pending reload is never treated as repaired.
+`NeedDaemonReload=no` is a limited observation (systemd compares mtimes and
+paths, not content hashes): it does not prove the loaded definition equals the
+bytes on disk. A managed input that cannot be mapped to one unit (a template,
+a type-wide or prefix drop-in, `system.conf`) carries a note "manager
+consistency not verified…". If `NeedDaemonReload` or `UnitPath` cannot be
+observed, the resource is an `ERROR` (aggregate `indeterminate`), never
+`no_drift`. `link` resources have no manager facet in audit.
 
 Sensitive resources never print raw values: drift details render as
 `redacted` and secrets never appear in text, JSON, reasons, or stderr.
@@ -414,6 +449,7 @@ the whole 1.x series. `sinter mcp` is governed by the
 | `resources` | array | One resource object per resource, in execution order. |
 | `handlers` | array | Handler objects for handlers that ran (always empty in `plan`). |
 | `handlers_pending` | array of strings | IDs of notified handlers that did not run. A `plan` lists every notified handler here. |
+| `manager_reloads` | array | Manager reload objects (see below). Always present, possibly `[]`. Additive field. |
 
 Resource object (`plan` and `apply`):
 
@@ -439,6 +475,26 @@ Handler object: `id` (string), `service` (string), `action` (string),
 `state` (string: `NotRun`, `Succeeded`, `Failed`, or `Indeterminate`,
 capitalized exactly as shown), and `reason` (string or null).
 
+Manager reload object (`plan` and `apply`):
+
+| Field | Type | Values |
+|-------|------|--------|
+| `phase` | string | `resource`, `handler`, `final`, `planned` (`plan` reports `planned`). |
+| `trigger` | string | `pending_input`, `observed_stale`, `package_discovery` |
+| `causes` | array of strings | IDs of the resources that made the reload necessary. |
+| `consumer` | string or null | The service resource or handler ID the reload precedes; `null` for the final reload. |
+| `execution` | string | `not_run`, `succeeded`, `failed`, `indeterminate` |
+| `change` | string | `none`, `changed`, `possible` |
+| `verification` | string | `not_applicable`, `not_performed`, `verified`, `failed`, `unknown` |
+| `unknown` | boolean | `true` when the outcome is not known (always in `plan`). |
+| `sensitive` | boolean | `true` when a cause or the consumer is sensitive. |
+| `reason` | string or null | Human-readable explanation; `"<redacted>"` when sensitive. Unit names, paths and stderr never appear for sensitive resources. |
+
+In `plan`, entries have `phase` `planned`, `execution` `not_run` and
+`unknown: true`. The existing value sets above are not extended; a failed
+`daemon-reload` makes the invocation `apply_failed` and a timed-out or lost one
+`indeterminate`, with the existing exit codes.
+
 ### audit
 
 | Field | Type | Values |
@@ -452,7 +508,7 @@ Resource object (`audit`): `id` (string), `type` (string), `loop_index`
 (integer or null), `origin` (string, informational text), `status` (string:
 `compliant`, `drift`, `not_auditable`, `not_applicable`, `error`),
 `sensitive` (boolean), `reason` (string or null), and `details` (array of
-objects with string fields `dimension`, `observed`, and `desired`; the
+objects with string fields `dimension`, `observed`, and `desired`; `dimension` may be `manager_reload`; the
 `observed` and `desired` values are human-readable and are `"[redacted]"`
 for a sensitive resource).
 
@@ -514,7 +570,8 @@ exits as described in [Framing and errors](#framing-and-errors).
   mapping; the framing and error rules; resource identity; and resource
   order.
 - **Additive changes** may appear in a 1.x minor release: new fields in any
-  object, and JSON output for new commands. Consumers must ignore fields they
+  object (for example `manager_reloads`), new audit `dimension` values (for
+  example `manager_reload`), and JSON output for new commands. Consumers must ignore fields they
   do not recognize.
 - **Breaking changes** happen only in a new major version:
   - removing or renaming a documented field;

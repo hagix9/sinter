@@ -30,6 +30,11 @@ absent.
   whose target differs.
 - `absent`: removes the symlink. Refuses to remove non-symlink objects as a
   link.
+- A symlink that really changes a systemd manager input (a unit file, drop-in,
+  alias/mask/`.wants`/`.requires` link, or `system.conf`) makes Sinter run
+  `systemctl daemon-reload` automatically before the next service or handler
+  that needs it, and at the end of a successful apply. See
+  [service](/en/reference/resources/service/#automatic-manager-synchronization).
 
 ## Idempotency
 

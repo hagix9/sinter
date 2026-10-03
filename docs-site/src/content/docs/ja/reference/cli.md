@@ -38,7 +38,8 @@ sinter plan <RECIPE> [target options]
 ```
 
 観測のみ — 接続して状態を観測し、非公式なプレビューを表示します。
-変更は一切行いません。
+変更は一切行わず、特に `systemctl daemon-reload` を実行することもありません。
+apply が行う reload は `manager reloads` に一覧されます。
 
 ## apply
 
@@ -47,7 +48,13 @@ sinter apply <RECIPE> [target options]
 ```
 
 状態を再観測し、変更を適用し、結果を検証し、通知されたハンドラを
-実行します。
+実行します。変更が systemd マネージャの入力（ユニットファイル、drop-in、
+alias リンク、`system.conf`）に触れた場合、またはユニットが
+`NeedDaemonReload=yes` を報告した場合、apply はそれを必要とするサービスまたは
+ハンドラの前、および成功した apply の最後に、システムマネージャに対して
+`systemctl daemon-reload` を実行します。詳細は
+[service](/ja/reference/resources/service/#マネージャの自動同期)を参照して
+ください。
 
 ## audit
 
@@ -57,13 +64,21 @@ sinter audit <RECIPE> [target options] [--format text|json]
 
 ターゲットがすでにレシピを満たしているかを検証します。audit は
 完全に読み取り専用です：`plan` と同じ観測経路を使い、変更は一切
-行わず、`command` リソースを実行せず、ハンドラも実行しません。
+行わず、`command` リソースを実行せず、ハンドラも実行せず、`daemon-reload` も
+実行しません。既存の観測に加えて実行する読み取り専用の `systemctl show` は、
+ちょうど次の 2 つの形だけです:
+`--property=LoadState,ActiveState,UnitFileState,NeedDaemonReload -- <unit>` と
+`--property=UnitPath`。
 
 レシピが唯一の desired-state の権威です — audit はレシピが記述する
 状態を検査し、別途のポリシーベースラインには依存しません。
 `/etc/ssh/sshd_config` を管理するレシピは `file`/`template`
 リソースを通じて監査され、sshd の稼働状態は `service` リソースで
 監査されます。SSH 固有の監査ロジックはありません。
+
+audit は systemd マネージャの同期状態も、独立したドリフト次元
+`manager_reload` として報告します（[audit の出力を読む](#audit-の出力を読む)を
+参照）。
 
 ## ターゲットオプション
 
@@ -311,6 +326,16 @@ CHANGED  motd [template] known/normal
 末尾の `handlers:` に列挙され、キューに入ったが実行されなかったハンドラは
 `pending handlers` に表示されます。
 
+`daemon-reload` が計画された、実行された、または実行されなかった場合、出力には
+`manager reloads (systemd daemon-reload):` セクションも含まれます。reload ごとに
+1 エントリで、トリガー（`pending_input`、`observed_stale`、`package_discovery`）、
+原因となったリソース、その reload が先行する消費側（service リソースまたは
+ハンドラ）、結果が示されます。reload はマネージャの操作であり、restart では
+ありません。`plan` では、まだ適用されていない systemd 入力に依存する
+サービス（または現在 `NeedDaemonReload=yes` を報告しているサービス）は `?` と
+なり、reason は「deferred/unknown until manager synchronization at apply…」で
+始まります。これは「変更なし」でも失敗でもありません。
+
 短い答え:
 
 - **何か変更されましたか？** `CHANGED` の行を探してください。収束した実行では
@@ -325,7 +350,8 @@ CHANGED  motd [template] known/normal
 
 `--format json` は同じ情報を構造化して出力します。`plan` では、通知された
 ハンドラは常に pending として報告されます。plan がハンドラを実行することは
-ありません。
+ありません。マネージャの reload はトップレベルの `manager_reloads` 配列に
+出力されます。
 
 ## audit の出力を読む
 
@@ -362,6 +388,21 @@ not_auditable、not_applicable、errors）と `status:` 行
 "resources"}` を出力します。リソースごとの `status` は `compliant`、
 `drift`、`not_auditable`、`not_applicable`、`error` のいずれかです。
 安定した構造の全体は [JSON 出力の契約](#json-出力の契約) を参照してください。
+
+マネージャの同期は、独立したドリフト次元 `manager_reload` です（観測値
+"daemon-reload pending (NeedDaemonReload=yes)"、期待値 "manager
+synchronized"）。active/enabled の状態が一致していても `service` リソースに
+表示され、また単一のユニットを指す管理対象のユニットファイルや drop-in にも
+表示されます。content/mode/owner や state/enabled のドリフトとは独立しており、
+audit は reload を行わないため、保留中の reload が修復済みと扱われることは
+ありません。`NeedDaemonReload=no` は限定的な観測です（systemd は内容の
+ハッシュではなく mtime とパスを比較します）。読み込まれている定義がディスク上の
+バイト列と等しいことの証明にはなりません。単一のユニットに対応付けられない
+管理対象の入力（テンプレート、型全体またはプレフィックスの drop-in、
+`system.conf`）には、「manager consistency not verified…」という注記が付きます。
+`NeedDaemonReload` や `UnitPath` を観測できない場合、そのリソースは `ERROR`
+（集約結果は `indeterminate`）となり、`no_drift` になることはありません。
+`link` リソースには audit でマネージャの観点はありません。
 
 sensitive リソースは生の値を一切出力しません：drift の詳細は
 `redacted` と表示され、シークレットは text、JSON、reason、stderr の
@@ -418,6 +459,7 @@ v1.0.0 以降、この節に記載した内容は 1.x 系全体を通じて安�
 | `resources` | array | リソースごとに 1 つのリソースオブジェクト（実行順） |
 | `handlers` | array | 実行された handler のオブジェクト（`plan` では常に空） |
 | `handlers_pending` | array of strings | 通知されたが実行されなかった handler の ID。`plan` では通知されたすべての handler がここに入る |
+| `manager_reloads` | array | マネージャ reload オブジェクト（下記）。常に存在し、空配列 `[]` の場合もある。追加的なフィールド |
 
 リソースオブジェクト（`plan` と `apply`）:
 
@@ -446,6 +488,26 @@ handler オブジェクトのフィールド:
 - `state`（string: `NotRun`、`Succeeded`、`Failed`、`Indeterminate`。大文字・小文字も表記どおり）
 - `reason`（string または null）
 
+マネージャ reload オブジェクト（`plan` と `apply`）:
+
+| フィールド | 型 | 値 |
+|------------|----|----|
+| `phase` | string | `resource`、`handler`、`final`、`planned`（`plan` は `planned` を報告） |
+| `trigger` | string | `pending_input`、`observed_stale`、`package_discovery` |
+| `causes` | array of strings | reload が必要になった原因のリソース ID |
+| `consumer` | string または null | その reload が先行する service リソースまたは handler の ID。最後の reload では `null` |
+| `execution` | string | `not_run`、`succeeded`、`failed`、`indeterminate` |
+| `change` | string | `none`、`changed`、`possible` |
+| `verification` | string | `not_applicable`、`not_performed`、`verified`、`failed`、`unknown` |
+| `unknown` | boolean | 結果が不明な場合に `true`（`plan` では常に `true`） |
+| `sensitive` | boolean | 原因または消費側が sensitive なら `true` |
+| `reason` | string または null | 人が読むための説明。sensitive の場合は `"<redacted>"`。sensitive リソースについては、ユニット名、パス、stderr は出力されない |
+
+`plan` のエントリは `phase` が `planned`、`execution` が `not_run`、
+`unknown` が `true` です。上記の既存の値の集合は拡張されません。
+`daemon-reload` が失敗した場合、実行全体は `apply_failed`、タイムアウトまたは
+応答喪失の場合は `indeterminate` となり、終了コードは既存のものと同じです。
+
 ### audit
 
 | フィールド | 型 | 値 |
@@ -463,7 +525,7 @@ handler オブジェクトのフィールド:
 - `status`（string: `compliant`、`drift`、`not_auditable`、`not_applicable`、`error`）
 - `sensitive`（boolean）
 - `reason`（string または null）
-- `details`（オブジェクトの配列。各オブジェクトは string の `dimension`、`observed`、`desired` を持つ。`observed` と `desired` は人が読むための値で、sensitive リソースでは `"[redacted]"`）
+- `details`（オブジェクトの配列。各オブジェクトは string の `dimension`、`observed`、`desired` を持つ。`dimension` は `manager_reload` になることがある。`observed` と `desired` は人が読むための値で、sensitive リソースでは `"[redacted]"`）
 
 ### backup（plan と apply）
 
@@ -525,7 +587,8 @@ targets、解決、重複ホスト）ではドキュメントを出力せず、
   - 出力形式とエラーのルール
   - リソースの識別方法と並び順
 - **追加的な変更**は 1.x のマイナーリリースで行うことがあります。
-  - 任意のオブジェクトへの新しいフィールドの追加
+  - 任意のオブジェクトへの新しいフィールドの追加（例: `manager_reloads`）や、
+    audit の `dimension` の新しい値（例: `manager_reload`）
   - 新しいコマンドの JSON 出力
 
   利用側は、知らないフィールドを無視してください。

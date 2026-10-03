@@ -76,7 +76,11 @@ handlers:
 `service` is the **systemd unit name on the target** — it is not resolved from
 a Sinter resource id. Handlers run once at the end of an apply, only when
 notified by a resource that actually changed. Multiple notifications of the
-same handler are deduplicated.
+same handler are deduplicated. If a systemd unit input changed or the unit
+reports `NeedDaemonReload=yes`, Sinter reloads the system manager
+(`systemctl daemon-reload`) before the handler runs; a reload is not a
+restart. See
+[service](/en/reference/resources/service/#automatic-manager-synchronization).
 
 ## Expressions
 

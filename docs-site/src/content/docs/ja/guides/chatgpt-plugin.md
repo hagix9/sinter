@@ -171,6 +171,10 @@ Plugin を使う間は bridge が起動している必要があります。停�
   `systemctl --user stop sinter-bridge` で正常停止し、異常終了時は 10 秒後に
   再起動されます。
 
+  上の `systemctl --user daemon-reload` は bridge ホスト上での手動の手順です。
+  Sinter が管理するのは systemd のシステムマネージャのみで、ユーザーマネージャを
+  管理することはありません。
+
 - **launchd（macOS）**: launchd 定義は提供していません。フォアグラウンドで実行して
   ください。スリープ・ログアウト・再起動で停止します。
 

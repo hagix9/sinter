@@ -105,6 +105,15 @@ vars:
 
 Handlers run once at apply end, only when a changed resource notified them.
 
+Before each handler runs, Sinter synchronizes the systemd system manager
+(`systemctl daemon-reload`) if a managed unit input changed or the unit reports
+`NeedDaemonReload=yes`, then observes the unit again, runs the action, and
+verifies it. A reload is not a restart: to apply a changed unit file to a
+running process, notify a `restart` handler. Sinter does not reorder
+resources, so a resource that writes a unit file must come before the service
+that uses it (`depends_on` or declaration order). See
+[service](/en/reference/resources/service/#automatic-manager-synchronization).
+
 ## Interpolation
 
 Strings may embed `{{ expression }}`:

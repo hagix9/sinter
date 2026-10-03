@@ -871,6 +871,8 @@ calculates known ChangeSets
 
 does not execute command resources
 
+does not run systemctl daemon-reload or any other service/manager mutation (§28.6)
+
 propagates Unknown from command registers
 
 displays known, skipped, and unknown outcomes
@@ -907,6 +909,8 @@ records result
 
 queues eligible handlers
 
+synchronizes the systemd system manager at the consumer boundaries defined in §28.3
+
 stops immediately on failed or indeterminate normal resource
 
 if normal traversal contains no failed or indeterminate resource, enters the handler phase and executes legitimately notified handlers in handler declaration order; condition skips and condition-derived dependency blocks do not suppress this phase
@@ -942,6 +946,8 @@ dependent resource is not executed
 disposition records blocked_by_dependency
 
 when: false on a producer therefore blocks its dependents in v0.1.
+
+Dependencies also define order. Sinter never reorders resources. A resource that produces systemd manager input (§28.2) must be ordered before the service resource or handler that consumes it, by depends_on or declaration order. A producer declared after its consumer does not cause the consumer to be redone; only the end-of-run synchronization (§28.3) still happens.
 
 15. Result model
 
@@ -1021,6 +1027,8 @@ no later normal resource executes
 
 no delayed handler executes
 
+no new systemd manager reload starts (§28.7)
+
 pending handlers are reported
 
 remaining resources are marked blocked_by_fail_fast
@@ -1063,11 +1071,25 @@ restart
 
 reload
 
+Handler execution order:
+
+manager synchronization if pending (§28.3)
+
+fresh observation of the handler's service (§28.4)
+
+restart or reload action
+
+verification
+
 Handler verification:
 
 restart: service must be active after action
 
 reload: command/action must report success and service must still be active after action
+
+The manager synchronization that may precede a handler (systemctl daemon-reload) is a separate operation from the handler's restart or reload action. It reloads unit definitions only and never restarts or reloads the service. To apply a changed unit definition to a running process, a restart handler (or a reload handler when the unit supports ExecReload) must be notified.
+
+A failed or indeterminate manager synchronization before a handler makes that handler failed or indeterminate without running its action; later handlers do not run.
 
 Handlers cannot notify anything else.
 
@@ -1601,7 +1623,7 @@ When only one field is managed, only that dimension is changed.
 
 Verification checks every requested dimension after mutation.
 
-Missing unit => fail, except in plan when the service has a direct dependency on a package resource whose planned state is present; in that one case plan reports the service as deferred/unknown until dependency apply.
+Missing unit => fail, except in plan when the service has a direct dependency on a package resource whose planned state is present; in that one case plan reports the service as deferred/unknown until dependency apply. In apply, a missing unit after a changed package dependency is handled by the discovery reload of §28.5.
 
 Masked unit when running requested => fail.
 Static unit with enabled field requested => fail.
@@ -1612,7 +1634,95 @@ running requested: Sinter may issue one start operation; if not active afterward
 
 stopped requested: Sinter issues stop/reset only as required by the documented systemd adapter and must verify inactive and not failed; it does not silently report an existing failed state as satisfied.
 
-Sinter does not perform daemon-reload implicitly in v0.1.
+28.1 Manager synchronization
+
+Sinter synchronizes the systemd system manager automatically by running systemctl daemon-reload when required by §28.2. There is no resource type, handler action, or recipe option for it, and a manual daemon-reload command resource is normally unnecessary.
+
+daemon-reload is not a restart. It reloads the manager's unit definitions; running processes keep their old configuration. Manager reload (daemon-reload), systemctl restart <unit>, and systemctl reload <unit> are three distinct operations.
+
+Only the system manager is managed. The user manager (systemctl --user, ~/.config/systemd/user, /etc/systemd/user, user.conf) is never managed and Sinter never passes --user. Sinter does not run daemon-reexec.
+
+28.2 Reload triggers
+
+A reload is required when either holds:
+
+(a) A file, template, or link resource really changes (content create/change/remove, symlink create/replace/remove) a systemd manager input:
+
+a unit file (*.service, *.socket, *.target, *.timer, *.path, *.mount, *.automount, *.swap, *.slice, including template units such as foo@.service)
+
+a drop-in (<unit>.d/*.conf, the type-wide service.d/*.conf form, or the prefix form such as foo-.service.d/*.conf)
+
+an alias, mask, .wants, or .requires link
+
+located directly in one of the manager's own unit load path roots, or the system manager configuration /etc/systemd/system.conf or system.conf.d/*.conf in the finite table /etc, /run, /usr/lib, /usr/local/lib under systemd/system.conf.d.
+
+Sinter reads the load path roots read-only with systemctl show --property=UnitPath, parses the quoted-array output strictly, and compares paths lexically. It does not assume /etc/systemd/system. The query is made only when a managed path's file name has the shape of unit, drop-in, or link input. If it cannot be run or parsed, the resource fails before any mutation (plan: plan error). Sinter never guesses.
+
+(b) A fresh observation (§28.4) reports NeedDaemonReload=yes for a unit the recipe uses: a service resource, the service of a notified handler, or a managed unit file or drop-in that names a single unit.
+
+Metadata-only changes (chmod/chown), directories, ordinary application configuration, /etc/systemd/journald.conf, user.conf, and /etc/systemd/user/... never require a reload.
+
+28.3 Enforcement points
+
+Synchronization is enforced at three points:
+
+before a service resource observes and decides, which is before its already-matches early return
+
+before each notified handler runs
+
+at the end of a successful apply, so that a unit update with no consumer is still synchronized
+
+One reload covers every change pending at that moment. For the order unit A, service A, unit B, service B, two reloads occur, one per consumer boundary; there is no at-most-once-per-run rule. With nothing pending and NeedDaemonReload=no, zero reloads occur: a second unchanged apply issues none, and a notify restart caused by ordinary configuration issues none.
+
+If NeedDaemonReload=yes remains after a reload, apply fails as unresolved. There is no retry loop, and at most one reload occurs per cause (pending input, observed staleness).
+
+28.4 Observation
+
+Service and handler observation requests exactly four properties, each exactly once: LoadState, ActiveState, UnitFileState, NeedDaemonReload (systemctl show --property=LoadState,ActiveState,UnitFileState,NeedDaemonReload -- <unit>). Missing, duplicate, invalid, or truncated properties, non-zero exit, and non-UTF-8 output are failures; NeedDaemonReload is never defaulted to no.
+
+After a reload the service is re-observed, and only that fresh state decides start, stop, enable, and disable. enable and disable keep systemctl's own native implicit reload (Sinter does not use --no-reload), and Sinter observes again after them before deciding whether start is still needed.
+
+28.5 Package boundary
+
+Apply never reloads merely because a package changed. If a changed package that the service explicitly depends on (state present) leaves the unit not found, Sinter performs exactly one discovery reload and re-observes. If the unit is still not found, the service fails with no retry.
+
+28.6 Plan and audit
+
+plan is read-only. It never runs daemon-reload, enable, disable, start, stop, restart, or reload. If an earlier resource in the plan changes managed systemd input (§28.2 (a)), or the manager currently reports NeedDaemonReload=yes (observed only), later service resources are reported unknown/deferred (status ?, reason deferred/unknown until manager synchronization at apply), not unchanged and not failed. The reloads apply would perform are reported separately (§28.8) with phase planned, execution not_run, and unknown true. Pending handlers are listed as before; no handler IDs are invented.
+
+audit is read-only and never reloads. Manager synchronization is an independent drift dimension, manager_reload (observed: daemon-reload pending (NeedDaemonReload=yes); desired: manager synchronized). It is reported on a service resource even when active and enabled match, and on a managed unit file or drop-in resource that names a single unit. It is separate from content/mode/owner drift and from state/enabled drift. NeedDaemonReload=yes is never treated as repaired. NeedDaemonReload=no is a limited observation, because systemd compares mtimes and paths, not content hashes; it is never presented as proof that the loaded definition equals the bytes on disk. A managed input that cannot be mapped to one unit (a template, a type-wide or prefix drop-in, system.conf) is reported with a note that manager consistency is not verified. An unobservable NeedDaemonReload or UnitPath is an observation error (aggregate indeterminate), never no_drift. link resources have no manager facet in audit.
+
+The commands allowed in audit gain exactly two read-only shapes: systemctl show --property=LoadState,ActiveState,UnitFileState,NeedDaemonReload -- <unit> (replacing the former three-property shape) and systemctl show --property=UnitPath.
+
+28.7 Failure semantics
+
+daemon-reload exits non-zero => failure. The dependent service resource or notified handler does nothing (no start, enable, restart, or reload). Earlier successful file, template, and link results stay changed, nothing is rolled back, and the reload is never retried in the same run. Aggregate status is apply_failed.
+
+Timeout, signal, or lost response => indeterminate. It is never reported as success nor as unchanged. Aggregate status is indeterminate.
+
+Reload succeeded but the fresh observation failed => the reload is kept in the report as executed and changed, and the consumer fails (verification failed).
+
+A run that stopped (earlier failed or indeterminate resource, or a failed handler) does not start a new reload. If managed input had changed, the report states that the reload was not run and the manager is unsynchronized; the operator re-applies or runs systemctl daemon-reload manually. Sinter keeps no persistent journal, so it cannot remember across runs that a previous apply stopped before its reload; a later run reloads only when it observes NeedDaemonReload=yes or makes a new change.
+
+28.8 Reporting
+
+plan and apply JSON documents carry a top-level manager_reloads list, always present and possibly empty. Each entry has: phase (resource, handler, final, planned), trigger (pending_input, observed_stale, package_discovery), causes (resource IDs), consumer (service resource ID, handler ID, or null), execution, change, verification (existing value sets of §15), unknown, sensitive, and reason. Text output has a manager reloads (systemd daemon-reload) section. For sensitive causes or consumers the reason is redacted; unit names, paths, and stderr never appear for sensitive resources.
+
+The closed enumerations of §15 (execution, change, verification, disposition), the handler states, and the aggregate statuses are not extended. Exit codes are those of the existing statuses (apply_failed, indeterminate).
+
+28.9 Limits
+
+A reload acts on the whole system manager: it also loads other pending on-disk edits and re-runs generators, and it does not restart services.
+
+systemd rate limits (ReloadLimit*) and authorization can make a reload fail.
+
+NeedDaemonReload cannot see an external edit with the same or a backward mtime.
+
+Path comparison with UnitPath roots is lexical. Aliases such as /lib versus /usr/lib are not equated, and an unrecognized path does not trigger a reload by itself. A unit file shadowed by a higher-priority root still triggers a reload. A fragment linked from outside the load path is noticed only through NeedDaemonReload.
+
+Reloading system.conf does not guarantee that every directive takes effect.
+
+Behavior on each supported distribution is validated separately; this section does not itself claim that validation.
 
 29. Plan representation of future-created state
 
@@ -1630,10 +1740,12 @@ current: missing
 desired: running
 status: deferred/unknown until dependency apply
 
+A service resource is likewise reported unknown/deferred when an earlier resource in the plan changes managed systemd manager input, or when the manager currently reports NeedDaemonReload=yes for it (§28.6). Plan runs no daemon-reload.
+
 This exception applies only when the service directly depends on a package resource whose desired state is present.
 Otherwise a missing service unit is a plan error for a requested service state.
 
-Apply re-observes the service after package application.
+Apply re-observes the service after package application. A changed package dependency that leaves the unit not found causes exactly one discovery reload (§28.5).
 
 30. Verification requirements
 
@@ -1651,7 +1763,7 @@ link: symlink target
 
 package: installed/absent state
 
-service: requested active/enabled state
+service: requested active/enabled state, observed after any manager synchronization (§28.3)
 
 template: same as file
 
@@ -1810,6 +1922,8 @@ install/remove package
 
 change service state
 
+run systemctl daemon-reload
+
 upload staging file
 
 execute command resource
@@ -1948,6 +2062,22 @@ missing service is deferred in plan only for direct present-package dependency
 
 package apply followed by service re-observation, with no stale service observation reused
 
+unit file/drop-in/link/system.conf change followed by a service or handler => one reload before the consumer, fresh four-property observation, then the action
+
+metadata-only, directory, ordinary-config, journald.conf, and user-manager changes => no reload
+
+unchanged second apply => zero daemon-reload invocations
+
+unit A, service A, unit B, service B => two reloads
+
+failed, timed-out, or unresolved reload => consumer does nothing, earlier changes stay changed, no retry
+
+stopped run with changed unit input => reload not run and reported as such
+
+plan and audit never reload; plan defers dependent services as unknown; audit reports manager_reload drift independently of content and state drift
+
+UnitPath or NeedDaemonReload unobservable => failure before mutation in apply/plan, ERROR in audit
+
 34.10 Result truthfulness
 
 Test:
@@ -2081,6 +2211,14 @@ use YAML/TOML-specific semantics
 make target identifiers dynamic
 
 execute commands during plan
+
+run systemctl daemon-reload, or any other service/manager mutation, during plan or audit
+
+use systemctl --user or manage the user manager
+
+guess systemd unit load paths instead of reading UnitPath
+
+treat NeedDaemonReload=no as proof that the loaded definition equals the file on disk
 
 treat Unknown as false, skipped, or unchanged
 

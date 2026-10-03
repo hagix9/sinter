@@ -2,6 +2,7 @@ use crate::engine::{command_register_map, unknown_result, Engine, Mode};
 use crate::error::{MutationState, Result, SinterError};
 use crate::executor::{Completion, ExecRequest, Output};
 use crate::expressions::{eval_boolean, eval_value_interpolated, parse_expr, EvalVal, Scope};
+use crate::manager::ManagerInput;
 use crate::model::FrozenResource;
 use crate::paths::{mode_to_string, parent_and_name, parse_mode};
 use crate::platform::PackageBackend;
@@ -190,9 +191,12 @@ impl Engine {
             )));
         }
 
+        // Recognize system-manager input BEFORE any mutation: an unusable
+        // UnitPath query stops the resource instead of being guessed around.
+        let input = self.classify_manager_input(res, &path, false)?;
         let stat = self.fs.inspect(&path)?;
         if state == "absent" {
-            return self.file_absent(res, &path, stat);
+            return self.file_absent(res, &path, stat, &input);
         }
 
         let content = self.resolve_content(res, &vals)?;
@@ -206,6 +210,7 @@ impl Engine {
             content.bytes,
             effective_content_sensitive,
             meta,
+            &input,
         )
     }
 
@@ -214,11 +219,13 @@ impl Engine {
         res: &FrozenResource,
         path: &str,
         stat: Stat,
+        input: &Option<ManagerInput>,
     ) -> Result<ResourceResult> {
         match stat.kind {
             ObjKind::Absent => Ok(unchanged_result(res, "path is already absent")),
             ObjKind::File => {
                 if self.opts.mode == Mode::Plan {
+                    self.record_manager_change(res, input);
                     let mut r = changed_result(res);
                     r.diff = Some(Diff {
                         body: DiffBody::Summary {
@@ -239,6 +246,9 @@ impl Engine {
                 }
                 let permit = self.fs.mutation_permit()?;
                 self.fs.remove_file(&permit, path)?;
+                // The removal executed: recognized manager input is now stale
+                // in the manager until it is reloaded.
+                self.record_manager_change(res, input);
                 self.verify_absent(res, path)
             }
             other => Err(SinterError::apply(format!(
@@ -446,6 +456,7 @@ impl Engine {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn file_present(
         &mut self,
         res: &FrozenResource,
@@ -454,6 +465,7 @@ impl Engine {
         desired_content: Option<Vec<u8>>,
         sensitive: bool,
         meta: MetaSpec,
+        input: &Option<ManagerInput>,
     ) -> Result<ResourceResult> {
         // Determine whether the object type is acceptable.
         match stat.kind {
@@ -526,6 +538,9 @@ impl Engine {
             }
             let mut r = changed_result_sensitive(res, sensitive);
             if content_changed {
+                // Content/existence change of recognized manager input;
+                // metadata-only changes never create manager pending state.
+                self.record_manager_change(res, input);
                 let desired = effective.clone().unwrap_or_default();
                 // Only fetch current bytes when a text diff is actually
                 // possible: non-sensitive and within the diff size bound.
@@ -663,6 +678,7 @@ impl Engine {
                     Ok(r)
                 }
                 PublishOutcome::FailedAfterPublish(reason) => {
+                    self.record_manager_change(res, input);
                     let mut r = changed_result_sensitive(res, sensitive);
                     r.execution = Execution::Failed;
                     r.change = Change::Changed;
@@ -671,6 +687,7 @@ impl Engine {
                     Ok(r)
                 }
                 PublishOutcome::Published => {
+                    self.record_manager_change(res, input);
                     // Re-observe and verify. Publication already happened, so a
                     // failure to re-observe must NOT be reported as change:none:
                     // the mutation is known to have occurred.
@@ -1392,6 +1409,7 @@ impl Engine {
             )));
         }
         let target = ev_str(&vals, "target")?;
+        let input = self.classify_manager_input(res, &path, true)?;
         let stat = self.fs.inspect(&path)?;
 
         if state == "absent" {
@@ -1400,6 +1418,7 @@ impl Engine {
                 ObjKind::Symlink => {
                     if self.opts.mode == Mode::Plan {
                         let cur = self.fs.readlink(&path)?;
+                        self.record_manager_change(res, &input);
                         let mut r = changed_result(res);
                         r.diff = Some(Diff {
                             body: DiffBody::Summary {
@@ -1412,6 +1431,7 @@ impl Engine {
                     self.fs.check_trusted_parents(&path)?;
                     let permit = self.fs.mutation_permit()?;
                     self.fs.remove_symlink(&permit, &path)?;
+                    self.record_manager_change(res, &input);
                     self.verify_absent(res, &path)
                 }
                 other => Err(SinterError::apply(format!(
@@ -1438,6 +1458,7 @@ impl Engine {
         match stat.kind {
             ObjKind::Absent => {
                 if self.opts.mode == Mode::Plan {
+                    self.record_manager_change(res, &input);
                     let mut r = changed_result_sensitive(res, link_sensitive);
                     let desired = if link_sensitive {
                         "symlink -> [redacted]".to_string()
@@ -1455,6 +1476,7 @@ impl Engine {
                 self.fs.check_trusted_parents(&path)?;
                 let permit = self.fs.mutation_permit()?;
                 self.fs.symlink(&permit, &target_val, &path)?;
+                self.record_manager_change(res, &input);
                 match self.verify_link(res, &path, &target_val, link_sensitive) {
                     Ok(v) => {
                         // Required verification mismatch is a failed resource
@@ -1479,6 +1501,7 @@ impl Engine {
                     ));
                 }
                 if self.opts.mode == Mode::Plan {
+                    self.record_manager_change(res, &input);
                     let mut r = changed_result_sensitive(res, link_sensitive);
                     let desired = if link_sensitive {
                         "symlink -> [redacted]".to_string()
@@ -1499,8 +1522,13 @@ impl Engine {
                 }
                 self.fs.check_trusted_parents(&path)?;
                 let permit = self.fs.mutation_permit()?;
-                self.fs
-                    .symlink_replace(&permit, &target_val, &path, &stat)?;
+                if let Err(e) = self.fs.symlink_replace(&permit, &target_val, &path, &stat) {
+                    if e.mutation == MutationState::Changed {
+                        self.record_manager_change(res, &input);
+                    }
+                    return Err(e);
+                }
+                self.record_manager_change(res, &input);
                 match self.verify_link(res, &path, &target_val, link_sensitive) {
                     Ok(v) => {
                         // Required verification mismatch is a failed resource
@@ -1586,10 +1614,11 @@ impl Engine {
                 res.id
             )));
         }
+        let input = self.classify_manager_input(res, &path, false)?;
         if state == "absent" {
             // Delegate to file_absent semantics.
             let stat = self.fs.inspect(&path)?;
-            return self.file_absent(res, &path, stat);
+            return self.file_absent(res, &path, stat, &input);
         }
 
         let source = res
@@ -1663,6 +1692,7 @@ impl Engine {
             Some(rendered.0.into_bytes()),
             sensitive,
             meta,
+            &input,
         )
     }
 
@@ -3340,11 +3370,40 @@ impl Engine {
             }
         }
         let sensitive = res.sensitive || res.derived_sensitive;
-        let obs = match self.observe_service_sensitive(&name, sensitive) {
+        let apply = self.opts.mode == Mode::Apply;
+        // Plan never reloads or observes a manager state it knows will change:
+        // earlier managed systemd input changes make the manager's current
+        // answer meaningless for this service until apply synchronizes it.
+        if !apply && !self.manager.pending.is_empty() {
+            let mut r = unknown_result(res);
+            r.reason = Some(
+                "deferred/unknown until manager synchronization at apply: managed systemd input changes are planned"
+                    .into(),
+            );
+            return Ok(r);
+        }
+        // Apply: synchronize the manager (pending input / NeedDaemonReload)
+        // BEFORE any early return or state decision, and decide only from the
+        // fresh observation taken afterwards. A failed initial observation is
+        // information uncertainty: no service mutation has been dispatched, so
+        // Change must stay None.
+        let first = if apply {
+            self.manager_sync(
+                crate::manager::ManagerReloadPhase::Resource,
+                Some(&res.id),
+                &[(name.clone(), sensitive)],
+            )
+            .map(|mut v| v.remove(0))
+        } else {
+            self.observe_service_sensitive(&name, sensitive)
+        };
+        let mut obs = match first {
             Ok(obs) => obs,
-            Err(e) => {
-                // Initial observation is information uncertainty. No mutating
-                // command has been dispatched, so Change must stay None.
+            Err(mut e) => {
+                // The service itself was not touched. A reload failure is
+                // reported on the manager operation (`manager_reloads`), not
+                // as a possible change of this resource.
+                e.mutation = MutationState::None;
                 return Err(if e.kind == crate::error::ErrorKind::Indeterminate {
                     SinterError::apply(e.message)
                 } else {
@@ -3352,6 +3411,107 @@ impl Engine {
                 });
             }
         };
+        if !apply && obs.need_daemon_reload {
+            // The manager reports its loaded definition stale; the state after
+            // apply's reload is not knowable here. Observation only, no reload.
+            self.manager_plan_deferred(
+                crate::manager::ManagerReloadTrigger::ObservedStale,
+                &res.id,
+                sensitive,
+            );
+            let mut r = unknown_result(res);
+            r.reason = Some(
+                "deferred/unknown: the manager reports NeedDaemonReload=yes; apply reloads it before deciding"
+                    .into(),
+            );
+            return Ok(r);
+        }
+        // A changed package that this service explicitly depends on may have
+        // installed a unit the manager has not discovered (a cached
+        // not-found). One bounded discovery reload, then a fresh observation;
+        // still missing is a failure, never a retry loop.
+        if apply && obs.load_state == "not-found" {
+            let causes: Vec<String> = self
+                .present_package_deps(res)?
+                .into_iter()
+                .filter(|d| self.manager.changed_ids.contains(d))
+                .collect();
+            if !causes.is_empty() {
+                // The episode is sensitive when the service or any package
+                // that caused it is: diagnostics of the reload and of the
+                // fresh observation inherit that.
+                let disc_sensitive = sensitive
+                    || causes.iter().any(|c| {
+                        self.model
+                            .resources
+                            .iter()
+                            .any(|r| &r.id == c && (r.sensitive || r.derived_sensitive))
+                    });
+                let idx = self
+                    .manager_reload(
+                        crate::manager::ManagerReloadPhase::Resource,
+                        crate::manager::ManagerReloadTrigger::PackageDiscovery,
+                        Some(&res.id),
+                        causes,
+                        disc_sensitive,
+                    )
+                    .map_err(|mut e| {
+                        e.mutation = MutationState::None;
+                        if e.kind == crate::error::ErrorKind::Indeterminate {
+                            SinterError::apply(e.message)
+                        } else {
+                            e
+                        }
+                    })?;
+                match self.observe_service_sensitive(&name, disc_sensitive) {
+                    Ok(after) => {
+                        let found = after.load_state != "not-found" && !after.need_daemon_reload;
+                        self.manager.reloads[idx].verification = if found {
+                            Verification::Verified
+                        } else {
+                            Verification::Failed
+                        };
+                        if !found {
+                            self.manager.reloads[idx].reason =
+                                Some(crate::manager::episode_reason(
+                                    disc_sensitive,
+                                    "the unit was still not found (or still stale) after the discovery reload",
+                                ));
+                        }
+                        if after.load_state != "not-found" && after.need_daemon_reload {
+                            // Found, but the manager still reports its loaded
+                            // definition stale: synchronization is unresolved.
+                            // Same bounded failure as the ordinary gate: no
+                            // further reload and no service mutation.
+                            return Err(SinterError::apply(
+                                "NeedDaemonReload is still yes after the package-discovery \
+                                 daemon-reload; the manager state could not be synchronized \
+                                 (not retried)",
+                            ));
+                        }
+                        // Still not found falls through to the not-found
+                        // failure below (no mutation); a found, synchronized
+                        // unit continues from this fresh observation only.
+                        obs = after;
+                    }
+                    Err(e) => {
+                        self.manager.reloads[idx].verification =
+                            if e.kind == crate::error::ErrorKind::Indeterminate {
+                                Verification::Unknown
+                            } else {
+                                Verification::Failed
+                            };
+                        self.manager.reloads[idx].reason =
+                            Some(crate::manager::episode_reason(disc_sensitive, &e.message));
+                        return Err(if e.kind == crate::error::ErrorKind::Indeterminate {
+                            SinterError::apply(e.message)
+                        } else {
+                            e
+                        });
+                    }
+                }
+            }
+        }
 
         if obs.load_state == "not-found" {
             if self.opts.mode == Mode::Plan && self.service_has_present_package_dep(res)? {
@@ -3402,7 +3562,7 @@ impl Engine {
         }
 
         // Determine required mutations.
-        let state_needs = want_state.as_deref().map(|want| {
+        let mut state_needs = want_state.as_deref().map(|want| {
             let running = obs.active_state == "active";
             let failed = obs.active_state == "failed";
             let matches = if want == "running" {
@@ -3498,6 +3658,26 @@ impl Engine {
                         return Ok(service_step_failure(res, e, mutated, sensitive));
                     }
                     mutated = true;
+                    if state_needs == Some(true) {
+                        // enable/disable natively reloads the manager. The
+                        // start decision must not rest on the observation
+                        // taken before that, so observe again (through the
+                        // same synchronization gate) and decide from it.
+                        let fresh = self.manager_sync(
+                            crate::manager::ManagerReloadPhase::Resource,
+                            Some(&res.id),
+                            &[(name.clone(), sensitive)],
+                        );
+                        match fresh {
+                            Ok(mut v) => {
+                                let mid = v.remove(0);
+                                state_needs = Some(
+                                    mid.active_state != "active" || mid.active_state == "failed",
+                                );
+                            }
+                            Err(e) => return Ok(service_step_failure(res, e, mutated, sensitive)),
+                        }
+                    }
                 }
                 if state_needs == Some(true) {
                     if let Err(e) = runit(self, "start") {
@@ -3648,6 +3828,23 @@ impl Engine {
         };
         match reset.completion {
             Completion::Exited(0) => Ok(()),
+            // systemd unloads an inactive unit that nothing references, so a
+            // successful stop can leave `reset-failed` with nothing to act
+            // on ("Unit ... not loaded."). That is benign only when a fresh
+            // observation proves nothing is left to clear: the unit is
+            // inactive, not failed. Any other reset-failed failure, and any
+            // doubt about the observation, stays a failure.
+            Completion::Exited(_) if reset_failed_reports_not_loaded(&reset, name) => {
+                match self.observe_service_sensitive(name, sensitive) {
+                    Ok(obs) if obs.active_state == "inactive" => Ok(()),
+                    Ok(_) => Err(SinterError::apply(format!(
+                        "systemctl reset-failed {} failed",
+                        unit_disp
+                    ))
+                    .changed()),
+                    Err(e) => Err(e.changed()),
+                }
+            }
             Completion::Indeterminate { reason, .. } => Err(SinterError::indeterminate(format!(
                 "systemctl reset-failed {} did not complete after stop: {}",
                 unit_disp, reason
@@ -3668,11 +3865,15 @@ impl Engine {
         let out = self.fs.systemctl_show_sensitive(name, sensitive)?;
         match out.completion {
             Completion::Indeterminate { reason, .. } => {
-                return Err(SinterError::indeterminate(format!(
-                    "service observation for {} did not complete: {}",
-                    if sensitive { "[redacted]" } else { name },
-                    reason
-                )));
+                return Err(SinterError::indeterminate(if sensitive {
+                    "service observation for [redacted] did not complete (details redacted)"
+                        .to_string()
+                } else {
+                    format!(
+                        "service observation for {} did not complete: {}",
+                        name, reason
+                    )
+                }));
             }
             Completion::Signaled(s) => {
                 return Err(SinterError::apply(format!(
@@ -3687,12 +3888,21 @@ impl Engine {
             // systemctl returns non-zero for an unknown unit but still prints
             // LoadState=not-found; a non-zero with no recognizable output is an
             // observation failure.
-            return Err(SinterError::apply(format!(
-                "service observation failed for {}: systemctl exited {:?} ({})",
-                if sensitive { "[redacted]" } else { name },
-                out.exit_code(),
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
+            // stderr is diagnostic text from the target; a sensitive
+            // observation never carries it.
+            return Err(SinterError::apply(if sensitive {
+                format!(
+                    "service observation failed for [redacted]: systemctl exited {:?} (details redacted)",
+                    out.exit_code()
+                )
+            } else {
+                format!(
+                    "service observation failed for {}: systemctl exited {:?} ({})",
+                    name,
+                    out.exit_code(),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )
+            }));
         }
         if out.stdout_truncated || out.stderr_truncated {
             // Incomplete capture before any mutating command: this is an
@@ -3703,9 +3913,10 @@ impl Engine {
                 if sensitive { "[redacted]" } else { name }
             )));
         }
-        // The request asks for exactly three properties, so the answer is
-        // exactly three property records. Extra output makes the capture
-        // ambiguous: it is not silently ignored (IA-01).
+        // The request asks for exactly four properties, so the answer is
+        // exactly four property records. Extra output makes the capture
+        // ambiguous: it is not silently ignored (IA-01). A missing,
+        // duplicated or invalid NeedDaemonReload is never read as `no`.
         let text = std::str::from_utf8(&out.stdout).map_err(|_| {
             SinterError::apply(format!(
                 "service observation for {} captured invalid UTF-8 output{}",
@@ -3713,12 +3924,14 @@ impl Engine {
                 if sensitive { " (value redacted)" } else { "" }
             ))
         })?;
-        let mut lines = text.lines();
+        let lines = text.lines();
         let mut load_state = String::new();
         let mut active_state = String::new();
         let mut unit_file_state = String::new();
+        let mut need_raw: Option<String> = None;
         let mut seen = 0usize;
-        for line in lines.by_ref() {
+        let mut seen_unit_file_state = false;
+        for line in lines {
             let Some((k, v)) = line.split_once('=') else {
                 return Err(SinterError::apply(format!(
                     "service observation for {} captured a malformed property record",
@@ -3728,7 +3941,11 @@ impl Engine {
             match k {
                 "LoadState" if load_state.is_empty() => load_state = v.to_string(),
                 "ActiveState" if active_state.is_empty() => active_state = v.to_string(),
-                "UnitFileState" if unit_file_state.is_empty() => unit_file_state = v.to_string(),
+                "UnitFileState" if !seen_unit_file_state => {
+                    seen_unit_file_state = true;
+                    unit_file_state = v.to_string();
+                }
+                "NeedDaemonReload" if need_raw.is_none() => need_raw = Some(v.to_string()),
                 _ => {
                     return Err(SinterError::apply(format!(
                         "service observation for {} captured an unexpected property record",
@@ -3738,7 +3955,7 @@ impl Engine {
             }
             seen += 1;
         }
-        if seen != 3 {
+        if seen != 4 {
             return Err(SinterError::apply(format!(
                 "service observation for {} was incomplete",
                 if sensitive { "[redacted]" } else { name }
@@ -3753,14 +3970,31 @@ impl Engine {
                 if sensitive { "[redacted]" } else { name }
             )));
         }
+        let need_daemon_reload = match need_raw.as_deref().and_then(crate::manager::parse_yes_no) {
+            Some(b) => b,
+            None => {
+                return Err(SinterError::apply(format!(
+                    "service observation for {} reported an invalid NeedDaemonReload value",
+                    if sensitive { "[redacted]" } else { name }
+                )))
+            }
+        };
         Ok(ServiceObs {
             load_state,
             active_state,
             unit_file_state,
+            need_daemon_reload,
         })
     }
 
     fn service_has_present_package_dep(&self, res: &FrozenResource) -> Result<bool> {
+        Ok(!self.present_package_deps(res)?.is_empty())
+    }
+
+    /// IDs of the direct `package` dependencies of `res` whose desired state
+    /// evaluates to `present`.
+    fn present_package_deps(&self, res: &FrozenResource) -> Result<Vec<String>> {
+        let mut found = Vec::new();
         for dep in &res.depends_on {
             if let Some(d) = self.model.resources.iter().find(|r| &r.id == dep) {
                 if d.type_ == "package" {
@@ -3789,13 +4023,13 @@ impl Engine {
                                     }
                                 })?;
                         if matches!(evaluated.val, Some(Value::Str(s)) if s == "present") {
-                            return Ok(true);
+                            found.push(d.id.clone());
                         }
                     }
                 }
             }
         }
-        Ok(false)
+        Ok(found)
     }
 
     // -----------------------------------------------------------------------
@@ -3808,11 +4042,21 @@ impl Engine {
     ) -> Result<HandlerOutcomeState> {
         let name = &h.service;
         let sensitive = h.sensitive;
-        let obs = match self.observe_service_sensitive(name, sensitive) {
-            Ok(obs) => obs,
+        // Manager synchronization gate: pending managed systemd input and a
+        // fresh NeedDaemonReload=yes are reloaded BEFORE the action, and the
+        // action decision rests on the observation taken afterwards. Ordinary
+        // application config leaves nothing pending and Need=no, so this adds
+        // no reload for it.
+        let obs = match self.manager_sync(
+            crate::manager::ManagerReloadPhase::Handler,
+            Some(&h.id),
+            &[(name.clone(), sensitive)],
+        ) {
+            Ok(mut v) => v.remove(0),
             Err(e) => {
-                // Observation failure is a handler outcome, not an outer report
-                // abort. Preserve indeterminate when observation is unknown.
+                // Observation or reload failure is a handler outcome, not an
+                // outer report abort. Preserve indeterminate when unknown.
+                self.manager.last_handler_failure = Some(e.message.clone());
                 return Ok(if e.kind == crate::error::ErrorKind::Indeterminate {
                     HandlerOutcomeState::Indeterminate
                 } else {
@@ -5172,6 +5416,72 @@ fn same_object_identity(prev: &Stat, cur: &Stat) -> bool {
     }
 }
 
+/// systemd unit-type suffixes. A name that already ends in one is used by
+/// `systemctl` as is; any other name gets `.service` appended.
+const UNIT_TYPE_SUFFIXES: &[&str] = &[
+    ".service",
+    ".socket",
+    ".target",
+    ".device",
+    ".mount",
+    ".automount",
+    ".swap",
+    ".timer",
+    ".path",
+    ".slice",
+    ".scope",
+];
+
+/// The unit name `systemctl` prints for the requested `name`: the name itself
+/// when it ends in a unit-type suffix, otherwise `<name>.service` (what
+/// `expand_unit_names` produces, so `reset-failed` reports that name, not the
+/// bare one). `None` for anything outside systemd's plain unit-name
+/// characters (paths, globs, whitespace, empty): such a request is never
+/// matched, which keeps the failure. Aliases are not resolved: the diagnostic
+/// names the requested unit, never its alias target.
+fn systemctl_unit_name(name: &str) -> Option<String> {
+    let plain =
+        |c: char| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_' | '.' | '\\' | '@');
+    if name.is_empty() || !name.chars().all(plain) {
+        return None;
+    }
+    let typed = UNIT_TYPE_SUFFIXES
+        .iter()
+        .any(|s| name.len() > s.len() && name.ends_with(s));
+    Some(if typed {
+        name.to_string()
+    } else {
+        format!("{name}.service")
+    })
+}
+
+/// Is this exactly systemd's "the unit is not loaded" refusal from
+/// `systemctl reset-failed <unit>`: `Failed to reset failed state of unit
+/// <U>: Unit <U> not loaded.` with `<U>` the requested unit (see
+/// `systemctl_unit_name`)? The whole text must equal that sentence, with at
+/// most one trailing `\n` or `\r\n`; nothing else is matched. The capture must
+/// be complete (neither stream truncated) and valid UTF-8. The text is
+/// systemd's own bus error (`org.freedesktop.systemd1.NoSuchUnit`), identical
+/// on systemd 252, 255, 257 and 259; it is English, which holds because the
+/// command runs with `LC_ALL=C.UTF-8` (`baseline_env`). Any other output
+/// stays a failure.
+fn reset_failed_reports_not_loaded(out: &Output, unit: &str) -> bool {
+    if out.stdout_truncated || out.stderr_truncated {
+        return false;
+    }
+    let Some(u) = systemctl_unit_name(unit) else {
+        return false;
+    };
+    let Ok(text) = std::str::from_utf8(&out.stderr) else {
+        return false;
+    };
+    let body = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .unwrap_or(text);
+    body == format!("Failed to reset failed state of unit {u}: Unit {u} not loaded.")
+}
+
 fn service_step_failure(
     res: &FrozenResource,
     e: SinterError,
@@ -5266,6 +5576,9 @@ pub(crate) struct ServiceObs {
     pub(crate) load_state: String,
     pub(crate) active_state: String,
     pub(crate) unit_file_state: String,
+    /// `NeedDaemonReload` as the manager reported it. `false` is a limited
+    /// observation, not proof that the loaded definition matches the disk.
+    pub(crate) need_daemon_reload: bool,
 }
 
 fn unchanged_result(res: &FrozenResource, reason: &str) -> ResourceResult {
@@ -6299,5 +6612,105 @@ Installed size: 108 k\n";
         assert!(!is_metadata_expiration_line(
             "Last metadata expiration check: 0:44:34 ago on Thu Sep 17 08:41:18 PM UTC."
         ));
+    }
+}
+
+#[cfg(test)]
+mod reset_failed_classifier_tests {
+    use super::*;
+
+    fn out(stderr: &[u8]) -> Output {
+        Output {
+            completion: Completion::Exited(1),
+            stdout: Vec::new(),
+            stderr: stderr.to_vec(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }
+    }
+
+    fn formal(u: &str) -> String {
+        format!("Failed to reset failed state of unit {u}: Unit {u} not loaded.")
+    }
+
+    #[test]
+    fn requested_name_maps_to_the_name_systemctl_prints() {
+        for (asked, printed) in [
+            ("foo.service", "foo.service"),
+            ("foo", "foo.service"),
+            ("foo.bar", "foo.bar.service"),
+            ("getty@tty1.service", "getty@tty1.service"),
+            ("getty@tty1", "getty@tty1.service"),
+            ("backup.timer", "backup.timer"),
+            ("dev-disk-by\\x2dlabel.mount", "dev-disk-by\\x2dlabel.mount"),
+            ("a:b_c-d.socket", "a:b_c-d.socket"),
+        ] {
+            assert_eq!(
+                systemctl_unit_name(asked).as_deref(),
+                Some(printed),
+                "{asked}"
+            );
+        }
+        // Anything outside plain unit-name characters is never matched.
+        for asked in [
+            "", "foo*", "foo?", "foo[1]", "/etc/foo", "foo bar", "foo\n", "föö", "-x y",
+        ] {
+            assert_eq!(systemctl_unit_name(asked), None, "{asked:?}");
+        }
+    }
+
+    #[test]
+    fn only_the_complete_sentence_for_the_requested_unit_matches() {
+        let f = formal("foo.service");
+        assert!(reset_failed_reports_not_loaded(
+            &out(f.as_bytes()),
+            "foo.service"
+        ));
+        assert!(reset_failed_reports_not_loaded(
+            &out(format!("{f}\n").as_bytes()),
+            "foo.service"
+        ));
+        assert!(reset_failed_reports_not_loaded(
+            &out(format!("{f}\r\n").as_bytes()),
+            "foo.service"
+        ));
+        assert!(reset_failed_reports_not_loaded(&out(f.as_bytes()), "foo"));
+        for bad in [
+            format!("{f}\n\n"),
+            format!("{f}\r\r\n"),
+            format!("\n{f}\n"),
+            format!(" {f}"),
+            format!("{f}\nx\n"),
+            format!("x\n{f}\n"),
+            formal("other.service"),
+            formal("foo"),
+            "Failed to reset failed state of unit permission denied not loaded.".to_string(),
+            String::new(),
+        ] {
+            assert!(
+                !reset_failed_reports_not_loaded(&out(bad.as_bytes()), "foo.service"),
+                "{bad:?}"
+            );
+        }
+        assert!(!reset_failed_reports_not_loaded(
+            &out(f.as_bytes()),
+            "other.service"
+        ));
+        assert!(!reset_failed_reports_not_loaded(&out(f.as_bytes()), "foo*"));
+        assert!(!reset_failed_reports_not_loaded(
+            &out(b"\xff"),
+            "foo.service"
+        ));
+    }
+
+    #[test]
+    fn a_truncated_capture_never_matches() {
+        let f = formal("foo.service");
+        for (o, e) in [(false, true), (true, false), (true, true)] {
+            let mut x = out(f.as_bytes());
+            x.stdout_truncated = o;
+            x.stderr_truncated = e;
+            assert!(!reset_failed_reports_not_loaded(&x, "foo.service"));
+        }
     }
 }
