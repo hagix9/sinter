@@ -5,6 +5,9 @@ description: The resource model — common fields, ordering, dependencies, notif
 
 Resources are the unit of desired state. v1.1.3 implements seven types:
 `file`, `directory`, `link`, `template`, `command`, `package`, `service`.
+On `main` after v1.1.3 (unreleased), two more are added:
+[`group`](/en/reference/resources/group/) and
+[`user`](/en/reference/resources/user/) — local Linux accounts.
 
 ## Common fields
 

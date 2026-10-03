@@ -620,3 +620,594 @@ impl FakeFs {
         resolve_input(&shape, &roots)?.unit
     }
 }
+
+// ---------------------------------------------------------------------------
+// scripted local account database
+// ---------------------------------------------------------------------------
+
+/// One passwd record of the scripted target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FakeUser {
+    pub name: String,
+    pub uid: u32,
+    pub gid: u32,
+    pub home: String,
+    pub shell: String,
+}
+
+/// One group record of the scripted target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FakeGroup {
+    pub name: String,
+    pub gid: u32,
+    pub members: Vec<String>,
+}
+
+/// A small, honest model of the local account databases and of the shadow-utils
+/// commands Sinter's `user`/`group` resources issue. `root` always exists;
+/// `useradd`, `usermod`, `userdel`, `groupadd` and `groupdel` obey the real
+/// tools' documented refusals (existing name, used id, missing group, a user's
+/// primary group, a user with running processes). Everything else is a test
+/// knob. It cannot prove real shadow-utils behavior: that stays real-OS
+/// acceptance.
+#[derive(Debug, Clone)]
+pub struct FakeAccounts {
+    /// Accounts in the local files database (besides `root`).
+    pub users: Vec<FakeUser>,
+    pub groups: Vec<FakeGroup>,
+    /// Accounts only another identity source (NSS: LDAP/SSSD) provides: found
+    /// by an ordinary lookup, absent from `getent -s files`.
+    pub nss_users: Vec<FakeUser>,
+    pub nss_groups: Vec<FakeGroup>,
+    /// Users with running processes: `userdel` and `usermod -d` fail.
+    pub running_users: BTreeSet<String>,
+    /// `USERGROUPS_ENAB yes`: `useradd` without `-g` creates a same-name
+    /// group, and `userdel` removes that group when nothing else uses it.
+    pub usergroups_enab: bool,
+    /// Forced answer per command basename (`useradd`, ...), served instead of
+    /// the command's effect.
+    pub forced: BTreeMap<String, Output>,
+    /// Commands that apply their effect and then exit non-zero.
+    pub fail_after_effect: BTreeSet<String>,
+    /// The `-s files` lookup itself fails with this completion (a getent that
+    /// does not support the option).
+    pub files_lookup_fails: Option<Completion>,
+}
+
+impl Default for FakeAccounts {
+    fn default() -> Self {
+        FakeAccounts {
+            users: Vec::new(),
+            groups: Vec::new(),
+            nss_users: Vec::new(),
+            nss_groups: Vec::new(),
+            running_users: BTreeSet::new(),
+            usergroups_enab: true,
+            forced: BTreeMap::new(),
+            fail_after_effect: BTreeSet::new(),
+            files_lookup_fails: None,
+        }
+    }
+}
+
+fn out(code: i32, stdout: String, stderr: String) -> Output {
+    Output {
+        completion: Completion::Exited(code),
+        stdout: stdout.into_bytes(),
+        stderr: stderr.into_bytes(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+    }
+}
+
+fn user_line(u: &FakeUser) -> String {
+    format!("{}:x:{}:{}::{}:{}\n", u.name, u.uid, u.gid, u.home, u.shell)
+}
+
+fn group_line(g: &FakeGroup) -> String {
+    format!("{}:x:{}:{}\n", g.name, g.gid, g.members.join(","))
+}
+
+impl FakeAccounts {
+    fn root_user() -> FakeUser {
+        FakeUser {
+            name: "root".into(),
+            uid: 0,
+            gid: 0,
+            home: "/root".into(),
+            shell: "/bin/bash".into(),
+        }
+    }
+
+    fn root_group() -> FakeGroup {
+        FakeGroup {
+            name: "root".into(),
+            gid: 0,
+            members: vec![],
+        }
+    }
+
+    /// The identity the fake target logs in as (the executor's `fakeuser`).
+    fn login(target_uid: u32, target_gid: u32, home: &str) -> (FakeUser, FakeGroup) {
+        (
+            FakeUser {
+                name: "fakeuser".into(),
+                uid: target_uid,
+                gid: target_gid,
+                home: home.to_string(),
+                shell: "/bin/sh".into(),
+            },
+            FakeGroup {
+                name: "fakegroup".into(),
+                gid: target_gid,
+                members: vec![],
+            },
+        )
+    }
+
+    fn files_users(&self, login: &FakeUser) -> Vec<FakeUser> {
+        let mut v = vec![Self::root_user(), login.clone()];
+        v.extend(self.users.iter().cloned());
+        v
+    }
+
+    fn files_groups(&self, login: &FakeGroup) -> Vec<FakeGroup> {
+        let mut v = vec![Self::root_group(), login.clone()];
+        v.extend(self.groups.iter().cloned());
+        v
+    }
+
+    /// `getent [-s files] passwd|group [key]`.
+    pub(crate) fn getent(
+        &self,
+        local_only: bool,
+        db: &str,
+        key: Option<&str>,
+        target: (u32, u32, &str),
+    ) -> Output {
+        if local_only {
+            if let Some(c) = &self.files_lookup_fails {
+                return Output {
+                    completion: c.clone(),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                };
+            }
+        }
+        let (lu, lg) = Self::login(target.0, target.1, target.2);
+        match db {
+            "passwd" => {
+                let mut all = self.files_users(&lu);
+                if !local_only {
+                    all.extend(self.nss_users.iter().cloned());
+                }
+                match key {
+                    None => out(0, all.iter().map(user_line).collect(), String::new()),
+                    Some(k) => {
+                        let hit = match k.parse::<u32>() {
+                            Ok(id) => all.iter().find(|u| u.uid == id),
+                            Err(_) => all.iter().find(|u| u.name == k),
+                        };
+                        match hit {
+                            Some(u) => out(0, user_line(u), String::new()),
+                            None => out(2, String::new(), String::new()),
+                        }
+                    }
+                }
+            }
+            "group" => {
+                let mut all = self.files_groups(&lg);
+                if !local_only {
+                    all.extend(self.nss_groups.iter().cloned());
+                }
+                match key {
+                    None => out(0, all.iter().map(group_line).collect(), String::new()),
+                    Some(k) => {
+                        let hit = match k.parse::<u32>() {
+                            Ok(id) => all.iter().find(|g| g.gid == id),
+                            Err(_) => all.iter().find(|g| g.name == k),
+                        };
+                        match hit {
+                            Some(g) => out(0, group_line(g), String::new()),
+                            None => out(2, String::new(), String::new()),
+                        }
+                    }
+                }
+            }
+            _ => out(2, String::new(), String::new()),
+        }
+    }
+
+    fn next_free(&self, from: u32, step: i64, login: (u32, u32)) -> u32 {
+        let mut n = from as i64;
+        loop {
+            let id = n as u32;
+            let used = id == login.0
+                || id == login.1
+                || id == 0
+                || self.users.iter().any(|u| u.uid == id)
+                || self.groups.iter().any(|g| g.gid == id);
+            if !used {
+                return id;
+            }
+            n += step;
+        }
+    }
+
+    /// Run one of the modeled shadow-utils commands. `None` = not modeled.
+    pub(crate) fn command(
+        &mut self,
+        prog: &str,
+        args: &[String],
+        target: (u32, u32, &str),
+    ) -> Option<Output> {
+        if !matches!(
+            prog,
+            "useradd" | "usermod" | "userdel" | "groupadd" | "groupdel"
+        ) {
+            return None;
+        }
+        if let Some(o) = self.forced.get(prog) {
+            return Some(o.clone());
+        }
+        let (lu, lg) = Self::login(target.0, target.1, target.2);
+        let result = match prog {
+            "groupadd" => self.groupadd(args, &lu, &lg),
+            "groupdel" => self.groupdel(args),
+            "useradd" => self.useradd(args, &lu, &lg),
+            "usermod" => self.usermod(args),
+            _ => self.userdel(args),
+        };
+        if self.fail_after_effect.contains(prog) && result.is_success() {
+            return Some(out(
+                1,
+                String::new(),
+                format!("{}: injected failure after effect", prog),
+            ));
+        }
+        Some(result)
+    }
+
+    fn all_groups(&self, lg: &FakeGroup) -> Vec<FakeGroup> {
+        self.files_groups(lg)
+    }
+
+    fn all_users(&self, lu: &FakeUser) -> Vec<FakeUser> {
+        self.files_users(lu)
+    }
+
+    fn groupadd(&mut self, args: &[String], lu: &FakeUser, lg: &FakeGroup) -> Output {
+        let mut gid: Option<u32> = None;
+        let mut system = false;
+        let mut name: Option<&str> = None;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--system" => system = true,
+                "-g" => {
+                    i += 1;
+                    gid = args.get(i).and_then(|v| v.parse().ok());
+                    if gid.is_none() {
+                        return out(3, String::new(), "groupadd: invalid group ID".into());
+                    }
+                }
+                other if other.starts_with('-') => {
+                    return out(
+                        2,
+                        String::new(),
+                        format!("groupadd: invalid option {}", other),
+                    )
+                }
+                other => name = Some(other),
+            }
+            i += 1;
+        }
+        let Some(name) = name else {
+            return out(2, String::new(), "groupadd: missing group name".into());
+        };
+        if self.all_groups(lg).iter().any(|g| g.name == name) {
+            return out(
+                9,
+                String::new(),
+                format!("groupadd: group '{}' already exists", name),
+            );
+        }
+        let gid = match gid {
+            Some(g) => {
+                if self.all_groups(lg).iter().any(|x| x.gid == g) {
+                    return out(
+                        4,
+                        String::new(),
+                        format!("groupadd: GID '{}' already exists", g),
+                    );
+                }
+                g
+            }
+            None if system => self.next_free(998, -1, (lu.uid, lg.gid)),
+            None => self.next_free(1001, 1, (lu.uid, lg.gid)),
+        };
+        self.groups.push(FakeGroup {
+            name: name.to_string(),
+            gid,
+            members: vec![],
+        });
+        out(0, String::new(), String::new())
+    }
+
+    fn groupdel(&mut self, args: &[String]) -> Output {
+        let [name] = args else {
+            return out(2, String::new(), "groupdel: expected one group name".into());
+        };
+        let Some(pos) = self.groups.iter().position(|g| &g.name == name) else {
+            return out(
+                6,
+                String::new(),
+                format!("groupdel: group '{}' does not exist", name),
+            );
+        };
+        let gid = self.groups[pos].gid;
+        if self.users.iter().any(|u| u.gid == gid) {
+            return out(
+                8,
+                String::new(),
+                "groupdel: cannot remove the primary group of user".to_string(),
+            );
+        }
+        self.groups.remove(pos);
+        out(0, String::new(), String::new())
+    }
+
+    fn useradd(&mut self, args: &[String], lu: &FakeUser, lg: &FakeGroup) -> Output {
+        let (mut uid, mut group, mut groups, mut shell, mut home) = (
+            None::<u32>,
+            None::<String>,
+            None::<String>,
+            None::<String>,
+            None::<String>,
+        );
+        let (mut system, mut name) = (false, None::<String>);
+        let mut i = 0;
+        while i < args.len() {
+            let a = args[i].as_str();
+            let val = |i: &mut usize| -> Option<String> {
+                *i += 1;
+                args.get(*i).cloned()
+            };
+            match a {
+                "--system" => system = true,
+                "-m" | "-M" => {}
+                "-u" => uid = val(&mut i).and_then(|v| v.parse().ok()),
+                "-g" => group = val(&mut i),
+                "-G" => groups = val(&mut i),
+                "-s" => shell = val(&mut i),
+                "-d" => home = val(&mut i),
+                o if o.starts_with('-') => {
+                    return out(2, String::new(), format!("useradd: invalid option {}", o))
+                }
+                o => name = Some(o.to_string()),
+            }
+            i += 1;
+        }
+        let Some(name) = name else {
+            return out(2, String::new(), "useradd: missing user name".into());
+        };
+        if self.all_users(lu).iter().any(|u| u.name == name) {
+            return out(
+                9,
+                String::new(),
+                format!("useradd: user '{}' already exists", name),
+            );
+        }
+        let uid = match uid {
+            Some(u) => {
+                if self.all_users(lu).iter().any(|x| x.uid == u) {
+                    return out(
+                        4,
+                        String::new(),
+                        format!("useradd: UID {} is not unique", u),
+                    );
+                }
+                u
+            }
+            None if system => self.next_free(998, -1, (lu.uid, lg.gid)),
+            None => self.next_free(1001, 1, (lu.uid, lg.gid)),
+        };
+        let supp: Vec<String> = groups
+            .map(|g| g.split(',').map(String::from).collect())
+            .unwrap_or_default();
+        for g in &supp {
+            if !self.all_groups(lg).iter().any(|x| &x.name == g) {
+                return out(
+                    6,
+                    String::new(),
+                    format!("useradd: group '{}' does not exist", g),
+                );
+            }
+        }
+        let gid = match group {
+            Some(g) => match self.all_groups(lg).iter().find(|x| x.name == g) {
+                Some(x) => x.gid,
+                None => {
+                    return out(
+                        6,
+                        String::new(),
+                        format!("useradd: group '{}' does not exist", g),
+                    )
+                }
+            },
+            None if self.usergroups_enab => {
+                if self.all_groups(lg).iter().any(|x| x.name == name) {
+                    return out(
+                        9,
+                        String::new(),
+                        format!(
+                            "useradd: group {} exists - if you want to add this user to that group, use -g.",
+                            name
+                        ),
+                    );
+                }
+                let gid = if self.all_groups(lg).iter().any(|x| x.gid == uid) {
+                    self.next_free(1001, 1, (lu.uid, lg.gid))
+                } else {
+                    uid
+                };
+                self.groups.push(FakeGroup {
+                    name: name.clone(),
+                    gid,
+                    members: vec![],
+                });
+                gid
+            }
+            None => 100,
+        };
+        for g in &supp {
+            if let Some(x) = self.groups.iter_mut().find(|x| &x.name == g) {
+                x.members.push(name.clone());
+            }
+        }
+        self.users.push(FakeUser {
+            home: home.unwrap_or_else(|| format!("/home/{}", name)),
+            shell: shell.unwrap_or_else(|| "/bin/sh".into()),
+            name,
+            uid,
+            gid,
+        });
+        out(0, String::new(), String::new())
+    }
+
+    fn usermod(&mut self, args: &[String]) -> Output {
+        let (mut group, mut shell, mut home, mut groups) = (
+            None::<String>,
+            None::<String>,
+            None::<String>,
+            None::<String>,
+        );
+        let (mut append, mut name) = (false, None::<String>);
+        let mut i = 0;
+        while i < args.len() {
+            let a = args[i].as_str();
+            let val = |i: &mut usize| -> Option<String> {
+                *i += 1;
+                args.get(*i).cloned()
+            };
+            match a {
+                "-a" => append = true,
+                "-g" => group = val(&mut i),
+                "-s" => shell = val(&mut i),
+                "-d" => home = val(&mut i),
+                "-G" => groups = val(&mut i),
+                o if o.starts_with('-') => {
+                    return out(2, String::new(), format!("usermod: invalid option {}", o))
+                }
+                o => name = Some(o.to_string()),
+            }
+            i += 1;
+        }
+        let Some(name) = name else {
+            return out(2, String::new(), "usermod: missing user name".into());
+        };
+        let Some(pos) = self.users.iter().position(|u| u.name == name) else {
+            return out(
+                6,
+                String::new(),
+                format!("usermod: user '{}' does not exist", name),
+            );
+        };
+        if groups.is_some() && !append {
+            return out(
+                2,
+                String::new(),
+                "usermod: this fake only models -a -G".into(),
+            );
+        }
+        if home.is_some() && self.running_users.contains(&name) {
+            return out(
+                8,
+                String::new(),
+                format!("usermod: user {} is currently used by process 4242", name),
+            );
+        }
+        let new_gid = match &group {
+            Some(g) => match self.groups.iter().find(|x| &x.name == g) {
+                Some(x) => Some(x.gid),
+                None if g == "root" => Some(0),
+                None if g == "fakegroup" => None,
+                None => {
+                    return out(
+                        6,
+                        String::new(),
+                        format!("usermod: group '{}' does not exist", g),
+                    )
+                }
+            },
+            None => None,
+        };
+        let supp: Vec<String> = groups
+            .map(|g| g.split(',').map(String::from).collect())
+            .unwrap_or_default();
+        for g in &supp {
+            if !self.groups.iter().any(|x| &x.name == g) && g != "root" && g != "fakegroup" {
+                return out(
+                    6,
+                    String::new(),
+                    format!("usermod: group '{}' does not exist", g),
+                );
+            }
+        }
+        if let Some(g) = new_gid {
+            self.users[pos].gid = g;
+        }
+        if let Some(s) = shell {
+            self.users[pos].shell = s;
+        }
+        if let Some(h) = home {
+            self.users[pos].home = h;
+        }
+        for g in &supp {
+            if let Some(x) = self.groups.iter_mut().find(|x| &x.name == g) {
+                if !x.members.contains(&name) {
+                    x.members.push(name.clone());
+                }
+            }
+        }
+        out(0, String::new(), String::new())
+    }
+
+    fn userdel(&mut self, args: &[String]) -> Output {
+        if args.iter().any(|a| a.starts_with('-')) {
+            return out(
+                2,
+                String::new(),
+                "userdel: this fake models only plain userdel".into(),
+            );
+        }
+        let [name] = args else {
+            return out(2, String::new(), "userdel: expected one user name".into());
+        };
+        let Some(pos) = self.users.iter().position(|u| &u.name == name) else {
+            return out(
+                6,
+                String::new(),
+                format!("userdel: user '{}' does not exist", name),
+            );
+        };
+        if self.running_users.contains(name) {
+            return out(
+                8,
+                String::new(),
+                format!("userdel: user {} is currently used by process 4242", name),
+            );
+        }
+        let gone = self.users.remove(pos);
+        for g in &mut self.groups {
+            g.members.retain(|m| m != name);
+        }
+        if self.usergroups_enab && !self.users.iter().any(|u| u.gid == gone.gid) {
+            self.groups
+                .retain(|g| !(g.gid == gone.gid && g.name == gone.name));
+        }
+        out(0, String::new(), String::new())
+    }
+}

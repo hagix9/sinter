@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod audit;
 pub mod backup;
 pub mod bundle;

@@ -69,7 +69,14 @@ fn assert_observation_only(report: &AuditReport) {
             "/usr/bin/readlink" => matches!(args.as_slice(), ["-n", "--", _]),
             "/usr/bin/sha256sum" => matches!(args.as_slice(), ["--", _]),
             // Account database lookup: database name then key.
-            "/usr/bin/getent" => matches!(args.as_slice(), ["passwd" | "group", _]),
+            // Local-only (`-s files`) and NSS-wide key lookups, and the local
+            // user enumeration the group-deletion guard uses.
+            "/usr/bin/getent" => matches!(
+                args.as_slice(),
+                ["passwd" | "group", _]
+                    | ["-s", "files", "passwd" | "group", _]
+                    | ["-s", "files", "passwd"]
+            ),
             // Extended-attribute/ACL inspection (fixed options, path operand).
             "/usr/bin/getfattr" => matches!(
                 args.as_slice(),

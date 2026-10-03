@@ -16,6 +16,16 @@ complete supported set — unknown `with` fields are schema errors.
 | [package](/en/reference/resources/package/) | Package install/remove (apt/dnf) | `name`, `state` |
 | [service](/en/reference/resources/service/) | systemd state + enablement | `name`, `state`, `enabled` |
 
+## Unreleased additions (after v1.1.3)
+
+These two types are on `main` and ship with the next release. They are not in
+the v1.1.3 binary.
+
+| Type | Purpose | Key parameters |
+|------|---------|----------------|
+| [group](/en/reference/resources/group/) | Local Linux group (unreleased) | `name`, `state`, `gid`, `system` |
+| [user](/en/reference/resources/user/) | Local Linux user (unreleased) | `name`, `state`, `uid`, `group`, `groups`, `shell`, `home`, `create_home`, `system` |
+
 ## Shared conventions
 
 - `path`-type parameters are absolute paths; parent paths must already exist

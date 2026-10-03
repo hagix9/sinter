@@ -62,7 +62,7 @@ pub(crate) fn ev_bool(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<Option
     }
 }
 
-fn ev_int(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<Option<i64>> {
+pub(crate) fn ev_int(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<Option<i64>> {
     match m.get(key) {
         None => Ok(None),
         Some(v) => match &v.val {
@@ -81,7 +81,10 @@ fn ev_int(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<Option<i64>> {
     }
 }
 
-fn ev_list_str(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<Option<(Vec<String>, bool)>> {
+pub(crate) fn ev_list_str(
+    m: &BTreeMap<String, EvalVal>,
+    key: &str,
+) -> Result<Option<(Vec<String>, bool)>> {
     match m.get(key) {
         None => Ok(None),
         Some(v) => match &v.val {
@@ -348,6 +351,47 @@ impl Engine {
         }
     }
 
+    /// Resolve a file `owner` name to a uid. In plan, an account that an
+    /// explicit direct dependency creates is deferred (Unknown) instead of
+    /// being an error; everywhere else an unknown account stays an error.
+    fn resolve_owner(&mut self, res: &FrozenResource, spec: &str, sensitive: bool) -> Result<u32> {
+        match self.fs.resolve_uid_sensitive(spec, sensitive) {
+            Ok(uid) => Ok(uid),
+            Err(e) => {
+                if let Some(deferred) = self.defer_owner_for_dependency(res, "user", spec, &e)? {
+                    return Err(deferred);
+                }
+                Err(if sensitive {
+                    redact_msg(&res.id, "unknown user", "resolution failed")
+                } else {
+                    e
+                })
+            }
+        }
+    }
+
+    /// Group counterpart of [`Self::resolve_owner`].
+    fn resolve_owner_group(
+        &mut self,
+        res: &FrozenResource,
+        spec: &str,
+        sensitive: bool,
+    ) -> Result<u32> {
+        match self.fs.resolve_gid_sensitive(spec, sensitive) {
+            Ok(gid) => Ok(gid),
+            Err(e) => {
+                if let Some(deferred) = self.defer_owner_for_dependency(res, "group", spec, &e)? {
+                    return Err(deferred);
+                }
+                Err(if sensitive {
+                    redact_msg(&res.id, "unknown group", "resolution failed")
+                } else {
+                    e
+                })
+            }
+        }
+    }
+
     pub(crate) fn file_meta(
         &mut self,
         res: &FrozenResource,
@@ -388,17 +432,7 @@ impl Engine {
 
         let owner_uid = if let Some((spec, sens)) = &owner {
             let sensitive = *sens || meta_sensitive;
-            Some(
-                self.fs
-                    .resolve_uid_sensitive(spec, sensitive)
-                    .map_err(|e| {
-                        if sensitive {
-                            redact_msg(&res.id, "unknown user", "resolution failed")
-                        } else {
-                            e
-                        }
-                    })?,
-            )
+            Some(self.resolve_owner(res, spec, sensitive)?)
         } else if is_existing {
             None // preserve
         } else {
@@ -407,17 +441,7 @@ impl Engine {
 
         let group_gid = if let Some((spec, sens)) = &group {
             let sensitive = *sens || meta_sensitive;
-            Some(
-                self.fs
-                    .resolve_gid_sensitive(spec, sensitive)
-                    .map_err(|e| {
-                        if sensitive {
-                            redact_msg(&res.id, "unknown group", "resolution failed")
-                        } else {
-                            e
-                        }
-                    })?,
-            )
+            Some(self.resolve_owner_group(res, spec, sensitive)?)
         } else if is_existing {
             None // preserve
         } else if let Some(uid) = owner_uid {
@@ -1292,17 +1316,7 @@ impl Engine {
         let meta_sensitive = res.sensitive || res.derived_sensitive;
         let owner_uid = if let Some((spec, sens)) = &owner {
             let sensitive = *sens || meta_sensitive;
-            Some(
-                self.fs
-                    .resolve_uid_sensitive(spec, sensitive)
-                    .map_err(|e| {
-                        if sensitive {
-                            redact_msg(&res.id, "unknown user", "resolution failed")
-                        } else {
-                            e
-                        }
-                    })?,
-            )
+            Some(self.resolve_owner(res, spec, sensitive)?)
         } else if is_existing {
             None
         } else {
@@ -1310,17 +1324,7 @@ impl Engine {
         };
         let group_gid = if let Some((spec, sens)) = &group {
             let sensitive = *sens || meta_sensitive;
-            Some(
-                self.fs
-                    .resolve_gid_sensitive(spec, sensitive)
-                    .map_err(|e| {
-                        if sensitive {
-                            redact_msg(&res.id, "unknown group", "resolution failed")
-                        } else {
-                            e
-                        }
-                    })?,
-            )
+            Some(self.resolve_owner_group(res, spec, sensitive)?)
         } else if is_existing {
             None
         } else if let Some(uid) = owner_uid {

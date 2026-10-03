@@ -476,6 +476,32 @@ impl TargetFs {
         )
     }
 
+    /// Read-only account database lookup for the `user`/`group` resources,
+    /// exact argv, no shell. `local_only` selects glibc's `-s files`, which
+    /// consults only the local /etc/passwd or /etc/group; otherwise the
+    /// ordinary NSS-wide lookup runs (used only to tell a local-only absence
+    /// from an account some other identity source provides). `key` of `None`
+    /// enumerates the database. `database` is always a fixed literal and
+    /// `key` is a validated account name or a decimal id, never an option.
+    pub(crate) fn account_getent(
+        &mut self,
+        local_only: bool,
+        database: &str,
+        key: Option<&str>,
+        sensitive: bool,
+    ) -> Result<Output> {
+        let mut args: Vec<String> = Vec::new();
+        if local_only {
+            args.push("-s".to_string());
+            args.push("files".to_string());
+        }
+        args.push(database.to_string());
+        if let Some(k) = key {
+            args.push(k.to_string());
+        }
+        self.run_argv_sensitivity("/usr/bin/getent", &args, sensitive)
+    }
+
     fn run_argv_ok(&mut self, program: &str, args: &[String]) -> Result<Output> {
         self.run_argv_ok_sensitivity(program, args, false, false)
     }

@@ -190,7 +190,8 @@ pub fn is_mutation_command(program: &str, args: &[String]) -> bool {
     let prog = program.rsplit('/').next().unwrap_or(program);
     match prog {
         "chmod" | "chown" | "chgrp" | "mkdir" | "rmdir" | "rm" | "mv" | "ln" | "mktemp"
-        | "setfattr" | "setfacl" | "tee" => true,
+        | "setfattr" | "setfacl" | "tee" | "useradd" | "usermod" | "userdel" | "groupadd"
+        | "groupmod" | "groupdel" => true,
         "sh" => {
             // A shell invocation mutates if its command line contains a mutation tool.
             args.iter().any(|a| {

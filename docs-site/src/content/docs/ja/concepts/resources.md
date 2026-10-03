@@ -6,6 +6,9 @@ description: リソースモデル — 共通フィールド、順序、依存�
 リソースは目的の状態の単位です。v1.1.3 では 7 つのタイプが実装されて
 います: `file`、`directory`、`link`、`template`、`command`、`package`、
 `service`。
+v1.1.3 より後の `main`（未リリース）では、ローカル Linux アカウントを扱う
+[`group`](/ja/reference/resources/group/) と
+[`user`](/ja/reference/resources/user/) の 2 つが追加されています。
 
 ## 共通フィールド
 

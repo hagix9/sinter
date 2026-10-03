@@ -213,6 +213,11 @@ desired state、ChangeSet、実行動作が同等になります。
 v0.2のresource typeは`file`、`directory`、`template`、`link`、
 `command`、`package`、`service`です。
 handlerは遅延実行されるserviceの`restart` / `reload`アクションです。
+v1.1.3より後（未リリース、v1.1.3のバイナリには含まれません）の`main`には、
+ローカルアカウント用の`group`と`user`の2種類が追加されています。
+明示的な`depends_on`、ローカルデータベースのみ、番号の振り直しなし、補助グループは
+追加のみ、`absent`は`-r` / `-f`なし、という契約です。リソースリファレンスを参照して
+ください。
 
 最小構成のrecipe例:
 

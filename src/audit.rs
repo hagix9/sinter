@@ -361,6 +361,8 @@ fn audit_resource(engine: &mut Engine, res: &FrozenResource) -> AuditResourceRes
         "link" => audit_link(engine, res, item.as_ref(), sensitive),
         "package" => audit_package(engine, res, item.as_ref(), sensitive),
         "service" => audit_service(engine, res, item.as_ref(), sensitive),
+        "group" => audit_group(engine, res, item.as_ref(), sensitive),
+        "user" => audit_user(engine, res, item.as_ref(), sensitive),
         other => {
             let mut r =
                 AuditResourceResult::base(res, AuditResourceStatus::NotAuditable, sensitive);
@@ -1200,4 +1202,95 @@ fn append_note(mut r: AuditResourceResult, note: Option<String>) -> AuditResourc
         });
     }
     r
+}
+
+/// Turn the comparison of an account resource into an audit result. Every
+/// declared dimension is its own drift detail; a refused change is not special
+/// in audit (the account simply is not in the declared state).
+fn account_audit_result(
+    res: &FrozenResource,
+    sensitive: bool,
+    c: crate::accounts::Compare,
+) -> AuditResourceResult {
+    let details: Vec<AuditDriftDetail> = c
+        .dims
+        .iter()
+        .map(|d| {
+            AuditDriftDetail::new(
+                d.dimension,
+                d.observed.clone(),
+                d.desired.clone(),
+                sensitive,
+            )
+        })
+        .collect();
+    if details.is_empty() {
+        let mut r = AuditResourceResult::base(res, AuditResourceStatus::Compliant, sensitive);
+        r.reason = Some(format!("{} already matches desired state", res.type_));
+        r
+    } else {
+        let mut r = AuditResourceResult::base(res, AuditResourceStatus::Drift, sensitive);
+        r.details = details;
+        r
+    }
+}
+
+fn audit_group(
+    engine: &mut Engine,
+    res: &FrozenResource,
+    item: Option<&EvalVal>,
+    sensitive: bool,
+) -> AuditResourceResult {
+    let vals = match obs_or_error(res, sensitive, engine.eval_with(res, item)) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let d = match obs_or_error(
+        res,
+        sensitive,
+        crate::accounts::group_desired(res, &vals, sensitive),
+    ) {
+        Ok(d) => d,
+        Err(r) => return *r,
+    };
+    let obs = match obs_or_error(
+        res,
+        sensitive,
+        crate::accounts::lookup_group(&mut engine.fs, &d.name, sensitive),
+    ) {
+        Ok(o) => o,
+        Err(r) => return *r,
+    };
+    match obs_or_error(res, sensitive, crate::accounts::compare_group(&d, &obs)) {
+        Ok(c) => account_audit_result(res, sensitive, c),
+        Err(r) => *r,
+    }
+}
+
+fn audit_user(
+    engine: &mut Engine,
+    res: &FrozenResource,
+    item: Option<&EvalVal>,
+    sensitive: bool,
+) -> AuditResourceResult {
+    let vals = match obs_or_error(res, sensitive, engine.eval_with(res, item)) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let d = match obs_or_error(
+        res,
+        sensitive,
+        crate::accounts::user_desired(res, &vals, sensitive),
+    ) {
+        Ok(d) => d,
+        Err(r) => return *r,
+    };
+    let obs = match obs_or_error(res, sensitive, engine.observe_user(&d, sensitive)) {
+        Ok(o) => o,
+        Err(r) => return *r,
+    };
+    match obs_or_error(res, sensitive, crate::accounts::compare_user(&d, &obs)) {
+        Ok(c) => account_audit_result(res, sensitive, c),
+        Err(r) => *r,
+    }
 }

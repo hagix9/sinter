@@ -42,6 +42,8 @@ pub struct FrozenResource {
     pub removes: Option<String>,
     pub package_name: Option<String>,
     pub service_name: Option<String>,
+    /// Static `name` of a `user` or `group` resource.
+    pub account_name: Option<String>,
     pub controller_source: Option<PathBuf>,
     pub register: Option<String>,
 }
@@ -709,6 +711,50 @@ fn validate_declaration_shape(
                 }
             }
         }
+        "group" | "user" => {
+            let kind = d.type_.as_str();
+            validate_with_fields(
+                &d.with,
+                if kind == "group" {
+                    GROUP_FIELDS
+                } else {
+                    USER_FIELDS
+                },
+                ctx,
+            )?;
+            require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
+            if let Some(Value::Str(s)) = d.with.get("name") {
+                if !crate::expressions::has_interpolation(s)
+                    && !crate::accounts::valid_account_name(s)
+                {
+                    return Err(SinterError::schema(format!(
+                        "{}: {} name {} is not a valid account name",
+                        ctx,
+                        kind,
+                        if field_sensitive("name") {
+                            "(value redacted)".to_string()
+                        } else {
+                            format!("{:?}", s)
+                        }
+                    )));
+                }
+            }
+            if d.with.contains_key("state") {
+                validate_desired_enum(
+                    &d.with,
+                    "state",
+                    &["present", "absent"],
+                    ctx,
+                    &format!("{} state must be present or absent", kind),
+                )?;
+            }
+            crate::accounts::validate_account_literals(
+                kind,
+                &d.with,
+                ctx,
+                d.sensitive || field_sensitive("name"),
+            )?;
+        }
         other => {
             return Err(SinterError::schema(format!(
                 "{}: unknown resource type {}",
@@ -1089,6 +1135,7 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
     // Resolve static identifiers, validate dependencies and ownership conflicts.
     let mut frozen: Vec<FrozenResource> = Vec::with_capacity(state.resources.len());
     let mut path_owner: BTreeMap<String, String> = BTreeMap::new();
+    let mut account_name_owner: BTreeMap<(String, String), String> = BTreeMap::new();
 
     for r in &state.resources {
         // Dependency / notify reference validation.
@@ -1178,6 +1225,7 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
             removes: None,
             package_name: None,
             service_name: None,
+            account_name: None,
             controller_source: None,
             register: r
                 .with
@@ -1416,6 +1464,64 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                         )));
                     }
                 }
+            }
+            "group" | "user" => {
+                let kind = r.type_.as_str();
+                validate_with_fields(
+                    &r.with,
+                    if kind == "group" {
+                        GROUP_FIELDS
+                    } else {
+                        USER_FIELDS
+                    },
+                    &resource_ctx,
+                )?;
+                let name_sensitive = field_sensitive("name");
+                let name =
+                    static_string(&r.with, "name", &scope, &resource_ctx, true, name_sensitive)?;
+                if !crate::accounts::valid_account_name(&name) {
+                    return Err(SinterError::schema(format!(
+                        "{}: {} name {} is not a valid account name",
+                        resource_ctx,
+                        kind,
+                        if name_sensitive {
+                            "(value redacted)".to_string()
+                        } else {
+                            format!("{:?}", name)
+                        }
+                    )));
+                }
+                if let Some(owner) =
+                    account_name_owner.insert((kind.to_string(), name.clone()), r.id.clone())
+                {
+                    return Err(SinterError::schema(format!(
+                        "conflicting ownership of {} {} by resources {} and {}",
+                        kind,
+                        if name_sensitive {
+                            "(value redacted)"
+                        } else {
+                            name.as_str()
+                        },
+                        owner,
+                        r.id
+                    )));
+                }
+                fr.account_name = Some(name);
+                if r.with.contains_key("state") {
+                    validate_desired_enum(
+                        &r.with,
+                        "state",
+                        &["present", "absent"],
+                        &resource_ctx,
+                        &format!("{} state must be present or absent", kind),
+                    )?;
+                }
+                crate::accounts::validate_account_literals(
+                    kind,
+                    &r.with,
+                    &resource_ctx,
+                    r.sensitive || name_sensitive,
+                )?;
             }
             other => {
                 return Err(SinterError::schema(format!(
@@ -2119,6 +2225,18 @@ pub const COMMAND_FIELDS: &[&str] = &[
 ];
 pub const PACKAGE_FIELDS: &[&str] = &["name", "state", "env"];
 pub const SERVICE_FIELDS: &[&str] = &["name", "state", "enabled"];
+pub const GROUP_FIELDS: &[&str] = &["name", "state", "gid", "system"];
+pub const USER_FIELDS: &[&str] = &[
+    "name",
+    "state",
+    "uid",
+    "group",
+    "groups",
+    "shell",
+    "home",
+    "create_home",
+    "system",
+];
 
 #[cfg(test)]
 mod tests {

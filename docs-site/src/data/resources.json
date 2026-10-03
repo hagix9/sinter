@@ -101,6 +101,37 @@
       ],
       "platforms": ["ubuntu", "rocky", "rhel", "almalinux"],
       "example": "resources:\n  - id: sshd\n    type: service\n    with:\n      name: sshd\n      state: running\n      enabled: true"
+    },
+    {
+      "type": "group",
+      "summary": "UNRELEASED (after v1.1.3): ensure a local Linux group exists or is absent, with an optional fixed gid.",
+      "docPath": "reference/resources/group",
+      "parameters": [
+        { "name": "name", "required": true, "type": "string", "default": null, "description": "Group name ([a-z_][a-z0-9_-]*, at most 32 characters)." },
+        { "name": "state", "required": false, "type": "string", "default": "present", "description": "present or absent." },
+        { "name": "gid", "required": false, "type": "integer", "default": null, "description": "Required gid (1-4294967294). An existing group with a different gid is refused, never renumbered." },
+        { "name": "system", "required": false, "type": "boolean", "default": "false", "description": "Create a system group. Create-time only." }
+      ],
+      "platforms": ["ubuntu", "rocky", "rhel", "almalinux"],
+      "example": "resources:\n  - id: app_group\n    type: group\n    with:\n      name: app\n      gid: 990\n      system: true"
+    },
+    {
+      "type": "user",
+      "summary": "UNRELEASED (after v1.1.3): ensure a local Linux user exists or is absent, with optional uid, primary group, shell, home record and additive supplementary groups.",
+      "docPath": "reference/resources/user",
+      "parameters": [
+        { "name": "name", "required": true, "type": "string", "default": null, "description": "User name ([a-z_][a-z0-9_-]*, at most 32 characters)." },
+        { "name": "state", "required": false, "type": "string", "default": "present", "description": "present or absent. absent runs userdel without -r or -f." },
+        { "name": "uid", "required": false, "type": "integer", "default": null, "description": "Required uid (1-4294967294). An existing user with a different uid is refused, never renumbered." },
+        { "name": "group", "required": false, "type": "string", "default": null, "description": "Primary group, by name. It must exist; list the creating group resource in depends_on." },
+        { "name": "groups", "required": false, "type": "list of strings", "default": null, "description": "Supplementary groups, by name. Additive: never removes membership." },
+        { "name": "shell", "required": false, "type": "string (absolute path)", "default": null, "description": "Login shell." },
+        { "name": "home", "required": false, "type": "string (absolute path)", "default": null, "description": "Home directory record. Nothing is created or moved." },
+        { "name": "create_home", "required": false, "type": "boolean", "default": "false", "description": "Create the home directory (useradd -m). Create-time only." },
+        { "name": "system", "required": false, "type": "boolean", "default": "false", "description": "Create a system user. Create-time only." }
+      ],
+      "platforms": ["ubuntu", "rocky", "rhel", "almalinux"],
+      "example": "resources:\n  - id: app_group\n    type: group\n    with:\n      name: app\n      gid: 990\n      system: true\n  - id: app_user\n    type: user\n    depends_on: [app_group]\n    with:\n      name: app\n      uid: 990\n      group: app\n      shell: /usr/sbin/nologin\n      home: /var/lib/app\n      system: true"
     }
   ]
 }

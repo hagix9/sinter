@@ -564,6 +564,8 @@ impl Engine {
             "command" => self.run_command(res, item),
             "package" => self.run_package(res, item),
             "service" => self.run_service(res, item),
+            "group" => self.run_group(res, item),
+            "user" => self.run_user(res, item),
             other => Err(SinterError::schema(format!(
                 "{}: unknown resource type {}",
                 res.id, other

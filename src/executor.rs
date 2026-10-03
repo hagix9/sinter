@@ -1868,6 +1868,9 @@ pub struct FakeTarget {
     /// Scripted systemd manager state (disk / loaded / NeedDaemonReload /
     /// reload behavior). Inert unless a test drives it.
     pub manager: crate::fakesys::FakeManager,
+    /// Scripted local account databases and the shadow-utils commands that
+    /// change them (`user`/`group` resources).
+    pub accounts: crate::fakesys::FakeAccounts,
     /// Opt-in scripted filesystem. `None` keeps the historical behavior:
     /// filesystem helpers are not modeled and fail honestly.
     pub fs: Option<crate::fakesys::FakeFs>,
@@ -1933,6 +1936,7 @@ impl FakeTarget {
             snapshot_rm_fails: false,
             observation_overrides: Default::default(),
             manager: Default::default(),
+            accounts: Default::default(),
             fs: None,
         }
     }
@@ -1987,6 +1991,7 @@ impl FakeTarget {
             snapshot_rm_fails: false,
             observation_overrides: Default::default(),
             manager: Default::default(),
+            accounts: Default::default(),
             fs: None,
         }
     }
@@ -2027,6 +2032,7 @@ impl FakeTarget {
             snapshot_rm_fails: false,
             observation_overrides: Default::default(),
             manager: Default::default(),
+            accounts: Default::default(),
             fs: None,
         }
     }
@@ -2070,6 +2076,7 @@ impl FakeTarget {
             snapshot_rm_fails: false,
             observation_overrides: Default::default(),
             manager: Default::default(),
+            accounts: Default::default(),
             fs: None,
         }
     }
@@ -2107,6 +2114,7 @@ impl FakeTarget {
             snapshot_rm_fails: false,
             observation_overrides: Default::default(),
             manager: Default::default(),
+            accounts: Default::default(),
             fs: None,
         }
     }
@@ -2149,6 +2157,36 @@ impl FakeTarget {
     pub fn with_fake_fs(mut self) -> Self {
         self.executables.insert("/usr/bin/getfattr".to_string());
         self.fs = Some(crate::fakesys::FakeFs::default());
+        self
+    }
+
+    /// Add a local group (no members).
+    pub fn with_group(mut self, name: &str, gid: u32) -> Self {
+        self.accounts.groups.push(crate::fakesys::FakeGroup {
+            name: name.to_string(),
+            gid,
+            members: Vec::new(),
+        });
+        self
+    }
+
+    /// Add a local user with its primary group already present.
+    pub fn with_user(mut self, name: &str, uid: u32, gid: u32, home: &str, shell: &str) -> Self {
+        self.accounts.users.push(crate::fakesys::FakeUser {
+            name: name.to_string(),
+            uid,
+            gid,
+            home: home.to_string(),
+            shell: shell.to_string(),
+        });
+        self
+    }
+
+    /// Make an existing local group list `user` as a supplementary member.
+    pub fn with_membership(mut self, group: &str, user: &str) -> Self {
+        if let Some(g) = self.accounts.groups.iter_mut().find(|g| g.name == group) {
+            g.members.push(user.to_string());
+        }
         self
     }
 
@@ -2298,6 +2336,14 @@ impl FakeExecutor {
             "uname" => Self::exited(0, format!("{}\n", self.target.arch), String::new()),
             "id" => self.run_id(&req.args),
             "getent" => self.run_getent(&req.args),
+            "useradd" | "usermod" | "userdel" | "groupadd" | "groupdel" => {
+                let target = (self.target.uid, self.target.gid, self.target.home.clone());
+                let t = (target.0, target.1, target.2.as_str());
+                match self.target.accounts.command(&prog, &req.args, t) {
+                    Some(o) => o,
+                    None => Self::exited(127, String::new(), "fake target: unmodeled".into()),
+                }
+            }
             "rpm" => self.run_rpm(&req.args),
             "dpkg-query" => self.run_dpkg_query(&req.args),
             "dnf" | "apt-get" => self.run_manager(&prog, &req.args),
@@ -2419,8 +2465,31 @@ impl FakeExecutor {
     }
 
     fn run_getent(&self, args: &[String]) -> Output {
+        let target = (self.target.uid, self.target.gid, self.target.home.as_str());
+        // `getent -s files <db> [key]`: the local-database lookup of the
+        // user/group resources.
+        if args.first().map(|s| s.as_str()) == Some("-s") {
+            if args.get(1).map(|s| s.as_str()) != Some("files") || args.len() < 3 {
+                return Self::exited(1, String::new(), "getent: unsupported service".to_string());
+            }
+            return self.target.accounts.getent(
+                true,
+                &args[2],
+                args.get(3).map(|s| s.as_str()),
+                target,
+            );
+        }
         let db = args.first().map(|s| s.as_str()).unwrap_or("");
         let key = args.get(1).map(|s| s.as_str()).unwrap_or("");
+        // Names the scripted accounts add are answered after the built-in
+        // fake identity (below) has had its chance.
+        let extra = |this: &Self| {
+            if key.is_empty() {
+                Self::exited(2, String::new(), String::new())
+            } else {
+                this.target.accounts.getent(false, db, Some(key), target)
+            }
+        };
         match db {
             "passwd" => {
                 let (uid, gid, home) = if self.sudo {
@@ -2442,7 +2511,7 @@ impl FakeExecutor {
                         String::new(),
                     );
                 }
-                Self::exited(2, String::new(), String::new())
+                extra(self)
             }
             "group" => {
                 let gid = if self.sudo { 0 } else { self.target.gid };
@@ -2452,7 +2521,7 @@ impl FakeExecutor {
                 if key == gid.to_string() || key == "fakegroup" {
                     return Self::exited(0, format!("fakegroup:x:{}:\n", gid), String::new());
                 }
-                Self::exited(2, String::new(), String::new())
+                extra(self)
             }
             _ => Self::exited(2, String::new(), String::new()),
         }

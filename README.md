@@ -212,6 +212,10 @@ Top-level fields: `version`, `vars`, `include`, `resources`, `handlers`.
 
 Resource types in v0.2: `file`, `directory`, `template`, `link`, `command`,
 `package`, `service`. Handlers are delayed `restart`/`reload` service actions.
+After v1.1.3 (unreleased, not in the v1.1.3 binary), `main` adds two local
+account types, `group` and `user`: explicit `depends_on`, local database only,
+no renumbering, additive supplementary groups, `absent` without `-r`/`-f`. See
+the resource reference.
 
 A minimal recipe:
 

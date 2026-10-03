@@ -2,6 +2,38 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- `group` and `user` resource types for **local** Linux accounts (not part of
+  the v1.1.3 release).
+  - `group`: `name`, `state` (`present`/`absent`, default `present`), `gid`,
+    `system` (create-time only).
+  - `user`: `name`, `state`, `uid`, `group` (primary, by name), `groups`
+    (supplementary, by name, **additive**), `shell`, `home` (record only),
+    `create_home` and `system` (create-time only).
+  - Only declared dimensions are managed and audited. Observation uses
+    `getent -s files`; an account that only another identity source (NSS)
+    provides is an error, never a create. Every command is a fixed executable
+    with explicit argv (`groupadd`, `groupdel`, `useradd`, `usermod`,
+    `userdel`), never a shell.
+  - An existing account is never renumbered (a `uid`/`gid` mismatch is
+    refused in `plan`/`apply` and reported as `DRIFT` by `audit`), renamed, or
+    have its home moved. Supplementary membership is never removed.
+    `absent` runs `userdel`/`groupdel` without `-r`/`-f`; the home directory
+    and mail spool are kept. Refused for root/uid 0, the account this run
+    executes as, the session account, and a group that is some user's primary
+    group.
+  - Dependencies stay explicit. In `plan`, a `user` whose group is created by a
+    `group` listed in its `depends_on`, and a `file`/`directory`/`template`
+    whose `owner`/`group` names an account created by a `user`/`group` listed
+    in its `depends_on`, are deferred (unknown until apply) instead of failing
+    the plan. Without `depends_on` the plan error for an unknown account is
+    unchanged.
+  - Tests use a scripted fake target; behavior on real hosts of the supported
+    distributions is pending real-OS acceptance.
+
 ## [1.1.3] - 2026-10-03
 
 systemd manager synchronization and a service-stop fix. There is no new resource

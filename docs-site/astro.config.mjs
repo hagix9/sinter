@@ -108,6 +108,8 @@ export default defineConfig({
                 { slug: 'reference/resources/command' },
                 { slug: 'reference/resources/package' },
                 { slug: 'reference/resources/service' },
+                { slug: 'reference/resources/group' },
+                { slug: 'reference/resources/user' },
               ],
             },
             {
