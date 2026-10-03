@@ -28,7 +28,7 @@ RHEL系ターゲットでは、標準的に構成されたDNFリポジトリが�
 
 ## 統一 Linux x86_64 配布
 
-Sinter v1.1.1では、対応するすべてのx86_64向けバージョンラインに
+Sinter v1.1.3では、対応するすべてのx86_64向けバージョンラインに
 `sinter-v<VERSION>-linux-x86_64.tar.gz` を1つ配布します。
 実行ファイルは共通ですが、実行時の検出により Ubuntu は APT、RHEL系は
 DNF を使います。任意の Linux や他のアーキテクチャへの対応を意味しません。
@@ -37,15 +37,15 @@ v1.0.0 以降の各リリースは、公開前にリリース成果物そのも�
 ターゲットで受入検証し、受入manifest、raw log、チェックサムをリリース
 アセットとして公開します（[受入証跡](https://github.com/hagix9/sinter/blob/main/release/ACCEPTANCE_EVIDENCE.md)参照）。
 
-現行リリースの Sinter v1.1.1 は、Linux x86_64 検証ゲートを通過した後、
-リリース成果物そのもの（`sinter-v1.1.1-linux-x86_64.tar.gz`）を8台の
+現行リリースの Sinter v1.1.3 は、Linux x86_64 検証ゲートを通過した後、
+リリース成果物そのもの（`sinter-v1.1.3-linux-x86_64.tar.gz`）を8台の
 実x86_64 Linuxホストで受入検証しました。検証したpoint releaseは
 Ubuntu 24.04.5 LTS、Ubuntu 26.04.1 LTS、Rocky Linux 9.8、Rocky Linux 10.2、
 RHEL 9.8、RHEL 10.2、AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64）です。
 各ホストでtarballと展開した実行ファイルがバイト単位で同一（SHA-256）で
 あることを確認し、同一の論理受入シナリオと成果物同一性・MCPのチェックを
 実行しました。**結果: 408チェックが通過、失敗0。**
-（[v1.1.1 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.1.1)参照）Sinter v1.1.0 と v1.0.0 も同じ8台での受入検証
+（[v1.1.3 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.1.3)参照）Sinter v1.1.2、v1.1.1、v1.1.0、v1.0.0 も同じ8台での受入検証
 （408/408）を、v0.5.1 と v0.4.1 もそれぞれ以前の8台での受入検証（344/344）を通過しており、その記録は履歴として
 保持します。他の各point releaseや将来のリリースを
 個別に検証したという意味ではありません。

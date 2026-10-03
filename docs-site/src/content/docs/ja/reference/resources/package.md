@@ -48,7 +48,7 @@ description: ターゲットのパッケージバックエンドでパッケー�
   選択されます — レシピはプラットフォーム中立のままです。
 - Ubuntu での `present` → `apt`。RHEL 系ターゲット（Rocky Linux、RHEL、
   AlmaLinux、Oracle Linux）→ `dnf`。
-- v1.1.1 ではバージョン固定はありません。
+- v1.1.3 ではバージョン固定はありません。
 - dnf ターゲットでは、インストールはプライベートキャッシュ
   スナップショット経由で行われます —
   [実行モデル](/ja/concepts/execution-model/)と

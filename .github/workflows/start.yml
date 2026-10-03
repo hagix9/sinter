@@ -38,7 +38,7 @@ jobs:
       - name: Run the start guide in the dev container
         run: |
           devcontainer exec --workspace-folder . bash -euo pipefail -c '
-            test "$(sinter --version)" = "sinter 1.1.1"
+            test "$(sinter --version)" = "sinter 1.1.3"
             sinter validate examples/start/hello.yaml
             sinter plan examples/start/hello.yaml
             test ! -e /home/vscode/sinter-start

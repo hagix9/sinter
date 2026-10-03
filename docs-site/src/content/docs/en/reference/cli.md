@@ -16,7 +16,7 @@ Commands:
 
 See [Core MCP](/en/reference/mcp/) for the `mcp` subcommand and `--targets-file`.
 
-`sinter --version` prints the version (e.g. `sinter 1.1.1`).
+`sinter --version` prints the version (e.g. `sinter 1.1.3`).
 
 ## validate
 

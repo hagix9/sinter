@@ -8,7 +8,7 @@ set -euo pipefail
 # manages; the base image does not include it.
 sudo apt-get update -qq
 sudo apt-get install -y -qq --no-install-recommends attr
-SINTER_VERSION=v1.1.1 SINTER_INSTALL_DIR="$HOME/.local/bin" sh ./install.sh
+SINTER_VERSION=v1.1.3 SINTER_INSTALL_DIR="$HOME/.local/bin" sh ./install.sh
 "$HOME/.local/bin/sinter" --version
 echo
 echo "Try: sinter validate examples/start/hello.yaml"
