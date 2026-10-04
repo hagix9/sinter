@@ -339,6 +339,16 @@ impl TargetFs {
         self.ex.run(req)
     }
 
+    /// The statistics handle of the executor (performance measurement).
+    pub fn exec_stats(&self) -> crate::executor::ExecStatsHandle {
+        self.ex.stats_handle()
+    }
+
+    /// Label the commands that follow for the statistics. Diagnostic only.
+    pub(crate) fn set_stats_scope(&self, scope: &'static str) {
+        self.ex.stats_handle().set_scope(scope);
+    }
+
     pub fn log(&self) -> Vec<crate::executor::CommandRecord> {
         self.ex.log()
     }

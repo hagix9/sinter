@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const MAX_CAPTURE: usize = 1024 * 1024;
@@ -166,6 +167,213 @@ pub struct CommandRecord {
     pub sensitive: bool,
 }
 
+// ---------------------------------------------------------------------------
+// Command statistics (performance measurement, WP-P0)
+// ---------------------------------------------------------------------------
+//
+// Why this exists: every observation Sinter makes is one target command (one
+// SSH exec channel when the target is remote), and those round trips dominate
+// wall-clock time. These statistics let tests and later work answer "how many
+// commands, caused by what, taking how long" without guessing.
+//
+// What one command is: one request submitted to a concrete executor's `run`
+// (`SshExecutor` = one exec channel, `LocalExecutor` = one child process,
+// `FakeExecutor` = one scripted request). That entry point is the only way a
+// command reaches a target, so counting there is authoritative. It also sees
+// the three target execs that never pass through `Executor::run` and are
+// therefore absent from the `CommandRecord` log: the SSH `getent passwd`
+// HOME lookup made while connecting, and `id -u` / `id -g`. Not counted: the
+// local `ssh -G` subprocess, the local `getent` that finds the controller's
+// own home for a *local* target, TCP connect/handshake/authentication (no
+// exec), and anything that is not a target command. A command that fails or
+// times out still counts (it was submitted); its outcome is recorded.
+//
+// Safety: a `CommandStat` holds only a coarse label (program basename, or
+// "[redacted]" for a sensitive request, exactly like `CommandRecord`), the
+// sudo flag, a fixed scope label, the elapsed time and a coarse outcome. It
+// never holds argv, environment, standard input, output or any value derived
+// from them, and it is diagnostic only: nothing reads it to decide anything.
+
+/// Coarse result of one target command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandOutcome {
+    /// Exited with status 0.
+    Success,
+    /// Exited with a non-zero status.
+    NonZeroExit,
+    /// Terminated by a signal.
+    Signaled,
+    /// Completion could not be established (for example a timeout).
+    Indeterminate,
+    /// The transport returned an error instead of a completion.
+    TransportError,
+}
+
+/// One target command. See the module comment above for what is (not) held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandStat {
+    /// What the run was doing: `setup`, `connect`, `backup`, a resource type
+    /// (`file`, `directory`, `link`, `template`, `command`, `package`,
+    /// `service`, `group`, `user`), `handler` or `manager`.
+    pub scope: &'static str,
+    /// Program basename, or `[redacted]` for a sensitive request.
+    pub program: String,
+    pub sudo: bool,
+    pub elapsed: Duration,
+    pub outcome: CommandOutcome,
+}
+
+/// A snapshot of the commands submitted to one target, in submission order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExecStats {
+    pub commands: Vec<CommandStat>,
+}
+
+impl ExecStats {
+    /// Total commands submitted.
+    pub fn total(&self) -> usize {
+        self.commands.len()
+    }
+
+    /// Commands whose program basename is `program` (for example `getent`).
+    pub fn count_program(&self, program: &str) -> usize {
+        self.commands
+            .iter()
+            .filter(|c| c.program == program)
+            .count()
+    }
+
+    /// Commands issued while `scope` was current.
+    pub fn count_scope(&self, scope: &str) -> usize {
+        self.commands.iter().filter(|c| c.scope == scope).count()
+    }
+
+    /// Commands per program basename.
+    pub fn by_program(&self) -> BTreeMap<String, usize> {
+        let mut m = BTreeMap::new();
+        for c in &self.commands {
+            *m.entry(c.program.clone()).or_insert(0) += 1;
+        }
+        m
+    }
+
+    /// Commands per scope.
+    pub fn by_scope(&self) -> BTreeMap<&'static str, usize> {
+        let mut m = BTreeMap::new();
+        for c in &self.commands {
+            *m.entry(c.scope).or_insert(0) += 1;
+        }
+        m
+    }
+
+    /// Commands that did not exit 0.
+    pub fn not_successful(&self) -> usize {
+        self.commands
+            .iter()
+            .filter(|c| c.outcome != CommandOutcome::Success)
+            .count()
+    }
+
+    /// Commands run under sudo.
+    pub fn sudo_commands(&self) -> usize {
+        self.commands.iter().filter(|c| c.sudo).count()
+    }
+
+    /// Sum of the commands' elapsed times (time spent waiting on the target).
+    pub fn elapsed(&self) -> Duration {
+        self.commands.iter().map(|c| c.elapsed).sum()
+    }
+}
+
+#[derive(Debug)]
+struct StatsInner {
+    scope: &'static str,
+    commands: Vec<CommandStat>,
+}
+
+/// A shared handle to one executor's statistics. It stays valid after the
+/// engine that owns the executor has been consumed by `run`, so callers take
+/// it first (`Engine::exec_stats`) and read it afterwards.
+#[derive(Debug, Clone)]
+pub struct ExecStatsHandle(Arc<Mutex<StatsInner>>);
+
+/// The scope before anything sets one: executor construction and the
+/// capability/fact probes of `Engine::new`.
+const SCOPE_SETUP: &str = "setup";
+
+impl Default for ExecStatsHandle {
+    fn default() -> Self {
+        ExecStatsHandle(Arc::new(Mutex::new(StatsInner {
+            scope: SCOPE_SETUP,
+            commands: Vec::new(),
+        })))
+    }
+}
+
+impl ExecStatsHandle {
+    fn lock(&self) -> std::sync::MutexGuard<'_, StatsInner> {
+        // Diagnostic data only: a poisoned lock is still readable.
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Label the commands that follow. Only fixed labels are accepted.
+    pub fn set_scope(&self, scope: &'static str) {
+        self.lock().scope = scope;
+    }
+
+    /// A copy of the commands submitted so far.
+    pub fn snapshot(&self) -> ExecStats {
+        ExecStats {
+            commands: self.lock().commands.clone(),
+        }
+    }
+
+    /// Record one command that went through an executor's `run`.
+    fn note(&self, req: &ExecRequest, sudo: bool, elapsed: Duration, out: Option<&Output>) {
+        let outcome = match out.map(|o| &o.completion) {
+            Some(Completion::Exited(0)) => CommandOutcome::Success,
+            Some(Completion::Exited(_)) => CommandOutcome::NonZeroExit,
+            Some(Completion::Signaled(_)) => CommandOutcome::Signaled,
+            Some(Completion::Indeterminate { .. }) => CommandOutcome::Indeterminate,
+            None => CommandOutcome::TransportError,
+        };
+        let program = if req.sensitive {
+            "[redacted]".to_string()
+        } else {
+            req.program
+                .rsplit('/')
+                .next()
+                .unwrap_or(&req.program)
+                .to_string()
+        };
+        let mut g = self.lock();
+        let scope = g.scope;
+        g.commands.push(CommandStat {
+            scope,
+            program,
+            sudo,
+            elapsed,
+            outcome,
+        });
+    }
+
+    /// Record the SSH HOME lookup made while connecting (it is a target exec
+    /// that has no `ExecRequest`).
+    fn note_connect(&self, program: &'static str, elapsed: Duration, ok: bool) {
+        self.lock().commands.push(CommandStat {
+            scope: "connect",
+            program: program.to_string(),
+            sudo: false,
+            elapsed,
+            outcome: if ok {
+                CommandOutcome::Success
+            } else {
+                CommandOutcome::TransportError
+            },
+        });
+    }
+}
+
 pub struct SshConfig {
     pub host: String,
     pub port: u16,
@@ -222,6 +430,15 @@ impl Executor {
             Executor::Local(l) => l.run(req),
             Executor::Ssh(s) => s.run(req),
             Executor::Fake(f) => Ok(f.run(req)),
+        }
+    }
+
+    /// The statistics handle of the active executor (see [`ExecStatsHandle`]).
+    pub fn stats_handle(&self) -> ExecStatsHandle {
+        match self {
+            Executor::Local(l) => l.stats.clone(),
+            Executor::Ssh(s) => s.stats.clone(),
+            Executor::Fake(f) => f.stats.clone(),
         }
     }
 
@@ -368,6 +585,7 @@ pub struct LocalExecutor {
     pub sudo: bool,
     pub home: String,
     pub log: Vec<CommandRecord>,
+    stats: ExecStatsHandle,
 }
 
 impl LocalExecutor {
@@ -383,10 +601,19 @@ impl LocalExecutor {
             sudo,
             home,
             log: Vec::new(),
+            stats: ExecStatsHandle::default(),
         })
     }
 
     fn run(&mut self, req: &ExecRequest) -> Result<Output> {
+        let started = Instant::now();
+        let result = self.exec_local(req);
+        self.stats
+            .note(req, self.sudo, started.elapsed(), result.as_ref().ok());
+        result
+    }
+
+    fn exec_local(&mut self, req: &ExecRequest) -> Result<Output> {
         let deadline = Instant::now() + Duration::from_secs(req.timeout_secs.max(1));
         use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
@@ -613,6 +840,7 @@ pub struct SshExecutor {
     session: ssh2::Session,
     pub home: String,
     pub log: Vec<CommandRecord>,
+    stats: ExecStatsHandle,
 }
 
 impl SshExecutor {
@@ -683,10 +911,14 @@ impl SshExecutor {
             )));
         }
 
+        let stats = ExecStatsHandle::default();
         let home = if sudo {
             "/root".to_string()
         } else {
-            detect_home(&session, &cfg.user, setup_deadline)?
+            let started = Instant::now();
+            let looked_up = detect_home(&session, &cfg.user, setup_deadline);
+            stats.note_connect("getent", started.elapsed(), looked_up.is_ok());
+            looked_up?
         };
 
         Ok(SshExecutor {
@@ -694,10 +926,19 @@ impl SshExecutor {
             session,
             home,
             log: Vec::new(),
+            stats,
         })
     }
 
     fn run(&mut self, req: &ExecRequest) -> Result<Output> {
+        let started = Instant::now();
+        let result = self.exec_ssh(req);
+        self.stats
+            .note(req, self.sudo, started.elapsed(), result.as_ref().ok());
+        result
+    }
+
+    fn exec_ssh(&mut self, req: &ExecRequest) -> Result<Output> {
         let deadline = Instant::now() + Duration::from_secs(req.timeout_secs.max(1));
         let line = build_remote_command(req, self.sudo, &self.home);
         self.session.set_blocking(false);
@@ -2325,6 +2566,7 @@ pub struct FakeExecutor {
     /// snapshot's package caches — what `find <snap> -name '*.rpm'` then
     /// reports.
     snap_payloads: Vec<String>,
+    stats: ExecStatsHandle,
 }
 
 impl FakeExecutor {
@@ -2337,6 +2579,7 @@ impl FakeExecutor {
             target,
             snap_copied: false,
             snap_payloads: Vec::new(),
+            stats: ExecStatsHandle::default(),
         }
     }
 
@@ -2351,6 +2594,14 @@ impl FakeExecutor {
     }
 
     fn run(&mut self, req: &ExecRequest) -> Output {
+        let started = Instant::now();
+        let out = self.exec_fake(req);
+        self.stats
+            .note(req, self.sudo, started.elapsed(), Some(&out));
+        out
+    }
+
+    fn exec_fake(&mut self, req: &ExecRequest) -> Output {
         let prog = req
             .program
             .rsplit('/')
@@ -3419,5 +3670,118 @@ mod tests {
         assert!(line.contains("'/usr/bin/printf'"));
         assert!(line.contains("'a b'"));
         assert!(line.contains("'$(x)'"));
+    }
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::*;
+
+    fn out(completion: Completion) -> Output {
+        Output {
+            completion,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }
+    }
+
+    #[test]
+    fn outcomes_programs_scopes_and_order_are_recorded() {
+        let h = ExecStatsHandle::default();
+        let d = Duration::from_millis(3);
+        h.note(
+            &ExecRequest::new("/usr/bin/stat"),
+            false,
+            d,
+            Some(&out(Completion::Exited(0))),
+        );
+        h.set_scope("file");
+        h.note(
+            &ExecRequest::new("/usr/bin/getent"),
+            true,
+            d,
+            Some(&out(Completion::Exited(2))),
+        );
+        h.note(
+            &ExecRequest::new("/bin/dd"),
+            true,
+            d,
+            Some(&out(Completion::Signaled(9))),
+        );
+        h.note(
+            &ExecRequest::new("/usr/bin/sha256sum"),
+            true,
+            d,
+            Some(&out(Completion::Indeterminate {
+                started: true,
+                reason: "timed out".into(),
+            })),
+        );
+        h.note(&ExecRequest::new("/usr/bin/id"), false, d, None);
+        let s = h.snapshot();
+        assert_eq!(s.total(), 5);
+        let programs: Vec<&str> = s.commands.iter().map(|c| c.program.as_str()).collect();
+        assert_eq!(programs, ["stat", "getent", "dd", "sha256sum", "id"]);
+        let outcomes: Vec<CommandOutcome> = s.commands.iter().map(|c| c.outcome).collect();
+        assert_eq!(
+            outcomes,
+            [
+                CommandOutcome::Success,
+                CommandOutcome::NonZeroExit,
+                CommandOutcome::Signaled,
+                CommandOutcome::Indeterminate,
+                CommandOutcome::TransportError,
+            ]
+        );
+        assert_eq!(s.count_scope("setup"), 1);
+        assert_eq!(s.count_scope("file"), 4);
+        assert_eq!(s.sudo_commands(), 3);
+        assert_eq!(s.not_successful(), 4);
+        assert_eq!(s.elapsed(), d * 5);
+        assert_eq!(s.count_program("getent"), 1);
+    }
+
+    #[test]
+    fn a_sensitive_request_keeps_no_program_name() {
+        let h = ExecStatsHandle::default();
+        let mut req = ExecRequest::new("/opt/SECRET-PROGRAM-NAME");
+        req.args = vec!["SECRET-ARG".to_string()];
+        req.stdin = Some(b"SECRET-STDIN".to_vec());
+        req.env.insert("K".into(), "SECRET-ENV".into());
+        req.sensitive = true;
+        h.note(
+            &req,
+            false,
+            Duration::ZERO,
+            Some(&out(Completion::Exited(0))),
+        );
+        let shown = format!("{:?}", h.snapshot());
+        assert!(!shown.contains("SECRET"), "{shown}");
+        assert_eq!(h.snapshot().commands[0].program, "[redacted]");
+    }
+
+    #[test]
+    fn a_clone_shares_the_same_statistics() {
+        let h = ExecStatsHandle::default();
+        let c = h.clone();
+        c.note(&ExecRequest::new("/bin/true"), false, Duration::ZERO, None);
+        assert_eq!(h.snapshot().total(), 1);
+    }
+
+    #[test]
+    fn the_connect_lookup_is_counted_without_a_request() {
+        let h = ExecStatsHandle::default();
+        h.note_connect("getent", Duration::from_millis(1), true);
+        let s = h.snapshot();
+        assert_eq!(
+            (
+                s.total(),
+                s.count_scope("connect"),
+                s.count_program("getent")
+            ),
+            (1, 1, 1)
+        );
     }
 }

@@ -302,6 +302,9 @@ pub fn run_audit(mut engine: Engine) -> Result<AuditReport> {
     let order = crate::engine::execution_order(&engine.model)?;
     for &ridx in &order {
         let res = engine.model.resources[ridx].clone();
+        engine
+            .fs
+            .set_stats_scope(crate::engine::scope_label(&res.type_));
         results.push(audit_resource(&mut engine, &res));
     }
     let summary = AuditSummary::from_results(&results);

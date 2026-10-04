@@ -195,6 +195,15 @@ impl Engine {
         self
     }
 
+    /// A handle to the target-command statistics of this engine's executor
+    /// (count, program, scope, elapsed time and outcome per command; never
+    /// argv, environment, input or output). Take it before `run`, which
+    /// consumes the engine, and read it afterwards. Diagnostic only: nothing
+    /// in Sinter reads it to decide anything.
+    pub fn exec_stats(&self) -> crate::executor::ExecStatsHandle {
+        self.fs.exec_stats()
+    }
+
     /// Internal execution audit log for acceptance/instrumentation tests.
     pub fn execution_log(&self) -> Vec<crate::executor::CommandRecord> {
         self.fs.log()
@@ -212,6 +221,7 @@ impl Engine {
                 .clone()
                 .unwrap_or_else(crate::backup::new_run_id);
             let paths = self.model.backups.clone();
+            self.fs.set_stats_scope("backup");
             Some(crate::backup::perform(&mut self.fs, &paths, &id)?)
         } else {
             Some(crate::backup::planned(&self.model.backups))
@@ -332,6 +342,7 @@ impl Engine {
                 continue;
             }
 
+            self.fs.set_stats_scope(scope_label(&res.type_));
             let rr = match self.dispatch_resource(&res, item.as_ref()) {
                 Ok(r) => r,
                 Err(e) => {
@@ -376,6 +387,7 @@ impl Engine {
 
         let mut handlers_run = Vec::new();
         let mut handlers_pending = Vec::new();
+        self.fs.set_stats_scope("handler");
         if self.opts.mode == Mode::Plan {
             // Plan never executes handlers; every notified handler is reported
             // as pending (would-run) without touching the target.
@@ -458,6 +470,7 @@ impl Engine {
                     HandlerOutcomeState::Failed | HandlerOutcomeState::Indeterminate
                 )
             });
+        self.fs.set_stats_scope("manager");
         self.manager_finish(run_stopped);
         let manager_failed =
             self.opts.mode == Mode::Apply && self.manager.reloads.iter().any(|m| m.is_failure());
@@ -676,6 +689,23 @@ impl Engine {
             reason,
             sensitive: h.sensitive,
         })
+    }
+}
+
+/// A fixed, non-sensitive label for the command statistics: the resource
+/// type, never a name, path or any other recipe text.
+pub(crate) fn scope_label(type_: &str) -> &'static str {
+    match type_ {
+        "file" => "file",
+        "directory" => "directory",
+        "link" => "link",
+        "template" => "template",
+        "command" => "command",
+        "package" => "package",
+        "service" => "service",
+        "group" => "group",
+        "user" => "user",
+        _ => "other",
     }
 }
 
