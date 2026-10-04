@@ -120,6 +120,14 @@ drift次元として報告します。
   読み取り権限を与えません。stagingはprivateな0700ディレクトリと
   `create_new`の0600ファイルを使います。通常のCLI recipeは引き続き
   完全な`include:`/`source:`をサポートします。
+- **MCP経由では暗号化シークレットを扱いません。** 暗号化シークレットを
+  参照するmanifest — `{ secret: … }`のようなmapとして書かれた`content`や
+  `password_hash`（[sinter secrets](/ja/reference/secrets/)を参照）— は、
+  ロード前にパース済み構造上で拒否され、メッセージは復号がMCP経由では
+  許可されないことを示します。参照テキストはechoされません。manifestを
+  受け取るすべてのツールがこの単一の境界を通ります。MCPサーバーは
+  identityを開かず、ファイルを復号することもないため、シークレットを使う
+  recipeのplan・apply・auditはMCPではなくCLIで行います。
 - **入力はboundedです。** manifestテキストは4MiBまで。SSHのセットアップ、
   ソケット、コマンドごとの操作はすべて時間制限付きです。
 - **redaction。** プロファイル内部情報とstagingパスはツール向け
@@ -133,6 +141,8 @@ drift次元として報告します。
 - 任意ホストへの接続 — 管理者が命名したプロファイルのみ到達可能です。
 - controllerファイルの読み取り — MCP manifestでは`include:`/`source:`が
   拒否されます。
+- シークレットの復号や取り扱い — MCP manifestでは暗号化シークレットの
+  参照が拒否されます。
 - リモートのfileやtemplate bodyの返却 — content diffはMCP境界で常に
   redactされます。
 

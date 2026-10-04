@@ -1,7 +1,10 @@
 //! `sinter secrets encrypt | decrypt | list` (Phase B).
 //!
 //! Operator-facing commands over the Phase A secret core ([`crate::secrets`]).
-//! No resource, recipe, plan/apply/audit or MCP integration exists yet.
+//! These commands work on files; recipes use secrets through
+//! [`crate::secret_source`] (`file.content` and `user.password_hash`, opened by
+//! plan/apply/audit), and `list` can read recipes (`--recipe`). MCP has no
+//! secret integration: its manifest tools refuse secret references.
 //!
 //! Boundaries (see SINTER_SECRETS_PHASE_B_2026-10-04.md):
 //!

@@ -1,6 +1,6 @@
 ---
 title: CLI リファレンス
-description: sinter validate、plan、apply、audit、mcp — フラグと終了コード。
+description: sinter validate、plan、apply、audit、mcp、secrets — フラグと終了コード。
 ---
 
 ```text
@@ -12,9 +12,12 @@ Commands:
   apply     Apply a recipe to a target
   audit     Audit whether a target already satisfies a recipe. Read-only.
   mcp       Serve a read-only MCP (Model Context Protocol) endpoint on stdio
+  secrets   Encrypt, decrypt and list secret files (standard age format). Unreleased: not part of v1.1.3.
 ```
 
-`mcp`サブコマンドと`--targets-file`については[Core MCP](/ja/reference/mcp/)を参照してください。
+`mcp`サブコマンドと`--targets-file`については[Core MCP](/ja/reference/mcp/)を、
+未リリースの`secrets`サブコマンドについては[sinter secrets](/ja/reference/secrets/)を
+参照してください。
 
 `sinter --version` はバージョンを表示します（例: `sinter 1.1.3`）。
 
@@ -80,6 +83,29 @@ audit は systemd マネージャの同期状態も、独立したドリフト�
 `manager_reload` として報告します（[audit の出力を読む](#audit-の出力を読む)を
 参照）。
 
+## secrets
+
+*未リリース: v1.1.3 より後の `main` にあり、v1.1.3 のバイナリには含まれません。*
+
+```sh
+sinter secrets encrypt [--passphrase | -r, --recipient <RECIPIENT>...] [-o, --output <OUT>] [-f, --force] <FILE | ->
+sinter secrets decrypt [-i, --identity <PATH>] <FILE>
+sinter secrets list    [--format text|json] [--recipe <FILE>...] [<PATH>...]
+```
+
+これらのフラグがインターフェースのすべてで、ほかの別名はありません。`secrets` は
+下の[ターゲットオプション](#ターゲットオプション)を受け付けず、その `--identity` は
+**age** の identity です（`decrypt` のみ）。動作、identity の探索、`list` の出力契約、
+終了コードは [sinter secrets](/ja/reference/secrets/) に記載しています。
+
+上記のコマンドとの関係が 2 点あります。
+
+- `plan`、`apply`、`audit` の `--identity` は **SSH** 秘密鍵であり、シークレットには
+  使われません。シークレットは `SINTER_IDENTITY`、既定の identity ファイル、
+  リポジトリの `identity.age` を使います。
+- `password_hash` を持つ `user` リソースには `--sudo` が必要です（`/etc/shadow` は
+  root だけが読めるため）。
+
 ## ターゲットオプション
 
 `validate`、`plan`、`apply`、`audit` が受け付けます（`validate` は無視します）。
@@ -91,9 +117,9 @@ audit は systemd マネージャの同期状態も、独立したドリフト�
 | `--port <PORT>` | インベントリ、ssh_config の `Port`、なければ `22` | SSH ポート。 |
 | `--user <USER>` | インベントリ、ssh_config の `User`、なければ `$USER` | SSH ユーザ。 |
 | `--known-hosts <PATH>` | インベントリ、ssh_config の `UserKnownHostsFile`、なければ `~/.ssh/known_hosts` | ホスト鍵データベース（厳格）。 |
-| `--identity <PATH>` | インベントリ、ssh_config の `IdentityFile`、なければ `~/.ssh/id_ed25519`、`id_ecdsa`、`id_rsa` | 秘密鍵ファイル。複数回指定可能。引き継いだ一覧を置き換えます。 |
+| `--identity <PATH>` | インベントリ、ssh_config の `IdentityFile`、なければ `~/.ssh/id_ed25519`、`id_ecdsa`、`id_rsa` | SSH 秘密鍵ファイル。複数回指定可能。引き継いだ一覧を置き換えます。[シークレット](/ja/reference/secrets/)には使われません。 |
 | `--no-ssh-config` | off | OpenSSH クライアント設定を参照しない。 |
-| `--sudo` | off | ターゲット側操作を `sudo -n` 経由で実行。 |
+| `--sudo` | off | ターゲット側操作を `sudo -n` 経由で実行。`password_hash` を持つ `user` リソースでは必須。 |
 | `--verbose` | off | 詳細な出力。 |
 | `--format` | `text` | `text` または `json`。 |
 

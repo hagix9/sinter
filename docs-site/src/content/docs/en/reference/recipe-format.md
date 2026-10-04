@@ -86,7 +86,7 @@ vars:
 | Field | Required | Type | Notes |
 |-------|----------|------|-------|
 | `id` | yes | string | Unique; also used by `depends_on`, `notify`, `registers`. |
-| `type` | yes | string | `file`, `directory`, `link`, `template`, `command`, `package`, `service`. |
+| `type` | yes | string | `file`, `directory`, `link`, `template`, `command`, `package`, `service`; and, unreleased (after v1.1.3), [`group`](/en/reference/resources/group/) and [`user`](/en/reference/resources/user/). |
 | `with` | yes | map | Type-specific parameters (see each resource page). |
 | `when` | no | string | Boolean expression gating this resource and dependents. |
 | `loop` | no | list | Expand once per item; `{{ item }}` in fields. |

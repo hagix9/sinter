@@ -8,8 +8,9 @@ All notable changes to Sinter are documented in this file.
 
 - `sinter secrets encrypt | decrypt | list` (not part of v1.1.3): encrypt and
   decrypt secret files in the standard age format, built on the encrypted-secret
-  core. A standalone command: no recipe, resource, `plan`/`apply`/`audit` or MCP
-  integration yet.
+  core. The command itself works on files; recipes use secrets through the
+  entries below (`file.content`, `user.password_hash`, `list --recipe`), and
+  MCP never does: MCP manifest tools refuse secret references.
   - `encrypt` takes recipients (`-r`, or the nearest `recipients.txt` up to the
     repository root) or a passphrase (`--passphrase`, terminal only, echo off);
     input is opaque bytes up to 16 MiB; the output is written atomically
@@ -76,9 +77,10 @@ All notable changes to Sinter are documented in this file.
     leading `!` is ignored, and an account locked with a different hash is
     refused rather than silently unlocked.
   - Always sensitive; `--sudo` is required (plan, apply and audit error without
-    it, never "no change"); `validate` never decrypts; audit shows
-    a `password_hash` drift with both sides `[redacted]`; MCP manifest tools
-    refuse the reference.
+    it, never "no change"); `validate` never decrypts; audit names each
+    drifting dimension of the user but shows both sides of every one as
+    `[redacted]` (the whole resource is sensitive); MCP manifest tools refuse
+    the reference.
   - Real-host acceptance on all eight supported targets was completed on
     2026-10-04, including `sudo-rs` on Ubuntu 26.04 and the `$y$` refusal on
     RHEL-family 9; see
@@ -110,8 +112,10 @@ All notable changes to Sinter are documented in this file.
     in its `depends_on`, are deferred (unknown until apply) instead of failing
     the plan. Without `depends_on` the plan error for an unknown account is
     unchanged.
-  - Tests use a scripted fake target; behavior on real hosts of the supported
-    distributions is pending real-OS acceptance.
+  - Tests use a scripted fake target; the `group`/`user` lifecycle
+    (`groupadd`, `groupdel`, `useradd`, `usermod`, `userdel`) on real hosts of
+    the supported distributions is pending real-OS acceptance. Only
+    `user.password_hash` has been accepted on real hosts (see above).
 
 ## [1.1.3] - 2026-10-03
 

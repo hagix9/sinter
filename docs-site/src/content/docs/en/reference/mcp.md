@@ -117,6 +117,14 @@ and the [JSON output contract](/en/reference/cli/#json-output-contract).
   loading, so an MCP manifest grants no controller-local filesystem read
   authority. Staging uses a private 0700 directory and a `create_new` 0600
   file. Ordinary CLI recipes keep full `include:`/`source:` support.
+- **No encrypted secrets over MCP.** A manifest that references an encrypted
+  secret — `content` or `password_hash` written as a map such as
+  `{ secret: … }` (see [sinter secrets](/en/reference/secrets/)) — is refused
+  on the parsed structure before loading, with a message saying that
+  decryption is not permitted over MCP; the reference text is not echoed.
+  Every manifest-consuming tool passes through this one boundary. The MCP
+  server never opens an identity and never decrypts a file, so recipes that
+  use secrets are planned, applied and audited with the CLI, not through MCP.
 - **Bounded input.** Manifest text is limited to 4 MiB; SSH setup, socket,
   and per-command operations are all time-bounded.
 - **Redaction.** Profile internals and staged paths are removed from
@@ -130,6 +138,8 @@ and the [JSON output contract](/en/reference/cli/#json-output-contract).
 - Reach arbitrary hosts — only administrator-named profiles are reachable.
 - Read controller files — `include:`/`source:` are rejected for MCP
   manifests.
+- Decrypt or handle secrets — encrypted-secret references are rejected for
+  MCP manifests.
 - Return remote file or template bodies — content diffs are redacted at the
   MCP boundary.
 

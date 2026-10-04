@@ -23,8 +23,8 @@ automatically when viewing the site.
 | Tool | Purpose |
 |------|---------|
 | `sinter_search_docs` | Free-text search over the documentation index; returns page titles, URLs, and summaries. |
-| `sinter_list_resources` | Lists all recipe resource types of the current release with one-line summaries and doc URLs. |
-| `sinter_get_resource` | Full parameter reference for one resource type (`file`, `directory`, `link`, `template`, `command`, `package`, `service`). |
+| `sinter_list_resources` | Lists all documented recipe resource types with one-line summaries and doc URLs. Types that are on `main` but not in the latest release (`group`, `user`) are marked `UNRELEASED` in their summaries. |
+| `sinter_get_resource` | Full parameter reference for one resource type (`file`, `directory`, `link`, `template`, `command`, `package`, `service`, and the unreleased `group` and `user`). |
 | `sinter_get_compatibility` | Supported-platform matrix, acceptance reference, and managed-target requirements. |
 | `sinter_get_installation` | Installation steps for a platform (`linux-x86_64` or `source`; old Ubuntu/Rocky identifiers remain aliases). |
 

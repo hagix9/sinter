@@ -67,7 +67,9 @@ blocked として報告されます（fail-fast）。
 パラメータ、内容、結果にシークレットが含まれ得る場合は、リソースに
 `sensitive: true` を指定します。Sinter はエラーメッセージを含むすべての
 出力チャネルで値をマスクし、内容のハッシュとサイズも隠します。
-sensitive 変数から派生した値は自動的に sensitive として扱われます。
+sensitive 変数から派生した値は自動的に sensitive として扱われます。暗号化された
+シークレットを持つリソース（`content: { secret: … }` や `password_hash: { secret: … }`、
+未リリース）は、宣言に関わらず常に sensitive です。
 
 ## 観測の契約
 

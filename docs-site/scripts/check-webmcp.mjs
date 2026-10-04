@@ -159,6 +159,25 @@ if (resources?.resourceTypes) {
   ok('resources.json: docPaths and type identities validated');
 }
 
+// 6.5b the sinter_get_resource input enum in public/webmcp.js is a hand-kept
+// list (the tool schema is registered before any data is fetched), so it must
+// name exactly the resource types of resources.json.
+
+if (resources?.resourceTypes) {
+  const js = readFileSync(join(root, 'public/webmcp.js'), 'utf8');
+  const tool = js.indexOf("name: 'sinter_get_resource'");
+  const enumMatch = tool === -1 ? null : js.slice(tool).match(/enum:\s*\[([^\]]*)\]/);
+  if (!enumMatch) {
+    fail('webmcp.js: could not find the sinter_get_resource type enum');
+  } else {
+    const inJs = [...enumMatch[1].matchAll(/'([^']+)'/g)].map((m) => m[1]).sort();
+    const inData = resources.resourceTypes.map((r) => r.type).sort();
+    for (const t of inData.filter((t) => !inJs.includes(t))) fail(`webmcp.js: sinter_get_resource enum is missing resource type "${t}"`);
+    for (const t of inJs.filter((t) => !inData.includes(t))) fail(`webmcp.js: sinter_get_resource enum names "${t}", which is not in resources.json`);
+    if (inJs.join() === inData.join()) ok(`webmcp.js: sinter_get_resource enum matches resources.json (${inJs.length} types)`);
+  }
+}
+
 // 6.6 release consistency — Cargo.toml [package] version is authoritative ----
 
 const cargo = readFileSync(join(repo, 'Cargo.toml'), 'utf8');

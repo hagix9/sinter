@@ -65,7 +65,10 @@ several changed resources may trigger the same handler once.
 Mark a resource `sensitive: true` when its parameters, content, or results may
 carry secrets. Sinter then redacts the values in every output channel —
 including error messages — and hides content hashes and sizes. Values derived
-from sensitive variables are automatically treated as sensitive.
+from sensitive variables are automatically treated as sensitive. A resource
+that holds an encrypted secret (`content: { secret: … }` or
+`password_hash: { secret: … }`, unreleased) is always sensitive, whatever it
+declares.
 
 ## Observation contract
 

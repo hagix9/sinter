@@ -86,7 +86,7 @@ vars:
 | フィールド | 必須 | 型 | 補足 |
 |-----------|------|-----|------|
 | `id` | はい | string | 一意。`depends_on`、`notify`、`registers` でも使われる。 |
-| `type` | はい | string | `file`、`directory`、`link`、`template`、`command`、`package`、`service`。 |
+| `type` | はい | string | `file`、`directory`、`link`、`template`、`command`、`package`、`service`。未リリース（v1.1.3 より後）として [`group`](/ja/reference/resources/group/) と [`user`](/ja/reference/resources/user/) もあります。 |
 | `with` | はい | map | タイプ固有のパラメータ（各リソースページを参照）。 |
 | `when` | いいえ | string | このリソースと依存先をゲートする boolean 式。 |
 | `loop` | いいえ | list | アイテムごとに 1 回展開。フィールド内で `{{ item }}`。 |

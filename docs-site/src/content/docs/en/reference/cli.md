@@ -1,6 +1,6 @@
 ---
 title: CLI Reference
-description: sinter validate, plan, apply, audit, mcp — flags and exit codes.
+description: sinter validate, plan, apply, audit, mcp, secrets — flags and exit codes.
 ---
 
 ```text
@@ -12,9 +12,12 @@ Commands:
   apply     Apply a recipe to a target
   audit     Audit whether a target already satisfies a recipe. Read-only.
   mcp       Serve a read-only MCP (Model Context Protocol) endpoint on stdio
+  secrets   Encrypt, decrypt and list secret files (standard age format). Unreleased: not part of v1.1.3.
 ```
 
-See [Core MCP](/en/reference/mcp/) for the `mcp` subcommand and `--targets-file`.
+See [Core MCP](/en/reference/mcp/) for the `mcp` subcommand and `--targets-file`,
+and [sinter secrets](/en/reference/secrets/) for the unreleased `secrets`
+subcommand.
 
 `sinter --version` prints the version (e.g. `sinter 1.1.3`).
 
@@ -76,6 +79,30 @@ There is no SSH-specific audit logic.
 Audit also reports systemd manager synchronization as its own drift dimension,
 `manager_reload` (see [Reading audit output](#reading-audit-output)).
 
+## secrets
+
+*Unreleased: on `main` after v1.1.3; not in the v1.1.3 binary.*
+
+```sh
+sinter secrets encrypt [--passphrase | -r, --recipient <RECIPIENT>...] [-o, --output <OUT>] [-f, --force] <FILE | ->
+sinter secrets decrypt [-i, --identity <PATH>] <FILE>
+sinter secrets list    [--format text|json] [--recipe <FILE>...] [<PATH>...]
+```
+
+These flags are the whole interface; there are no other aliases. `secrets`
+does not take the [target options](#target-options) below, and its `--identity`
+is an **age** identity (`decrypt` only). Behavior, identity discovery, the
+`list` output contract and exit codes are documented on
+[sinter secrets](/en/reference/secrets/).
+
+Two interactions with the commands above:
+
+- On `plan`, `apply` and `audit`, `--identity` is an **SSH** private key and is
+  never used for secrets; secrets use `SINTER_IDENTITY`, the default identity
+  file, or a repository `identity.age`.
+- A `user` resource with `password_hash` needs `--sudo` (`/etc/shadow` is
+  readable only by root).
+
 ## Target options
 
 Accepted by `validate`, `plan`, `apply` and `audit`; `validate` ignores them.
@@ -87,9 +114,9 @@ Accepted by `validate`, `plan`, `apply` and `audit`; `validate` ignores them.
 | `--port <PORT>` | inventory, ssh_config `Port`, else `22` | SSH port. |
 | `--user <USER>` | inventory, ssh_config `User`, else `$USER` | SSH user. |
 | `--known-hosts <PATH>` | inventory, ssh_config `UserKnownHostsFile`, else `~/.ssh/known_hosts` | Host-key database (strict). |
-| `--identity <PATH>` | inventory, ssh_config `IdentityFile`, else `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa` | Identity file; repeatable; replaces the inherited list. |
+| `--identity <PATH>` | inventory, ssh_config `IdentityFile`, else `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa` | SSH identity file; repeatable; replaces the inherited list. Never used for [secrets](/en/reference/secrets/#identities-private-keys-and-where-they-live). |
 | `--no-ssh-config` | off | Do not consult the OpenSSH client configuration. |
-| `--sudo` | off | Run target-side operations via `sudo -n`. |
+| `--sudo` | off | Run target-side operations via `sudo -n`. Required by a `user` resource with `password_hash`. |
 | `--verbose` | off | Verbose output. |
 | `--format` | `text` | `text` or `json`. |
 

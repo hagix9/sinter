@@ -6,7 +6,7 @@
       "parameters": {
         "path": "管理対象ファイルの絶対パス。",
         "state": "present または absent。",
-        "content": "ファイルに書き込む文字列。source とは排他。",
+        "content": "ファイルに書き込む文字列、または暗号化シークレットの参照 { secret: <path> }（レシピからの相対パスで age ファイルを指す。未リリース、v1.1.3 より後）。シークレットを使うファイルは常に sensitive。source とは排他。",
         "source": "path にコピーするコントローラ側のファイル。content とは排他。",
         "owner": "ファイルの所有者名。",
         "group": "ファイルのグループ名。",

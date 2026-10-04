@@ -22,8 +22,8 @@ description: このサイトが WebMCP 経由で公開する読み取り専用�
 | ツール | 目的 |
 |--------|------|
 | `sinter_search_docs` | ドキュメントインデックスのフリーテキスト検索。ページのタイトル、URL、要約を返します。 |
-| `sinter_list_resources` | 現在のリリースのレシピリソースタイプを 1 行の要約とドキュメント URL 付きで一覧表示します。 |
-| `sinter_get_resource` | 1 つのリソースタイプ（`file`、`directory`、`link`、`template`、`command`、`package`、`service`）の完全なパラメータリファレンス。 |
+| `sinter_list_resources` | ドキュメント化されているすべてのレシピリソースタイプを 1 行の要約とドキュメント URL 付きで一覧表示します。最新リリースにはなく `main` にだけある型（`group`、`user`）は、要約に「未リリース」と表示されます（英語データでは `UNRELEASED`）。 |
+| `sinter_get_resource` | 1 つのリソースタイプ（`file`、`directory`、`link`、`template`、`command`、`package`、`service`、および未リリースの `group`、`user`）の完全なパラメータリファレンス。 |
 | `sinter_get_compatibility` | 対応プラットフォームマトリクス、受入基準環境、管理対象の要件。 |
 | `sinter_get_installation` | プラットフォーム（`linux-x86_64`、`source`。旧Ubuntu/Rocky識別子は別名として維持）ごとのインストール手順。 |
 

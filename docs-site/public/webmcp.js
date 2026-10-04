@@ -234,6 +234,8 @@ function register() {
             'command',
             'package',
             'service',
+            'group',
+            'user',
           ],
         },
         locale: localeProp,

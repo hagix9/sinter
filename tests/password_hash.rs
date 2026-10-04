@@ -6,8 +6,12 @@
 //! contract rests on: `chpasswd -e` reads `name:hash` lines on standard input,
 //! needs root, validates nothing; `getent -s files shadow` is readable by root
 //! only. What only a real Linux host can prove (the real `chpasswd`, real
-//! `/etc/shadow` modes, sudo and sudo-rs stdin pass-through) is
-//! `PENDING REAL-OS ACCEPTANCE` and is not claimed here.
+//! `/etc/shadow` modes, sudo and sudo-rs stdin pass-through) is not claimed by
+//! these tests. It was accepted separately on all eight supported targets in
+//! Secrets Phase F (2026-10-04; see "Real-host acceptance of the unreleased
+//! secrets features" on the Supported Platforms page). That acceptance covers
+//! `password_hash` only: the general `user` lifecycle (`useradd`, `usermod`,
+//! `userdel`) has not been accepted on real hosts.
 #![cfg(unix)]
 mod common;
 

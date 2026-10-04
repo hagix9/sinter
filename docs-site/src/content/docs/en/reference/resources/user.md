@@ -54,8 +54,8 @@ never changed and never audited.
 | `uid` | no | integer | unmanaged | Required uid, 1–4294967294. Never `0`. |
 | `group` | no | string | unmanaged | Primary group, **by name**. It must already exist (see Dependencies). |
 | `groups` | no | list of strings | unmanaged | Supplementary groups, by name. **Additive**: the user is added to these, never removed from any group. May not repeat the primary group. |
-| `shell` | no | string | unmanaged | Absolute path of the login shell (`/usr/sbin/nologin`). Not validated against `/etc/shells`. |
-| `home` | no | string | unmanaged | Absolute path stored as the home directory. **Only the record is set**; nothing is created or moved. |
+| `shell` | no | string | unmanaged | Absolute path of the login shell (`/usr/sbin/nologin`). Not validated against `/etc/shells`. Same path rules as `home`. |
+| `home` | no | string | unmanaged | Absolute path stored as the home directory. **Only the record is set**; nothing is created or moved. See [Path rules](#path-rules-for-home-and-shell). |
 | `create_home` | no | boolean | `false` | Create the home directory (`useradd -m`). Create-time only. With `false`, `-M` is passed explicitly. |
 | `system` | no | boolean | `false` | Create a system user (`useradd --system`). Create-time only; never audited or changed later. |
 | `password_hash` | no | `{ secret: <path> }` | unmanaged | The password **hash** (not the password), kept as an encrypted secret. See [Password hash](#password-hash). Unreleased, after v1.1.3. |
@@ -63,6 +63,16 @@ never changed and never audited.
 Unknown fields are schema errors. There are no plaintext password, lock,
 expiry, SSH key, `move_home`, `remove_home`, `force` or `non_unique` fields:
 those are not part of this resource.
+
+### Path rules for `home` and `shell`
+
+Both are stored in a colon-separated `/etc/passwd` record, so the same rules
+apply to each: an absolute path that is not `/` itself, with no empty, `.` or
+`..` component, no repeated or trailing `/`, no NUL, and none of the characters
+`:` or `,` or any control character. A literal that breaks the rules is a
+schema error (`validate` fails). A value that uses `{{ }}` interpolation is
+checked after it is evaluated, and an invalid result is an error before any
+command runs. Neither case changes the account silently.
 
 When a dimension is not declared, `useradd` applies the distribution default at
 creation (for example a same-named private group when `group` is omitted; if a group of that name already exists, or a `group` dependency creates it, Sinter refuses and asks you to declare `group:`). Use
@@ -117,8 +127,8 @@ hash with your own tooling (`mkpasswd -m sha-512`, `openssl passwd -6`,
 (offline-crackable): it is never written in a recipe and never shown.
 
 - **Accepted values:** exactly one `$y$` (yescrypt) or `$6$` (sha512crypt) hash
-  (`$6$[rounds=N$]salt$hash`, N 1000–999999999), characters `[./0-9A-Za-z]`
-  only, with at most one trailing newline. Anything else (DES, `$1$`, `$5$`,
+  (`$6$[rounds=N$]salt$hash`, N 1000–999999999), at most 256 bytes, characters
+  `[./0-9A-Za-z]` only, with at most one trailing newline. Anything else (DES, `$1$`, `$5$`,
   bcrypt, a plaintext password, extra whitespace, a leading `!` or `*`) is
   refused without echoing it.
 - **Salt:** `$6$` salts must be 1–16 characters of `[./0-9A-Za-z]`, which is
@@ -131,9 +141,14 @@ hash with your own tooling (`mkpasswd -m sha-512`, `openssl passwd -6`,
 - **`--sudo` is required.** `/etc/shadow` is readable only by root. Without
   `--sudo`, `plan`, `apply` and `audit` fail (`audit` reports `ERROR`); they
   never report "no change". The secret is not opened before that check.
-- **Always sensitive**, whatever `sensitive:` says: redacted diff and notes,
-  fixed-text errors, no tool stderr. Audit reports only a
-  `password_hash` drift with both sides shown as `[redacted]`, never a value.
+- **Always sensitive**, whatever `sensitive:` says, and this covers the **whole
+  resource**, not only the password: the plan diff is shown as redacted, notes
+  and errors are fixed text (the account name appears as `[redacted]` and a
+  refusal gives a generic reason), and tool stderr is never shown. `audit` still
+  names each drifting dimension (`uid`, `shell`, `groups`, `password_hash`, …),
+  but both sides of **every** dimension are `[redacted]`, never a value. For a
+  user that declares `password_hash`, observed and desired ids, paths and group
+  names are therefore not visible in any output.
 - **`validate` never decrypts.** It checks the reference and that an age file
   is there. `plan`, `apply` and `audit` decrypt, with the identity discovery of
   [`sinter secrets`](/en/reference/secrets/); an unavailable key fails the
@@ -144,7 +159,8 @@ How it is applied and observed:
 
 - The stored field is read with `getent -s files shadow <name>` under `sudo` and
   compared **in memory** with the declared hash. A leading `!` (a locked
-  account) is ignored in the comparison. An unreadable or missing shadow
+  account) is ignored in the comparison, so a locked account that already holds
+  the declared hash is compliant and stays locked. An unreadable or missing shadow
   record, or an account that is not in the local files, is an error.
 - On a mismatch, `/usr/sbin/chpasswd -e` runs under `sudo -n` with
   `name:hash` on **standard input** (never on a command line, never
@@ -158,7 +174,9 @@ How it is applied and observed:
 - **Locked accounts:** an account locked with a *different* password hash
   (`!<hash>`) is **refused**, because `chpasswd -e` replaces the field and
   would silently unlock it; there is no lock field yet. An account with no
-  password at all (`!`, `!!`, `*`, empty) simply gets the hash.
+  password at all (an empty field, `!`, `!!`, `*`, `!*` or a similar marker)
+  simply gets the hash, which also means a `!!` account becomes
+  password-enabled.
 - The controller briefly holds the account's *current* stored hash in memory to
   compare it; this is as sensitive as the declared one and is documented, not
   hidden. This `password_hash` behavior was accepted on real hosts on
@@ -167,10 +185,16 @@ How it is applied and observed:
 
 ## Dependencies
 
-Dependencies are explicit; nothing is inferred.
+Dependencies are explicit; nothing is inferred. A lookup is deferred only when
+the resource that creates the account is listed **directly** in the dependent
+resource's own `depends_on` and its `state` evaluates to `present` (the
+default). An account created by a resource that is reachable only through a
+chain of other dependencies, or by one that is `absent`, is not taken into
+account, and the unknown-account plan error stays. Deferral exists only in
+`plan`; `apply` runs in dependency order and looks accounts up for real.
 
 - A user whose `group`/`groups` name a group created by a `group` resource must
-  list that resource in `depends_on`. In `plan`, such a user is **deferred**
+  list that resource in its own `depends_on`. In `plan`, such a user is **deferred**
   (unknown until apply) instead of failing; the same applies to everything that
   depends on it. A missing group with no such dependency is a plan error that
   says so.
@@ -187,8 +211,10 @@ second `apply` runs no `useradd`/`usermod`/`userdel`.
 ## Audit
 
 `audit` reports each declared dimension independently — `state`, `uid`,
-`group`, `groups`, `shell`, `home`, and `password_hash` (without values) — as
-drift. An account provided only by
+`group`, `groups`, `shell`, `home` and `password_hash` — as drift. Values are
+shown for an ordinary user; for a user with `password_hash` (always sensitive)
+both sides of every dimension are `[redacted]`, and `password_hash` never has a
+value. An account provided only by
 another identity source is `ERROR`. `create_home` and `system` are create-time
 options and are not audited.
 
