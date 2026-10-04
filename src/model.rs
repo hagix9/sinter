@@ -1545,6 +1545,20 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                     &resource_ctx,
                     r.sensitive || name_sensitive,
                 )?;
+                // `password_hash: { secret: <path> }`: resolve and confine the
+                // reference. Nothing is decrypted while loading.
+                if let Some(ph) = r.with.get("password_hash") {
+                    if let Ok(crate::secret_source::ContentShape::Secret(reference)) =
+                        crate::secret_source::content_shape(ph)
+                    {
+                        fr.secret = Some(crate::secret_source::resolve_reference(
+                            &r.origin,
+                            reference,
+                            &resource_ctx,
+                            r.sensitive || name_sensitive,
+                        )?);
+                    }
+                }
             }
             other => {
                 return Err(SinterError::schema(format!(
@@ -2263,6 +2277,7 @@ pub const USER_FIELDS: &[&str] = &[
     "home",
     "create_home",
     "system",
+    "password_hash",
 ];
 
 #[cfg(test)]

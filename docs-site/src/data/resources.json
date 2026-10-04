@@ -128,7 +128,8 @@
         { "name": "shell", "required": false, "type": "string (absolute path)", "default": null, "description": "Login shell." },
         { "name": "home", "required": false, "type": "string (absolute path)", "default": null, "description": "Home directory record. Nothing is created or moved." },
         { "name": "create_home", "required": false, "type": "boolean", "default": "false", "description": "Create the home directory (useradd -m). Create-time only." },
-        { "name": "system", "required": false, "type": "boolean", "default": "false", "description": "Create a system user. Create-time only." }
+        { "name": "system", "required": false, "type": "boolean", "default": "false", "description": "Create a system user. Create-time only." },
+        { "name": "password_hash", "required": false, "type": "{ secret: <path> }", "default": null, "description": "Password hash (not the password) kept as an encrypted secret; one $y$ or $6$ hash. Needs --sudo. Always sensitive; set with chpasswd -e on stdin. Unreleased." }
       ],
       "platforms": ["ubuntu", "rocky", "rhel", "almalinux"],
       "example": "resources:\n  - id: app_group\n    type: group\n    with:\n      name: app\n      gid: 990\n      system: true\n  - id: app_user\n    type: user\n    depends_on: [app_group]\n    with:\n      name: app\n      uid: 990\n      group: app\n      shell: /usr/sbin/nologin\n      home: /var/lib/app\n      system: true"

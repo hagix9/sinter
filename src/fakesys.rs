@@ -672,7 +672,28 @@ pub struct FakeAccounts {
     /// The `-s files` lookup itself fails with this completion (a getent that
     /// does not support the option).
     pub files_lookup_fails: Option<Completion>,
+    /// Stored shadow password fields by user name (what `getent -s files
+    /// shadow` shows after the name). A local user without an entry has
+    /// `initial_shadow`.
+    pub shadows: BTreeMap<String, String>,
+    /// The field a fresh or unlisted local account has (`!` on Ubuntu and
+    /// RHEL 10, `!!` on RHEL 9).
+    pub initial_shadow: String,
+    /// Local users whose shadow record does not exist (`getent` exit 2).
+    pub no_shadow_users: BTreeSet<String>,
+    /// Forced answer to the shadow lookup (an unreadable database, ...).
+    pub forced_shadow: Option<Output>,
+    /// Every modeled account command that reached the target, in order:
+    /// program basename, argv and standard input. Clones of the target share
+    /// it, so a test can read it after the run.
+    pub calls: CallLog,
 }
+
+/// One modeled account command: program basename, argv, standard input.
+pub type FakeCall = (String, Vec<String>, Option<Vec<u8>>);
+
+/// The shared log of [`FakeCall`]s.
+pub type CallLog = std::sync::Arc<std::sync::Mutex<Vec<FakeCall>>>;
 
 impl Default for FakeAccounts {
     fn default() -> Self {
@@ -686,6 +707,11 @@ impl Default for FakeAccounts {
             forced: BTreeMap::new(),
             fail_after_effect: BTreeSet::new(),
             files_lookup_fails: None,
+            shadows: BTreeMap::new(),
+            initial_shadow: "!".to_string(),
+            no_shadow_users: BTreeSet::new(),
+            forced_shadow: None,
+            calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 }
@@ -836,18 +862,107 @@ impl FakeAccounts {
         }
     }
 
+    /// `getent -s files shadow <name>`. Only root can read it; anyone else
+    /// gets glibc's silent "not found".
+    pub(crate) fn shadow_getent(
+        &self,
+        name: Option<&str>,
+        root: bool,
+        target: (u32, u32, &str),
+    ) -> Output {
+        if let Some(o) = &self.forced_shadow {
+            return o.clone();
+        }
+        let Some(name) = name else {
+            return out(2, String::new(), String::new());
+        };
+        let (lu, _) = Self::login(target.0, target.1, target.2);
+        if !root
+            || self.no_shadow_users.contains(name)
+            || !self.files_users(&lu).iter().any(|u| u.name == name)
+        {
+            return out(2, String::new(), String::new());
+        }
+        let field = self
+            .shadows
+            .get(name)
+            .map(String::as_str)
+            .unwrap_or(&self.initial_shadow);
+        out(
+            0,
+            format!("{}:{}:19000:0:99999:7:::\n", name, field),
+            String::new(),
+        )
+    }
+
+    /// `chpasswd -e` reading `name:hash` lines on standard input: no PAM, no
+    /// hash validation (shadow before 4.19), only root, and every line must
+    /// name an existing local user. All lines are applied or none.
+    fn chpasswd(
+        &mut self,
+        args: &[String],
+        stdin: Option<&[u8]>,
+        root: bool,
+        lu: &FakeUser,
+    ) -> Output {
+        if !root {
+            return out(1, String::new(), "chpasswd: Permission denied.".into());
+        }
+        if args != ["-e"] {
+            return out(
+                1,
+                String::new(),
+                "chpasswd: this fake models only chpasswd -e".into(),
+            );
+        }
+        let Some(text) = stdin.and_then(|b| std::str::from_utf8(b).ok()) else {
+            return out(1, String::new(), "chpasswd: no input".into());
+        };
+        let mut updates = Vec::new();
+        for (n, line) in text.lines().enumerate() {
+            let Some((name, hash)) = line.split_once(':') else {
+                return out(
+                    1,
+                    String::new(),
+                    format!("chpasswd: line {}: missing new password", n + 1),
+                );
+            };
+            if !self.all_users(lu).iter().any(|u| u.name == name) {
+                return out(
+                    1,
+                    String::new(),
+                    format!(
+                        "chpasswd: (line {}, user {}) password not changed",
+                        n + 1,
+                        name
+                    ),
+                );
+            }
+            updates.push((name.to_string(), hash.to_string()));
+        }
+        for (name, hash) in updates {
+            self.shadows.insert(name, hash);
+        }
+        out(0, String::new(), String::new())
+    }
+
     /// Run one of the modeled shadow-utils commands. `None` = not modeled.
     pub(crate) fn command(
         &mut self,
         prog: &str,
         args: &[String],
+        stdin: Option<&[u8]>,
+        root: bool,
         target: (u32, u32, &str),
     ) -> Option<Output> {
         if !matches!(
             prog,
-            "useradd" | "usermod" | "userdel" | "groupadd" | "groupdel"
+            "useradd" | "usermod" | "userdel" | "groupadd" | "groupdel" | "chpasswd"
         ) {
             return None;
+        }
+        if let Ok(mut log) = self.calls.lock() {
+            log.push((prog.to_string(), args.to_vec(), stdin.map(|b| b.to_vec())));
         }
         if let Some(o) = self.forced.get(prog) {
             return Some(o.clone());
@@ -858,6 +973,7 @@ impl FakeAccounts {
             "groupdel" => self.groupdel(args),
             "useradd" => self.useradd(args, &lu, &lg),
             "usermod" => self.usermod(args),
+            "chpasswd" => self.chpasswd(args, stdin, root, &lu),
             _ => self.userdel(args),
         };
         if self.fail_after_effect.contains(prog) && result.is_success() {
@@ -1201,6 +1317,7 @@ impl FakeAccounts {
             );
         }
         let gone = self.users.remove(pos);
+        self.shadows.remove(name);
         for g in &mut self.groups {
             g.members.retain(|m| m != name);
         }

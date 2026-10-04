@@ -28,7 +28,7 @@
     { "title": "package リソース", "path": "reference/resources/package", "description": "package リソース: apt/dnf によるインストールと削除。", "keywords": "package name state present absent apt dnf" },
     { "title": "service リソース", "path": "reference/resources/service", "description": "service リソース: systemd の state と enabled。", "keywords": "service systemd running stopped enabled" },
     { "title": "group リソース", "path": "reference/resources/group", "description": "group リソース: ローカル Linux グループ（未リリース、v1.1.3 より後）。", "keywords": "group gid groupadd groupdel local linux unreleased" },
-    { "title": "user リソース", "path": "reference/resources/user", "description": "user リソース: ローカル Linux ユーザー（未リリース、v1.1.3 より後）。", "keywords": "user uid shell home groups useradd userdel local linux unreleased" },
+    { "title": "user リソース", "path": "reference/resources/user", "description": "user リソース: ローカル Linux ユーザー（未リリース、v1.1.3 より後）。", "keywords": "user uid shell home groups useradd userdel local linux password_hash chpasswd shadow unreleased" },
     { "title": "ドキュメント WebMCP", "path": "reference/webmcp", "description": "このサイトが WebMCP 経由で公開する読み取り専用ドキュメント検索ツール。", "keywords": "webmcp modelcontext エージェント ツール api 機械可読 ドキュメント" },
     { "title": "Core MCP", "path": "reference/mcp", "description": "sinter mcp — stdio経由の読み取り専用オペレーショナルMCPエンドポイント: named SSHターゲットの validate・plan・audit。", "keywords": "mcp model context protocol stdio 読み取り専用 ツール ターゲット audit plan" },
     { "title": "対応プラットフォーム", "path": "compatibility/platforms", "description": "プラットフォーム/アーキテクチャ/バックエンドのサポートマトリクスと受入基準環境。", "keywords": "対応 プラットフォーム ubuntu rocky rhel almalinux oracle amd64 x86_64 apt dnf" },

@@ -375,7 +375,8 @@ fn account_ids_are_range_checked_and_root_ids_are_never_declarable() {
 fn unsupported_fields_are_rejected() {
     for f in [
         "password",
-        "password_hash",
+        // `password_hash` is supported since Phase D, as a secret reference
+        // only (tests/password_hash.rs): a bare value is a schema error there.
         "locked",
         "expires",
         "ssh_keys",

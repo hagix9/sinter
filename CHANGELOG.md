@@ -46,6 +46,23 @@ All notable changes to Sinter are documented in this file.
   - Not yet: `user.password_hash`, `secrets list` "used by", real-Linux
     acceptance.
 
+- `user.password_hash: { secret: <path> }` (not part of v1.1.3): set a local
+  user's password from a pre-generated hash kept as an encrypted secret. There
+  is no plaintext `password` field.
+  - The secret is one `$y$` (yescrypt) or `$6$` (sha512crypt) hash; anything
+    else is refused without echoing it; `$y$` is refused on RHEL-family 9.
+  - Applied with `sudo -n /usr/sbin/chpasswd -e` reading `name:hash` on standard
+    input (never argv, never `usermod -p`), only on a mismatch. The stored field
+    is read with `getent -s files shadow` under sudo and compared in memory; a
+    leading `!` is ignored, and an account locked with a different hash is
+    refused rather than silently unlocked.
+  - Always sensitive; `--sudo` is required (plan, apply and audit error without
+    it, never "no change"); `validate` never decrypts; audit shows
+    a `password_hash` drift with both sides `[redacted]`; MCP manifest tools
+    refuse the reference.
+  - Not yet: a lock field, `on_create` mode, real-host acceptance (including
+    `sudo-rs` on Ubuntu 26.04).
+
 - `group` and `user` resource types for **local** Linux accounts (not part of
   the v1.1.3 release).
   - `group`: `name`, `state` (`present`/`absent`, default `present`), `gid`,

@@ -6,8 +6,9 @@ description: Encrypt, decrypt and list secret files in the standard age format (
 :::caution[Unreleased]
 `sinter secrets` and the recipe field `file.content: { secret: … }` are on the
 `main` branch after v1.1.3. They are **not** in the v1.1.3 release binary. The
-`file` resource is the only recipe use of a secret so far; `user.password_hash`,
-MCP and `secrets list` "used by" information are not available yet.
+`file` resource (`content`) and the `user` resource (`password_hash`) are the
+only recipe uses of a secret so far; MCP use and `secrets list` "used by"
+information are not available yet.
 :::
 
 **Purpose:** keep secret files (SSH keys, `.env` files, tokens, password hashes,
@@ -152,8 +153,11 @@ literal or a controller file:
   on the terminal only. A passphrase-encrypted secret asks for its passphrase on
   the terminal once per file and invocation; use recipient-encrypted secrets for
   unattended runs.
-- **MCP** manifest tools refuse any `content: { secret: … }`: a manifest sent by
-  a client cannot make the gateway decrypt a file.
+- **`user.password_hash: { secret: <path> }`** uses the same reference rules and
+  identity discovery; the secret is one password hash line. See the
+  [user resource](/en/reference/resources/user/#password-hash).
+- **MCP** manifest tools refuse any `content` or `password_hash` secret
+  reference: a manifest sent by a client cannot make the gateway decrypt a file.
 
 The plaintext is held in memory in buffers that Sinter zeroizes when it is done
 with them, and is sent to the target over the existing SSH channel (or local

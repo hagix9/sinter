@@ -14,7 +14,10 @@
 //! * `absent` is `userdel`/`groupdel` without `-r`/`-f`; the home directory
 //!   and mail spool are kept;
 //! * every command is a fixed executable with explicit argv, never a shell,
-//!   and every mutation goes through the engine's mutation permit.
+//!   and every mutation goes through the engine's mutation permit;
+//! * `password_hash` (a secret reference, never a literal) is set with
+//!   `chpasswd -e` reading `name:hash` on standard input, compared in memory
+//!   against `getent -s files shadow`, requires `--sudo`, and is never shown.
 
 use crate::engine::{unknown_result, Engine, Mode};
 use crate::error::{ErrorKind, Result, SinterError};
@@ -25,7 +28,9 @@ use crate::resources::{ev_bool, ev_int, ev_list_str, ev_str};
 use crate::result::*;
 use crate::targetfs::TargetFs;
 use std::collections::BTreeMap;
+use zeroize::Zeroizing;
 
+const CHPASSWD: &str = "/usr/sbin/chpasswd";
 const GROUPADD: &str = "/usr/sbin/groupadd";
 const GROUPDEL: &str = "/usr/sbin/groupdel";
 const USERADD: &str = "/usr/sbin/useradd";
@@ -123,6 +128,26 @@ pub(crate) fn validate_account_literals(
         }
     }
     if kind == "user" {
+        if let Some(v) = with.get("password_hash") {
+            // Only a secret reference: a hash is secret material and is never
+            // written in a recipe, and there is no plaintext `password`.
+            match crate::secret_source::content_shape(v) {
+                Ok(crate::secret_source::ContentShape::Secret(_)) => {}
+                _ => {
+                    return Err(SinterError::schema(format!(
+                        "{}: password_hash must be {{ secret: <path> }} (a hash is secret and is \
+                         never written in a recipe)",
+                        ctx
+                    )))
+                }
+            }
+            if matches!(with.get("state"), Some(Value::Str(s)) if s == "absent") {
+                return Err(SinterError::schema(format!(
+                    "{}: password_hash cannot be combined with state: absent",
+                    ctx
+                )));
+            }
+        }
         if let Some(v) = with.get("group") {
             if !matches!(v, Value::Null) {
                 match v {
@@ -373,6 +398,18 @@ pub(crate) fn user_desired(
         create_home: ev_bool(vals, "create_home")?.unwrap_or(false),
         system: ev_bool(vals, "system")?.unwrap_or(false),
     })
+}
+
+/// The declared password hash of a user (secret material).
+#[derive(Clone)]
+pub(crate) struct PasswordSpec {
+    pub hash: Zeroizing<String>,
+}
+
+impl std::fmt::Debug for PasswordSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PasswordSpec([redacted])")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1110,7 +1147,7 @@ impl Engine {
             (_, false) => (GROUPDEL, vec![d.name.clone()]),
             _ => unreachable!("a changing present group that exists is refused above"),
         };
-        if let Err(r) = self.account_exec(res, sensitive, program, args) {
+        if let Err(r) = self.account_exec(res, sensitive, program, args, None) {
             return Ok(*r);
         }
         let mut r = changed_account(res, sensitive);
@@ -1224,6 +1261,130 @@ impl Engine {
         })
     }
 
+    /// The desired user, with its password hash opened from the secret named
+    /// by `password_hash` (if any). Everything that can fail does so before
+    /// anything is observed or changed: no `--sudo`, an absent user, an
+    /// unavailable key, a secret that is not an accepted hash, or yescrypt on
+    /// an EL9 target.
+    pub(crate) fn desired_user(
+        &mut self,
+        res: &FrozenResource,
+        vals: &BTreeMap<String, EvalVal>,
+        sensitive: bool,
+    ) -> Result<(UserDesired, Option<PasswordSpec>)> {
+        let d = user_desired(res, vals, sensitive)?;
+        if res.secret.is_none() {
+            return Ok((d, None));
+        }
+        if !d.present {
+            return Err(self.account_err(format!(
+                "{}: password_hash cannot be combined with state: absent",
+                res.id
+            )));
+        }
+        if !self.opts.sudo {
+            return Err(self.account_err(format!(
+                "{}: password_hash needs --sudo: the password database is readable and writable \
+                 only by root",
+                res.id
+            )));
+        }
+        let secret = self.open_resource_secret(res)?;
+        let (kind, hash) = crate::passwd_hash::parse_secret(secret.expose()).map_err(|_| {
+            redact_text(&res.id, "password_hash", crate::passwd_hash::Rejected::TEXT)
+        })?;
+        drop(secret);
+        if kind == crate::passwd_hash::Format::Yescrypt && self.is_el9() {
+            return Err(self.account_err(format!(
+                "{}: yescrypt ($y$) hashes are not supported on this platform (RHEL-family 9); \
+                 use a $6$ hash",
+                res.id
+            )));
+        }
+        Ok((d, Some(PasswordSpec { hash })))
+    }
+
+    /// RHEL-family major version 9 (Rocky, Alma, RHEL): shadow-utils and
+    /// libxcrypt there are built without yescrypt (Red Hat bz 2151145).
+    fn is_el9(&self) -> bool {
+        self.facts.os_family == "redhat" && self.facts.os_version.split('.').next() == Some("9")
+    }
+
+    /// The stored password field of a local user: `getent -s files shadow`
+    /// under sudo, in memory only. A failed or denied read is an error, never
+    /// "no change".
+    fn observe_password(&mut self, name: &str, sensitive: bool) -> Result<Zeroizing<String>> {
+        let what = shown(name, sensitive);
+        let mut out = self
+            .fs
+            .account_getent(true, "shadow", Some(name), sensitive)?;
+        let field = match out.completion {
+            Completion::Exited(0) => {
+                single_record(&out, "the password database").and_then(|line| {
+                    let mut f = line.split(':');
+                    match (f.next(), f.next()) {
+                        (Some(n), Some(h)) if n == name => Ok(Zeroizing::new(h.to_string())),
+                        _ => Err(SinterError::apply(format!(
+                            "the password database returned a malformed record for {}",
+                            what
+                        ))),
+                    }
+                })
+            }
+            // The passwd entry is local, so a missing or unreadable shadow
+            // record is something this resource cannot manage.
+            Completion::Exited(2) => Err(SinterError::apply(format!(
+                "the password database has no readable record for local user {}",
+                what
+            ))),
+            _ => Err(lookup_failure("the password database", &out)),
+        };
+        zeroize::Zeroize::zeroize(&mut out.stdout);
+        field
+    }
+
+    /// Add the `password_hash` dimension to `c`. The observed and desired
+    /// values are never put into it.
+    fn password_compare(
+        &mut self,
+        d: &UserDesired,
+        o: &UserObservation,
+        pw: &Option<PasswordSpec>,
+        sensitive: bool,
+        c: &mut Compare,
+    ) -> Result<()> {
+        let (Some(pw), Lookup::Local(_), true) = (pw, &o.user, d.present) else {
+            return Ok(());
+        };
+        let field = self.observe_password(&d.name, sensitive)?;
+        match crate::passwd_hash::relate(&field, &pw.hash) {
+            crate::passwd_hash::Relation::Same => {}
+            crate::passwd_hash::Relation::Differs => {
+                c.dims
+                    .push(dim("password_hash", "(redacted)", "(redacted)"));
+            }
+            crate::passwd_hash::Relation::DiffersLocked => {
+                c.dims
+                    .push(dim("password_hash", "(redacted)", "(redacted)"));
+                c.refusals.push(LOCKED_REFUSAL.to_string());
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Self::password_compare`] for callers that own the comparison.
+    pub(crate) fn compare_password(
+        &mut self,
+        d: &UserDesired,
+        o: &UserObservation,
+        pw: &Option<PasswordSpec>,
+        sensitive: bool,
+        mut c: Compare,
+    ) -> Result<Compare> {
+        self.password_compare(d, o, pw, sensitive, &mut c)?;
+        Ok(c)
+    }
+
     pub(crate) fn run_user(
         &mut self,
         res: &FrozenResource,
@@ -1231,9 +1392,10 @@ impl Engine {
     ) -> Result<ResourceResult> {
         let vals = self.eval_with(res, item)?;
         let sensitive = res.sensitive || res.derived_sensitive;
-        let d = user_desired(res, &vals, sensitive)?;
+        let (d, pw) = self.desired_user(res, &vals, sensitive)?;
         let obs = self.observe_user(&d, sensitive)?;
-        let c = compare_user(&d, &obs)?;
+        let mut c = compare_user(&d, &obs)?;
+        self.password_compare(&d, &obs, &pw, sensitive, &mut c)?;
         if let Some(r) = c.refusals.first() {
             return Err(self.account_err(format!(
                 "{}: refusing to change user {}: {}",
@@ -1342,20 +1504,50 @@ impl Engine {
             _ => None,
         };
 
-        let (program, args) = match (&obs.user, d.present) {
-            (Lookup::Absent, true) => (USERADD, useradd_args(&d)),
-            (Lookup::Local(u), true) => (USERMOD, usermod_args(&d, &obs, u)),
-            (Lookup::Local(_), false) => (USERDEL, vec![d.name.clone()]),
-            _ => unreachable!("an absent user that should be absent has no drift"),
-        };
-        if let Err(r) = self.account_exec(res, sensitive, program, args) {
-            return Ok(*r);
+        // Account attributes first (useradd/usermod/userdel), then the
+        // password. A password-only drift runs chpasswd alone.
+        let base_dims = c.dims.iter().any(|x| x.dimension != "password_hash");
+        let set_password = d.present
+            && pw.is_some()
+            && (created || c.dims.iter().any(|x| x.dimension == "password_hash"));
+        if base_dims {
+            let (program, args) = match (&obs.user, d.present) {
+                (Lookup::Absent, true) => (USERADD, useradd_args(&d)),
+                (Lookup::Local(u), true) => (USERMOD, usermod_args(&d, &obs, u)),
+                (Lookup::Local(_), false) => (USERDEL, vec![d.name.clone()]),
+                _ => unreachable!("an absent user that should be absent has no drift"),
+            };
+            if let Err(r) = self.account_exec(res, sensitive, program, args, None) {
+                return Ok(*r);
+            }
+        }
+        if let (true, Some(pw)) = (set_password, &pw) {
+            let input = crate::passwd_hash::chpasswd_input(&d.name, &pw.hash);
+            if let Err(mut r) =
+                self.account_exec(res, true, CHPASSWD, vec!["-e".to_string()], Some(input))
+            {
+                if base_dims {
+                    // The account was already created or changed: say so, and
+                    // that the password is what is missing. A re-run converges.
+                    r.change = Change::Changed;
+                    r.reason = Some(
+                        "the account was changed but its password could not be set; \
+                         run again to finish"
+                            .to_string(),
+                    );
+                } else {
+                    r.reason = Some("the password could not be set".to_string());
+                }
+                return Ok(*r);
+            }
         }
         let mut r = changed_account(res, sensitive);
-        match self
-            .observe_user(&d, sensitive)
-            .and_then(|after| compare_user(&d, &after))
-        {
+        let after = self.observe_user(&d, sensitive).and_then(|after| {
+            let mut c = compare_user(&d, &after)?;
+            self.password_compare(&d, &after, &pw, sensitive, &mut c)?;
+            Ok(c)
+        });
+        match after {
             Ok(after)
                 if after.dims.is_empty()
                     && after.refusals.is_empty()
@@ -1422,6 +1614,7 @@ impl Engine {
         sensitive: bool,
         program: &str,
         args: Vec<String>,
+        stdin: Option<Zeroizing<Vec<u8>>>,
     ) -> std::result::Result<(), Box<ResourceResult>> {
         let permit = self.fs.mutation_permit().map_err(|e| {
             let mut r = changed_account(res, sensitive);
@@ -1435,6 +1628,9 @@ impl Engine {
         req.env = crate::resources::baseline_env(self.fs.home_env());
         req.sensitive = sensitive;
         req.timeout_secs = 60;
+        // Standard input may carry a password hash: it is zeroized when the
+        // request is dropped and never recorded.
+        req.stdin = stdin.as_ref().map(|b| b.to_vec());
         let verb = program.rsplit('/').next().unwrap_or(program);
         let out = match self.fs.exec(&permit, &req) {
             Ok(o) => o,
@@ -1534,9 +1730,14 @@ fn changed_account(res: &FrozenResource, sensitive: bool) -> ResourceResult {
     }
 }
 
+/// The refusal for a locked account whose password hash differs (fixed text,
+/// safe to show for a sensitive resource).
+const LOCKED_REFUSAL: &str = "the account is locked with a different password hash; setting \
+     the declared hash would unlock it, and this resource has no lock field";
+
 /// A refusal reason, without the ids when the resource is sensitive.
 fn refusal_text(r: &str, sensitive: bool) -> &str {
-    if sensitive {
+    if sensitive && r != LOCKED_REFUSAL {
         "an existing account is never renumbered"
     } else {
         r
@@ -1573,6 +1774,10 @@ fn planned_account(
         },
     });
     r
+}
+
+fn redact_text(id: &str, what: &str, detail: &str) -> SinterError {
+    SinterError::apply(format!("{}: {} (value redacted): {}", id, what, detail))
 }
 
 /// The mutation is known to have succeeded; only the verification failed.

@@ -299,6 +299,35 @@ impl Engine {
         }
     }
 
+    /// Open the secret a resource names (`file.content` or
+    /// `user.password_hash`) through the engine's source. Every failure is a
+    /// redacted resource error with fixed text; with no source configured the
+    /// resource fails closed.
+    pub(crate) fn open_resource_secret(
+        &mut self,
+        res: &FrozenResource,
+    ) -> Result<crate::secrets::Secret> {
+        let sref = res.secret.as_ref().ok_or_else(|| {
+            redact_msg(
+                &res.id,
+                "secret unavailable",
+                "the resource names no secret",
+            )
+        })?;
+        let source = self.secrets.clone().ok_or_else(|| {
+            redact_msg(
+                &res.id,
+                "secret unavailable",
+                "no secret source is configured",
+            )
+        })?;
+        let secret = source
+            .borrow_mut()
+            .open(sref)
+            .map_err(|e| redact_msg(&res.id, "secret unavailable", &e.message))?;
+        Ok(secret)
+    }
+
     pub(crate) fn resolve_content(
         &mut self,
         res: &FrozenResource,
@@ -306,18 +335,8 @@ impl Engine {
     ) -> Result<ContentSpec> {
         // `content: { secret: <path> }`: the bytes are the decrypted secret.
         // The resource is sensitive; every failure carries fixed text only.
-        if let Some(sref) = &res.secret {
-            let source = self.secrets.clone().ok_or_else(|| {
-                redact_msg(
-                    &res.id,
-                    "secret unavailable",
-                    "no secret source is configured",
-                )
-            })?;
-            let secret = source
-                .borrow_mut()
-                .open(sref)
-                .map_err(|e| redact_msg(&res.id, "secret unavailable", &e.message))?;
+        if res.secret.is_some() {
+            let secret = self.open_resource_secret(res)?;
             return Ok(ContentSpec {
                 bytes: Some(secret.into_zeroizing()),
                 sensitive: true,

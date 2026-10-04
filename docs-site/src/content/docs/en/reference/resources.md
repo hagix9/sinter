@@ -24,7 +24,7 @@ the v1.1.3 binary.
 | Type | Purpose | Key parameters |
 |------|---------|----------------|
 | [group](/en/reference/resources/group/) | Local Linux group (unreleased) | `name`, `state`, `gid`, `system` |
-| [user](/en/reference/resources/user/) | Local Linux user (unreleased) | `name`, `state`, `uid`, `group`, `groups`, `shell`, `home`, `create_home`, `system` |
+| [user](/en/reference/resources/user/) | Local Linux user (unreleased) | `name`, `state`, `uid`, `group`, `groups`, `shell`, `home`, `create_home`, `system`, `password_hash` |
 
 ## Shared conventions
 

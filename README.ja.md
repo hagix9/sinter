@@ -222,8 +222,9 @@ v1.1.3より後（未リリース、v1.1.3のバイナリには含まれませ�
 また、v1.1.3より後（未リリース）には`sinter secrets encrypt | decrypt | list`があり、
 標準のage形式でシークレットファイルを暗号化します（受信者、または端末からのみ入力する
 パスフレーズ。identityは既定でリポジトリ外）。`file`リソースは
-`content: { secret: <path> }`でそのシークレットから内容を取れます
-（`validate`は復号せず、`plan` / `apply` / `audit`が復号します）。
+`content: { secret: <path> }`でそのシークレットから内容を取れ、`user`は
+`password_hash: { secret: <path> }`でパスワードハッシュを取れます
+（`validate`は復号せず、`plan` / `apply` / `audit`が復号します。ハッシュには`--sudo`が必要です）。
 `sinter secrets`リファレンスを参照してください。
 
 最小構成のrecipe例:

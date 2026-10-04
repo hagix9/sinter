@@ -25,7 +25,7 @@ Sinter v1.1.3 は 7 つのリソースタイプを実装しています。以下
 | タイプ | 用途 | 主要パラメータ |
 |--------|------|----------------|
 | [group](/ja/reference/resources/group/) | ローカル Linux グループ（未リリース） | `name`、`state`、`gid`、`system` |
-| [user](/ja/reference/resources/user/) | ローカル Linux ユーザー（未リリース） | `name`、`state`、`uid`、`group`、`groups`、`shell`、`home`、`create_home`、`system` |
+| [user](/ja/reference/resources/user/) | ローカル Linux ユーザー（未リリース） | `name`、`state`、`uid`、`group`、`groups`、`shell`、`home`、`create_home`、`system`、`password_hash` |
 
 ## 共通の規約
 

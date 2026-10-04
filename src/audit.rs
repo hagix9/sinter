@@ -1278,11 +1278,7 @@ fn audit_user(
         Ok(v) => v,
         Err(r) => return *r,
     };
-    let d = match obs_or_error(
-        res,
-        sensitive,
-        crate::accounts::user_desired(res, &vals, sensitive),
-    ) {
+    let (d, pw) = match obs_or_error(res, sensitive, engine.desired_user(res, &vals, sensitive)) {
         Ok(d) => d,
         Err(r) => return *r,
     };
@@ -1290,7 +1286,9 @@ fn audit_user(
         Ok(o) => o,
         Err(r) => return *r,
     };
-    match obs_or_error(res, sensitive, crate::accounts::compare_user(&d, &obs)) {
+    let compared = crate::accounts::compare_user(&d, &obs)
+        .and_then(|c| engine.compare_password(&d, &obs, &pw, sensitive, c));
+    match obs_or_error(res, sensitive, compared) {
         Ok(c) => account_audit_result(res, sensitive, c),
         Err(r) => *r,
     }

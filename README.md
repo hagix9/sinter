@@ -220,8 +220,9 @@ the resource reference.
 Also after v1.1.3 (unreleased): `sinter secrets encrypt | decrypt | list`
 encrypts secret files in the standard age format (recipients or a terminal-only
 passphrase; identities outside the repository by default). A `file` resource can
-take its content from such a secret with `content: { secret: <path> }`
-(`validate` never decrypts; `plan`, `apply` and `audit` do). See the
+take its content from such a secret with `content: { secret: <path> }`, and a
+`user` can take its password hash from one with `password_hash: { secret: <path> }`
+(`validate` never decrypts; `plan`, `apply` and `audit` do; the hash needs `--sudo`). See the
 `sinter secrets` reference.
 
 A minimal recipe:

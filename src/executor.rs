@@ -2219,6 +2219,15 @@ impl FakeTarget {
         self
     }
 
+    /// Set the stored shadow password field of a local user (`$6$…`, `!`,
+    /// `!$6$…` for a locked account, ...).
+    pub fn with_shadow(mut self, user: &str, field: &str) -> Self {
+        self.accounts
+            .shadows
+            .insert(user.to_string(), field.to_string());
+        self
+    }
+
     /// Create a directory on the scripted filesystem (root-owned 0755).
     pub fn with_fs_dir(mut self, path: &str) -> Self {
         let fs = self.fs.get_or_insert_with(Default::default);
@@ -2365,10 +2374,15 @@ impl FakeExecutor {
             "uname" => Self::exited(0, format!("{}\n", self.target.arch), String::new()),
             "id" => self.run_id(&req.args),
             "getent" => self.run_getent(&req.args),
-            "useradd" | "usermod" | "userdel" | "groupadd" | "groupdel" => {
+            "useradd" | "usermod" | "userdel" | "groupadd" | "groupdel" | "chpasswd" => {
                 let target = (self.target.uid, self.target.gid, self.target.home.clone());
                 let t = (target.0, target.1, target.2.as_str());
-                match self.target.accounts.command(&prog, &req.args, t) {
+                let root = self.sudo;
+                match self
+                    .target
+                    .accounts
+                    .command(&prog, &req.args, req.stdin.as_deref(), root, t)
+                {
                     Some(o) => o,
                     None => Self::exited(127, String::new(), "fake target: unmodeled".into()),
                 }
@@ -2500,6 +2514,13 @@ impl FakeExecutor {
         if args.first().map(|s| s.as_str()) == Some("-s") {
             if args.get(1).map(|s| s.as_str()) != Some("files") || args.len() < 3 {
                 return Self::exited(1, String::new(), "getent: unsupported service".to_string());
+            }
+            if args[2] == "shadow" {
+                return self.target.accounts.shadow_getent(
+                    args.get(3).map(|s| s.as_str()),
+                    self.sudo,
+                    target,
+                );
             }
             return self.target.accounts.getent(
                 true,

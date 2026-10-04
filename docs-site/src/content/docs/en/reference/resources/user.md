@@ -58,10 +58,11 @@ never changed and never audited.
 | `home` | no | string | unmanaged | Absolute path stored as the home directory. **Only the record is set**; nothing is created or moved. |
 | `create_home` | no | boolean | `false` | Create the home directory (`useradd -m`). Create-time only. With `false`, `-M` is passed explicitly. |
 | `system` | no | boolean | `false` | Create a system user (`useradd --system`). Create-time only; never audited or changed later. |
+| `password_hash` | no | `{ secret: <path> }` | unmanaged | The password **hash** (not the password), kept as an encrypted secret. See [Password hash](#password-hash). Unreleased, after v1.1.3. |
 
-Unknown fields are schema errors. There are no password, lock, expiry, SSH key,
-`move_home`, `remove_home`, `force` or `non_unique` fields: those are not part
-of this resource.
+Unknown fields are schema errors. There are no plaintext password, lock,
+expiry, SSH key, `move_home`, `remove_home`, `force` or `non_unique` fields:
+those are not part of this resource.
 
 When a dimension is not declared, `useradd` applies the distribution default at
 creation (for example a same-named private group when `group` is omitted; if a group of that name already exists, or a `group` dependency creates it, Sinter refuses and asks you to declare `group:`). Use
@@ -94,6 +95,75 @@ home directory itself.
   account running or connecting the session. A user with running processes
   makes `userdel`/`usermod` fail and is reported as a failure.
 
+## Password hash
+
+:::caution[Unreleased]
+`password_hash` is on the `main` branch after v1.1.3. It needs the unreleased
+[encrypted secrets](/en/reference/secrets/#using-a-secret-in-a-recipe).
+:::
+
+```yaml
+- id: app_user
+  type: user
+  with:
+    name: app
+    password_hash: { secret: secrets/app-password-hash.age }
+```
+
+Sinter never sees a plaintext password and has no `password` field. You make a
+hash with your own tooling (`mkpasswd -m sha-512`, `openssl passwd -6`,
+`python -c 'import crypt…'`), store that one line with
+`sinter secrets encrypt`, and reference it. **A hash is secret material**
+(offline-crackable): it is never written in a recipe and never shown.
+
+- **Accepted values:** exactly one `$y$` (yescrypt) or `$6$` (sha512crypt) hash
+  (`$6$[rounds=N$]salt$hash`, N 1000–999999999), characters `[./0-9A-Za-z]`
+  only, with at most one trailing newline. Anything else (DES, `$1$`, `$5$`,
+  bcrypt, a plaintext password, extra whitespace, a leading `!` or `*`) is
+  refused without echoing it.
+- **Salt:** `$6$` salts must be 1–16 characters of `[./0-9A-Za-z]`, which is
+  stricter than crypt(5): a hash made with `openssl passwd -6 -salt 'my_salt'`
+  is refused, so let the tool generate the salt.
+- **EL9:** `$y$` is refused on RHEL, Rocky and AlmaLinux 9 (shadow-utils and
+  libxcrypt there are built without yescrypt): use `$6$`. Sinter does not check
+  other platforms: a `$y$` hash on a distribution that cannot verify yescrypt
+  (older than the supported targets) would be stored but could not log in.
+- **`--sudo` is required.** `/etc/shadow` is readable only by root. Without
+  `--sudo`, `plan`, `apply` and `audit` fail (`audit` reports `ERROR`); they
+  never report "no change". The secret is not opened before that check.
+- **Always sensitive**, whatever `sensitive:` says: redacted diff and notes,
+  fixed-text errors, no tool stderr. Audit reports only a
+  `password_hash` drift with both sides shown as `[redacted]`, never a value.
+- **`validate` never decrypts.** It checks the reference and that an age file
+  is there. `plan`, `apply` and `audit` decrypt, with the identity discovery of
+  [`sinter secrets`](/en/reference/secrets/); an unavailable key fails the
+  resource (`ERROR` in `audit`), never "no change".
+- **Not combined with `state: absent`** (schema error).
+
+How it is applied and observed:
+
+- The stored field is read with `getent -s files shadow <name>` under `sudo` and
+  compared **in memory** with the declared hash. A leading `!` (a locked
+  account) is ignored in the comparison. An unreadable or missing shadow
+  record, or an account that is not in the local files, is an error.
+- On a mismatch, `/usr/sbin/chpasswd -e` runs under `sudo -n` with
+  `name:hash` on **standard input** (never on a command line, never
+  `usermod -p`, never a shell). Nothing is written when the hash already
+  matches. Each write resets the account's last-change date (password aging).
+- A new user is created first (`useradd`), then its password is set. If the
+  password step fails after the account was created or changed, the result says
+  so (change `changed`, failed); running again finishes the job.
+- **A declared hash is enforced**: a password the user changed is replaced
+  at the next `apply`.
+- **Locked accounts:** an account locked with a *different* password hash
+  (`!<hash>`) is **refused**, because `chpasswd -e` replaces the field and
+  would silently unlock it; there is no lock field yet. An account with no
+  password at all (`!`, `!!`, `*`, empty) simply gets the hash.
+- The controller briefly holds the account's *current* stored hash in memory to
+  compare it; this is as sensitive as the declared one and is documented, not
+  hidden. Real-host behavior (including `sudo-rs` on Ubuntu 26.04) is pending
+  real-OS acceptance.
+
 ## Dependencies
 
 Dependencies are explicit; nothing is inferred.
@@ -116,7 +186,8 @@ second `apply` runs no `useradd`/`usermod`/`userdel`.
 ## Audit
 
 `audit` reports each declared dimension independently — `state`, `uid`,
-`group`, `groups`, `shell`, `home` — as drift. An account provided only by
+`group`, `groups`, `shell`, `home`, and `password_hash` (without values) — as
+drift. An account provided only by
 another identity source is `ERROR`. `create_home` and `system` are create-time
 options and are not audited.
 
@@ -133,8 +204,8 @@ options and are not audited.
 
 ## Platform notes
 
-Uses `/usr/sbin/useradd`, `usermod`, `userdel` and `getent`, with argv only and
-no shell. Behavior on real hosts of Ubuntu 24.04 / 26.04 and Rocky Linux,
+Uses `/usr/sbin/useradd`, `usermod`, `userdel`, `chpasswd` and `getent`, with
+argv only and no shell. Behavior on real hosts of Ubuntu 24.04 / 26.04 and Rocky Linux,
 RHEL and AlmaLinux 9 / 10 is pending real-OS acceptance.
 
 ## Related
