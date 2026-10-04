@@ -43,8 +43,9 @@ All notable changes to Sinter are documented in this file.
     plaintext is held in buffers Sinter zeroizes, never printed, and
     `ExecRequest` standard input is zeroized when the request is dropped.
   - MCP manifest tools refuse `content: { secret: … }`.
-  - Not yet: `user.password_hash`, `secrets list` "used by", real-Linux
-    acceptance.
+  - Real-Linux acceptance of the unreleased secrets features on all eight
+    supported targets was completed on 2026-10-04; see
+    [Supported Platforms](https://sinter.fulltrust.co.jp/en/compatibility/platforms/#real-host-acceptance-of-the-unreleased-secrets-features).
 
 - `sinter secrets list --recipe FILE` (repeatable; not part of v1.1.3): adds
   what the recipes you name say about the listed secrets, and still never
@@ -78,8 +79,11 @@ All notable changes to Sinter are documented in this file.
     it, never "no change"); `validate` never decrypts; audit shows
     a `password_hash` drift with both sides `[redacted]`; MCP manifest tools
     refuse the reference.
-  - Not yet: a lock field, `on_create` mode, real-host acceptance (including
-    `sudo-rs` on Ubuntu 26.04).
+  - Real-host acceptance on all eight supported targets was completed on
+    2026-10-04, including `sudo-rs` on Ubuntu 26.04 and the `$y$` refusal on
+    RHEL-family 9; see
+    [Supported Platforms](https://sinter.fulltrust.co.jp/en/compatibility/platforms/#real-host-acceptance-of-the-unreleased-secrets-features).
+  - Not yet: a lock field, `on_create` mode.
 
 - `group` and `user` resource types for **local** Linux accounts (not part of
   the v1.1.3 release).

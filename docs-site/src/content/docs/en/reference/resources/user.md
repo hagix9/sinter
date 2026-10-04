@@ -161,8 +161,9 @@ How it is applied and observed:
   password at all (`!`, `!!`, `*`, empty) simply gets the hash.
 - The controller briefly holds the account's *current* stored hash in memory to
   compare it; this is as sensitive as the declared one and is documented, not
-  hidden. Real-host behavior (including `sudo-rs` on Ubuntu 26.04) is pending
-  real-OS acceptance.
+  hidden. This `password_hash` behavior was accepted on real hosts on
+  2026-10-04, including `sudo-rs` on Ubuntu 26.04; see
+  [Supported Platforms](/en/compatibility/platforms/#real-host-acceptance-of-the-unreleased-secrets-features).
 
 ## Dependencies
 
@@ -205,8 +206,11 @@ options and are not audited.
 ## Platform notes
 
 Uses `/usr/sbin/useradd`, `usermod`, `userdel`, `chpasswd` and `getent`, with
-argv only and no shell. Behavior on real hosts of Ubuntu 24.04 / 26.04 and Rocky Linux,
-RHEL and AlmaLinux 9 / 10 is pending real-OS acceptance.
+argv only and no shell. The `password_hash` behavior above was accepted on real
+hosts of Ubuntu 24.04 / 26.04 and Rocky Linux, RHEL and AlmaLinux 9 / 10 on
+2026-10-04. The `useradd` / `usermod` / `userdel` dimensions of this resource
+were **not** exercised on real hosts and remain proven only against the
+scripted fake target.
 
 ## Related
 
