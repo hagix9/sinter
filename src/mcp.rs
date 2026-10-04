@@ -329,7 +329,9 @@ fn redact_bounded(text: &str, needle: &str) -> String {
 /// Policy: an untrusted MCP manifest grants no controller filesystem
 /// authority. `include:` (absolute, relative, nested — all forms) and any
 /// resource `with.source` (file/template, absolute or relative) are
-/// rejected. The check runs on the parsed structure before `load_model`,
+/// rejected, and so is any `content: { secret: … }` reference: a client-supplied
+/// manifest must not be able to ask the gateway to decrypt a file it chooses.
+/// The check runs on the parsed structure before `load_model`,
 /// so no caller-selected controller path is ever opened: the only file
 /// read is the private staged manifest Sinter itself created.
 fn check_mcp_manifest_authority(doc: &Document) -> Result<(), ToolError> {
@@ -349,6 +351,17 @@ fn check_mcp_manifest_authority(doc: &Document) -> Result<(), ToolError> {
                 kind: Some("schema"),
                 message: "MCP manifests may not use \"source:\" — controller-local \
                           file reads are not permitted over MCP"
+                    .to_string(),
+            });
+        }
+        // Any map-valued `content` is a secret reference (or malformed); both
+        // are refused. The reference text is not echoed.
+        if matches!(r.with.get("content"), Some(crate::value::Value::Map(_))) {
+            return Err(ToolError {
+                category: "invalid_manifest",
+                kind: Some("schema"),
+                message: "MCP manifests may not reference encrypted secrets \
+                          (content: { secret: … }) — decryption is not permitted over MCP"
                     .to_string(),
             });
         }

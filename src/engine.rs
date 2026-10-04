@@ -104,6 +104,9 @@ pub struct Engine {
     pub(crate) backup_run_id: Option<String>,
     /// Target-local systemd manager synchronization state.
     pub(crate) manager: crate::manager::ManagerState,
+    /// Where `content: { secret: … }` is opened. `None` (the default) means
+    /// no secret can be opened: such a resource fails, closed.
+    pub(crate) secrets: Option<crate::secret_source::SharedSecrets>,
 }
 
 impl Engine {
@@ -174,7 +177,15 @@ impl Engine {
             opts,
             backup_run_id: None,
             manager: crate::manager::ManagerState::default(),
+            secrets: None,
         })
+    }
+
+    /// Open `content: { secret: … }` through `source`. Without one, a
+    /// resource that names a secret cannot be planned, applied or audited.
+    pub fn with_secrets(mut self, source: crate::secret_source::SharedSecrets) -> Self {
+        self.secrets = Some(source);
+        self
     }
 
     /// Use `id` as the backup run id (one id per CLI invocation, so every

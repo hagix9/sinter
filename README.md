@@ -219,8 +219,10 @@ the resource reference.
 
 Also after v1.1.3 (unreleased): `sinter secrets encrypt | decrypt | list`
 encrypts secret files in the standard age format (recipients or a terminal-only
-passphrase; identities outside the repository by default). It is a standalone
-command; no recipe field uses it yet. See the `sinter secrets` reference.
+passphrase; identities outside the repository by default). A `file` resource can
+take its content from such a secret with `content: { secret: <path> }`
+(`validate` never decrypts; `plan`, `apply` and `audit` do). See the
+`sinter secrets` reference.
 
 A minimal recipe:
 

@@ -27,6 +27,25 @@ All notable changes to Sinter are documented in this file.
   - Passphrases are accepted only on the terminal: never from argv, the
     environment or stdin. Automation uses recipients and identities.
 
+- `file.content: { secret: <path> }` (not part of v1.1.3): a `file` resource can
+  take its bytes from an encrypted secret (age). The reference is a static path
+  relative to the recipe that names it (no absolute path, `..`, interpolation or
+  symbolic link). `validate` checks the reference and that an age file is there,
+  and never decrypts; `plan`, `apply` and `audit` decrypt through the same
+  identity discovery as `sinter secrets decrypt` without `--identity` (on
+  plan/apply/audit `--identity` stays the SSH key): `SINTER_IDENTITY`, the
+  default identity, then a passphrase-protected repository `identity.age`.
+  - A resource that holds a secret is always sensitive (redacted diff, 0600
+    default, redacted report text). An unavailable key fails that resource in
+    `plan` and `apply` and is `ERROR` in `audit` (when the target file exists),
+    never `COMPLIANT`; the cause is printed once on standard error.
+  - Content is exact bytes, published through the unchanged file pipeline; the
+    plaintext is held in buffers Sinter zeroizes, never printed, and
+    `ExecRequest` standard input is zeroized when the request is dropped.
+  - MCP manifest tools refuse `content: { secret: … }`.
+  - Not yet: `user.password_hash`, `secrets list` "used by", real-Linux
+    acceptance.
+
 - `group` and `user` resource types for **local** Linux accounts (not part of
   the v1.1.3 release).
   - `group`: `name`, `state` (`present`/`absent`, default `present`), `gid`,

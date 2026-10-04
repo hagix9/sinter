@@ -4,9 +4,10 @@ description: Encrypt, decrypt and list secret files in the standard age format (
 ---
 
 :::caution[Unreleased]
-`sinter secrets` is on the `main` branch after v1.1.3. It is **not** in the
-v1.1.3 release binary. It is a standalone command: no recipe field, resource,
-`plan`, `apply`, `audit` or MCP tool uses secrets yet.
+`sinter secrets` and the recipe field `file.content: { secret: … }` are on the
+`main` branch after v1.1.3. They are **not** in the v1.1.3 release binary. The
+`file` resource is the only recipe use of a secret so far; `user.password_hash`,
+MCP and `secrets list` "used by" information are not available yet.
 :::
 
 **Purpose:** keep secret files (SSH keys, `.env` files, tokens, password hashes,
@@ -101,6 +102,65 @@ protects *every* secret. Choose a long passphrase (or a generated one), and use
 Model A when that trade-off is not acceptable. A plain unprotected identity for
 automation is created with the standard `age-keygen`; Sinter does not generate
 unprotected identities.
+
+## Using a secret in a recipe
+
+A `file` resource can take its content from an encrypted secret instead of a
+literal or a controller file:
+
+```yaml
+- id: app_key
+  type: file
+  with:
+    path: /home/app/.ssh/id_ed25519
+    content: { secret: secrets/app-id-ed25519.age }
+    owner: app
+    mode: "0600"
+```
+
+- **The reference** is a static path, relative to the recipe file that names it
+  (an included recipe's own directory). No absolute path, no `.` or `..`, no
+  `{{ }}` interpolation and no symbolic link anywhere below that directory. The
+  value must be exactly `{ secret: <path> }`; `content` and `source` stay
+  mutually exclusive. Nothing else accepts a secret reference.
+- **The method is not in the recipe.** The age header says whether the file
+  opens with a passphrase or an identity; Sinter follows it.
+- **A secret-holding resource is always sensitive**: its diff is redacted, a
+  new file defaults to mode `0600`, and diagnostics are redacted, whatever the
+  resource declares.
+- **`validate`** checks that the reference is allowed, and that the file exists
+  and is a well-formed age file. It **never decrypts** and needs no key.
+- **`plan`, `apply` and `audit` decrypt**, because the desired SHA-256 of the
+  file needs the plaintext (a stored hash of a low-entropy secret would be a
+  guessing oracle). The plaintext goes through the unchanged file pipeline to
+  the target; no controller temporary file is written. Content is compared and
+  published as exact bytes (no newline or line-ending change). If the key is not
+  available, `plan` and `apply` fail that resource, and `audit` reports `ERROR`
+  for a file that exists on the target: it never reports `COMPLIANT`, and an
+  apply never writes a partly decrypted file. The report text is redacted (the
+  resource is sensitive); the cause (for example "no identity found" or "the
+  passphrase can only be typed on a terminal") is printed once on standard error
+  as `secret unavailable: <reference>: <cause>`. A target file that does not
+  exist is `DRIFT` in `audit` without opening the secret. `state: absent` needs
+  no key. `apply` opens each secret as it reaches the resource, so run `plan`
+  first: it reports an unavailable key before anything is changed.
+- **Identity discovery** is the order above without `--identity`: on `plan`,
+  `apply` and `audit`, `--identity` already means an **SSH** private key and is
+  never used for secrets. Use `SINTER_IDENTITY` (a path), the default identity
+  file, or a passphrase-protected repository `identity.age`. A protected
+  identity is unlocked once per invocation (a failed unlock is not asked again),
+  on the terminal only. A passphrase-encrypted secret asks for its passphrase on
+  the terminal once per file and invocation; use recipient-encrypted secrets for
+  unattended runs.
+- **MCP** manifest tools refuse any `content: { secret: … }`: a manifest sent by
+  a client cannot make the gateway decrypt a file.
+
+The plaintext is held in memory in buffers that Sinter zeroizes when it is done
+with them, and is sent to the target over the existing SSH channel (or local
+pipe) on standard input; it is not put on a command line or in the environment.
+Copies inside the SSH library or the operating system are outside Sinter's
+control. Sinter does not protect against root on the controller or on the
+target.
 
 ## Output safety
 

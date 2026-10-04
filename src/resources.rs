@@ -11,6 +11,7 @@ use crate::result::*;
 use crate::targetfs::{ObjKind, Stat, Xattrs};
 use crate::value::Value;
 use std::collections::BTreeMap;
+use zeroize::Zeroizing;
 
 /// Metadata desired for a filesystem object.
 #[derive(Debug, Clone)]
@@ -303,11 +304,30 @@ impl Engine {
         res: &FrozenResource,
         vals: &BTreeMap<String, EvalVal>,
     ) -> Result<ContentSpec> {
+        // `content: { secret: <path> }`: the bytes are the decrypted secret.
+        // The resource is sensitive; every failure carries fixed text only.
+        if let Some(sref) = &res.secret {
+            let source = self.secrets.clone().ok_or_else(|| {
+                redact_msg(
+                    &res.id,
+                    "secret unavailable",
+                    "no secret source is configured",
+                )
+            })?;
+            let secret = source
+                .borrow_mut()
+                .open(sref)
+                .map_err(|e| redact_msg(&res.id, "secret unavailable", &e.message))?;
+            return Ok(ContentSpec {
+                bytes: Some(secret.into_zeroizing()),
+                sensitive: true,
+            });
+        }
         let content = ev_str(vals, "content")?;
         let source = ev_str(vals, "source")?;
         match (content, source) {
             (Some((c, sens)), None) => Ok(ContentSpec {
-                bytes: Some(c.into_bytes()),
+                bytes: Some(Zeroizing::new(c.into_bytes())),
                 sensitive: sens,
             }),
             (None, Some((s, sens))) => {
@@ -336,7 +356,7 @@ impl Engine {
                     }
                 })?;
                 Ok(ContentSpec {
-                    bytes: Some(bytes),
+                    bytes: Some(Zeroizing::new(bytes)),
                     sensitive: false,
                 })
             }
@@ -486,7 +506,7 @@ impl Engine {
         res: &FrozenResource,
         path: &str,
         stat: Stat,
-        desired_content: Option<Vec<u8>>,
+        desired_content: Option<Zeroizing<Vec<u8>>>,
         sensitive: bool,
         meta: MetaSpec,
         input: &Option<ManagerInput>,
@@ -511,11 +531,11 @@ impl Engine {
         }
 
         // Resolve the effective desired bytes.
-        let effective: Option<Vec<u8>> = match &desired_content {
+        let effective: Option<Zeroizing<Vec<u8>>> = match &desired_content {
             Some(c) => Some(c.clone()),
             None => {
                 if stat.kind == ObjKind::Absent {
-                    Some(Vec::new())
+                    Some(Zeroizing::new(Vec::new()))
                 } else {
                     None // preserve existing content
                 }
@@ -595,7 +615,7 @@ impl Engine {
                     r.diff = Some(Diff {
                         body: DiffBody::Summary {
                             current,
-                            desired: crate::diff::format_bytes(Some(&desired)),
+                            desired: crate::diff::format_bytes(Some(desired.as_slice())),
                         },
                     });
                 }
@@ -720,7 +740,7 @@ impl Engine {
                     match self.verify_file(
                         res,
                         path,
-                        Some(&bytes),
+                        Some(bytes.as_slice()),
                         enforce_uid,
                         enforce_gid,
                         enforce_mode,
@@ -1693,7 +1713,7 @@ impl Engine {
             res,
             &path,
             stat,
-            Some(rendered.0.into_bytes()),
+            Some(Zeroizing::new(rendered.0.into_bytes())),
             sensitive,
             meta,
             &input,
@@ -5375,10 +5395,21 @@ fn parse_dnf_install_set(text: &str) -> Option<Vec<DnfInstallRow>> {
     )
 }
 
-#[derive(Debug, Clone)]
+/// The desired bytes of a file. They may be a decrypted secret, so they are
+/// zeroized when dropped and never printed.
+#[derive(Clone)]
 pub(crate) struct ContentSpec {
-    pub(crate) bytes: Option<Vec<u8>>,
+    pub(crate) bytes: Option<Zeroizing<Vec<u8>>>,
     pub(crate) sensitive: bool,
+}
+
+impl std::fmt::Debug for ContentSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContentSpec")
+            .field("bytes", &self.bytes.as_ref().map(|_| "[redacted]"))
+            .field("sensitive", &self.sensitive)
+            .finish()
+    }
 }
 
 /// The outcome of a file publication attempt, preserving whether a mutation

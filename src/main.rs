@@ -969,7 +969,10 @@ fn execute(
         fault: None,
         fake_target: None,
     };
-    let mut engine = Engine::new(model, opts)?;
+    // Secrets are opened lazily: a recipe that names none never touches an
+    // identity or the terminal.
+    let mut engine =
+        Engine::new(model, opts)?.with_secrets(sinter::secret_source::process_secrets());
     if let Some(id) = backup_run_id {
         engine = engine.with_backup_run_id(id.to_string());
     }

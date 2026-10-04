@@ -34,6 +34,7 @@ use crate::error::{Result, SinterError};
 use crate::executor::CommandRecord;
 use crate::model::FrozenResource;
 use std::collections::BTreeMap;
+use zeroize::Zeroizing;
 
 /// The compliance outcome of auditing a single resource.
 ///
@@ -463,7 +464,7 @@ fn audit_file_impl(
     res: &FrozenResource,
     item: Option<&EvalVal>,
     sensitive: bool,
-    desired_override: Option<Option<Vec<u8>>>,
+    desired_override: Option<Option<Zeroizing<Vec<u8>>>>,
 ) -> AuditResourceResult {
     let path = match res.path.clone() {
         Some(p) => p,
@@ -550,7 +551,7 @@ fn audit_file_impl(
     }
 
     // Resolve desired content.
-    let desired: Option<Vec<u8>> = match desired_override {
+    let desired: Option<Zeroizing<Vec<u8>>> = match desired_override {
         Some(d) => d,
         None => match obs_or_error(res, sensitive, engine.resolve_content(res, &vals)) {
             Ok(c) => c.bytes,
@@ -716,7 +717,7 @@ fn audit_template(
         res,
         item,
         sensitive,
-        Some(Some(rendered.into_bytes())),
+        Some(Some(Zeroizing::new(rendered.into_bytes()))),
     )
 }
 

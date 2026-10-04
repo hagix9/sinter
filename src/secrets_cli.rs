@@ -62,7 +62,7 @@ const MAX_KEY_FILE_BYTES: usize = 1024 * 1024;
 /// A path (or any operator-supplied text) for display: control characters are
 /// escaped by [`sanitize_line`] and Unicode bidirectional / invisible format
 /// characters, which could make a name look like another, are replaced.
-fn show(path: &Path) -> String {
+pub(crate) fn show(path: &Path) -> String {
     neutralize(&sanitize_line(&path.display().to_string()))
 }
 
@@ -362,7 +362,7 @@ impl Io<'_> {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Follow {
+pub(crate) enum Follow {
     /// A final symlink is refused (sources, repository files).
     No,
     /// A final symlink is followed; the *target* must be a regular file
@@ -373,7 +373,7 @@ enum Follow {
 
 /// Open a regular file, check it is one on the opened descriptor, and read at
 /// most `limit` bytes (more is an error). Never blocks on a FIFO.
-fn read_regular(
+pub(crate) fn read_regular(
     path: &Path,
     follow: Follow,
     limit: usize,
@@ -487,7 +487,7 @@ fn search_chain(start: &Path) -> Vec<PathBuf> {
     }
 }
 
-fn parent_dir(path: &Path) -> PathBuf {
+pub(crate) fn parent_dir(path: &Path) -> PathBuf {
     match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => PathBuf::from("."),
@@ -1035,7 +1035,7 @@ pub fn find_identity(
 /// Load the identity at `path` into `keys`. A plaintext identity is accepted
 /// only from an explicit source and only if private to the user; a
 /// passphrase-protected one is unlocked with a terminal passphrase.
-fn load_identity(
+pub(crate) fn load_identity(
     path: &Path,
     origin: IdentityOrigin,
     keys: &mut Keys,

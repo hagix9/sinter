@@ -171,6 +171,11 @@ impl Secret {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Hand the bytes to another zeroizing owner without an intermediate copy.
+    pub fn into_zeroizing(self) -> Zeroizing<Vec<u8>> {
+        self.0
+    }
 }
 
 impl fmt::Debug for Secret {

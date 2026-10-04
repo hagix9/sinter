@@ -7,17 +7,43 @@ use std::time::{Duration, Instant};
 
 pub const MAX_CAPTURE: usize = 1024 * 1024;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ExecRequest {
     pub program: String,
     pub args: Vec<String>,
     pub cwd: Option<String>,
     pub env: BTreeMap<String, String>,
+    /// Bytes sent to the command's standard input. They may be a decrypted
+    /// secret: zeroized when the request is dropped and never printed.
     pub stdin: Option<Vec<u8>>,
     pub timeout_secs: u64,
     /// When true, the command line (program/args/cwd/env values) may contain
     /// sensitive material. Internal audit records must never store the raw form.
     pub sensitive: bool,
+}
+
+impl Drop for ExecRequest {
+    fn drop(&mut self) {
+        if let Some(b) = self.stdin.as_mut() {
+            zeroize::Zeroize::zeroize(b);
+        }
+    }
+}
+
+impl std::fmt::Debug for ExecRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The command line is shown as the request carries it; standard input
+        // is never shown, only whether it is present.
+        f.debug_struct("ExecRequest")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("cwd", &self.cwd)
+            .field("env", &self.env)
+            .field("stdin", &self.stdin.as_ref().map(|_| "[redacted]"))
+            .field("timeout_secs", &self.timeout_secs)
+            .field("sensitive", &self.sensitive)
+            .finish()
+    }
 }
 
 impl ExecRequest {
@@ -407,7 +433,7 @@ impl LocalExecutor {
 
         if let Some(input) = &req.stdin {
             if let Some(mut si) = child.stdin.take() {
-                let data = input.clone();
+                let data = zeroize::Zeroizing::new(input.clone());
                 std::thread::spawn(move || {
                     let _ = si.write_all(&data);
                 });
@@ -711,7 +737,10 @@ impl SshExecutor {
         // Incremental stdin state for full-duplex progress. Writing all stdin
         // before draining can deadlock once the SSH channel window fills
         // (e.g. large payload to /bin/cat).
-        let stdin_data = req.stdin.clone();
+        let stdin_data = req
+            .stdin
+            .as_ref()
+            .map(|b| zeroize::Zeroizing::new(b.clone()));
         let mut stdin_off = 0usize;
         let mut stdin_eof_sent = false;
 

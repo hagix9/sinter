@@ -20,6 +20,7 @@ pub mod paths;
 pub mod platform;
 pub mod resources;
 pub mod result;
+pub mod secret_source;
 pub mod secrets;
 pub mod secrets_cli;
 pub mod sshconfig;

@@ -45,6 +45,9 @@ pub struct FrozenResource {
     /// Static `name` of a `user` or `group` resource.
     pub account_name: Option<String>,
     pub controller_source: Option<PathBuf>,
+    /// The encrypted secret named by `content: { secret: <path> }`, resolved
+    /// against the recipe that names it. Such a resource is always sensitive.
+    pub secret: Option<crate::secret_source::SecretRef>,
     pub register: Option<String>,
 }
 
@@ -1041,8 +1044,13 @@ fn require_content_type(with: &BTreeMap<String, Value>, ctx: &str) -> Result<()>
     match with.get("content") {
         None | Some(Value::Null) => Ok(()),
         Some(Value::Str(_)) => Ok(()),
+        // `{ secret: <path> }`: only the shape is checked here; the reference
+        // itself is resolved when the model is frozen.
+        Some(Value::Map(_)) => crate::secret_source::content_shape(&with["content"])
+            .map(|_| ())
+            .map_err(|what| SinterError::schema(format!("{}: {}", ctx, what))),
         Some(_) => Err(SinterError::schema(format!(
-            "{}: content must be a string",
+            "{}: content must be a string or {{ secret: <path> }}",
             ctx
         ))),
     }
@@ -1227,6 +1235,7 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
             service_name: None,
             account_name: None,
             controller_source: None,
+            secret: None,
             register: r
                 .with
                 .get("register")
@@ -1265,6 +1274,20 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                     &mut fr,
                     &sensitive_var_names,
                 )?;
+                // `content: { secret: <path> }`: resolve and confine the
+                // reference. Nothing is decrypted while loading.
+                if let Some(content) = r.with.get("content") {
+                    if let Ok(crate::secret_source::ContentShape::Secret(reference)) =
+                        crate::secret_source::content_shape(content)
+                    {
+                        fr.secret = Some(crate::secret_source::resolve_reference(
+                            &r.origin,
+                            reference,
+                            &resource_ctx,
+                            r.sensitive,
+                        )?);
+                    }
+                }
             }
             "directory" => {
                 validate_with_fields(&r.with, DIR_FIELDS, &resource_ctx)?;
@@ -1641,6 +1664,10 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
         // variable referenced by interpolated fields, or a sensitive variable in
         // a template body.
         let mut derived = derived_from_with;
+        // A resource that holds a secret is sensitive whatever it declares.
+        if fr.secret.is_some() {
+            derived = true;
+        }
         if let Some(src) = &fr.controller_source {
             if let Ok(body) = std::fs::read_to_string(src) {
                 for tok in extract_interpolation_exprs(&body) {
