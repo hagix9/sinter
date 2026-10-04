@@ -75,7 +75,24 @@ fn reference_error(sensitive: bool, ctx: &str, what: &str) -> SinterError {
     }
 }
 
-/// Resolve and check a secret reference.
+/// How strictly a secret reference is checked while a recipe loads.
+///
+/// The reference *text* rules are the same in both modes; only the checks that
+/// depend on the state of the referenced file differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ReferenceCheck {
+    /// The file must exist as a regular, link-free, well-formed age file. Used
+    /// by `validate`, `plan`, `apply`, `audit` and MCP, which never see any
+    /// other mode.
+    #[default]
+    Strict,
+    /// Only the reference text is checked. The state of the file is observed
+    /// afterwards by [`observe_reference`] (`sinter secrets list --recipe`,
+    /// which has to be able to report a reference whose file is absent).
+    ReferenceOnly,
+}
+
+/// Resolve and check a secret reference ([`ReferenceCheck::Strict`]).
 ///
 /// The reference must be a static, relative path of plain components, inside
 /// the directory of the recipe that names it: no absolute path, no `.`/`..`,
@@ -88,44 +105,39 @@ pub fn resolve_reference(
     ctx: &str,
     sensitive: bool,
 ) -> Result<SecretRef> {
+    resolve_reference_with(ReferenceCheck::Strict, origin, reference, ctx, sensitive)
+}
+
+/// [`resolve_reference`] in an explicit mode.
+pub(crate) fn resolve_reference_with(
+    mode: ReferenceCheck,
+    origin: &str,
+    reference: &str,
+    ctx: &str,
+    sensitive: bool,
+) -> Result<SecretRef> {
     let bad = |what: &str| reference_error(sensitive, ctx, what);
-    if reference.is_empty() || reference.len() > MAX_REFERENCE_BYTES {
-        return Err(bad("secret reference must be a non-empty path"));
-    }
-    if reference.chars().any(|c| c.is_control()) {
-        return Err(bad("secret reference may not contain control characters"));
-    }
-    // Sinter's interpolation marker is `{{`; no spelling of it is accepted,
-    // escaped or not, so the path is exactly what is written.
-    if reference.contains("{{") || reference.contains("}}") {
-        return Err(bad(
-            "secret reference must be a static path (no interpolation)",
-        ));
-    }
-    if reference.starts_with('/') || reference.contains('\\') {
-        return Err(bad(
-            "secret reference must be relative to the recipe (no absolute path)",
-        ));
-    }
-    if reference
-        .split('/')
-        .any(|c| c.is_empty() || c == "." || c == "..")
-    {
-        return Err(bad(
-            "secret reference may not contain empty, '.' or '..' components",
-        ));
-    }
+    check_reference_text(reference).map_err(bad)?;
     let base = parent_dir(Path::new(origin));
     let path = base.join(reference);
-    check_confined(&base, &path).map_err(bad)?;
+    let found = SecretRef {
+        reference: reference.to_string(),
+        base,
+        path,
+    };
+    if mode == ReferenceCheck::ReferenceOnly {
+        return Ok(found);
+    }
     let shown = || neutralize_reference(reference);
-    let (bytes, _) = read_regular(&path, Follow::No, secrets::max_file_bytes()).map_err(|_| {
-        reference_error(
-            sensitive,
-            ctx,
-            &format!("secret {} is not a readable regular file", shown()),
-        )
-    })?;
+    check_confined(&found.base, &found.path).map_err(bad)?;
+    let (bytes, _) =
+        read_regular(&found.path, Follow::No, secrets::max_file_bytes()).map_err(|_| {
+            reference_error(
+                sensitive,
+                ctx,
+                &format!("secret {} is not a readable regular file", shown()),
+            )
+        })?;
     secrets::inspect(&bytes).map_err(|_| {
         reference_error(
             sensitive,
@@ -133,44 +145,133 @@ pub fn resolve_reference(
             &format!("secret {} is not a valid age file", shown()),
         )
     })?;
-    Ok(SecretRef {
-        reference: reference.to_string(),
-        base,
-        path,
-    })
+    Ok(found)
+}
+
+/// The reference *text* rules: pure, no filesystem access.
+fn check_reference_text(reference: &str) -> std::result::Result<(), &'static str> {
+    if reference.is_empty() || reference.len() > MAX_REFERENCE_BYTES {
+        return Err("secret reference must be a non-empty path");
+    }
+    if reference.chars().any(|c| c.is_control()) {
+        return Err("secret reference may not contain control characters");
+    }
+    // Sinter's interpolation marker is `{{`; no spelling of it is accepted,
+    // escaped or not, so the path is exactly what is written.
+    if reference.contains("{{") || reference.contains("}}") {
+        return Err("secret reference must be a static path (no interpolation)");
+    }
+    if reference.starts_with('/') || reference.contains('\\') {
+        return Err("secret reference must be relative to the recipe (no absolute path)");
+    }
+    if reference
+        .split('/')
+        .any(|c| c.is_empty() || c == "." || c == "..")
+    {
+        return Err("secret reference may not contain empty, '.' or '..' components");
+    }
+    Ok(())
+}
+
+/// What the filesystem says about a structurally valid reference, observed
+/// with `lstat` only (no link is followed, nothing is read).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReferenceState {
+    /// A regular file, reached without passing through a symbolic link.
+    Present,
+    /// Some component is absent (`ENOENT` / `ENOTDIR`).
+    Missing,
+    /// A component is a symbolic link (refused by policy).
+    Link,
+    /// The final component is not a regular file, or an intermediate one is
+    /// not a directory.
+    NotRegular,
+    /// A component could not be inspected for another reason (for example
+    /// permission denied). Never reported as missing.
+    Unreadable,
+}
+
+/// Observe the file a reference resolves to, component by component.
+pub(crate) fn observe_reference(r: &SecretRef) -> ReferenceState {
+    match walk_reference(&r.base, &r.path) {
+        Walk::Present => ReferenceState::Present,
+        Walk::Absent => ReferenceState::Missing,
+        Walk::Link => ReferenceState::Link,
+        Walk::NotFinalFile | Walk::NotDirectory => ReferenceState::NotRegular,
+        Walk::Unreadable => ReferenceState::Unreadable,
+        // Cannot happen for a reference that passed the text rules.
+        Walk::Escapes | Walk::NotPlain => ReferenceState::Unreadable,
+    }
 }
 
 fn neutralize_reference(reference: &str) -> String {
     show(Path::new(reference))
 }
 
-/// Every component below `base` must exist, be a directory (the last: a file)
-/// and not be a symbolic link. This is also what keeps a reference from
-/// escaping `base`.
-fn check_confined(base: &Path, path: &Path) -> std::result::Result<(), &'static str> {
-    let rel = path
-        .strip_prefix(base)
-        .map_err(|_| "secret reference escapes the recipe directory")?;
+/// The outcome of walking a reference below its base directory.
+enum Walk {
+    Present,
+    Absent,
+    Link,
+    NotFinalFile,
+    NotDirectory,
+    Unreadable,
+    Escapes,
+    NotPlain,
+}
+
+/// Inspect every component below `base` with `lstat`, never following a link.
+fn walk_reference(base: &Path, path: &Path) -> Walk {
+    let Ok(rel) = path.strip_prefix(base) else {
+        return Walk::Escapes;
+    };
     let mut cur = base.to_path_buf();
     let comps: Vec<Component<'_>> = rel.components().collect();
     for (i, c) in comps.iter().enumerate() {
         let Component::Normal(name) = c else {
-            return Err("secret reference may only contain plain path components");
+            return Walk::NotPlain;
         };
         cur.push(name);
-        let md = std::fs::symlink_metadata(&cur).map_err(|_| "secret file not found")?;
+        let md = match std::fs::symlink_metadata(&cur) {
+            Ok(md) => md,
+            Err(e) => {
+                return match e.raw_os_error() {
+                    Some(libc::ENOENT) | Some(libc::ENOTDIR) => Walk::Absent,
+                    _ => Walk::Unreadable,
+                }
+            }
+        };
         if md.file_type().is_symlink() {
-            return Err("secret reference may not pass through a symbolic link");
+            return Walk::Link;
         }
         let last = i + 1 == comps.len();
         if last && !md.file_type().is_file() {
-            return Err("secret reference must name a regular file");
+            return Walk::NotFinalFile;
         }
         if !last && !md.file_type().is_dir() {
-            return Err("secret reference passes through something that is not a directory");
+            return Walk::NotDirectory;
         }
     }
-    Ok(())
+    Walk::Present
+}
+
+/// Every component below `base` must exist, be a directory (the last: a file)
+/// and not be a symbolic link. This is also what keeps a reference from
+/// escaping `base`.
+fn check_confined(base: &Path, path: &Path) -> std::result::Result<(), &'static str> {
+    match walk_reference(base, path) {
+        Walk::Present => Ok(()),
+        Walk::Escapes => Err("secret reference escapes the recipe directory"),
+        Walk::NotPlain => Err("secret reference may only contain plain path components"),
+        // Any component that cannot be reached is reported as not found, as
+        // before the typed walk existed.
+        Walk::Absent | Walk::Unreadable => Err("secret file not found"),
+        Walk::Link => Err("secret reference may not pass through a symbolic link"),
+        Walk::NotFinalFile => Err("secret reference must name a regular file"),
+        Walk::NotDirectory => {
+            Err("secret reference passes through something that is not a directory")
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -426,6 +527,124 @@ mod tests {
             ]),
         ] {
             assert!(content_shape(&bad).is_err());
+        }
+    }
+
+    /// A directory with a recipe file and one well-formed age file.
+    fn tree() -> (tempfile::TempDir, String) {
+        let d = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(d.path()).unwrap();
+        std::fs::create_dir_all(base.join("s")).unwrap();
+        let id = secrets::generate_identity();
+        let ct = secrets::encrypt_to_recipients(b"x", std::slice::from_ref(&id.recipient)).unwrap();
+        std::fs::write(base.join("s/ok.age"), ct).unwrap();
+        std::fs::write(base.join("s/plain.age"), b"text").unwrap();
+        std::os::unix::fs::symlink(base.join("s/ok.age"), base.join("s/link.age")).unwrap();
+        let origin = base.join("r.yaml").display().to_string();
+        (d, origin)
+    }
+
+    fn load(mode: ReferenceCheck, origin: &str, r: &str) -> Result<SecretRef> {
+        resolve_reference_with(mode, origin, r, "res", false)
+    }
+
+    #[test]
+    fn strict_is_the_default_and_the_public_function_is_strict() {
+        assert_eq!(ReferenceCheck::default(), ReferenceCheck::Strict);
+        let (_d, origin) = tree();
+        assert!(resolve_reference(&origin, "s/ok.age", "res", false).is_ok());
+        for gone in [
+            "s/gone.age",
+            "s/plain.age",
+            "s/link.age",
+            "s",
+            "nodir/x.age",
+        ] {
+            assert!(
+                resolve_reference(&origin, gone, "res", false).is_err(),
+                "{gone}"
+            );
+        }
+    }
+
+    #[test]
+    fn reference_only_defers_exactly_the_filesystem_checks() {
+        let (_d, origin) = tree();
+        // state of the file: accepted without looking
+        for state_only in [
+            "s/gone.age",
+            "s/plain.age",
+            "s/link.age",
+            "s",
+            "nodir/x.age",
+        ] {
+            let strict = load(ReferenceCheck::Strict, &origin, state_only);
+            let loose = load(ReferenceCheck::ReferenceOnly, &origin, state_only);
+            assert!(strict.is_err(), "{state_only}");
+            let r = loose.unwrap_or_else(|e| panic!("{state_only}: {}", e.message));
+            assert_eq!(r.reference, state_only);
+        }
+        // the text of the reference: the same error, byte for byte, in both
+        for text in [
+            "",
+            "/abs",
+            "../x",
+            "a/../b",
+            "./a",
+            "a//b",
+            "a/",
+            "a\\b",
+            "a/{{ v }}",
+            "a/\tb",
+        ] {
+            let a = load(ReferenceCheck::Strict, &origin, text).unwrap_err();
+            let b = load(ReferenceCheck::ReferenceOnly, &origin, text).unwrap_err();
+            assert_eq!(a.message, b.message, "{text:?}");
+        }
+        let long = "a".repeat(MAX_REFERENCE_BYTES + 1);
+        assert_eq!(
+            load(ReferenceCheck::Strict, &origin, &long)
+                .unwrap_err()
+                .message,
+            load(ReferenceCheck::ReferenceOnly, &origin, &long)
+                .unwrap_err()
+                .message
+        );
+        // a good reference resolves to the same value in both
+        assert_eq!(
+            load(ReferenceCheck::Strict, &origin, "s/ok.age").unwrap(),
+            load(ReferenceCheck::ReferenceOnly, &origin, "s/ok.age").unwrap()
+        );
+    }
+
+    #[test]
+    fn observation_distinguishes_absent_from_refused() {
+        let (d, origin) = tree();
+        let base = std::fs::canonicalize(d.path()).unwrap();
+        std::fs::create_dir_all(base.join("sealed")).unwrap();
+        std::fs::write(base.join("sealed/x.age"), b"x").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let obs =
+            |r: &str| observe_reference(&load(ReferenceCheck::ReferenceOnly, &origin, r).unwrap());
+        assert_eq!(obs("s/ok.age"), ReferenceState::Present);
+        assert_eq!(obs("s/plain.age"), ReferenceState::Present);
+        assert_eq!(obs("s/gone.age"), ReferenceState::Missing);
+        assert_eq!(obs("nodir/x.age"), ReferenceState::Missing);
+        assert_eq!(obs("s/link.age"), ReferenceState::Link);
+        assert_eq!(obs("s"), ReferenceState::NotRegular);
+        assert_eq!(obs("s/ok.age/inside"), ReferenceState::NotRegular);
+        // restored even if an assertion below fails
+        struct Restore(std::path::PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+        let _restore = Restore(base.join("sealed"));
+        std::fs::set_permissions(base.join("sealed"), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+        if unsafe { libc::geteuid() } != 0 {
+            assert_eq!(obs("sealed/x.age"), ReferenceState::Unreadable);
         }
     }
 }

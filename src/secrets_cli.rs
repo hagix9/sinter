@@ -25,8 +25,10 @@
 //! operator-supplied paths; library strings, recipients and secret material
 //! are never included.
 
+use crate::bundle::load_source_with;
 use crate::diff::sanitize_line;
 use crate::error::{Result, SinterError};
+use crate::secret_source::{observe_reference, ReferenceCheck, ReferenceState, SecretRef};
 use crate::secrets::{self, Keys, Method, Passphrase, Recipient, SecretError, MAX_SECRET_BYTES};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -1292,7 +1294,254 @@ fn walk(
     }
 }
 
+/// One resource, in one of the recipes given with `--recipe`, that names a
+/// secret. Labels only: nothing derived from a `with` value.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UsedBy {
+    /// The `--recipe` argument as the operator wrote it.
+    pub recipe: String,
+    /// `type:id` of the resource.
+    pub resource: String,
+}
+
+/// A secret reference found in an analysed recipe.
+struct Reference {
+    used_by: UsedBy,
+    secret: SecretRef,
+    /// Where to show it: the recipe argument's directory joined with the
+    /// reference when the declaring file lies below it, else the resolved path.
+    shown: PathBuf,
+}
+
+/// The `--recipe` files, all structurally analysed (never a partial set).
+struct Analysis {
+    labels: Vec<String>,
+    /// Distinct recipe files (`a.yaml` and `./a.yaml` are one).
+    distinct: usize,
+    references: Vec<Reference>,
+}
+
+/// `(device, inode)` of a regular file: the identity two spellings of the same
+/// path share. `None` when it cannot be established (not a regular file, no
+/// metadata, or a filesystem that reports inode 0).
+type FileId = Option<(u64, u64)>;
+
+fn file_id(path: &Path) -> FileId {
+    let md = std::fs::symlink_metadata(path).ok()?;
+    if !md.file_type().is_file() || md.ino() == 0 {
+        return None;
+    }
+    Some((md.dev(), md.ino()))
+}
+
+/// The directory part of the operator's recipe argument, as written.
+fn shown_base(arg: &Path, secret: &SecretRef) -> PathBuf {
+    let dir = parent_dir(arg);
+    if let Ok(canon) = std::fs::canonicalize(&dir) {
+        if let Ok(rel) = secret.base.strip_prefix(&canon) {
+            return dir.join(rel).join(&secret.reference);
+        }
+    }
+    secret.path.clone()
+}
+
+/// Load every `--recipe` through the authoritative loader with only the
+/// filesystem state of secret references deferred. Any structural error in any
+/// recipe makes the whole analysis fail: every failing recipe is reported and
+/// `None` is returned, so no inventory (and no "not referenced" conclusion)
+/// is ever built from a partial recipe set.
+fn analyze_recipes(recipes: &[PathBuf], io: &mut Io<'_>) -> Option<Analysis> {
+    let mut labels = Vec::new();
+    let mut files: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut references = Vec::new();
+    let mut failed = false;
+    for arg in recipes {
+        let label = show(arg);
+        files.insert(std::fs::canonicalize(arg).unwrap_or_else(|_| arg.clone()));
+        if !labels.contains(&label) {
+            labels.push(label.clone());
+        }
+        match load_source_with(arg, ReferenceCheck::ReferenceOnly) {
+            Ok(source) => {
+                for unit in source.units() {
+                    for fr in &unit.model.resources {
+                        if let Some(secret) = &fr.secret {
+                            references.push(Reference {
+                                used_by: UsedBy {
+                                    recipe: label.clone(),
+                                    resource: neutralize(&sanitize_line(&format!(
+                                        "{}:{}",
+                                        fr.type_, fr.id
+                                    ))),
+                                },
+                                shown: shown_base(arg, secret),
+                                secret: secret.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                failed = true;
+                io.note(&format!("--recipe {}: {}", label, e.message));
+            }
+        }
+    }
+    if failed {
+        io.note("no inventory was produced: every --recipe must load without a structural error");
+        return None;
+    }
+    Some(Analysis {
+        labels,
+        distinct: files.len(),
+        references,
+    })
+}
+
+/// One line of the inventory with the recipe-derived facts attached.
+struct Row {
+    path: PathBuf,
+    entry: ListEntry,
+    id: FileId,
+    /// Canonical parent joined with the file name (no link in the last part).
+    canon: Option<PathBuf>,
+    used_by: std::collections::BTreeSet<UsedBy>,
+}
+
+fn canon_of(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?;
+    Some(std::fs::canonicalize(parent_dir(path)).ok()?.join(name))
+}
+
+/// A file that Sinter's identity discovery could pick: the very file
+/// `<its directory>/identity.age` (compared by file identity, so a different
+/// spelling or case on a case-insensitive filesystem is recognised too).
+fn possible_identity_file(row: &Row) -> bool {
+    if row
+        .path
+        .file_name()
+        .is_some_and(|n| n == REPO_IDENTITY_FILE)
+    {
+        return true;
+    }
+    let Some(id) = row.id else { return false };
+    file_id(&parent_dir(&row.path).join(REPO_IDENTITY_FILE)) == Some(id)
+}
+
+fn missing_entry(path: &Path, status: &'static str, note: &'static str) -> ListEntry {
+    ListEntry {
+        path: show(path),
+        status,
+        method: None,
+        recipients: None,
+        armored: false,
+        note: Some(note),
+    }
+}
+
+/// Attach the references to the listed files and add the referenced files that
+/// were not listed (or are absent).
+/// Returns `true` when some existing referenced file could not be matched
+/// reliably (no file identity and no path match): "not referenced"
+/// conclusions are then withheld for the whole listing.
+fn merge_references(
+    rows: &mut Vec<Row>,
+    refs: &[Reference],
+    budget: &mut u64,
+    truncated: &mut bool,
+) -> bool {
+    let mut uncertain = false;
+    for r in refs {
+        let state = observe_reference(&r.secret);
+        let id = if state == ReferenceState::Present {
+            file_id(&r.secret.path)
+        } else {
+            None
+        };
+        let lexical = &r.secret.path;
+        if state == ReferenceState::Unreadable {
+            uncertain = true;
+        }
+        // Every listed name of the same file (hard links, other spellings)
+        // is referenced, not only the first one found.
+        let mut matched = false;
+        for row in rows.iter_mut() {
+            if (id.is_some() && row.id == id) || row.canon.as_deref() == Some(lexical.as_path()) {
+                row.used_by.insert(r.used_by.clone());
+                matched = true;
+            }
+        }
+        if matched {
+            continue;
+        }
+        // A reference that could not be inspected (permission denied) or
+        // whose identity is unknown may still be the very file a listed name
+        // points to (a hard link): withhold every "not referenced" conclusion.
+        if (state == ReferenceState::Present && id.is_none()) || state == ReferenceState::Unreadable
+        {
+            uncertain = true;
+        }
+        let entry = match state {
+            ReferenceState::Present => {
+                let size = std::fs::symlink_metadata(&r.secret.path)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                if size > *budget {
+                    *truncated = true;
+                    let mut e = classify_unread(&r.shown);
+                    e.note = Some("skipped: read budget reached");
+                    e
+                } else {
+                    *budget -= size;
+                    let mut e = classify(&r.secret.path);
+                    e.path = show(&r.shown);
+                    e
+                }
+            }
+            ReferenceState::Missing => missing_entry(
+                &r.shown,
+                "missing",
+                "referenced by a recipe, but the file does not exist",
+            ),
+            ReferenceState::Link => {
+                missing_entry(&r.shown, "unreadable", "symbolic link not followed")
+            }
+            ReferenceState::NotRegular => {
+                missing_entry(&r.shown, "unreadable", "not a regular file")
+            }
+            ReferenceState::Unreadable => {
+                missing_entry(&r.shown, "unreadable", "cannot be inspected")
+            }
+        };
+        let mut used_by = std::collections::BTreeSet::new();
+        used_by.insert(r.used_by.clone());
+        rows.push(Row {
+            path: r.shown.clone(),
+            entry,
+            id,
+            canon: Some(lexical.clone()),
+            used_by,
+        });
+    }
+    uncertain
+}
+
+/// `true`/`false` only where a conclusion is justified, else `None`: a parsed
+/// age file that is not a possible identity file, whose file identity is known.
+fn not_referenced(row: &Row, uncertain: bool) -> Option<bool> {
+    if uncertain || row.entry.status != "ok" || row.id.is_none() || possible_identity_file(row) {
+        return None;
+    }
+    Some(row.used_by.is_empty())
+}
+
 pub fn list(args: &ListArgs, io: &mut Io<'_>) -> Result<u8> {
+    list_for_recipes(args, &[], io)
+}
+
+/// `secrets list`, optionally with recipe-derived facts (`--recipe`). Without
+/// recipes the output is exactly the Phase B listing.
+pub fn list_for_recipes(args: &ListArgs, recipes: &[PathBuf], io: &mut Io<'_>) -> Result<u8> {
     let roots: Vec<PathBuf> = if args.paths.is_empty() {
         vec![PathBuf::from(".")]
     } else {
@@ -1312,12 +1561,22 @@ pub fn list(args: &ListArgs, io: &mut Io<'_>) -> Result<u8> {
         }
     }
     files.extend(explicit.iter().cloned());
+    // Analyse the recipes before anything is classified or printed: a failure
+    // must leave stdout empty.
+    let analysis = if recipes.is_empty() {
+        None
+    } else {
+        match analyze_recipes(recipes, io) {
+            Some(a) => Some(a),
+            None => return Ok(2),
+        }
+    };
     let mut budget = LIST_MAX_BYTES;
-    let entries: Vec<ListEntry> = files
+    let mut rows: Vec<Row> = files
         .iter()
         .map(|p| {
             let size = std::fs::symlink_metadata(p).map(|m| m.len()).unwrap_or(0);
-            if size > budget {
+            let entry = if size > budget {
                 truncated = true;
                 let mut e = classify_unread(p);
                 e.note = Some("skipped: read budget reached");
@@ -1325,24 +1584,51 @@ pub fn list(args: &ListArgs, io: &mut Io<'_>) -> Result<u8> {
             } else {
                 budget -= size;
                 classify(p)
+            };
+            let analysed = analysis.is_some();
+            Row {
+                path: p.clone(),
+                entry,
+                id: if analysed { file_id(p) } else { None },
+                canon: if analysed { canon_of(p) } else { None },
+                used_by: BTreeSet::new(),
             }
         })
         .collect();
+    let mut uncertain = false;
+    if let Some(a) = &analysis {
+        uncertain = merge_references(&mut rows, &a.references, &mut budget, &mut truncated);
+        rows.sort_by(|x, y| x.path.cmp(&y.path));
+    }
     if args.json {
-        let docs: Vec<serde_json::Value> = entries
+        let docs: Vec<serde_json::Value> = rows
             .iter()
-            .map(|e| {
-                serde_json::json!({
+            .map(|r| {
+                let e = &r.entry;
+                let mut v = serde_json::json!({
                     "path": e.path,
                     "status": e.status,
                     "method": e.method,
                     "recipients": e.recipients,
                     "armored": e.armored,
                     "note": e.note,
-                })
+                });
+                if analysis.is_some() {
+                    v["referenced_by"] = r
+                        .used_by
+                        .iter()
+                        .map(|u| serde_json::json!({ "recipe": u.recipe, "resource": u.resource }))
+                        .collect();
+                    v["not_referenced"] = serde_json::json!(not_referenced(r, uncertain));
+                    v["possible_identity_file"] = serde_json::json!(possible_identity_file(r));
+                }
+                v
             })
             .collect();
-        let doc = serde_json::json!({ "command": "secrets list", "secrets": docs, "truncated": truncated });
+        let mut doc = serde_json::json!({ "command": "secrets list", "secrets": docs, "truncated": truncated });
+        if let Some(a) = &analysis {
+            doc["recipes"] = serde_json::json!(a.labels);
+        }
         writeln!(
             io.stdout,
             "{}",
@@ -1352,10 +1638,34 @@ pub fn list(args: &ListArgs, io: &mut Io<'_>) -> Result<u8> {
     } else {
         let w = |s: &str, n: usize| format!("{:<n$}", s, n = n);
         let mut text = String::new();
-        if entries.is_empty() {
+        if rows.is_empty() {
             text.push_str("no age files found\n");
         } else {
-            for e in &entries {
+            for r in &rows {
+                let e = &r.entry;
+                let mut tail = e.note.map(|n| format!("  ({})", n)).unwrap_or_default();
+                if let Some(a) = &analysis {
+                    if !r.used_by.is_empty() {
+                        let list: Vec<String> = r
+                            .used_by
+                            .iter()
+                            .map(|u| format!("{} in {}", u.resource, u.recipe))
+                            .collect();
+                        tail.push_str(&format!("  [referenced by {}]", list.join(", ")));
+                    }
+                    if not_referenced(r, uncertain) == Some(true) {
+                        tail.push_str(&format!(
+                            "  (not referenced by the {} recipe(s) given)",
+                            a.distinct
+                        ));
+                    }
+                    if possible_identity_file(r) {
+                        tail.push_str(
+                            "  (possible Sinter identity file: identity discovery uses this name; \
+                             not a recipe secret)",
+                        );
+                    }
+                }
                 text.push_str(&format!(
                     "{}{}{}{}{}\n",
                     w(e.status, 12),
@@ -1367,13 +1677,21 @@ pub fn list(args: &ListArgs, io: &mut Io<'_>) -> Result<u8> {
                         12
                     ),
                     e.path,
-                    e.note.map(|n| format!("  ({})", n)).unwrap_or_default()
+                    tail
                 ));
             }
             text.insert_str(0, "STATUS      METHOD      RECIPIENTS  PATH\n");
         }
         if truncated {
             text.push_str("(listing truncated: depth or file-count limit reached)\n");
+        }
+        if let Some(a) = &analysis {
+            text.push_str(&format!(
+                "recipe analysis covers only the {} recipe(s) given ({}); references from other \
+                 recipes are not considered\n",
+                a.distinct,
+                a.labels.join(", ")
+            ));
         }
         io.stdout
             .write_all(text.as_bytes())

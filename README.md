@@ -222,7 +222,9 @@ encrypts secret files in the standard age format (recipients or a terminal-only
 passphrase; identities outside the repository by default). A `file` resource can
 take its content from such a secret with `content: { secret: <path> }`, and a
 `user` can take its password hash from one with `password_hash: { secret: <path> }`
-(`validate` never decrypts; `plan`, `apply` and `audit` do; the hash needs `--sudo`). See the
+(`validate` never decrypts; `plan`, `apply` and `audit` do; the hash needs `--sudo`).
+`sinter secrets list --recipe FILE` shows which recipes' resources use each secret
+and which listed secrets none of those recipes reference. See the
 `sinter secrets` reference.
 
 A minimal recipe:

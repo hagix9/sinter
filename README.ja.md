@@ -225,6 +225,8 @@ v1.1.3より後（未リリース、v1.1.3のバイナリには含まれませ�
 `content: { secret: <path> }`でそのシークレットから内容を取れ、`user`は
 `password_hash: { secret: <path> }`でパスワードハッシュを取れます
 （`validate`は復号せず、`plan` / `apply` / `audit`が復号します。ハッシュには`--sudo`が必要です）。
+`sinter secrets list --recipe FILE`は、指定したrecipeのどのリソースが各シークレットを使うか、
+また指定したrecipeのどれからも参照されていない一覧上のシークレットを示します。
 `sinter secrets`リファレンスを参照してください。
 
 最小構成のrecipe例:

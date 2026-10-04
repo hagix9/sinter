@@ -1804,6 +1804,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_password_spec_never_prints_its_hash() {
+        let spec = PasswordSpec {
+            hash: Zeroizing::new("$6$salt$CANARY-HASH-BODY".to_string()),
+        };
+        for text in [
+            format!("{:?}", spec),
+            format!("{:#?}", spec),
+            format!("{:?}", Some(&spec)),
+        ] {
+            assert!(!text.contains("CANARY"), "{text}");
+            assert!(!text.contains("$6$"), "{text}");
+        }
+    }
+
+    #[test]
     fn names() {
         for ok in ["app", "_svc", "a-b_c9", "x", "a".repeat(32).as_str()] {
             assert!(valid_account_name(ok), "{}", ok);

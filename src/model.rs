@@ -104,6 +104,15 @@ impl Model {
 
 /// Load and expand the recipe starting at `entry`.
 pub fn load_model(entry: &Path) -> Result<Model> {
+    load_model_with(entry, crate::secret_source::ReferenceCheck::Strict)
+}
+
+/// [`load_model`] with an explicit secret-reference mode. Every caller except
+/// `secrets list --recipe` uses the strict one through [`load_model`].
+pub(crate) fn load_model_with(
+    entry: &Path,
+    refs: crate::secret_source::ReferenceCheck,
+) -> Result<Model> {
     // Pre-pass: collect every sensitive variable name across the whole
     // include graph before any resource is expanded. Sensitivity of an
     // expression must not depend on include ordering — a resource in an
@@ -125,6 +134,7 @@ pub fn load_model(entry: &Path) -> Result<Model> {
         backups: Vec::new(),
         entry: None,
         targets: None,
+        refs,
     };
     state.load(entry)?;
     freeze(state, entry)
@@ -182,6 +192,8 @@ struct LoadState {
     entry: Option<PathBuf>,
     /// `targets` of the entry recipe.
     targets: Option<TargetSelector>,
+    /// How strictly secret references are checked (strict unless listing).
+    refs: crate::secret_source::ReferenceCheck,
 }
 
 /// A resource declaration as written, retained for declaration-level
@@ -1280,7 +1292,8 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                     if let Ok(crate::secret_source::ContentShape::Secret(reference)) =
                         crate::secret_source::content_shape(content)
                     {
-                        fr.secret = Some(crate::secret_source::resolve_reference(
+                        fr.secret = Some(crate::secret_source::resolve_reference_with(
+                            state.refs,
                             &r.origin,
                             reference,
                             &resource_ctx,
@@ -1551,7 +1564,8 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                     if let Ok(crate::secret_source::ContentShape::Secret(reference)) =
                         crate::secret_source::content_shape(ph)
                     {
-                        fr.secret = Some(crate::secret_source::resolve_reference(
+                        fr.secret = Some(crate::secret_source::resolve_reference_with(
+                            state.refs,
                             &r.origin,
                             reference,
                             &resource_ctx,

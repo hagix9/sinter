@@ -5740,6 +5740,22 @@ mod package_tests {
     use super::*;
 
     #[test]
+    fn a_content_spec_never_prints_its_bytes() {
+        let spec = ContentSpec {
+            bytes: Some(Zeroizing::new(b"CANARY-CONTENT-BYTES".to_vec())),
+            sensitive: true,
+        };
+        for text in [
+            format!("{:?}", spec),
+            format!("{:#?}", spec),
+            format!("{:?}", vec![&spec]),
+        ] {
+            assert!(!text.contains("CANARY"), "{text}");
+            assert!(!text.contains("67, 65, 78"), "no byte dump either: {text}");
+        }
+    }
+
+    #[test]
     fn clean_states() {
         assert_eq!(
             classify_dpkg_status("install ok installed").unwrap(),

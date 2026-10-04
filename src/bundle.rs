@@ -17,7 +17,8 @@
 
 use crate::document::{only_fields, parse_file_value, valid_name};
 use crate::error::{Result, SinterError};
-use crate::model::{load_model, Model};
+use crate::model::{load_model_with, Model};
+use crate::secret_source::ReferenceCheck;
 use crate::value::Value;
 use std::path::{Path, PathBuf};
 
@@ -67,9 +68,15 @@ fn is_bundle_value(v: &Value) -> bool {
 
 /// Load a recipe or bundle, validating everything statically.
 pub fn load_source(path: &Path) -> Result<Source> {
+    load_source_with(path, ReferenceCheck::Strict)
+}
+
+/// [`load_source`] with an explicit secret-reference mode (strict for every
+/// caller except `secrets list --recipe`).
+pub(crate) fn load_source_with(path: &Path, refs: ReferenceCheck) -> Result<Source> {
     let value = parse_file_value(path)?;
     if !is_bundle_value(&value) {
-        let model = load_model(path)?;
+        let model = load_model_with(path, refs)?;
         return Ok(Source::Recipe(RecipeUnit {
             label: stem(path),
             path: path.to_path_buf(),
@@ -138,7 +145,7 @@ pub fn load_source(path: &Path) -> Result<Source> {
                 p.display()
             )));
         }
-        let model = load_model(&canon)?;
+        let model = load_model_with(&canon, refs)?;
         recipes.push(RecipeUnit {
             label: stem(&p),
             path: p,

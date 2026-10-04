@@ -7,8 +7,8 @@ description: Encrypt, decrypt and list secret files in the standard age format (
 `sinter secrets` and the recipe field `file.content: { secret: … }` are on the
 `main` branch after v1.1.3. They are **not** in the v1.1.3 release binary. The
 `file` resource (`content`) and the `user` resource (`password_hash`) are the
-only recipe uses of a secret so far; MCP use and `secrets list` "used by"
-information are not available yet.
+only recipe uses of a secret so far; MCP use is not available. `secrets list
+--recipe` ("used by", "missing", "not referenced") is new on `main` as well.
 :::
 
 **Purpose:** keep secret files (SSH keys, `.env` files, tokens, password hashes,
@@ -21,7 +21,7 @@ files: they can be recovered without Sinter by any age-compatible tool.
 ```
 sinter secrets encrypt [--passphrase | -r RECIPIENT ...] [-o OUT] [--force] <FILE | ->
 sinter secrets decrypt [-i IDENTITY] <FILE>
-sinter secrets list [--format text|json] [PATH ...]
+sinter secrets list [--format text|json] [--recipe FILE ...] [PATH ...]
 ```
 
 - **encrypt** writes `FILE.age` (or `-o OUT`; `-` reads stdin and then needs
@@ -38,6 +38,44 @@ sinter secrets list [--format text|json] [PATH ...]
   name. The recipient count does not include the decoy stanza the age format
   adds on purpose, and age does not say *which* recipients; Sinter never claims
   a "recovery recipient".
+  - **`--recipe FILE`** (repeatable; a recipe or a bundle) adds what the
+    recipes you name say about the files. Nothing is discovered: only the
+    recipes you give are read, and a recipe is never searched for. Each is
+    loaded by the same loader as `validate`, so its structure, fields,
+    includes and the *text* of every secret reference are checked exactly as
+    there; only the state of the referenced file is observed afterwards
+    instead of required. The output adds, for each secret, **referenced by**
+    (`type:id` and the recipe argument as you wrote it, never a value from the
+    resource), and these conclusions:
+    - `missing` status: a valid reference whose file is absent. It does not
+      make the command fail (exit 0), and `validate` still rejects the same
+      recipe. A reference that passes through a symbolic link, names a
+      directory or other non-regular file, or cannot be inspected (for example
+      permission denied) is shown as `unreadable` with a note, a file that is
+      not age is `not-age`/`invalid`; none of these is called `missing`.
+    - **not referenced by the N recipe(s) given**: an age file in the listed
+      paths that none of the recipes you named references. This is a statement
+      about those recipes only, **not** that the file is unused or safe to
+      delete: another recipe, another repository, or a person may use it.
+      Files are matched by file identity (device and inode), so another
+      spelling, a hard link, or a different letter case on a case-insensitive
+      filesystem still counts as referenced; if a match cannot be established
+      the conclusion is withheld. Resources that are conditional
+      (`when`) or `state: absent` still count as references.
+    - A file Sinter's identity discovery could pick (`identity.age`) gets a
+      note instead of the "not referenced" conclusion; it is never offered as
+      unreferenced. Only a file named `identity.age` (or the very same file
+      under another name in that directory) is recognised; an identity kept
+      elsewhere or under another name, for example one named by `--identity` or
+      `SINTER_IDENTITY`, is not, so do not treat the listing as a deletion list.
+      If a reference cannot be inspected (for example permission denied), no
+      "not referenced" conclusion is made at all.
+    If **any** recipe fails to load (invalid YAML, an unknown field, a bad
+    reference, a bad include, an unreadable file), the command exits 2, names
+    every failing recipe on standard error and prints **no** listing and no
+    conclusion. `--recipe` does not change which paths are listed, and it
+    never decrypts, prompts, or looks for an identity. Without `--recipe` the
+    output is unchanged.
 
 ## Encryption methods
 

@@ -46,6 +46,24 @@ All notable changes to Sinter are documented in this file.
   - Not yet: `user.password_hash`, `secrets list` "used by", real-Linux
     acceptance.
 
+- `sinter secrets list --recipe FILE` (repeatable; not part of v1.1.3): adds
+  what the recipes you name say about the listed secrets, and still never
+  decrypts, prompts or looks for an identity.
+  - Each recipe (or bundle) is loaded by the `validate` loader; only the state
+    of the referenced file is observed instead of required. Output adds
+    `referenced_by` (`type:id` and the recipe argument as written), the
+    `missing` status (a valid reference whose file is absent; exit 0, while
+    `validate` still rejects it) and a "not referenced by the N recipe(s) given"
+    conclusion that is withheld unless every recipe loaded, the file is a parsed
+    age file whose identity could be matched (device and inode), and it is not a
+    possible `identity.age`. Links, directories, unreadable and non-age
+    references are never called `missing`.
+  - Any recipe that fails to load makes the command exit 2 with every failing
+    recipe named on standard error and nothing on standard output. Without
+    `--recipe` the output is exactly as before.
+  - Also in this change: a canary-in-all-outputs test suite across the secrets
+    surfaces, `Debug` hygiene tests for secret carriers, and threat-model tests.
+
 - `user.password_hash: { secret: <path> }` (not part of v1.1.3): set a local
   user's password from a pre-generated hash kept as an encrypted secret. There
   is no plaintext `password` field.

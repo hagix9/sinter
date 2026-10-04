@@ -111,6 +111,11 @@ struct SecretsListArgs {
     /// Output format: text or json.
     #[arg(long, default_value = "text")]
     format: String,
+    /// Also report which resources of this recipe (or bundle) use each
+    /// secret, and which listed secrets it does not reference. Repeatable;
+    /// only the recipes named are considered. Never decrypts.
+    #[arg(long, value_name = "FILE")]
+    recipe: Vec<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -264,11 +269,12 @@ fn secrets_command(a: SecretsArgs) -> Result<u8, SinterError> {
         ),
         SecretsCommand::List(l) => {
             let json = matches!(parse_format(&l.format)?, OutputFormat::Json);
-            sc::list(
+            sc::list_for_recipes(
                 &sc::ListArgs {
                     paths: l.paths,
                     json,
                 },
+                &l.recipe,
                 &mut io,
             )
         }
