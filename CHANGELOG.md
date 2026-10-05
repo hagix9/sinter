@@ -2,11 +2,48 @@
 
 All notable changes to Sinter are documented in this file.
 
-## [Unreleased]
+## [1.2.0] - 2026-10-06
+
+Local account management (`group` and `user` resources), encrypted secrets, and
+fewer remote commands per run on some targets. Recipes, command lines and
+`--format json` documents that do not use the new features are unchanged: the
+additions are new resource types, a new command group (`sinter secrets`), new
+optional fields, and internal changes to how a run observes the target. This
+release is a new capability release, not only a performance release.
 
 ### Added
 
-- `sinter secrets encrypt | decrypt | list` (not part of v1.1.3): encrypt and
+- `group` and `user` resource types for **local** Linux accounts.
+  - `group`: `name`, `state` (`present`/`absent`, default `present`), `gid`,
+    `system` (create-time only).
+  - `user`: `name`, `state`, `uid`, `group` (primary, by name), `groups`
+    (supplementary, by name, **additive**), `shell`, `home` (record only),
+    `create_home` and `system` (create-time only).
+  - Only declared dimensions are managed and audited. Observation uses
+    `getent -s files`; an account that only another identity source (NSS)
+    provides is an error, never a create. Every command is a fixed executable
+    with explicit argv (`groupadd`, `groupdel`, `useradd`, `usermod`,
+    `userdel`), never a shell.
+  - An existing account is never renumbered (a `uid`/`gid` mismatch is
+    refused in `plan`/`apply` and reported as `DRIFT` by `audit`) or renamed,
+    and its home is never moved. Supplementary membership is never removed.
+    `absent` runs `userdel`/`groupdel` without `-r`/`-f`; the home directory
+    and mail spool are kept. Refused for root/uid 0, the account this run
+    executes as, the session account, and a group that is some user's primary
+    group.
+  - Dependencies stay explicit. In `plan`, a `user` whose group is created by a
+    `group` listed in its `depends_on`, and a `file`/`directory`/`template`
+    whose `owner`/`group` names an account created by a `user`/`group` listed
+    in its `depends_on`, are deferred (unknown until apply) instead of failing
+    the plan. Without `depends_on` the plan error for an unknown account is
+    unchanged.
+  - Unit tests use a scripted fake target. A real-host `group` → `user` →
+    `directory` → `file` lifecycle scenario (create, converge, update, drift and
+    audit, refusals, removal) on the eight supported targets is part of the
+    v1.2.0 release acceptance; its result is recorded in the acceptance
+    evidence published with the release.
+
+- `sinter secrets encrypt | decrypt | list`: encrypt and
   decrypt secret files in the standard age format, built on the encrypted-secret
   core. The command itself works on files; recipes use secrets through the
   entries below (`file.content`, `user.password_hash`, `list --recipe`), and
@@ -28,7 +65,7 @@ All notable changes to Sinter are documented in this file.
   - Passphrases are accepted only on the terminal: never from argv, the
     environment or stdin. Automation uses recipients and identities.
 
-- `file.content: { secret: <path> }` (not part of v1.1.3): a `file` resource can
+- `file.content: { secret: <path> }`: a `file` resource can
   take its bytes from an encrypted secret (age). The reference is a static path
   relative to the recipe that names it (no absolute path, `..`, interpolation or
   symbolic link). `validate` checks the reference and that an age file is there,
@@ -44,11 +81,12 @@ All notable changes to Sinter are documented in this file.
     plaintext is held in buffers Sinter zeroizes, never printed, and
     `ExecRequest` standard input is zeroized when the request is dropped.
   - MCP manifest tools refuse `content: { secret: … }`.
-  - Real-Linux acceptance of the unreleased secrets features on all eight
-    supported targets was completed on 2026-10-04; see
+  - Real-Linux acceptance of the secrets features on all eight supported
+    targets was completed on 2026-10-04 on a pre-release build, not on the
+    v1.2.0 release artifact; see
     [Supported Platforms](https://sinter.fulltrust.co.jp/en/compatibility/platforms/#real-host-acceptance-of-the-unreleased-secrets-features).
 
-- `sinter secrets list --recipe FILE` (repeatable; not part of v1.1.3): adds
+- `sinter secrets list --recipe FILE` (repeatable): adds
   what the recipes you name say about the listed secrets, and still never
   decrypts, prompts or looks for an identity.
   - Each recipe (or bundle) is loaded by the `validate` loader; only the state
@@ -66,7 +104,7 @@ All notable changes to Sinter are documented in this file.
   - Also in this change: a canary-in-all-outputs test suite across the secrets
     surfaces, `Debug` hygiene tests for secret carriers, and threat-model tests.
 
-- `user.password_hash: { secret: <path> }` (not part of v1.1.3): set a local
+- `user.password_hash: { secret: <path> }`: set a local
   user's password from a pre-generated hash kept as an encrypted secret. There
   is no plaintext `password` field.
   - The secret is one `$y$` (yescrypt) or `$6$` (sha512crypt) hash; anything
@@ -82,40 +120,56 @@ All notable changes to Sinter are documented in this file.
     `[redacted]` (the whole resource is sensitive); MCP manifest tools refuse
     the reference.
   - Real-host acceptance on all eight supported targets was completed on
-    2026-10-04, including `sudo-rs` on Ubuntu 26.04 and the `$y$` refusal on
+    2026-10-04 on a pre-release build, not on the v1.2.0 release artifact,
+    including `sudo-rs` on Ubuntu 26.04 and the `$y$` refusal on
     RHEL-family 9; see
     [Supported Platforms](https://sinter.fulltrust.co.jp/en/compatibility/platforms/#real-host-acceptance-of-the-unreleased-secrets-features).
   - Not yet: a lock field, `on_create` mode.
 
-- `group` and `user` resource types for **local** Linux accounts (not part of
-  the v1.1.3 release).
-  - `group`: `name`, `state` (`present`/`absent`, default `present`), `gid`,
-    `system` (create-time only).
-  - `user`: `name`, `state`, `uid`, `group` (primary, by name), `groups`
-    (supplementary, by name, **additive**), `shell`, `home` (record only),
-    `create_home` and `system` (create-time only).
-  - Only declared dimensions are managed and audited. Observation uses
-    `getent -s files`; an account that only another identity source (NSS)
-    provides is an error, never a create. Every command is a fixed executable
-    with explicit argv (`groupadd`, `groupdel`, `useradd`, `usermod`,
-    `userdel`), never a shell.
-  - An existing account is never renumbered (a `uid`/`gid` mismatch is
-    refused in `plan`/`apply` and reported as `DRIFT` by `audit`), renamed, or
-    have its home moved. Supplementary membership is never removed.
-    `absent` runs `userdel`/`groupdel` without `-r`/`-f`; the home directory
-    and mail spool are kept. Refused for root/uid 0, the account this run
-    executes as, the session account, and a group that is some user's primary
-    group.
-  - Dependencies stay explicit. In `plan`, a `user` whose group is created by a
-    `group` listed in its `depends_on`, and a `file`/`directory`/`template`
-    whose `owner`/`group` names an account created by a `user`/`group` listed
-    in its `depends_on`, are deferred (unknown until apply) instead of failing
-    the plan. Without `depends_on` the plan error for an unknown account is
-    unchanged.
-  - Tests use a scripted fake target; the `group`/`user` lifecycle
-    (`groupadd`, `groupdel`, `useradd`, `usermod`, `userdel`) on real hosts of
-    the supported distributions is pending real-OS acceptance. Only
-    `user.password_hash` has been accepted on real hosts (see above).
+- New dependencies: `age` 0.12.1 (exact pin, default features off: standard age
+  format only, no plugins) and `zeroize`, with their transitive crates.
+
+### Changed
+
+- Fewer remote commands per run in two situations. Both are internal: output,
+  `--format json` documents and the safety checks are unchanged, apart from the
+  refusal wording noted below. Remote commands are also counted internally for
+  tests and measurement (program name, resource-type label, duration and
+  outcome; never arguments, environment, input or output; the program name is
+  `[redacted]` for a sensitive request); the counts are never printed or sent
+  anywhere.
+  - Repeated lookups of the same owner, group or primary group within one run
+    on one target are answered once and reused until the run changes the
+    target (any command, file, directory, link or account change clears them).
+    A lookup for a sensitive resource is never reused, and only a numeric id is
+    ever kept.
+  - On targets that do not have `getfacl` (in pre-release testing on real hosts:
+    Ubuntu 24.04 and 26.04, and Rocky Linux, RHEL and AlmaLinux 10), the trusted-parent check
+    before a write observes every ancestor directory with one `stat` command
+    and, only when every ancestor passes that check, one `getfattr` command,
+    instead of separate commands for each ancestor. Every trusted-parent check
+    is a fresh observation (nothing is carried from one check to the next), a
+    failed `stat` check ends the walk before `getfattr` is run, and a dispatched
+    batch is never retried through the per-ancestor path. Targets that have `getfacl` (Rocky Linux,
+    RHEL and AlmaLinux 9) keep the per-ancestor check, unchanged. A path whose
+    batch command would be unusually long, or that contains control characters other
+    than tab and newline, also uses the per-ancestor check, decided before anything is sent.
+    Example, measured on real hosts without `getfacl` with a pre-release
+    build: applying three resources
+    (a new file, a new directory and a replaced file) under a seven-directory
+    path took 149–150 remote commands before and 65–66 after; the trusted-parent
+    checks alone went from 98 to 14 commands. These are command counts, not
+    timings. For a missing ancestor directory the refusal message says that
+    `stat` failed and a parent directory may be missing or inaccessible,
+    instead of naming the missing ancestor; the operation is refused either
+    way.
+
+### Documentation
+
+- English and Japanese reference pages for the `group` and `user` resources and
+  for `sinter secrets`, the secrets sections of the `file` and `user` pages,
+  the CLI, MCP and recipe-format references, and a Supported Platforms section
+  recording the pre-release real-host acceptance of the secrets features.
 
 ## [1.1.3] - 2026-10-03
 

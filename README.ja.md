@@ -213,13 +213,12 @@ desired state、ChangeSet、実行動作が同等になります。
 v0.2のresource typeは`file`、`directory`、`template`、`link`、
 `command`、`package`、`service`です。
 handlerは遅延実行されるserviceの`restart` / `reload`アクションです。
-v1.1.3より後（未リリース、v1.1.3のバイナリには含まれません）の`main`には、
-ローカルアカウント用の`group`と`user`の2種類が追加されています。
+v1.2.0以降、ローカルアカウント用の`group`と`user`の2種類があります。
 明示的な`depends_on`、ローカルデータベースのみ、番号の振り直しなし、補助グループは
 追加のみ、`absent`は`-r` / `-f`なし、という契約です。リソースリファレンスを参照して
 ください。
 
-また、v1.1.3より後（未リリース）には`sinter secrets encrypt | decrypt | list`があり、
+また、v1.2.0以降は`sinter secrets encrypt | decrypt | list`があり、
 標準のage形式でシークレットファイルを暗号化します（受信者、または端末からのみ入力する
 パスフレーズ。identityは既定でリポジトリ外）。`file`リソースは
 `content: { secret: <path> }`でそのシークレットから内容を取れ、`user`は

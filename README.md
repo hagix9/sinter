@@ -212,12 +212,12 @@ Top-level fields: `version`, `vars`, `include`, `resources`, `handlers`.
 
 Resource types in v0.2: `file`, `directory`, `template`, `link`, `command`,
 `package`, `service`. Handlers are delayed `restart`/`reload` service actions.
-After v1.1.3 (unreleased, not in the v1.1.3 binary), `main` adds two local
+Since v1.2.0 Sinter also has two local
 account types, `group` and `user`: explicit `depends_on`, local database only,
 no renumbering, additive supplementary groups, `absent` without `-r`/`-f`. See
 the resource reference.
 
-Also after v1.1.3 (unreleased): `sinter secrets encrypt | decrypt | list`
+Also since v1.2.0: `sinter secrets encrypt | decrypt | list`
 encrypts secret files in the standard age format (recipients or a terminal-only
 passphrase; identities outside the repository by default). A `file` resource can
 take its content from such a secret with `content: { secret: <path> }`, and a
