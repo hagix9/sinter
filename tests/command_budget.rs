@@ -411,11 +411,15 @@ fn budget_mixed_resources_plan() {
 
 #[test]
 fn budget_file_creation_apply() {
-    // Creating a file three directories deep. Today: 37 commands, of which
-    // only the staged write is productive; the rest is observation, chiefly
-    // the trusted-parent walk (`stat` + `getfattr` per ancestor) that runs
-    // three times (18 `stat`, 9 `getfattr`). The productive operations are
-    // exact; the totals are ceilings so that a reduction passes.
+    // Creating a file three directories deep. Today: 25 commands (37 before
+    // Path C, performance WP-P2), of which only the staged write is productive;
+    // the rest is observation, chiefly the trusted-parent walk that runs three
+    // times. This scripted target has no `getfacl`, so each walk is one batched
+    // `stat` plus one batched `getfattr` (12 `stat` in all, 3 `getfattr`; it was
+    // one `stat` and one `getfattr` per ancestor: 18 and 9). A target that has
+    // `getfacl` keeps the sequential walk (`tests/path_c.rs` pins 46 for it).
+    // The productive operations are exact; the totals are ceilings so that a
+    // reduction passes.
     let dir = tempfile::tempdir().unwrap();
     let path = recipe(
         &dir,
@@ -433,14 +437,14 @@ fn budget_file_creation_apply() {
     }
     let resource_commands = o.stats.total() - o.setup;
     assert!(
-        resource_commands <= 37,
-        "file creation: {resource_commands} commands exceed 37: {:?}",
+        resource_commands <= 25,
+        "file creation: {resource_commands} commands exceed 25: {:?}",
         o.stats.by_program()
     );
     let walk = o.stats.count_program("stat") + o.stats.count_program("getfattr");
     assert!(
-        walk <= 27,
-        "trusted-parent observation grew to {walk} (today 27)"
+        walk <= 15,
+        "trusted-parent observation grew to {walk} (today 15)"
     );
     assert_stats_agree_with_log(&o);
 

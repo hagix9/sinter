@@ -136,6 +136,85 @@ fn is_valid_xattr_encoded(v: &str) -> bool {
     false
 }
 
+/// Interpret one single-operand `getfattr -d -m - -e base64` capture. Only a
+/// complete, successful enumeration is authoritative: any abnormal completion,
+/// truncation, invalid UTF-8 or uninterpretable attribute line yields
+/// `inspected == false`, which callers must treat as a refusal, never as "no
+/// attributes".
+fn interpret_getfattr_capture(out: &Output) -> Xattrs {
+    let code = match out.completion {
+        Completion::Exited(c) => c,
+        _ => {
+            return Xattrs {
+                attrs: BTreeMap::new(),
+                inspected: false,
+            }
+        }
+    };
+    if code != 0 {
+        return Xattrs {
+            attrs: BTreeMap::new(),
+            inspected: false,
+        };
+    }
+    if out.stdout_truncated || out.stderr_truncated {
+        return Xattrs {
+            attrs: BTreeMap::new(),
+            inspected: false,
+        };
+    }
+    let text = match std::str::from_utf8(&out.stdout) {
+        Ok(text) => text,
+        Err(_) => {
+            return Xattrs {
+                attrs: BTreeMap::new(),
+                inspected: false,
+            }
+        }
+    };
+    parse_getfattr_text(text)
+}
+
+/// Parse the attribute lines of one object's `getfattr -e base64` output.
+/// The same predicate serves the single-operand capture and each attributed
+/// block of a batched capture, so a batch can never be more permissive than
+/// the sequential observation.
+fn parse_getfattr_text(text: &str) -> Xattrs {
+    let mut attrs = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            return Xattrs {
+                attrs,
+                inspected: false,
+            };
+        };
+        if k.trim().is_empty() {
+            return Xattrs {
+                attrs,
+                inspected: false,
+            };
+        }
+        let value = v.trim();
+        // getfattr -e base64 emits `0s<base64>` (or empty). Reject values
+        // that cannot be authoritatively interpreted (DESIGN §24.4).
+        if !is_valid_xattr_encoded(value) {
+            return Xattrs {
+                attrs,
+                inspected: false,
+            };
+        }
+        attrs.insert(k.trim().to_string(), value.to_string());
+    }
+    Xattrs {
+        attrs,
+        inspected: true,
+    }
+}
+
 /// Parse a getfacl `-c -p` capture. Distinguishes a complete ACL (possibly
 /// without extended entries) from empty/incomplete/malformed output.
 fn classify_acl_text(text: &str) -> AclClass {
@@ -443,12 +522,21 @@ impl TargetFs {
         args: &[String],
         sensitive: bool,
     ) -> Result<Output> {
+        let req = self.argv_request(program, args, sensitive);
+        self.ex.run(&req)
+    }
+
+    /// The exact request `run_argv_sensitivity` dispatches for this program and
+    /// argv: fixed argv, no shell, baseline environment. Building it is a pure
+    /// local operation, so a caller can measure a request before deciding
+    /// whether to dispatch it (see [`TargetFs::batched_parent_walk_applies`]).
+    fn argv_request(&self, program: &str, args: &[String], sensitive: bool) -> ExecRequest {
         let mut req = ExecRequest::new(program);
         req.args = args.to_vec();
         req.env = base_env();
         req.env.insert("HOME".to_string(), self.home_env());
         req.sensitive = sensitive;
-        self.ex.run(&req)
+        req
     }
 
     /// Query dpkg for a package's status using exact argv.
@@ -755,65 +843,11 @@ impl TargetFs {
         )?;
         // Only a complete successful enumeration is authoritative. Abnormal
         // or incomplete output must fail closed rather than become "no attrs".
-        let code = match out.completion {
-            Completion::Exited(c) => c,
-            _ => {
-                return Ok(Xattrs {
-                    attrs: BTreeMap::new(),
-                    inspected: false,
-                })
-            }
-        };
-        if code != 0 {
-            return Ok(Xattrs {
-                attrs: BTreeMap::new(),
-                inspected: false,
-            });
+        let parsed = interpret_getfattr_capture(&out);
+        if !parsed.inspected {
+            return Ok(parsed);
         }
-        if out.stdout_truncated || out.stderr_truncated {
-            return Ok(Xattrs {
-                attrs: BTreeMap::new(),
-                inspected: false,
-            });
-        }
-        let text = match std::str::from_utf8(&out.stdout) {
-            Ok(text) => text,
-            Err(_) => {
-                return Ok(Xattrs {
-                    attrs: BTreeMap::new(),
-                    inspected: false,
-                })
-            }
-        };
-        let mut attrs = BTreeMap::new();
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let Some((k, v)) = line.split_once('=') else {
-                return Ok(Xattrs {
-                    attrs,
-                    inspected: false,
-                });
-            };
-            if k.trim().is_empty() {
-                return Ok(Xattrs {
-                    attrs,
-                    inspected: false,
-                });
-            }
-            let value = v.trim();
-            // getfattr -e base64 emits `0s<base64>` (or empty). Reject values
-            // that cannot be authoritatively interpreted (DESIGN §24.4).
-            if !is_valid_xattr_encoded(value) {
-                return Ok(Xattrs {
-                    attrs,
-                    inspected: false,
-                });
-            }
-            attrs.insert(k.trim().to_string(), value.to_string());
-        }
+        let mut attrs = parsed.attrs;
 
         // Detect POSIX ACLs honestly. getfattr may not surface
         // system.posix_acl_access on all filesystems, so use getfacl explicitly.
@@ -1418,45 +1452,21 @@ impl TargetFs {
     }
 
     /// Check the parent-path trust boundary (DESIGN §23).
+    ///
+    /// On a target whose `getfacl` capability is absent (and when the pre-dispatch
+    /// guard of [`TargetFs::batched_parent_walk_applies`] passes) the ancestors
+    /// are observed with one `stat` batch followed, only if every record is
+    /// acceptable, by one `getfattr` batch. Every other case runs the sequential
+    /// walk unchanged. The choice is made before the first command is sent and a
+    /// dispatched batch is never retried through the sequential walk.
     pub fn check_trusted_parents(&mut self, path: &str) -> Result<()> {
-        for dir in ancestor_dirs(path) {
+        let dirs = ancestor_dirs(path);
+        if self.batched_parent_walk_applies(&dirs) {
+            return self.check_trusted_parents_batched(path, &dirs);
+        }
+        for dir in dirs {
             let st = self.inspect(&dir)?;
-            match st.kind {
-                ObjKind::Absent => {
-                    return Err(SinterError::apply(format!(
-                        "required parent path {} does not exist",
-                        dir
-                    )))
-                }
-                ObjKind::Symlink => {
-                    return Err(SinterError::apply(format!(
-                        "parent path {} is a symlink; refusing to follow it",
-                        dir
-                    )))
-                }
-                ObjKind::Dir => {}
-                other => {
-                    return Err(SinterError::apply(format!(
-                        "parent path {} has unexpected type {}",
-                        dir,
-                        other.describe()
-                    )))
-                }
-            }
-            let trusted_owner = st.uid == 0 || (!self.sudo && st.uid == self.target_uid);
-            if !trusted_owner {
-                return Err(SinterError::apply(format!(
-                    "parent path {} is owned by uid {}, outside the trusted set",
-                    dir, st.uid
-                )));
-            }
-            if st.mode & 0o022 != 0 {
-                return Err(SinterError::apply(format!(
-                    "parent path {} grants group or other write access; refusing unsafe path ({})",
-                    dir,
-                    mode_to_string(st.mode)
-                )));
-            }
+            self.check_parent_stat(&dir, &st)?;
             // Effective writability cannot be proven from mode bits alone when
             // extended access metadata (ACLs) is present. If inspection cannot
             // be completed, fail closed rather than assume safety.
@@ -1468,19 +1478,125 @@ impl TargetFs {
             } else {
                 self.xattrs(&dir)?
             };
-            if !x.inspected {
+            self.check_parent_xattrs(&dir, &x)?;
+        }
+        Ok(())
+    }
+
+    /// Type, owner and mode verdict for one ancestor (shared by the sequential
+    /// and the batched walk so both apply exactly the same predicate).
+    fn check_parent_stat(&self, dir: &str, st: &Stat) -> Result<()> {
+        match st.kind {
+            ObjKind::Absent => {
                 return Err(SinterError::apply(format!(
-                    "cannot inspect access metadata of parent path {}; refusing unsafe path{}",
-                    dir,
-                    self.xattr_inspection_unavailable().unwrap_or_default()
-                )));
-            }
-            if x.unsafe_attr().is_some() {
-                return Err(SinterError::apply(format!(
-                    "parent path {} carries extended access metadata; cannot prove it is non-writable",
+                    "required parent path {} does not exist",
                     dir
-                )));
+                )))
             }
+            ObjKind::Symlink => {
+                return Err(SinterError::apply(format!(
+                    "parent path {} is a symlink; refusing to follow it",
+                    dir
+                )))
+            }
+            ObjKind::Dir => {}
+            other => {
+                return Err(SinterError::apply(format!(
+                    "parent path {} has unexpected type {}",
+                    dir,
+                    other.describe()
+                )))
+            }
+        }
+        let trusted_owner = st.uid == 0 || (!self.sudo && st.uid == self.target_uid);
+        if !trusted_owner {
+            return Err(SinterError::apply(format!(
+                "parent path {} is owned by uid {}, outside the trusted set",
+                dir, st.uid
+            )));
+        }
+        if st.mode & 0o022 != 0 {
+            return Err(SinterError::apply(format!(
+                "parent path {} grants group or other write access; refusing unsafe path ({})",
+                dir,
+                mode_to_string(st.mode)
+            )));
+        }
+        Ok(())
+    }
+
+    /// Extended access metadata verdict for one ancestor (shared by both walks).
+    fn check_parent_xattrs(&self, dir: &str, x: &Xattrs) -> Result<()> {
+        if !x.inspected {
+            return Err(SinterError::apply(format!(
+                "cannot inspect access metadata of parent path {}; refusing unsafe path{}",
+                dir,
+                self.xattr_inspection_unavailable().unwrap_or_default()
+            )));
+        }
+        if x.unsafe_attr().is_some() {
+            return Err(SinterError::apply(format!(
+                "parent path {} carries extended access metadata; cannot prove it is non-writable",
+                dir
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether this walk uses the batched observation. Decided **before** any
+    /// command is dispatched and only from local facts:
+    ///
+    /// * the target's existing `getfacl` capability snapshot is negative (the
+    ///   per-ancestor `getfacl` of the sequential walk cannot be batched, and
+    ///   interposing it would reintroduce the ordering problems rejected in
+    ///   WP-P2 research), and `getfattr` is present (otherwise the sequential
+    ///   walk produces its existing actionable refusal);
+    /// * no fault injection that targets the sequential walk is active;
+    /// * every ancestor is made only of characters whose `stat`/`getfattr`
+    ///   batch grammar is proven (no control character other than TAB and LF);
+    /// * both completed remote commands fit the conservative size guard
+    ///   [`BATCHED_WALK_MAX_COMMAND_BYTES`].
+    ///
+    /// No remote probe is made and nothing is sent when this returns `false`.
+    pub(crate) fn batched_parent_walk_applies(&self, dirs: &[String]) -> bool {
+        if self.has_getfacl || !self.has_getfattr {
+            return false;
+        }
+        if self.fault.as_deref() == Some("uninspectable_parent") {
+            return false;
+        }
+        if dirs.is_empty() {
+            return false;
+        }
+        if dirs
+            .iter()
+            .any(|d| d.chars().any(|c| c.is_control() && c != '\t' && c != '\n'))
+        {
+            return false;
+        }
+        let stat = self.argv_request("/usr/bin/stat", &batched_stat_args(dirs), false);
+        let getfattr = self.argv_request("/usr/bin/getfattr", &batched_getfattr_args(dirs), false);
+        [stat, getfattr].iter().all(|req| {
+            crate::executor::build_remote_command(req, self.sudo, &self.home_env()).len()
+                <= BATCHED_WALK_MAX_COMMAND_BYTES
+        })
+    }
+
+    /// Path-C walk: one `stat` for every ancestor, a complete gate over all of
+    /// its records, then (only on success) one `getfattr` for every ancestor.
+    /// Any failure, anomaly or unacceptable record refuses; nothing is retried
+    /// and nothing falls back to the sequential walk after dispatch.
+    fn check_trusted_parents_batched(&mut self, path: &str, dirs: &[String]) -> Result<()> {
+        let out = self.run_argv("/usr/bin/stat", &batched_stat_args(dirs))?;
+        let stats = interpret_stat_batch(&out, path, dirs)?;
+        // Complete stat gate: every record is validated before getfattr exists.
+        for (dir, st) in dirs.iter().zip(stats.iter()) {
+            self.check_parent_stat(dir, st)?;
+        }
+        let out = self.run_argv("/usr/bin/getfattr", &batched_getfattr_args(dirs))?;
+        let xs = interpret_getfattr_batch(&out, path, dirs)?;
+        for (dir, x) in dirs.iter().zip(xs.iter()) {
+            self.check_parent_xattrs(dir, x)?;
         }
         Ok(())
     }
@@ -1610,6 +1726,244 @@ pub(crate) fn interpret_stat(out: &Output, path: &str) -> Result<Stat> {
             path, reason
         ))),
     }
+}
+
+/// Largest completed remote command (as built by
+/// [`crate::executor::build_remote_command`], i.e. including the `env -i`
+/// baseline, the optional `sudo -n --` wrapper and all quoting) that the
+/// batched parent walk will send. A walk whose `stat` or `getfattr` command
+/// would be larger runs the sequential walk instead, decided before anything
+/// is dispatched.
+///
+/// This is an internal, conservative safety margin, **not** a transport
+/// contract. 16 KiB is far below every limit known on the path: the Linux
+/// per-argument limit (`MAX_ARG_STRLEN`, 131,072 bytes; commands up to 131,070
+/// bytes were measured to run through OpenSSH on all eight reference targets)
+/// and the 32,768-byte payload / 35,000-byte packet every SSH implementation
+/// must accept (RFC 4253 §6.1), which also bounds an unproven libssh2 request
+/// path. Typical walks are a few hundred bytes to a few KiB; only
+/// pathologically deep or long paths fall back, and falling back costs nothing
+/// but the optimisation.
+pub(crate) const BATCHED_WALK_MAX_COMMAND_BYTES: usize = 16 * 1024;
+
+/// `stat` format of the batched observation: the nine sequential fields, then
+/// the operand name, NUL-terminated. NUL cannot occur in a path, so a record
+/// boundary is unambiguous for any file name.
+const BATCHED_STAT_FORMAT: &str = "--printf=%F|%a|%u|%g|%s|%d|%i|%y|%z|%n\\0";
+
+fn batched_stat_args(dirs: &[String]) -> Vec<String> {
+    let mut args = vec![BATCHED_STAT_FORMAT.to_string(), "--".to_string()];
+    args.extend(dirs.iter().cloned());
+    args
+}
+
+fn batched_getfattr_args(dirs: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = ["-d", "-m", "-", "-e", "base64", "--absolute-names", "--"]
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
+    args.extend(dirs.iter().cloned());
+    args
+}
+
+/// Interpret one batched `stat --printf` capture covering `dirs`, in order.
+///
+/// The capture is accepted only when it is the complete, clean answer: exit 0,
+/// not truncated, empty stderr, valid UTF-8, NUL-terminated, exactly one
+/// record per operand, each record naming the operand it must describe, and
+/// every record passing the same nine-field grammar as the sequential
+/// observation. Any other outcome — a non-zero exit (including a partial
+/// answer), a signal, an indeterminate completion, a missing, extra, duplicate
+/// or misattributed record — is an error: nothing is salvaged from a prefix.
+pub(crate) fn interpret_stat_batch(out: &Output, path: &str, dirs: &[String]) -> Result<Vec<Stat>> {
+    let what = format!("the parent paths of {}", path);
+    match out.completion {
+        Completion::Exited(0) => {}
+        Completion::Exited(c) => {
+            return Err(SinterError::apply(format!(
+                "cannot inspect {}: stat exited with status {} (a parent directory may be missing or inaccessible)",
+                what, c
+            )))
+        }
+        Completion::Signaled(s) => {
+            return Err(SinterError::apply(format!(
+                "inspection of {} terminated by signal {}",
+                what, s
+            )))
+        }
+        Completion::Indeterminate { ref reason, .. } => {
+            return Err(SinterError::indeterminate(format!(
+                "inspection of {} did not complete: {}",
+                what, reason
+            )))
+        }
+    }
+    require_complete(out, &what)?;
+    if !out.stderr.is_empty() {
+        return Err(SinterError::apply(format!(
+            "cannot inspect {}: the capture carried an unexpected diagnostic",
+            what
+        )));
+    }
+    let text = utf8_stream(&out.stdout, &what)?;
+    let body = text.strip_suffix('\0').ok_or_else(|| {
+        SinterError::apply(format!(
+            "cannot inspect {}: the stat output is not terminated by the expected record separator",
+            what
+        ))
+    })?;
+    let records: Vec<&str> = body.split('\0').collect();
+    if records.len() != dirs.len() {
+        return Err(SinterError::apply(format!(
+            "cannot inspect {}: expected {} stat records, got {}",
+            what,
+            dirs.len(),
+            records.len()
+        )));
+    }
+    let mut stats = Vec::with_capacity(dirs.len());
+    for (dir, record) in dirs.iter().zip(records) {
+        // Nine fields, then the operand name (which may itself contain `|`).
+        let parts: Vec<&str> = record.splitn(10, '|').collect();
+        if parts.len() != 10 {
+            return Err(SinterError::apply(format!(
+                "cannot inspect {}: malformed stat record",
+                dir
+            )));
+        }
+        if parts[9] != dir {
+            return Err(SinterError::apply(format!(
+                "cannot inspect {}: the stat record describes a different operand",
+                dir
+            )));
+        }
+        let st = parse_stat_fields(&parts[..9])
+            .map_err(|e| SinterError::apply(format!("cannot inspect {}: {}", dir, e)))?;
+        stats.push(st);
+    }
+    Ok(stats)
+}
+
+/// The name `getfattr` prints in a `# file:` header: the operand with
+/// backslash, line feed and carriage return written as octal escapes.
+fn getfattr_header_name(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        match c {
+            '\\' => out.push_str("\\134"),
+            '\n' => out.push_str("\\012"),
+            '\r' => out.push_str("\\015"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Interpret one batched `getfattr -d -m - -e base64` capture covering
+/// `dirs`, in order, returning one [`Xattrs`] per operand.
+///
+/// `getfattr` prints a block only for an object that has attributes, so an
+/// operand without a block is an object without attributes — but only when the
+/// whole capture is complete and clean (exit 0, not truncated, empty stderr,
+/// valid UTF-8, every block terminated). Each block must be headed by one of
+/// the expected operands, in operand order and at most once. A non-zero exit,
+/// signal, indeterminate completion, unknown / duplicate / out-of-order header,
+/// stray line or unterminated block is an error; nothing is salvaged. Each
+/// block is then interpreted by the same predicate as the sequential capture.
+pub(crate) fn interpret_getfattr_batch(
+    out: &Output,
+    path: &str,
+    dirs: &[String],
+) -> Result<Vec<Xattrs>> {
+    let what = format!("the access metadata of the parent paths of {}", path);
+    match out.completion {
+        Completion::Exited(0) => {}
+        Completion::Exited(c) => {
+            return Err(SinterError::apply(format!(
+                "cannot inspect {}: getfattr exited with status {}",
+                what, c
+            )))
+        }
+        Completion::Signaled(s) => {
+            return Err(SinterError::apply(format!(
+                "inspection of {} terminated by signal {}",
+                what, s
+            )))
+        }
+        Completion::Indeterminate { ref reason, .. } => {
+            return Err(SinterError::indeterminate(format!(
+                "inspection of {} did not complete: {}",
+                what, reason
+            )))
+        }
+    }
+    require_complete(out, &what)?;
+    if !out.stderr.is_empty() {
+        return Err(SinterError::apply(format!(
+            "cannot inspect {}: the capture carried an unexpected diagnostic",
+            what
+        )));
+    }
+    let text = utf8_stream(&out.stdout, &what)?;
+    let malformed =
+        |why: &str| SinterError::apply(format!("cannot inspect {}: getfattr output {}", what, why));
+    let mut blocks: Vec<Option<String>> = vec![None; dirs.len()];
+    if !text.is_empty() {
+        if !text.ends_with("\n\n") {
+            return Err(malformed("is not terminated"));
+        }
+        let expected: BTreeMap<String, usize> = dirs
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (getfattr_header_name(d), i))
+            .collect();
+        let mut lines: Vec<&str> = text.split('\n').collect();
+        lines.pop(); // the empty remainder after the final line feed
+        let mut current: Option<(usize, String)> = None;
+        let mut last: Option<usize> = None;
+        for line in lines {
+            if let Some(name) = line.strip_prefix("# file: ") {
+                if current.is_some() {
+                    return Err(malformed("has an unterminated block"));
+                }
+                let Some(&idx) = expected.get(name) else {
+                    return Err(malformed("names an unexpected object"));
+                };
+                if blocks[idx].is_some() {
+                    return Err(malformed("repeats an object"));
+                }
+                if last.is_some_and(|l| idx <= l) {
+                    return Err(malformed("is out of operand order"));
+                }
+                last = Some(idx);
+                current = Some((idx, format!("{}\n", line)));
+            } else if line.is_empty() {
+                let Some((idx, block)) = current.take() else {
+                    return Err(malformed("has a stray blank line"));
+                };
+                blocks[idx] = Some(block);
+            } else {
+                let Some((_, block)) = current.as_mut() else {
+                    return Err(malformed("has a line outside any block"));
+                };
+                block.push_str(line);
+                block.push('\n');
+            }
+        }
+        if current.is_some() {
+            return Err(malformed("has an unterminated block"));
+        }
+    }
+    Ok(blocks
+        .into_iter()
+        .map(|b| match b {
+            Some(text) => parse_getfattr_text(&text),
+            None => Xattrs {
+                attrs: BTreeMap::new(),
+                inspected: true,
+            },
+        })
+        .collect())
 }
 
 /// Interpret a `sha256sum` capture. See [`TargetFs::sha256`] for the
@@ -1936,6 +2290,15 @@ fn parse_stat_line(text: &str) -> std::result::Result<Stat, String> {
     if parts.len() != 9 {
         return Err(format!("unexpected stat output: {:?}", line));
     }
+    parse_stat_fields(&parts)
+}
+
+/// Validate and convert the nine `stat` fields (`%F|%a|%u|%g|%s|%d|%i|%y|%z`).
+/// This is the single field grammar for both the one-record `stat -c`
+/// observation and each record of a batched `stat --printf` capture, so a
+/// batch is exactly as strict as the sequential observation (IA-01).
+fn parse_stat_fields(parts: &[&str]) -> std::result::Result<Stat, String> {
+    debug_assert_eq!(parts.len(), 9);
     let kind = match parts[0] {
         "regular file" | "regular empty file" => ObjKind::File,
         "directory" => ObjKind::Dir,
@@ -3384,5 +3747,1190 @@ mod tests {
         let mut fs = memo_fs(memo_target());
         let e = fs.primary_gid_of_uid_sensitive(4321, true).unwrap_err();
         assert!(!e.message.contains("4321"), "{}", e.message);
+    }
+
+    // -----------------------------------------------------------------
+    // Path C: the batched trusted-parent walk (performance WP-P2).
+    // -----------------------------------------------------------------
+
+    use crate::executor::{FakeExecutor, FakeTarget};
+
+    const PC_TS: &str = "2026-09-19 09:30:00.000000000 +0000";
+
+    /// A named scripted-platform preset.
+    type PcPlatform = (&'static str, fn() -> FakeTarget);
+
+    fn pc_out(code: i32, stdout: &[u8], stderr: &str) -> Output {
+        Output {
+            completion: Completion::Exited(code),
+            stdout: stdout.to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }
+    }
+
+    /// One batched `stat` record: nine fields, the operand name, NUL.
+    fn pc_rec(kind: &str, mode: &str, uid: &str, name: &str) -> String {
+        format!("{kind}|{mode}|{uid}|0|4096|2049|100|{PC_TS}|{PC_TS}|{name}\0")
+    }
+
+    fn pc_good_stat(dirs: &[String]) -> String {
+        dirs.iter()
+            .map(|d| pc_rec("directory", "755", "0", d))
+            .collect()
+    }
+
+    /// `/`, `/d1`, `/d1/d2`, ... : `n` ancestors.
+    fn pc_dirs(n: usize) -> Vec<String> {
+        let mut v = vec!["/".to_string()];
+        let mut cur = String::new();
+        for i in 1..n {
+            cur.push_str(&format!("/d{}", i));
+            v.push(cur.clone());
+        }
+        v
+    }
+
+    fn pc_path(n: usize) -> String {
+        let last = pc_dirs(n).pop().unwrap();
+        if last == "/" {
+            "/f".to_string()
+        } else {
+            format!("{}/f", last)
+        }
+    }
+
+    fn pc_target(n: usize) -> FakeTarget {
+        let mut t = FakeTarget::ubuntu2404().with_fake_fs();
+        for d in pc_dirs(n).iter().skip(1) {
+            t = t.with_fs_dir(d);
+        }
+        t
+    }
+
+    fn pc_fs_with(t: FakeTarget, getfacl: bool, getfattr: bool, sudo: bool) -> TargetFs {
+        TargetFs::new_for(
+            Executor::Fake(Box::new(FakeExecutor::new(t, sudo))),
+            sudo,
+            1000,
+            1000,
+            "/home/fake".to_string(),
+            Some(crate::platform::PackageBackend::Apt),
+            getfattr,
+            getfacl,
+            false,
+            None,
+        )
+    }
+
+    fn pc_fs(t: FakeTarget) -> TargetFs {
+        pc_fs_with(t, false, true, false)
+    }
+
+    /// One token per command the target received: `stat-batch:<operands>`,
+    /// `stat`, `getfattr:<operands>`, `getfacl`.
+    fn pc_trace(fs: &TargetFs) -> Vec<String> {
+        fs.log()
+            .iter()
+            .map(|c| {
+                let p = c.program.rsplit('/').next().unwrap();
+                match p {
+                    "stat" if c.args.first().is_some_and(|a| a.starts_with("--printf=")) => {
+                        format!("stat-batch:{}", c.args.len() - 2)
+                    }
+                    "getfattr" => format!("getfattr:{}", c.args.len() - 7),
+                    other => other.to_string(),
+                }
+            })
+            .collect()
+    }
+
+    fn pc_stat_override(t: FakeTarget, out: Output) -> FakeTarget {
+        t.with_observations("stat", vec![out])
+    }
+
+    fn pc_getfattr_override(t: FakeTarget, out: Output) -> FakeTarget {
+        t.with_observations("getfattr", vec![out])
+    }
+
+    #[test]
+    fn path_c_issues_exactly_two_commands_for_any_depth() {
+        for n in [1usize, 2, 3, 6] {
+            let mut fs = pc_fs(pc_target(n));
+            fs.check_trusted_parents(&pc_path(n)).unwrap();
+            assert_eq!(
+                pc_trace(&fs),
+                [format!("stat-batch:{n}"), format!("getfattr:{n}")],
+                "n = {n}"
+            );
+            // The operands are the unchanged ancestor list, in order.
+            let log = fs.log();
+            assert_eq!(log[0].args[2..], pc_dirs(n)[..], "stat operands, n = {n}");
+            assert_eq!(
+                log[1].args[7..],
+                pc_dirs(n)[..],
+                "getfattr operands, n = {n}"
+            );
+            assert_eq!(pc_dirs(n), ancestor_dirs(&pc_path(n)));
+        }
+    }
+
+    #[test]
+    fn path_c_batch_commands_are_direct_argv() {
+        let mut fs = pc_fs(pc_target(3));
+        fs.check_trusted_parents(&pc_path(3)).unwrap();
+        for rec in fs.log() {
+            assert!(rec.program == "/usr/bin/stat" || rec.program == "/usr/bin/getfattr");
+            assert!(!rec.sudo);
+            assert!(!rec.sensitive);
+        }
+        let log = fs.log();
+        assert_eq!(
+            log[0].args[..2],
+            [
+                "--printf=%F|%a|%u|%g|%s|%d|%i|%y|%z|%n\\0".to_string(),
+                "--".to_string()
+            ]
+        );
+        assert_eq!(
+            log[1].args[..7],
+            ["-d", "-m", "-", "-e", "base64", "--absolute-names", "--"].map(String::from)
+        );
+    }
+
+    #[test]
+    fn path_c_branch_follows_the_getfacl_capability_and_nothing_else() {
+        // The same capability decides the branch on every platform: the
+        // operating system is never consulted.
+        let platforms: [PcPlatform; 4] = [
+            ("ubuntu2404", FakeTarget::ubuntu2404),
+            ("ubuntu2604", FakeTarget::ubuntu2604),
+            ("rocky9", FakeTarget::rocky9),
+            ("rocky10", FakeTarget::rocky10),
+        ];
+        for (name, make) in platforms {
+            let target = || {
+                make()
+                    .with_fake_fs()
+                    .with_fs_dir("/d1")
+                    .with_fs_dir("/d1/d2")
+            };
+            let mut absent = pc_fs_with(target(), false, true, false);
+            absent.check_trusted_parents("/d1/d2/f").unwrap();
+            assert_eq!(pc_trace(&absent), ["stat-batch:3", "getfattr:3"], "{name}");
+
+            let mut present = pc_fs_with(target(), true, true, false);
+            present.check_trusted_parents("/d1/d2/f").unwrap();
+            assert_eq!(
+                pc_trace(&present),
+                [
+                    "stat",
+                    "getfattr:1",
+                    "getfacl",
+                    "stat",
+                    "getfattr:1",
+                    "getfacl",
+                    "stat",
+                    "getfattr:1",
+                    "getfacl"
+                ],
+                "{name}: getfacl present keeps the sequential walk"
+            );
+        }
+    }
+
+    #[test]
+    fn path_c_getfacl_present_walk_is_the_unchanged_sequential_walk() {
+        // Per ancestor, in order: stat, getfattr, getfacl - one operand each.
+        let mut fs = pc_fs_with(pc_target(3), true, true, false);
+        fs.check_trusted_parents(&pc_path(3)).unwrap();
+        let log = fs.log();
+        assert_eq!(log.len(), 9);
+        for (i, dir) in pc_dirs(3).iter().enumerate() {
+            let (s, g, l) = (&log[3 * i], &log[3 * i + 1], &log[3 * i + 2]);
+            assert_eq!(s.args, ["-c", "%F|%a|%u|%g|%s|%d|%i|%y|%z", "--", dir]);
+            assert_eq!(g.args.last().unwrap(), dir);
+            assert_eq!(l.args, ["-p", "-c", "--", dir]);
+        }
+    }
+
+    #[test]
+    fn path_c_missing_getfattr_keeps_the_existing_actionable_refusal() {
+        let mut fs = pc_fs_with(pc_target(2), false, false, false);
+        let e = fs.check_trusted_parents(&pc_path(2)).unwrap_err();
+        assert!(e.message.contains("attr"), "{}", e.message);
+        assert_eq!(
+            pc_trace(&fs),
+            ["stat"],
+            "sequential walk, stopped at the first ancestor"
+        );
+    }
+
+    #[test]
+    fn path_c_uninspectable_parent_fault_uses_the_sequential_walk() {
+        let mut fs = TargetFs::new_for(
+            Executor::Fake(Box::new(FakeExecutor::new(pc_target(2), false))),
+            false,
+            1000,
+            1000,
+            "/home/fake".to_string(),
+            None,
+            true,
+            false,
+            false,
+            Some("uninspectable_parent".to_string()),
+        );
+        let e = fs.check_trusted_parents(&pc_path(2)).unwrap_err();
+        assert!(
+            e.message.contains("cannot inspect access metadata"),
+            "{}",
+            e.message
+        );
+        assert_eq!(pc_trace(&fs), ["stat"]);
+    }
+
+    #[test]
+    fn path_c_unsafe_stat_record_never_reaches_getfattr() {
+        // An unsafe ancestor at every position, in every way CURRENT refuses.
+        let n = 4;
+        let dirs = pc_dirs(n);
+        let unsafe_records: [(&str, &str, &str, &str); 6] = [
+            ("symlink", "symbolic link", "777", "0"),
+            ("wrong owner", "directory", "755", "4242"),
+            ("group/other writable", "directory", "775", "0"),
+            ("other writable", "directory", "757", "0"),
+            ("regular file", "regular file", "644", "0"),
+            ("fifo", "fifo", "644", "0"),
+        ];
+        for k in [0usize, 1, n - 2, n - 1] {
+            for (what, kind, mode, uid) in unsafe_records {
+                let stdout: String = dirs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| {
+                        if i == k {
+                            pc_rec(kind, mode, uid, d)
+                        } else {
+                            pc_rec("directory", "755", "0", d)
+                        }
+                    })
+                    .collect();
+                let t = pc_stat_override(pc_target(n), pc_out(0, stdout.as_bytes(), ""));
+                let mut fs = pc_fs(t);
+                let e = fs
+                    .check_trusted_parents(&pc_path(n))
+                    .expect_err(&format!("{what} at {k} must refuse"));
+                assert!(e.message.contains(&dirs[k]), "{what} at {k}: {}", e.message);
+                assert_eq!(
+                    pc_trace(&fs),
+                    [format!("stat-batch:{n}")],
+                    "{what} at {k}: getfattr must not run after a failed stat gate"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn path_c_first_failing_ancestor_decides_the_reason_in_ancestor_order() {
+        let dirs = pc_dirs(3);
+        let stdout = format!(
+            "{}{}{}",
+            pc_rec("directory", "755", "0", &dirs[0]),
+            pc_rec("directory", "775", "0", &dirs[1]),
+            pc_rec("symbolic link", "777", "0", &dirs[2]),
+        );
+        let t = pc_stat_override(pc_target(3), pc_out(0, stdout.as_bytes(), ""));
+        let mut fs = pc_fs(t);
+        let e = fs.check_trusted_parents(&pc_path(3)).unwrap_err();
+        assert!(e.message.contains("group or other write"), "{}", e.message);
+        assert!(e.message.contains(&dirs[1]), "{}", e.message);
+    }
+
+    fn pc_stat_failure_cases(n: usize) -> Vec<(&'static str, Output)> {
+        let dirs = pc_dirs(n);
+        let good = pc_good_stat(&dirs);
+        let mut trunc = pc_out(0, good.as_bytes(), "");
+        trunc.stdout_truncated = true;
+        let mut err_trunc = pc_out(0, good.as_bytes(), "");
+        err_trunc.stderr_truncated = true;
+        let without_last: String = dirs[..n - 1]
+            .iter()
+            .map(|d| pc_rec("directory", "755", "0", d))
+            .collect();
+        let extra = format!("{}{}", good, pc_rec("directory", "755", "0", "/zz"));
+        let duplicate = format!("{}{}", good, pc_rec("directory", "755", "0", &dirs[n - 1]));
+        let mut swapped: Vec<String> = dirs.clone();
+        swapped.swap(0, n - 1);
+        let swapped_stdout: String = swapped
+            .iter()
+            .map(|d| pc_rec("directory", "755", "0", d))
+            .collect();
+        let mut v = vec![
+            (
+                "non-zero with a complete body",
+                pc_out(1, good.as_bytes(), ""),
+            ),
+            (
+                "non-zero with a partial body",
+                pc_out(
+                    1,
+                    without_last.as_bytes(),
+                    "stat: cannot statx 'x': No such file or directory\n",
+                ),
+            ),
+            (
+                "non-zero and empty",
+                pc_out(
+                    1,
+                    b"",
+                    "stat: cannot statx 'x': No such file or directory\n",
+                ),
+            ),
+            (
+                "exit 0 with stderr",
+                pc_out(0, good.as_bytes(), "stat: warning\n"),
+            ),
+            ("stdout truncated", trunc),
+            ("stderr truncated", err_trunc),
+            ("record missing", pc_out(0, without_last.as_bytes(), "")),
+            ("record extra", pc_out(0, extra.as_bytes(), "")),
+            ("record duplicated", pc_out(0, duplicate.as_bytes(), "")),
+            (
+                "records out of order",
+                pc_out(0, swapped_stdout.as_bytes(), ""),
+            ),
+            ("empty output", pc_out(0, b"", "")),
+            (
+                "not NUL terminated",
+                pc_out(0, good.trim_end_matches('\0').as_bytes(), ""),
+            ),
+            (
+                "cut in the middle of a record",
+                pc_out(0, &good.as_bytes()[..good.len() - 30], ""),
+            ),
+            (
+                "newline instead of NUL",
+                pc_out(0, good.replace('\0', "\n").as_bytes(), ""),
+            ),
+            ("invalid UTF-8", pc_out(0, b"\xff\xfe\0", "")),
+        ];
+        v.push((
+            "signal",
+            Output {
+                completion: Completion::Signaled(9),
+                ..pc_out(0, good.as_bytes(), "")
+            },
+        ));
+        v.push((
+            "indeterminate",
+            Output {
+                completion: Completion::Indeterminate {
+                    started: true,
+                    reason: "timed out".to_string(),
+                },
+                ..pc_out(0, b"", "")
+            },
+        ));
+        v
+    }
+
+    #[test]
+    fn path_c_stat_batch_failures_refuse_before_getfattr_and_never_retry() {
+        for n in [1usize, 2, 3, 6] {
+            for (what, out) in pc_stat_failure_cases(n) {
+                if n == 1 && matches!(what, "record missing" | "records out of order") {
+                    continue; // one operand has no shorter non-empty or reordered form
+                }
+                let mut fs = pc_fs(pc_stat_override(pc_target(n), out));
+                let r = fs.check_trusted_parents(&pc_path(n));
+                assert!(r.is_err(), "n={n} {what}: must refuse");
+                // Exactly the one dispatched batch: no getfattr, and no
+                // sequential retry that the (healthy) fake would have accepted.
+                assert_eq!(pc_trace(&fs), [format!("stat-batch:{n}")], "n={n} {what}");
+            }
+        }
+    }
+
+    #[test]
+    fn path_c_indeterminate_stat_batch_is_an_indeterminate_error() {
+        let out = Output {
+            completion: Completion::Indeterminate {
+                started: true,
+                reason: "timed out".to_string(),
+            },
+            ..pc_out(0, b"", "")
+        };
+        let mut fs = pc_fs(pc_stat_override(pc_target(3), out));
+        let e = fs.check_trusted_parents(&pc_path(3)).unwrap_err();
+        assert_eq!(e.kind, crate::error::ErrorKind::Indeterminate);
+    }
+
+    #[test]
+    fn path_c_stat_batch_message_does_not_expose_the_capture() {
+        let canary = "CANARY-9d31";
+        let body = format!("directory|755|0|0|4096|2049|100|{PC_TS}|{PC_TS}|/{canary}\0");
+        let mut fs = pc_fs(pc_stat_override(
+            pc_target(1),
+            pc_out(0, body.as_bytes(), ""),
+        ));
+        let e = fs.check_trusted_parents("/f").unwrap_err();
+        assert!(!e.message.contains(canary), "{}", e.message);
+        let mut fs = pc_fs(pc_stat_override(
+            pc_target(1),
+            pc_out(1, canary.as_bytes(), canary),
+        ));
+        let e = fs.check_trusted_parents("/f").unwrap_err();
+        assert!(!e.message.contains(canary), "{}", e.message);
+    }
+
+    const PC_ATTR: &str = "# file: /d1\nuser.note=0sYQ==\n\n";
+
+    #[test]
+    fn path_c_getfattr_batch_failures_refuse_without_retry() {
+        let n = 3;
+        let dirs = pc_dirs(n);
+        let good = pc_good_stat(&dirs);
+        let blocks = |header: &str| format!("# file: {header}\nuser.note=0sYQ==\n\n");
+        let mut trunc = pc_out(0, PC_ATTR.as_bytes(), "");
+        trunc.stdout_truncated = true;
+        let cases: Vec<(&str, Output)> = vec![
+            (
+                "non-zero",
+                pc_out(1, b"", "getfattr: /d1: No such file or directory\n"),
+            ),
+            ("non-zero with a body", pc_out(1, PC_ATTR.as_bytes(), "")),
+            ("exit 0 with stderr", pc_out(0, b"", "getfattr: warning\n")),
+            ("truncated", trunc),
+            (
+                "unterminated block",
+                pc_out(0, b"# file: /d1\nuser.note=0sYQ==\n", ""),
+            ),
+            (
+                "missing final blank line",
+                pc_out(
+                    0,
+                    b"# file: /d1\nuser.note=0sYQ==\n\n# file: /d1/d2\nuser.n=0sYQ==\n",
+                    "",
+                ),
+            ),
+            ("unknown object", pc_out(0, blocks("/other").as_bytes(), "")),
+            (
+                "repeated object",
+                pc_out(
+                    0,
+                    format!("{}{}", blocks("/d1"), blocks("/d1")).as_bytes(),
+                    "",
+                ),
+            ),
+            (
+                "out of operand order",
+                pc_out(
+                    0,
+                    format!("{}{}", blocks("/d1/d2"), blocks("/d1")).as_bytes(),
+                    "",
+                ),
+            ),
+            ("stray blank line", pc_out(0, b"\n\n", "")),
+            (
+                "line outside any block",
+                pc_out(0, b"user.note=0sYQ==\n\n", ""),
+            ),
+            (
+                "malformed attribute line",
+                pc_out(0, b"# file: /d1\nnoequals\n\n", ""),
+            ),
+            (
+                "malformed value",
+                pc_out(0, b"# file: /d1\nuser.note=zz!\n\n", ""),
+            ),
+            (
+                "invalid UTF-8",
+                pc_out(0, b"# file: /d1\nuser.note=\xff\n\n", ""),
+            ),
+            (
+                "signal",
+                Output {
+                    completion: Completion::Signaled(15),
+                    ..pc_out(0, b"", "")
+                },
+            ),
+        ];
+        for (what, out) in cases {
+            let t = pc_getfattr_override(
+                pc_stat_override(pc_target(n), pc_out(0, good.as_bytes(), "")),
+                out,
+            );
+            let mut fs = pc_fs(t);
+            assert!(
+                fs.check_trusted_parents(&pc_path(n)).is_err(),
+                "{what}: must refuse"
+            );
+            assert_eq!(
+                pc_trace(&fs),
+                ["stat-batch:3", "getfattr:3"],
+                "{what}: exactly the two dispatched batches, no retry"
+            );
+        }
+    }
+
+    #[test]
+    fn path_c_access_affecting_attributes_refuse_and_benign_ones_pass() {
+        let n = 3;
+        let dirs = pc_dirs(n);
+        let good = pc_good_stat(&dirs);
+        let unsafe_names = [
+            "trusted.overlay.opaque",
+            "security.capability",
+            "system.posix_acl_access",
+            "system.posix_acl_default",
+            "system.nfs4_acl",
+        ];
+        for name in unsafe_names {
+            for (idx, dir) in dirs.iter().enumerate() {
+                let body = format!("# file: {dir}\n{name}=0sAAAA\n\n");
+                let t = pc_getfattr_override(
+                    pc_stat_override(pc_target(n), pc_out(0, good.as_bytes(), "")),
+                    pc_out(0, body.as_bytes(), ""),
+                );
+                let mut fs = pc_fs(t);
+                let e = fs
+                    .check_trusted_parents(&pc_path(n))
+                    .expect_err(&format!("{name} on {idx} must refuse"));
+                assert!(
+                    e.message.contains("extended access metadata"),
+                    "{}",
+                    e.message
+                );
+                assert!(
+                    e.message.contains(dir.as_str()),
+                    "attributed to {dir}: {}",
+                    e.message
+                );
+                assert!(
+                    !e.message.contains(name),
+                    "no attribute name or value is echoed"
+                );
+                assert_eq!(pc_trace(&fs), ["stat-batch:3", "getfattr:3"]);
+            }
+        }
+        for name in ["user.note", "security.selinux"] {
+            let body = format!("# file: /d1\n{name}=0sYQ==\n\n");
+            let t = pc_getfattr_override(
+                pc_stat_override(pc_target(n), pc_out(0, good.as_bytes(), "")),
+                pc_out(0, body.as_bytes(), ""),
+            );
+            let mut fs = pc_fs(t);
+            fs.check_trusted_parents(&pc_path(n))
+                .unwrap_or_else(|e| panic!("{name} must pass: {}", e.message));
+        }
+    }
+
+    #[test]
+    fn path_c_empty_clean_getfattr_means_no_attributes() {
+        let dirs = pc_dirs(3);
+        let xs = interpret_getfattr_batch(&pc_out(0, b"", ""), "/f", &dirs).unwrap();
+        assert_eq!(xs.len(), 3);
+        assert!(xs.iter().all(|x| x.inspected && x.attrs.is_empty()));
+    }
+
+    #[test]
+    fn path_c_getfattr_batch_attributes_each_block_to_its_own_ancestor() {
+        let dirs = pc_dirs(4);
+        let body =
+            "# file: /d1\nuser.a=0sQQ==\n\n# file: /d1/d2/d3\nuser.b=0sQg==\nuser.c=0sQw==\n\n";
+        let xs = interpret_getfattr_batch(&pc_out(0, body.as_bytes(), ""), "/f", &dirs).unwrap();
+        assert!(xs[0].attrs.is_empty());
+        assert_eq!(xs[1].attrs.keys().collect::<Vec<_>>(), ["user.a"]);
+        assert!(xs[2].attrs.is_empty());
+        assert_eq!(xs[3].attrs.keys().collect::<Vec<_>>(), ["user.b", "user.c"]);
+        assert!(xs.iter().all(|x| x.inspected));
+    }
+
+    #[test]
+    fn path_c_batched_grammar_is_as_strict_as_the_sequential_grammar() {
+        // Every nine-field variant is judged identically by the one-record
+        // `stat -c` parser and by a batched record.
+        let fields = |f: [&str; 9]| f.join("|");
+        let ok = [
+            "directory",
+            "755",
+            "0",
+            "0",
+            "4096",
+            "2049",
+            "100",
+            PC_TS,
+            PC_TS,
+        ];
+        let mut corpus: Vec<[&str; 9]> = vec![ok];
+        let variants: [(usize, &str); 20] = [
+            (1, "9"),
+            (1, ""),
+            (1, "+755"),
+            (2, "-1"),
+            (2, "abc"),
+            (2, "4294967296"),
+            (3, "4294967296"),
+            (4, "18446744073709551616"),
+            (4, "-5"),
+            (5, "18446744073709551616"),
+            (5, "x"),
+            (6, "18446744073709551616"),
+            (6, ""),
+            (7, ""),
+            (7, "2026-13-01 00:00:00.000000000 +0000"),
+            (7, "2026-09-19 09:30:00 +00"),
+            (8, ""),
+            (8, "garbage"),
+            (8, "2026-09-19 25:30:00.000000000 +0000"),
+            (0, "regular file"),
+        ];
+        for (idx, v) in variants {
+            let mut f = ok;
+            f[idx] = v;
+            corpus.push(f);
+        }
+        for f in corpus {
+            let line = fields(f);
+            let sequential = parse_stat_line(&format!("{line}\n"));
+            let record = format!("{line}|/x\0");
+            let batched = interpret_stat_batch(
+                &pc_out(0, record.as_bytes(), ""),
+                "/x/f",
+                &["/x".to_string()],
+            );
+            assert_eq!(
+                sequential.is_ok(),
+                batched.is_ok(),
+                "grammar divergence for {line:?}: sequential {sequential:?}, batched {batched:?}"
+            );
+            if let (Ok(a), Ok(b)) = (&sequential, &batched) {
+                assert_eq!(
+                    (a.kind, a.mode, a.uid, a.gid, a.size, a.dev, a.ino),
+                    (b[0].kind, b[0].mode, b[0].uid, b[0].gid, b[0].size, b[0].dev, b[0].ino)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn path_c_numeric_and_timestamp_corruption_is_refused_at_every_position() {
+        let n = 3;
+        let dirs = pc_dirs(n);
+        let corruptions = [
+            (
+                "size overflow",
+                "directory|755|0|0|18446744073709551616|2049|100|TS|TS",
+            ),
+            (
+                "inode overflow",
+                "directory|755|0|0|4096|2049|18446744073709551616|TS|TS",
+            ),
+            ("device non-numeric", "directory|755|0|0|4096|x|100|TS|TS"),
+            (
+                "device overflow",
+                "directory|755|0|0|4096|18446744073709551616|100|TS|TS",
+            ),
+            ("uid negative", "directory|755|-1|0|4096|2049|100|TS|TS"),
+            ("malformed mtime", "directory|755|0|0|4096|2049|100|nope|TS"),
+            ("empty ctime", "directory|755|0|0|4096|2049|100|TS|"),
+            ("mode not octal", "directory|8|0|0|4096|2049|100|TS|TS"),
+        ];
+        for k in 0..n {
+            for (what, rec) in corruptions {
+                let rec = rec.replace("TS", PC_TS);
+                let stdout: String = dirs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| {
+                        if i == k {
+                            format!("{rec}|{d}\0")
+                        } else {
+                            pc_rec("directory", "755", "0", d)
+                        }
+                    })
+                    .collect();
+                let mut fs = pc_fs(pc_stat_override(
+                    pc_target(n),
+                    pc_out(0, stdout.as_bytes(), ""),
+                ));
+                assert!(
+                    fs.check_trusted_parents(&pc_path(n)).is_err(),
+                    "{what} at {k}"
+                );
+                assert_eq!(pc_trace(&fs), ["stat-batch:3"], "{what} at {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn path_c_unusual_file_names_are_attributed_exactly() {
+        // Names that contain the field separator, a line feed, a backslash,
+        // quotes, spaces, a tab and non-ASCII text.
+        let dirs: Vec<String> = [
+            "/",
+            "/a b",
+            "/a|b",
+            "/a\\b",
+            "/a\nb",
+            "/it's \"q\" $x",
+            "/t\tab",
+            "/ünï",
+            "/-dash",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let stat_body = pc_good_stat(&dirs);
+        let st = interpret_stat_batch(&pc_out(0, stat_body.as_bytes(), ""), "/f", &dirs).unwrap();
+        assert_eq!(st.len(), dirs.len());
+        assert!(st.iter().all(|s| s.kind == ObjKind::Dir));
+        // A record whose name is a different (even similar) operand is refused.
+        let wrong = stat_body.replace("/a|b", "/a|c");
+        assert!(interpret_stat_batch(&pc_out(0, wrong.as_bytes(), ""), "/f", &dirs).is_err());
+
+        let mut body = String::new();
+        for d in &dirs {
+            body.push_str(&format!(
+                "# file: {}\nuser.k=0sYQ==\n\n",
+                getfattr_header_name(d)
+            ));
+        }
+        let xs = interpret_getfattr_batch(&pc_out(0, body.as_bytes(), ""), "/f", &dirs).unwrap();
+        assert!(xs.iter().all(|x| x.inspected && x.attrs.len() == 1));
+        // getfattr writes a backslash as `\134` and a line feed as `\012`.
+        assert_eq!(getfattr_header_name("/a\\b"), "/a\\134b");
+        assert_eq!(getfattr_header_name("/a\nb"), "/a\\012b");
+        // The unescaped form of a name with a line feed must not match.
+        let raw = "# file: /a\nb\nuser.k=0sYQ==\n\n";
+        assert!(interpret_getfattr_batch(
+            &pc_out(0, raw.as_bytes(), ""),
+            "/f",
+            &["/".to_string(), "/a\nb".to_string()]
+        )
+        .is_err());
+    }
+
+    /// Length of the longer of the two batch commands for a walk whose single
+    /// non-root ancestor has a `len`-character name.
+    fn pc_command_len(fs: &TargetFs, name_len: usize) -> usize {
+        let dirs = vec!["/".to_string(), format!("/{}", "a".repeat(name_len))];
+        [
+            fs.argv_request("/usr/bin/stat", &batched_stat_args(&dirs), false),
+            fs.argv_request("/usr/bin/getfattr", &batched_getfattr_args(&dirs), false),
+        ]
+        .iter()
+        .map(|r| crate::executor::build_remote_command(r, fs.sudo, &fs.home_env()).len())
+        .max()
+        .unwrap()
+    }
+
+    #[test]
+    fn path_c_size_guard_is_exact_and_decided_before_dispatch() {
+        for sudo in [false, true] {
+            let fs = pc_fs_with(pc_target(1), false, true, sudo);
+            // Largest name length whose commands still fit.
+            // One plain character adds exactly one byte, so start from the
+            // arithmetic estimate and let the loops settle on the boundary.
+            let mut inside = BATCHED_WALK_MAX_COMMAND_BYTES - pc_command_len(&fs, 0);
+            while pc_command_len(&fs, inside) > BATCHED_WALK_MAX_COMMAND_BYTES {
+                inside -= 1;
+            }
+            while pc_command_len(&fs, inside + 1) <= BATCHED_WALK_MAX_COMMAND_BYTES {
+                inside += 1;
+            }
+            let outside = inside + 1;
+            assert!(pc_command_len(&fs, inside) <= BATCHED_WALK_MAX_COMMAND_BYTES);
+            assert!(pc_command_len(&fs, outside) > BATCHED_WALK_MAX_COMMAND_BYTES);
+            // Exactly one character apart: the guard sits on the boundary.
+            assert_eq!(
+                pc_command_len(&fs, outside) - pc_command_len(&fs, inside),
+                1
+            );
+            for (len, expect_batch) in [(inside, true), (outside, false)] {
+                let dirs = vec!["/".to_string(), format!("/{}", "a".repeat(len))];
+                assert_eq!(
+                    fs.batched_parent_walk_applies(&dirs),
+                    expect_batch,
+                    "sudo={sudo} len={len}"
+                );
+                // Run it: the first command the target ever sees tells which
+                // walk was chosen - nothing precedes the decision.
+                let mut t = FakeTarget::ubuntu2404().with_fake_fs();
+                t = t.with_fs_dir(&dirs[1]);
+                let mut run = pc_fs_with(t, false, true, sudo);
+                run.check_trusted_parents(&format!("{}/f", dirs[1]))
+                    .unwrap();
+                let trace = pc_trace(&run);
+                if expect_batch {
+                    assert_eq!(trace, ["stat-batch:2", "getfattr:2"]);
+                } else {
+                    assert_eq!(trace, ["stat", "getfattr:1", "stat", "getfattr:1"]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn path_c_guard_counts_the_sudo_wrapper_and_quoting() {
+        let plain = pc_fs_with(pc_target(1), false, true, false);
+        let sudo = pc_fs_with(pc_target(1), false, true, true);
+        assert!(pc_command_len(&sudo, 100) > pc_command_len(&plain, 100));
+        // A name made of quotes quadruples under POSIX quoting, so it falls
+        // back far earlier than a plain name of the same length.
+        let quotes = vec!["/".to_string(), format!("/{}", "'".repeat(5000))];
+        let plain_names = vec!["/".to_string(), format!("/{}", "a".repeat(5000))];
+        assert!(!plain.batched_parent_walk_applies(&quotes));
+        assert!(plain.batched_parent_walk_applies(&plain_names));
+    }
+
+    #[test]
+    fn path_c_control_characters_select_the_sequential_walk() {
+        let fs = pc_fs_with(pc_target(1), false, true, false);
+        let with = |name: &str| vec!["/".to_string(), format!("/{name}")];
+        for bad in [
+            "a\u{1}b",
+            "a\rb",
+            "a\u{7f}b",
+            "a\u{85}b",
+            "a\u{1b}[0m",
+            "a\u{0c}b",
+        ] {
+            assert!(!fs.batched_parent_walk_applies(&with(bad)), "{bad:?}");
+        }
+        for ok in [
+            "a b", "a\tb", "a\nb", "a'b", "a\"b", "a\\b", "a|b", "a$b", "ünï", "-dash",
+        ] {
+            assert!(fs.batched_parent_walk_applies(&with(ok)), "{ok:?}");
+        }
+    }
+
+    #[test]
+    fn path_c_matches_the_sequential_walk_on_every_trust_decision() {
+        // Differential test over the whole decision space of one ancestor:
+        // kind x owner x mode x privilege. The batched and the sequential
+        // walks must agree on accept/refuse for every combination.
+        use crate::fakesys::FakeKind;
+        let kinds = ["dir", "symlink", "file"];
+        let owners = [0u32, 1000, 4242];
+        let modes = [0o755u32, 0o700, 0o775, 0o757, 0o777, 0o1777, 0o2755];
+        let mut combos = 0;
+        for sudo in [false, true] {
+            for kind in kinds {
+                for uid in owners {
+                    for mode in modes {
+                        let target = |_: ()| {
+                            let mut t = pc_target(3);
+                            let fs = t.fs.as_mut().unwrap();
+                            let node = fs.nodes.get_mut("/d1").unwrap();
+                            node.uid = uid;
+                            node.mode = mode;
+                            node.kind = match kind {
+                                "dir" => FakeKind::Dir,
+                                "symlink" => FakeKind::Symlink("/x".to_string()),
+                                _ => FakeKind::File(b"x".to_vec()),
+                            };
+                            t
+                        };
+                        let mut batched = pc_fs_with(target(()), false, true, sudo);
+                        let mut sequential = pc_fs_with(target(()), true, true, sudo);
+                        let b = batched.check_trusted_parents(&pc_path(3));
+                        let s = sequential.check_trusted_parents(&pc_path(3));
+                        assert_eq!(
+                            b.is_ok(),
+                            s.is_ok(),
+                            "sudo={sudo} kind={kind} uid={uid} mode={mode:o}: batched {b:?} vs sequential {s:?}"
+                        );
+                        if let (Err(b), Err(s)) = (&b, &s) {
+                            assert_eq!(
+                                b.message, s.message,
+                                "same reason, sudo={sudo} {kind} {uid} {mode:o}"
+                            );
+                        }
+                        combos += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(combos, 2 * 3 * 3 * 7);
+    }
+
+    #[test]
+    fn path_c_missing_ancestor_is_a_refusal_with_one_command() {
+        // /d1/d2 does not exist on the target.
+        let mut t = FakeTarget::ubuntu2404().with_fake_fs().with_fs_dir("/d1");
+        t = t.with_fs_dir("/d1/d3");
+        let mut fs = pc_fs(t);
+        let e = fs.check_trusted_parents("/d1/d2/d3/f").unwrap_err();
+        assert!(
+            e.message.contains("parent directory may be missing"),
+            "{}",
+            e.message
+        );
+        assert_eq!(pc_trace(&fs), ["stat-batch:4"]);
+    }
+
+    #[test]
+    fn path_c_does_not_require_one_device_across_the_ancestors() {
+        // CURRENT never compared the devices of the ancestors with each other
+        // (a mount below the root is legitimate); the batch must not start to.
+        let dirs = pc_dirs(3);
+        let body: String = dirs
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                format!(
+                    "directory|755|0|0|4096|{}|100|{PC_TS}|{PC_TS}|{d}\0",
+                    2049 + i * 1000
+                )
+            })
+            .collect();
+        let mut fs = pc_fs(pc_stat_override(
+            pc_target(3),
+            pc_out(0, body.as_bytes(), ""),
+        ));
+        fs.check_trusted_parents(&pc_path(3)).unwrap();
+        assert_eq!(pc_trace(&fs), ["stat-batch:3", "getfattr:3"]);
+    }
+
+    #[test]
+    fn path_c_same_filesystem_stays_a_separate_fresh_observation() {
+        let mut t = pc_target(2).with_fs_file("/d1/f", "x");
+        t = t.with_fs_dir("/d1/g");
+        let mut fs = pc_fs(t);
+        fs.check_trusted_parents("/d1/f").unwrap();
+        let before = fs.log().len();
+        assert!(fs.same_filesystem("/d1", "/d1/f").unwrap());
+        let after = pc_trace(&fs);
+        // The comparison reads its own single-operand `stat -c` records; it
+        // reuses nothing from the batch.
+        assert_eq!(after[before..], ["stat", "stat"]);
+        assert!(fs.log()[before..].iter().all(|c| c.args[0] == "-c"));
+    }
+
+    #[test]
+    fn single_operand_getfattr_interpretation_is_unchanged() {
+        let ok = |s: &str| interpret_getfattr_capture(&pc_out(0, s.as_bytes(), ""));
+        assert!(ok("").inspected && ok("").attrs.is_empty());
+        let x = ok("# file: /d\nuser.a=0sYQ==\nsecurity.selinux=0sYQ==\n\n");
+        assert!(x.inspected);
+        assert_eq!(x.attrs.len(), 2);
+        assert!(x.unsafe_attr().is_none());
+        assert!(!ok("noequals\n").inspected);
+        assert!(!ok("k=zz!\n").inspected);
+        assert!(!interpret_getfattr_capture(&pc_out(1, b"", "")).inspected);
+        let mut t = pc_out(0, b"", "");
+        t.stdout_truncated = true;
+        assert!(!interpret_getfattr_capture(&t).inspected);
+        assert!(!interpret_getfattr_capture(&pc_out(0, b"\xff", "")).inspected);
+    }
+
+    // Captures from real tools on the research hosts (tests/fixtures/path_c).
+    macro_rules! pc_capture {
+        ($name:literal) => {
+            (
+                include_str!(concat!("../tests/fixtures/path_c/", $name, ".dirs"))
+                    .lines()
+                    .map(String::from)
+                    .collect::<Vec<String>>(),
+                include_bytes!(concat!("../tests/fixtures/path_c/", $name, ".stat.bin")).as_slice(),
+                include_bytes!(concat!("../tests/fixtures/path_c/", $name, ".getfattr.bin"))
+                    .as_slice(),
+            )
+        };
+    }
+
+    /// A walk context for the capture host's test user (the owner recorded for
+    /// the first ancestor of the capture).
+    fn pc_capture_fs(uid: u32) -> TargetFs {
+        TargetFs::new_for(
+            Executor::Fake(Box::new(FakeExecutor::new(FakeTarget::ubuntu2404(), false))),
+            false,
+            uid,
+            uid,
+            "/home/a0000".to_string(),
+            None,
+            true,
+            false,
+            false,
+            None,
+        )
+    }
+
+    /// Run a captured chain through the production batch interpretation and
+    /// the shared per-ancestor verdicts, exactly as the walk does.
+    fn pc_walk_captures(dirs: &[String], stat: &[u8], getfattr: &[u8]) -> Result<()> {
+        let stats = interpret_stat_batch(&pc_out(0, stat, ""), "/x/f", dirs)?;
+        let fs = pc_capture_fs(stats[0].uid);
+        for (d, st) in dirs.iter().zip(&stats) {
+            fs.check_parent_stat(d, st)?;
+        }
+        let xs = interpret_getfattr_batch(&pc_out(0, getfattr, ""), "/x/f", dirs)?;
+        for (d, x) in dirs.iter().zip(&xs) {
+            fs.check_parent_xattrs(d, x)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn path_c_accepts_real_captures_of_safe_chains_from_every_tool_family() {
+        for (host, (dirs, stat, getfattr)) in [
+            (
+                "ubuntu24 GNU 9.4 / attr 2.5.2",
+                pc_capture!("ubuntu24_safe"),
+            ),
+            (
+                "ubuntu26 uutils 0.8.0 / attr 2.5.2",
+                pc_capture!("ubuntu26_safe"),
+            ),
+            (
+                "rocky98 GNU 8.32 / attr 2.6.0 + SELinux labels",
+                pc_capture!("rocky98_safe"),
+            ),
+            (
+                "rocky102 GNU 9.5 / attr 2.6.0",
+                pc_capture!("rocky102_safe"),
+            ),
+            ("ubuntu24 user xattr", pc_capture!("ubuntu24_xattr")),
+        ] {
+            assert_eq!(dirs.len(), 3, "{host}");
+            pc_walk_captures(&dirs, stat, getfattr)
+                .unwrap_or_else(|e| panic!("{host}: {}", e.message));
+        }
+    }
+
+    #[test]
+    fn path_c_attributes_real_getfattr_blocks_to_their_ancestors() {
+        let (dirs, _, getfattr) = pc_capture!("rocky98_safe");
+        let xs = interpret_getfattr_batch(&pc_out(0, getfattr, ""), "/x/f", &dirs).unwrap();
+        assert!(xs.iter().all(|x| x.inspected));
+        assert!(xs
+            .iter()
+            .all(|x| x.attrs.keys().collect::<Vec<_>>() == ["security.selinux"]));
+        let (dirs, _, getfattr) = pc_capture!("ubuntu24_xattr");
+        let xs = interpret_getfattr_batch(&pc_out(0, getfattr, ""), "/x/f", &dirs).unwrap();
+        // Only the middle ancestor carried an attribute.
+        assert!(
+            xs[0].attrs.is_empty() && xs[2].attrs.is_empty()
+                || xs.iter().filter(|x| !x.attrs.is_empty()).count() == 1
+        );
+        assert_eq!(xs.iter().map(|x| x.attrs.len()).sum::<usize>(), 1);
+    }
+
+    #[test]
+    fn path_c_refuses_real_captures_of_unsafe_chains() {
+        for (what, (dirs, stat, getfattr), needle) in [
+            (
+                "symlink ancestor",
+                pc_capture!("rocky98_symlink"),
+                "symlink",
+            ),
+            (
+                "group/other writable ancestor",
+                pc_capture!("rocky98_mode"),
+                "group or other write",
+            ),
+            (
+                "foreign-owned ancestor",
+                pc_capture!("rocky98_owner"),
+                "outside the trusted set",
+            ),
+        ] {
+            let e = pc_walk_captures(&dirs, stat, getfattr)
+                .expect_err(&format!("{what} must be refused"));
+            assert!(e.message.contains(needle), "{what}: {}", e.message);
+        }
+    }
+
+    #[test]
+    fn path_c_refuses_real_acl_captures_at_whichever_gate_sees_them() {
+        // A named *access* ACL entry raises the group bits `stat` reports to the
+        // ACL mask, so the stat gate already refuses; a *default* ACL leaves the
+        // mode alone and only the attribute gate sees it. The attribute gate
+        // refuses both on its own, which is what matters when a mask hides
+        // nothing.
+        for (what, (dirs, stat, getfattr), first_gate) in [
+            (
+                "access ACL",
+                pc_capture!("rocky98_aclc"),
+                "group or other write",
+            ),
+            (
+                "default ACL",
+                pc_capture!("rocky98_dacl"),
+                "extended access metadata",
+            ),
+        ] {
+            let e = pc_walk_captures(&dirs, stat, getfattr).expect_err(what);
+            assert!(e.message.contains(first_gate), "{what}: {}", e.message);
+            let fs = pc_capture_fs(1000);
+            let xs = interpret_getfattr_batch(&pc_out(0, getfattr, ""), "/x/f", &dirs).unwrap();
+            let refused: Vec<_> = dirs
+                .iter()
+                .zip(&xs)
+                .filter_map(|(d, x)| fs.check_parent_xattrs(d, x).err())
+                .collect();
+            assert_eq!(
+                refused.len(),
+                1,
+                "{what}: exactly one ancestor carries the ACL"
+            );
+            assert!(
+                refused[0].message.contains("extended access metadata"),
+                "{}",
+                refused[0].message
+            );
+        }
+    }
+
+    #[test]
+    fn path_c_refuses_a_real_partial_stat_failure() {
+        let (dirs, stat, _) = pc_capture!("rocky98_missing");
+        let stderr = include_str!("../tests/fixtures/path_c/rocky98_missing.stat.stderr");
+        assert!(!stat.is_empty(), "the real failure still printed a record");
+        let e = interpret_stat_batch(&pc_out(1, stat, stderr), "/x/f", &dirs).unwrap_err();
+        assert!(e.message.contains("exited with status 1"), "{}", e.message);
+        // Even offered as if it had succeeded, the missing records refuse it.
+        assert!(interpret_stat_batch(&pc_out(0, stat, ""), "/x/f", &dirs).is_err());
+    }
+
+    #[test]
+    fn path_c_walks_are_independent_invocations() {
+        // Two walks over the same path send two complete, fresh batch pairs:
+        // nothing observed by the first is reused by the second.
+        let mut fs = pc_fs(pc_target(3));
+        fs.check_trusted_parents(&pc_path(3)).unwrap();
+        fs.check_trusted_parents(&pc_path(3)).unwrap();
+        fs.check_trusted_parents(&pc_path(3)).unwrap();
+        assert_eq!(
+            pc_trace(&fs),
+            [
+                "stat-batch:3",
+                "getfattr:3",
+                "stat-batch:3",
+                "getfattr:3",
+                "stat-batch:3",
+                "getfattr:3"
+            ]
+        );
+        assert_eq!(fs.exec_stats().snapshot().total(), 6);
+    }
+
+    #[test]
+    fn path_c_batch_requests_are_counted_as_one_command_each() {
+        let mut fs = pc_fs(pc_target(6));
+        fs.check_trusted_parents(&pc_path(6)).unwrap();
+        let s = fs.exec_stats().snapshot();
+        assert_eq!(s.total(), 2);
+        assert_eq!(s.count_program("stat"), 1);
+        assert_eq!(s.count_program("getfattr"), 1);
+        // A failed batch is still one counted command.
+        let mut fs = pc_fs(pc_stat_override(pc_target(6), pc_out(1, b"", "x\n")));
+        assert!(fs.check_trusted_parents(&pc_path(6)).is_err());
+        let s = fs.exec_stats().snapshot();
+        assert_eq!(s.total(), 1);
+        assert_eq!(s.count_program("stat"), 1);
+        assert_eq!(s.not_successful(), 1);
     }
 }

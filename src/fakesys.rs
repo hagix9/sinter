@@ -377,39 +377,77 @@ impl FakeFs {
         )
     }
 
+    /// The nine `%F|%a|%u|%g|%s|%d|%i|%y|%z` fields of one object (no
+    /// terminator), or `None` when it does not exist.
+    fn stat_record(&self, path: &str) -> Option<String> {
+        let n = self.nodes.get(path)?;
+        let (kind, size) = match &n.kind {
+            FakeKind::Dir => ("directory", 4096),
+            FakeKind::File(b) if b.is_empty() => ("regular empty file", 0),
+            FakeKind::File(b) => ("regular file", b.len()),
+            FakeKind::Symlink(t) => ("symbolic link", t.len()),
+        };
+        // `freeze_mtime` reports a constant timestamp for regular files.
+        let (mtime, ctime) = if self.freeze_mtime && matches!(n.kind, FakeKind::File(_)) {
+            (Self::stat_time(1), Self::stat_time(1))
+        } else {
+            (Self::stat_time(n.mtime), Self::stat_time(n.ctime))
+        };
+        Some(format!(
+            "{}|{:o}|{}|{}|{}|2049|{}|{}|{}",
+            kind,
+            n.mode & 0o7777,
+            n.uid,
+            n.gid,
+            size,
+            n.ino,
+            mtime,
+            ctime
+        ))
+    }
+
+    fn stat_missing(path: &str) -> String {
+        format!(
+            "stat: cannot statx {}: No such file or directory\n",
+            crate::targetfs::q(path)
+        )
+    }
+
     fn stat(&self, path: &str) -> Output {
-        match self.nodes.get(path) {
-            None => exited(
-                1,
-                String::new(),
-                format!(
-                    "stat: cannot statx {}: No such file or directory\n",
-                    crate::targetfs::q(path)
-                ),
-            ),
-            Some(n) => {
-                let (kind, size) = match &n.kind {
-                    FakeKind::Dir => ("directory", 4096),
-                    FakeKind::File(b) if b.is_empty() => ("regular empty file", 0),
-                    FakeKind::File(b) => ("regular file", b.len()),
-                    FakeKind::Symlink(t) => ("symbolic link", t.len()),
-                };
-                exited(
-                    0,
-                    format!(
-                        "{}|{:o}|{}|{}|{}|2049|{}|{}|{}\n",
-                        kind,
-                        n.mode & 0o7777,
-                        n.uid,
-                        n.gid,
-                        size,
-                        n.ino,
-                        Self::stat_time(n.mtime),
-                        Self::stat_time(n.ctime)
-                    ),
-                    String::new(),
-                )
+        match self.stat_record(path) {
+            None => exited(1, String::new(), Self::stat_missing(path)),
+            Some(rec) => exited(0, format!("{}\n", rec), String::new()),
+        }
+    }
+
+    /// `stat --printf='<nine fields>|%n\0' -- <operands...>`: one NUL-terminated
+    /// record per existing operand, in operand order; a missing operand gets a
+    /// diagnostic and a non-zero exit but the remaining operands are still
+    /// answered (GNU behaviour).
+    fn stat_batch(&self, paths: &[&str]) -> Output {
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr = String::new();
+        let mut code = 0;
+        for p in paths {
+            match self.stat_record(p) {
+                Some(rec) => {
+                    stdout.extend_from_slice(rec.as_bytes());
+                    stdout.push(b'|');
+                    stdout.extend_from_slice(p.as_bytes());
+                    stdout.push(0);
+                }
+                None => {
+                    code = 1;
+                    stderr.push_str(&Self::stat_missing(p));
+                }
             }
+        }
+        Output {
+            completion: Completion::Exited(code),
+            stdout,
+            stderr: stderr.into_bytes(),
+            stdout_truncated: false,
+            stderr_truncated: false,
         }
     }
 
@@ -431,26 +469,11 @@ impl FakeFs {
         let a: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let mut touched: Vec<TouchedPath> = Vec::new();
         let out = match (prog, a.as_slice()) {
-            ("stat", ["-c", "%F|%a|%u|%g|%s|%d|%i|%y|%z", "--", p]) => {
-                let mut o = self.stat(p);
-                if self.freeze_mtime && o.completion == Completion::Exited(0) {
-                    // report a constant timestamp for regular files
-                    if let Some(FakeNode {
-                        kind: FakeKind::File(_),
-                        ..
-                    }) = self.nodes.get(*p)
-                    {
-                        let text = String::from_utf8_lossy(&o.stdout).to_string();
-                        let mut parts: Vec<String> =
-                            text.trim_end().split('|').map(|s| s.to_string()).collect();
-                        if parts.len() == 9 {
-                            parts[7] = Self::stat_time(1);
-                            parts[8] = Self::stat_time(1);
-                            o.stdout = format!("{}\n", parts.join("|")).into_bytes();
-                        }
-                    }
-                }
-                o
+            ("stat", ["-c", "%F|%a|%u|%g|%s|%d|%i|%y|%z", "--", p]) => self.stat(p),
+            ("stat", ["--printf=%F|%a|%u|%g|%s|%d|%i|%y|%z|%n\\0", "--", paths @ ..])
+                if !paths.is_empty() =>
+            {
+                self.stat_batch(paths)
             }
             ("sha256sum", ["--", p]) => match self.nodes.get(*p) {
                 Some(FakeNode {
@@ -489,11 +512,35 @@ impl FakeFs {
                 },
                 _ => exited(1, String::new(), String::new()),
             },
-            ("getfattr", ["-d", "-m", "-", "-e", "base64", "--absolute-names", "--", p]) => {
-                if self.nodes.contains_key(*p) {
+            (
+                "getfattr",
+                ["-d", "-m", "-", "-e", "base64", "--absolute-names", "--", paths @ ..],
+            ) if !paths.is_empty() => {
+                // The modeled filesystem carries no extended attributes, so an
+                // existing operand prints nothing (as real getfattr does for an
+                // object without attributes); a missing one is a diagnostic and
+                // a non-zero exit, with the other operands still answered.
+                let mut stderr = String::new();
+                for p in paths {
+                    if !self.nodes.contains_key(*p) {
+                        stderr.push_str(&format!("getfattr: {}: No such file or directory\n", p));
+                    }
+                }
+                if stderr.is_empty() {
                     ok()
                 } else {
-                    Self::fail(&format!("getfattr: {}: No such file or directory", p))
+                    exited(1, String::new(), stderr)
+                }
+            }
+            ("getfacl", ["-p", "-c", "--", p]) => {
+                if self.nodes.contains_key(*p) {
+                    exited(
+                        0,
+                        "user::rwx\ngroup::r-x\nother::r-x\n\n".to_string(),
+                        String::new(),
+                    )
+                } else {
+                    Self::fail(&format!("getfacl: {}: No such file or directory", p))
                 }
             }
             ("mktemp", ["-d", "-p", dir, tmpl]) if tmpl.starts_with(".sinter-stage.") => {
