@@ -45,7 +45,6 @@ enum Command {
     /// Serve a read-only MCP (Model Context Protocol) endpoint on stdio.
     Mcp(McpArgs),
     /// Encrypt, decrypt and list secret files (standard age format).
-    /// Unreleased: not part of v1.1.3.
     Secrets(SecretsArgs),
 }
 
