@@ -17,9 +17,9 @@
 //!
 //! * `baseline_*` tests pin **today's exact shape** of a few small scenarios.
 //!   They are deliberately exact: they also prove the instrumentation counts
-//!   correctly. When a change intentionally alters a count (for example
-//!   memoizing account lookups), update the number *and* say why, with the
-//!   before/after evidence, in the same change.
+//!   correctly. When a change intentionally alters a count (as WP-P1's
+//!   account-lookup memo did for `getent`), update the number *and* say why,
+//!   with the before/after evidence, in the same change.
 //! * `budget_*` tests are **ceilings**. A reduction passes; growth fails. They
 //!   are the lasting regression guard and need no edit when a count goes down.
 //!
@@ -295,13 +295,17 @@ fn baseline_compliant_owned_file_costs_four_commands_in_plan_and_audit() {
 }
 
 #[test]
-fn baseline_shared_owner_and_group_are_looked_up_once_per_resource() {
-    // The baseline for account-lookup memoization (WP-P1). Today every file
-    // that names an owner and a group runs `getent passwd` and `getent group`
-    // again, even when every resource names the same two accounts: getent is
-    // exactly half of the per-resource commands and grows linearly with N.
-    // A memo should turn `2 * n` into `2`; update these numbers then, with the
-    // before/after evidence.
+fn baseline_shared_owner_and_group_are_looked_up_once_per_run() {
+    // WP-P1 (account-lookup memo). WP-P0 measured `getent = 2 * n` here: every
+    // file that names an owner and a group ran `getent passwd` and `getent
+    // group` again, even though every resource named the same two accounts
+    // (half of the per-resource commands). A lookup that already succeeded,
+    // with nothing mutating in between, is now answered from the memo, so plan
+    // and audit ask the target for each distinct account once:
+    //
+    //   getent: 2n -> 2      per-resource commands: 4n -> 2n + 2
+    //
+    // (`stat` and `sha256sum` are unchanged: one each per file.)
     for n in [1usize, 5, 20] {
         let (body, t) = shared_owner_files(n);
         let dir = tempfile::tempdir().unwrap();
@@ -310,16 +314,10 @@ fn baseline_shared_owner_and_group_are_looked_up_once_per_resource() {
         let audit = run_audit_of(&path, false, t);
         for (what, o) in [("plan", &plan), ("audit", &audit)] {
             let per_resource = o.stats.total() - SETUP_COMMANDS;
-            assert_eq!(per_resource, 4 * n, "{what} n={n}");
-            assert_eq!(o.stats.count_program("getent"), 2 * n, "{what} n={n}");
+            assert_eq!(per_resource, 2 * n + 2, "{what} n={n}");
+            assert_eq!(o.stats.count_program("getent"), 2, "{what} n={n}");
             assert_eq!(o.stats.count_program("stat"), n, "{what} n={n}");
             assert_eq!(o.stats.count_program("sha256sum"), n, "{what} n={n}");
-            // Half of the per-resource commands are account lookups.
-            assert_eq!(
-                o.stats.count_program("getent") * 2,
-                per_resource,
-                "{what} n={n}"
-            );
         }
     }
 }

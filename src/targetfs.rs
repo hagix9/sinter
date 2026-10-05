@@ -268,6 +268,56 @@ pub struct TargetFs {
     has_getfacl: bool,
     allow_mutation: bool,
     fault: Option<String>,
+    /// Successful, non-sensitive account lookups already made by this
+    /// `TargetFs` (performance WP-P1). See [`IdentityMemo`].
+    identity_memo: IdentityMemo,
+}
+
+/// Memo of account lookups (`getent passwd|group <key>`) that already
+/// succeeded on this target, so a recipe whose resources share an owner or a
+/// group does not repeat the same remote round trip per resource.
+///
+/// * **Scope:** a field of one `TargetFs`, which is owned by one `Engine`,
+///   which is built for one (recipe, host). It is never static, never shared
+///   between engines or hosts, and dies with the engine.
+/// * **Key:** `(database, key, field)`. `passwd foo` and `group foo` are
+///   different entries, and "the uid of user `foo`" (field 2) is different from
+///   "the primary gid of uid `foo`" (field 3).
+/// * **Value:** the single parsed number the caller asked for. The raw record
+///   (home directory, shell, GECOS, ...) is never kept.
+/// * **Only successes are stored.** An unknown account, a non-zero exit, an
+///   indeterminate completion and a malformed record all stay live: the next
+///   lookup asks the target again. "Not found" is deliberately not cached
+///   because an earlier resource may create the account.
+/// * **Sensitive lookups bypass the memo** (read and write), so a name that
+///   came from a secret is never held here and its command is still issued
+///   exactly as before.
+/// * **Invalidation:** every operation that holds a [`MutationPermit`] — the
+///   raw `exec` channel and every mutating helper — empties the memo before it
+///   is dispatched, because any of them may change the account databases
+///   (`useradd`, `groupmod`, a package scriptlet, a file written to
+///   `/etc/passwd`, ...). Plan and audit hold no permit, so their memo stays
+///   valid for the whole run.
+#[derive(Debug, Default)]
+struct IdentityMemo {
+    entries: BTreeMap<(&'static str, String, usize), u32>,
+}
+
+impl IdentityMemo {
+    fn get(&self, database: &'static str, key: &str, field: usize) -> Option<u32> {
+        self.entries
+            .get(&(database, key.to_string(), field))
+            .copied()
+    }
+
+    fn insert(&mut self, database: &'static str, key: &str, field: usize, value: u32) {
+        self.entries
+            .insert((database, key.to_string(), field), value);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
 }
 
 fn base_env() -> BTreeMap<String, String> {
@@ -306,6 +356,7 @@ impl TargetFs {
             has_getfacl,
             allow_mutation,
             fault,
+            identity_memo: IdentityMemo::default(),
         }
     }
 
@@ -336,6 +387,7 @@ impl TargetFs {
     /// and handler actions. It therefore requires a `MutationPermit`, which
     /// only a mutation-enabled TargetFs can produce (RA-01).
     pub(crate) fn exec(&mut self, _permit: &MutationPermit, req: &ExecRequest) -> Result<Output> {
+        self.identity_memo.clear();
         self.ex.run(req)
     }
 
@@ -572,6 +624,7 @@ impl TargetFs {
     /// no shell syntax can leak. The directory is created mode 0700.
     pub fn make_staging_dir(&mut self, dir: &str) -> Result<String> {
         let _permit = self.mutation_permit()?;
+        self.identity_memo.clear();
         let out = self.run_argv_ok(
             "/usr/bin/mktemp",
             &[
@@ -840,6 +893,7 @@ impl TargetFs {
     }
 
     pub fn chmod(&mut self, _permit: &MutationPermit, path: &str, mode: u32) -> Result<()> {
+        self.identity_memo.clear();
         // Permit required: this method is unreachable on a read-only TargetFs.
         self.run_argv_ok_mutating(
             "/bin/chmod",
@@ -863,6 +917,7 @@ impl TargetFs {
         uid: u32,
         gid: u32,
     ) -> Result<()> {
+        self.identity_memo.clear();
         self.run_argv_ok_mutating(
             "/bin/chown",
             &[
@@ -881,6 +936,7 @@ impl TargetFs {
     }
 
     pub fn mkdir(&mut self, _permit: &MutationPermit, path: &str) -> Result<()> {
+        self.identity_memo.clear();
         self.run_argv_ok_mutating("/bin/mkdir", &["--".to_string(), path.to_string()])?;
         Ok(())
     }
@@ -888,6 +944,7 @@ impl TargetFs {
     /// `mkdir -p` for directories inside a freshly created private backup
     /// run directory (never used on managed paths).
     pub(crate) fn mkdir_p(&mut self, _permit: &MutationPermit, path: &str) -> Result<()> {
+        self.identity_memo.clear();
         self.run_argv_ok_mutating(
             "/bin/mkdir",
             &["-p".to_string(), "--".to_string(), path.to_string()],
@@ -907,6 +964,7 @@ impl TargetFs {
         src: &str,
         dest: &str,
     ) -> Result<()> {
+        self.identity_memo.clear();
         let mut req = ExecRequest::new("/bin/cp");
         req.args = vec![
             "-a".to_string(),
@@ -939,12 +997,14 @@ impl TargetFs {
     }
 
     pub fn rmdir(&mut self, _permit: &MutationPermit, path: &str) -> Result<()> {
+        self.identity_memo.clear();
         self.run_argv_ok_mutating("/bin/rmdir", &["--".to_string(), path.to_string()])?;
         Ok(())
     }
 
     /// Remove a file only if it is the exact object we created (regular file).
     pub fn remove_file(&mut self, _permit: &MutationPermit, path: &str) -> Result<()> {
+        self.identity_memo.clear();
         self.run_argv_ok_mutating(
             "/bin/rm",
             &["-f".to_string(), "--".to_string(), path.to_string()],
@@ -954,6 +1014,7 @@ impl TargetFs {
 
     /// Remove a symlink only, refusing to follow it.
     pub fn remove_symlink(&mut self, _permit: &MutationPermit, path: &str) -> Result<()> {
+        self.identity_memo.clear();
         self.run_argv_ok_mutating(
             "/bin/rm",
             &["-f".to_string(), "--".to_string(), path.to_string()],
@@ -967,6 +1028,7 @@ impl TargetFs {
         target: &str,
         link_path: &str,
     ) -> Result<()> {
+        self.identity_memo.clear();
         if target.contains('\0') {
             return Err(SinterError::schema(
                 "symlink target may not contain NUL bytes",
@@ -998,6 +1060,7 @@ impl TargetFs {
         link_path: &str,
         observed: &Stat,
     ) -> Result<()> {
+        self.identity_memo.clear();
         let (dir, name) = parent_and_name(link_path);
         let stage_dir = self.make_staging_dir(&dir)?;
         let tmp = format!("{}/{}", stage_dir, name);
@@ -1107,6 +1170,7 @@ impl TargetFs {
     }
 
     pub fn rename(&mut self, _permit: &MutationPermit, from: &str, to: &str) -> Result<()> {
+        self.identity_memo.clear();
         // Controlled failure-injection inside the real rename operation so the
         // publish error path that classifies rename outcomes is exercised.
         if self.fault() == Some("rename_fail") {
@@ -1140,6 +1204,7 @@ impl TargetFs {
     /// destination path is passed as a single argv element, so no recipe-
     /// controlled value can become shell syntax, and no shell is invoked.
     pub fn write_bytes(&mut self, _permit: &MutationPermit, path: &str, data: &[u8]) -> Result<()> {
+        self.identity_memo.clear();
         if path.contains('\0') {
             return Err(SinterError::schema("path may not contain NUL bytes"));
         }
@@ -1173,6 +1238,7 @@ impl TargetFs {
         value: &str,
         path: &str,
     ) -> Result<()> {
+        self.identity_memo.clear();
         self.run_argv_ok(
             "/usr/bin/setfattr",
             &[
@@ -1196,6 +1262,7 @@ impl TargetFs {
         from: &str,
         to: &str,
     ) -> Result<()> {
+        self.identity_memo.clear();
         if !self.has_getfattr {
             return Ok(());
         }
@@ -1214,7 +1281,7 @@ impl TargetFs {
         if let Ok(n) = spec.parse::<u32>() {
             return Ok(n);
         }
-        self.getent_field("passwd", spec, 2, 7, "user", sensitive)
+        self.memoized_getent_field("passwd", spec, 2, 7, "user", sensitive)
     }
 
     pub fn resolve_gid(&mut self, spec: &str) -> Result<u32> {
@@ -1225,11 +1292,42 @@ impl TargetFs {
         if let Ok(n) = spec.parse::<u32>() {
             return Ok(n);
         }
-        self.getent_field("group", spec, 2, 4, "group", sensitive)
+        self.memoized_getent_field("group", spec, 2, 4, "group", sensitive)
     }
 
     pub fn primary_gid_of_uid(&mut self, uid: u32) -> Result<u32> {
-        self.getent_field("passwd", &uid.to_string(), 3, 7, "uid", false)
+        self.primary_gid_of_uid_sensitive(uid, false)
+    }
+
+    /// The primary gid of `uid`. A lookup made for a sensitive resource is
+    /// redacted and bypasses the memo, like the owner and group lookups.
+    pub fn primary_gid_of_uid_sensitive(&mut self, uid: u32, sensitive: bool) -> Result<u32> {
+        self.memoized_getent_field("passwd", &uid.to_string(), 3, 7, "uid", sensitive)
+    }
+
+    /// [`Self::getent_field`] with the [`IdentityMemo`]: a repeat of a lookup
+    /// that already succeeded, with no mutation in between, is answered
+    /// without a target command. Failures are returned unchanged and never
+    /// stored; sensitive lookups never touch the memo.
+    fn memoized_getent_field(
+        &mut self,
+        database: &'static str,
+        key: &str,
+        field: usize,
+        expected_fields: usize,
+        what: &str,
+        sensitive: bool,
+    ) -> Result<u32> {
+        if !sensitive {
+            if let Some(v) = self.identity_memo.get(database, key, field) {
+                return Ok(v);
+            }
+        }
+        let v = self.getent_field(database, key, field, expected_fields, what, sensitive)?;
+        if !sensitive {
+            self.identity_memo.insert(database, key, field, v);
+        }
+        Ok(v)
     }
 
     /// Strict `getent <db> <key>` observation contract (IA-01): a complete,
@@ -2871,5 +2969,420 @@ mod tests {
     fn readlink_contract_rejects_invalid_utf8() {
         let o = out_exit(0, &[0x2f, 0xff, 0xfe], b"");
         assert!(readlink_record(&o, "/link").is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // Account-lookup memo (performance WP-P1).
+    // -----------------------------------------------------------------
+
+    fn memo_fs(target: crate::executor::FakeTarget) -> TargetFs {
+        TargetFs::new_for(
+            Executor::Fake(Box::new(crate::executor::FakeExecutor::new(target, false))),
+            false,
+            1000,
+            1000,
+            "/home/fake".to_string(),
+            Some(crate::platform::PackageBackend::Apt),
+            true,
+            false,
+            true,
+            None,
+        )
+    }
+
+    fn memo_target() -> crate::executor::FakeTarget {
+        crate::executor::FakeTarget::ubuntu2404()
+            .with_fake_fs()
+            .with_fs_dir("/d")
+            .with_group("app", 990)
+            .with_user("app", 990, 990, "/h", "/bin/sh")
+    }
+
+    /// `(database, key)` of every `getent` the target received, in order.
+    fn getent_calls(fs: &TargetFs) -> Vec<(String, String)> {
+        fs.log()
+            .iter()
+            .filter(|c| c.program.ends_with("getent"))
+            .map(|c| (c.args[0].clone(), c.args[1].clone()))
+            .collect()
+    }
+
+    #[test]
+    fn memo_answers_a_repeated_lookup_without_a_second_command() {
+        let mut fs = memo_fs(memo_target());
+        for _ in 0..5 {
+            assert_eq!(fs.resolve_uid("app").unwrap(), 990);
+            assert_eq!(fs.resolve_gid("app").unwrap(), 990);
+            assert_eq!(fs.primary_gid_of_uid(990).unwrap(), 990);
+        }
+        assert_eq!(
+            getent_calls(&fs),
+            [
+                ("passwd".to_string(), "app".to_string()),
+                ("group".to_string(), "app".to_string()),
+                ("passwd".to_string(), "990".to_string()),
+            ]
+        );
+        assert_eq!(fs.exec_stats().snapshot().count_program("getent"), 3);
+    }
+
+    #[test]
+    fn memo_keeps_user_and_group_namespaces_apart() {
+        // The same name in both databases with different numbers: a hit on the
+        // wrong namespace would return the other number.
+        let t = crate::executor::FakeTarget::ubuntu2404()
+            .with_group("shared", 2002)
+            .with_group("shared-primary", 1001)
+            .with_user("shared", 1001, 1001, "/h", "/bin/sh");
+        let mut fs = memo_fs(t);
+        for _ in 0..3 {
+            assert_eq!(fs.resolve_uid("shared").unwrap(), 1001);
+            assert_eq!(fs.resolve_gid("shared").unwrap(), 2002);
+        }
+        assert_eq!(
+            getent_calls(&fs),
+            [
+                ("passwd".to_string(), "shared".to_string()),
+                ("group".to_string(), "shared".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn memo_distinguishes_a_uid_from_the_primary_gid_of_that_uid() {
+        // `shared`'s uid is 1001 and its primary gid is 3003: "the uid of
+        // `shared`" and "the primary gid of uid 1001" are different facts.
+        let t = crate::executor::FakeTarget::ubuntu2404()
+            .with_group("g3003", 3003)
+            .with_user("shared", 1001, 3003, "/h", "/bin/sh");
+        let mut fs = memo_fs(t);
+        for _ in 0..2 {
+            assert_eq!(fs.resolve_uid("shared").unwrap(), 1001);
+            assert_eq!(fs.primary_gid_of_uid(1001).unwrap(), 3003);
+        }
+        assert_eq!(getent_calls(&fs).len(), 2);
+    }
+
+    #[test]
+    fn memo_looks_up_each_distinct_identity_once() {
+        let t = memo_target()
+            .with_group("other", 991)
+            .with_user("other", 991, 991, "/h", "/bin/sh");
+        let mut fs = memo_fs(t);
+        for _ in 0..3 {
+            assert_eq!(fs.resolve_uid("app").unwrap(), 990);
+            assert_eq!(fs.resolve_uid("other").unwrap(), 991);
+            assert_eq!(fs.resolve_gid("app").unwrap(), 990);
+            assert_eq!(fs.resolve_gid("other").unwrap(), 991);
+        }
+        assert_eq!(getent_calls(&fs).len(), 4);
+    }
+
+    #[test]
+    fn memo_does_not_cache_a_missing_account() {
+        let mut fs = memo_fs(memo_target());
+        assert!(fs.resolve_uid("ghost").is_err());
+        assert!(fs.resolve_uid("ghost").is_err());
+        assert!(fs.resolve_gid("ghost").is_err());
+        assert!(fs.resolve_gid("ghost").is_err());
+        assert_eq!(getent_calls(&fs).len(), 4, "every miss asks the target");
+        assert!(fs.identity_memo.entries.is_empty());
+    }
+
+    #[test]
+    fn memo_does_not_cache_failed_or_malformed_lookups() {
+        let ok = out_exit(0, b"app:x:990:990::/h:/bin/sh\n", b"");
+        let queued = vec![
+            // execution failure
+            out_exit(2, b"", b""),
+            // transport/timeout: completion cannot be established
+            Output {
+                completion: Completion::Indeterminate {
+                    started: true,
+                    reason: "timed out".to_string(),
+                },
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+            },
+            // malformed: too few fields, not a number, two records, diagnostic
+            out_exit(0, b"app:x:990\n", b""),
+            out_exit(0, b"app:x:abc:990::/h:/bin/sh\n", b""),
+            out_exit(
+                0,
+                b"app:x:990:990::/h:/bin/sh\napp:x:990:990::/h:/bin/sh\n",
+                b"",
+            ),
+            out_exit(0, b"app:x:990:990::/h:/bin/sh\n", b"warning\n"),
+            // truncated record
+            Output {
+                stdout_truncated: true,
+                ..ok.clone()
+            },
+        ];
+        let n = queued.len();
+        let mut fs = memo_fs(memo_target().with_observations("getent", queued));
+        for i in 0..n {
+            assert!(fs.resolve_uid("app").is_err(), "failure {} must surface", i);
+            assert!(
+                fs.identity_memo.entries.is_empty(),
+                "failure {} must not be stored",
+                i
+            );
+        }
+        // The queue is exhausted: the next lookup is live, succeeds, is stored.
+        assert_eq!(fs.resolve_uid("app").unwrap(), 990);
+        assert_eq!(fs.resolve_uid("app").unwrap(), 990);
+        assert_eq!(getent_calls(&fs).len(), n + 1);
+    }
+
+    #[test]
+    fn memo_never_stores_or_reads_a_sensitive_lookup() {
+        let mut fs = memo_fs(memo_target());
+        assert_eq!(fs.resolve_uid_sensitive("app", true).unwrap(), 990);
+        assert_eq!(fs.resolve_uid_sensitive("app", true).unwrap(), 990);
+        assert_eq!(fs.resolve_gid_sensitive("app", true).unwrap(), 990);
+        assert!(fs.identity_memo.entries.is_empty());
+        // A sensitive request is not answered from a non-sensitive entry.
+        assert_eq!(fs.resolve_uid("app").unwrap(), 990);
+        assert_eq!(fs.resolve_uid_sensitive("app", true).unwrap(), 990);
+        // Four sensitive lookups, each a real (redacted) command; one ordinary.
+        let stats = fs.exec_stats().snapshot();
+        assert_eq!(stats.count_program("[redacted]"), 4);
+        assert_eq!(getent_calls(&fs).len(), 1);
+        assert_eq!(fs.identity_memo.entries.len(), 1);
+    }
+
+    #[test]
+    fn memo_stores_only_a_number_never_the_record() {
+        let mut fs = memo_fs(memo_target());
+        fs.resolve_uid("app").unwrap();
+        let dump = format!("{:?}", fs.identity_memo);
+        assert!(!dump.contains("/bin/sh"), "{}", dump);
+        assert!(!dump.contains("/h"), "{}", dump);
+        assert_eq!(fs.identity_memo.entries.len(), 1);
+    }
+
+    #[test]
+    fn memos_of_two_targets_never_share_an_answer() {
+        let a = crate::executor::FakeTarget::ubuntu2404()
+            .with_group("app", 1000)
+            .with_user("app", 1000, 1000, "/h", "/bin/sh");
+        let b = crate::executor::FakeTarget::ubuntu2404()
+            .with_group("app", 2000)
+            .with_user("app", 2000, 2000, "/h", "/bin/sh");
+        let (mut fa, mut fb) = (memo_fs(a), memo_fs(b));
+        assert_eq!(fa.resolve_uid("app").unwrap(), 1000);
+        assert_eq!(fb.resolve_uid("app").unwrap(), 2000);
+        assert_eq!(fa.resolve_uid("app").unwrap(), 1000);
+        assert_eq!(fb.resolve_gid("app").unwrap(), 2000);
+        assert_eq!(fa.resolve_gid("app").unwrap(), 1000);
+        // Each paid for its own first lookups.
+        assert_eq!(getent_calls(&fa).len(), 2);
+        assert_eq!(getent_calls(&fb).len(), 2);
+    }
+
+    #[test]
+    fn every_mutating_operation_empties_the_memo() {
+        type Op = Box<dyn Fn(&mut TargetFs, &MutationPermit)>;
+        let permit_ops: Vec<(&str, Op)> = vec![
+            (
+                "exec",
+                Box::new(|f, p| {
+                    let mut r = ExecRequest::new("/bin/true");
+                    r.env = base_env();
+                    let _ = f.exec(p, &r);
+                }),
+            ),
+            (
+                "chmod",
+                Box::new(|f, p| {
+                    let _ = f.chmod(p, "/d/x", 0o600);
+                }),
+            ),
+            (
+                "chown",
+                Box::new(|f, p| {
+                    let _ = f.chown(p, "/d/x", 0, 0);
+                }),
+            ),
+            (
+                "mkdir",
+                Box::new(|f, p| {
+                    let _ = f.mkdir(p, "/d/new");
+                }),
+            ),
+            (
+                "mkdir_p",
+                Box::new(|f, p| {
+                    let _ = f.mkdir_p(p, "/d/a/b");
+                }),
+            ),
+            (
+                "rmdir",
+                Box::new(|f, p| {
+                    let _ = f.rmdir(p, "/d/new");
+                }),
+            ),
+            (
+                "remove_file",
+                Box::new(|f, p| {
+                    let _ = f.remove_file(p, "/d/x");
+                }),
+            ),
+            (
+                "remove_symlink",
+                Box::new(|f, p| {
+                    let _ = f.remove_symlink(p, "/d/l");
+                }),
+            ),
+            (
+                "symlink",
+                Box::new(|f, p| {
+                    let _ = f.symlink(p, "/t", "/d/l");
+                }),
+            ),
+            (
+                "rename",
+                Box::new(|f, p| {
+                    let _ = f.rename(p, "/d/x", "/d/y");
+                }),
+            ),
+            (
+                "write_bytes",
+                Box::new(|f, p| {
+                    let _ = f.write_bytes(p, "/d/x", b"x");
+                }),
+            ),
+            (
+                "set_xattr",
+                Box::new(|f, p| {
+                    let _ = f.set_xattr(p, "user.a", "b", "/d/x");
+                }),
+            ),
+            (
+                "copy_user_xattrs",
+                Box::new(|f, p| {
+                    let _ = f.copy_user_xattrs(p, "/d/x", "/d/y");
+                }),
+            ),
+            (
+                "backup_copy",
+                Box::new(|f, p| {
+                    let _ = f.backup_copy(p, "/d/x", "/d/b");
+                }),
+            ),
+            (
+                // Delegates to `make_staging_dir`, which clears as well, so
+                // this entry proves the outcome, not the direct call alone.
+                "symlink_replace",
+                Box::new(|f, p| {
+                    let observed = f.inspect("/d/l").unwrap();
+                    let _ = f.symlink_replace(p, "/t", "/d/l", &observed);
+                }),
+            ),
+        ];
+        for (name, op) in permit_ops {
+            let mut fs = memo_fs(memo_target());
+            let permit = fs.mutation_permit().unwrap();
+            fs.resolve_uid("app").unwrap();
+            assert_eq!(fs.identity_memo.entries.len(), 1, "{name}: primed");
+            op(&mut fs, &permit);
+            assert!(fs.identity_memo.entries.is_empty(), "{name} must clear");
+        }
+        // The two helpers that obtain their own permit.
+        let mut fs = memo_fs(memo_target());
+        fs.resolve_uid("app").unwrap();
+        let _ = fs.make_staging_dir("/d");
+        assert!(fs.identity_memo.entries.is_empty(), "make_staging_dir");
+        let mut fs = memo_fs(memo_target());
+        fs.resolve_uid("app").unwrap();
+        let _ = fs.set_metadata("/d/x", 0o600, 0, 0);
+        assert!(fs.identity_memo.entries.is_empty(), "set_metadata");
+    }
+
+    #[test]
+    fn observations_do_not_empty_the_memo() {
+        let mut fs = memo_fs(memo_target());
+        fs.resolve_uid("app").unwrap();
+        let _ = fs.inspect("/d");
+        let _ = fs.sha256("/d/none");
+        assert_eq!(fs.identity_memo.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_mutation_makes_the_next_lookup_live_and_current() {
+        let mut fs = memo_fs(memo_target());
+        let permit = fs.mutation_permit().unwrap();
+        assert_eq!(fs.primary_gid_of_uid(990).unwrap(), 990);
+        let mut r = ExecRequest::new("/usr/sbin/groupadd");
+        r.args = vec!["-g".to_string(), "995".to_string(), "newg".to_string()];
+        fs.exec(&permit, &r).unwrap();
+        let mut r = ExecRequest::new("/usr/sbin/usermod");
+        r.args = vec!["-g".to_string(), "newg".to_string(), "app".to_string()];
+        fs.exec(&permit, &r).unwrap();
+        assert_eq!(fs.primary_gid_of_uid(990).unwrap(), 995, "no stale answer");
+        assert_eq!(getent_calls(&fs).len(), 2);
+    }
+
+    // -----------------------------------------------------------------
+    // WP-P1 remediation: the primary-gid lookup carries the sensitivity of
+    // the resource it is made for.
+    // -----------------------------------------------------------------
+
+    /// A target whose `getent` answers are scripted, in order, one per call.
+    fn scripted_getent(lines: &[&str]) -> TargetFs {
+        let queued = lines
+            .iter()
+            .map(|l| out_exit(0, format!("{}\n", l).as_bytes(), b""))
+            .collect();
+        memo_fs(memo_target().with_observations("getent", queued))
+    }
+
+    const APP_PRIMARY_111: &str = "app:x:990:111::/h:/bin/sh";
+    const APP_PRIMARY_222: &str = "app:x:990:222::/h:/bin/sh";
+
+    #[test]
+    fn a_sensitive_primary_gid_lookup_never_reads_the_memo() {
+        // Ordinary lookup first (gid 111, memoized); the target then answers
+        // 222. A sensitive lookup must ask again and see 222, not 111.
+        let mut fs = scripted_getent(&[APP_PRIMARY_111, APP_PRIMARY_222]);
+        assert_eq!(fs.primary_gid_of_uid(990).unwrap(), 111);
+        assert_eq!(fs.identity_memo.entries.len(), 1);
+        assert_eq!(fs.primary_gid_of_uid_sensitive(990, true).unwrap(), 222);
+        // ... and the ordinary entry is untouched by it.
+        assert_eq!(fs.primary_gid_of_uid(990).unwrap(), 111);
+        let stats = fs.exec_stats().snapshot();
+        assert_eq!(stats.count_program("getent"), 1);
+        assert_eq!(stats.count_program("[redacted]"), 1);
+    }
+
+    #[test]
+    fn a_sensitive_primary_gid_lookup_never_writes_the_memo() {
+        // Sensitive lookup first (gid 111); the target then answers 222. The
+        // ordinary lookup afterwards must ask itself, not reuse 111.
+        let mut fs = scripted_getent(&[APP_PRIMARY_111, APP_PRIMARY_222]);
+        assert_eq!(fs.primary_gid_of_uid_sensitive(990, true).unwrap(), 111);
+        assert!(fs.identity_memo.entries.is_empty());
+        assert_eq!(fs.primary_gid_of_uid(990).unwrap(), 222);
+        assert_eq!(fs.identity_memo.entries.len(), 1);
+        let stats = fs.exec_stats().snapshot();
+        assert_eq!(stats.count_program("getent"), 1);
+        assert_eq!(stats.count_program("[redacted]"), 1);
+    }
+
+    #[test]
+    fn a_sensitive_primary_gid_lookup_is_redacted_in_the_log() {
+        let mut fs = memo_fs(memo_target());
+        assert_eq!(fs.primary_gid_of_uid_sensitive(990, true).unwrap(), 990);
+        let log = fs.log();
+        let rec = log.last().unwrap();
+        assert!(rec.sensitive);
+        assert!(!format!("{:?}", rec).contains("990"), "{:?}", rec);
+        // The failure message names no uid either.
+        let mut fs = memo_fs(memo_target());
+        let e = fs.primary_gid_of_uid_sensitive(4321, true).unwrap_err();
+        assert!(!e.message.contains("4321"), "{}", e.message);
     }
 }

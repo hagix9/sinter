@@ -487,7 +487,9 @@ impl Engine {
             if uid == self.fs.target_uid {
                 Some(self.fs.target_gid)
             } else {
-                Some(self.fs.primary_gid_of_uid(uid).map_err(|e| {
+                let psens = owner.as_ref().is_some_and(|(_, sens)| *sens) || meta_sensitive;
+                let primary = self.fs.primary_gid_of_uid_sensitive(uid, psens);
+                Some(primary.map_err(|e| {
                     if meta_sensitive {
                         redact_msg(&res.id, "unknown primary group", "resolution failed")
                     } else {
@@ -1370,7 +1372,9 @@ impl Engine {
             if uid == self.fs.target_uid {
                 Some(self.fs.target_gid)
             } else {
-                Some(self.fs.primary_gid_of_uid(uid).map_err(|e| {
+                let psens = owner.as_ref().is_some_and(|(_, sens)| *sens) || meta_sensitive;
+                let primary = self.fs.primary_gid_of_uid_sensitive(uid, psens);
+                Some(primary.map_err(|e| {
                     if meta_sensitive {
                         redact_msg(&res.id, "unknown primary group", "resolution failed")
                     } else {
