@@ -17,8 +17,9 @@
 //!   [`run_audit`](crate::audit::run_audit) (`resources`).
 //! * The **caller layer** owns `RunStarted` and `RunEnded` (the engine cannot
 //!   tell `plan` from `audit`, and `connect` happens before `run` can be
-//!   entered). The types exist here; nothing emits them until S3 wires the CLI.
-//!   `Resolve` likewise belongs to the CLI (inventory/`--host` resolution).
+//!   entered). The types live here; the CLI emits them through
+//!   [`progress_session`](crate::progress_session) (S3), which also emits
+//!   `Resolve` (the `ssh -G` evaluation of inventory/`--host` resolution).
 //!
 //! # Lifecycle invariants (executable form: [`validate_stream`])
 //!
@@ -72,10 +73,12 @@
 //! never reads anything back, so a sink cannot influence control flow, cannot
 //! cancel and cannot make a run fail. An observer may disappear at any time (a
 //! channel-backed sink must discard `SendError`, e.g. `let _ = tx.send(..)`).
-//! S1/S2 add **no** panic isolation: a panicking sink unwinds through the
-//! engine. Isolating the engine from a misbehaving consumer (channel hand-off
-//! to a renderer thread, bounded teardown) is the S3 boundary, and the S3
-//! sink must be written so it cannot panic.
+//! The engine adds **no** panic isolation of its own: a panicking sink unwinds
+//! through the engine. The production CLI path isolates the engine from a
+//! misbehaving consumer instead ([`progress_session`](crate::progress_session):
+//! a panic-free `ChannelSink`, a worker thread, bounded teardown); an
+//! arbitrary third-party sink passed to `new_with_progress` stays outside that
+//! guarantee.
 //!
 //! `Send + Sync` is required on purpose: `Engine` itself is `!Send`, but the
 //! sink is the only part a later consumer (a renderer thread, or the MCP
@@ -87,11 +90,14 @@
 //! * Owner decision OQ-1: TTY progress is automatic; non-TTY/CI progress is
 //!   off by default, so default non-TTY output stays byte-compatible, and any
 //!   future plain progress is explicit opt-in only; JSON mode emits no
-//!   progress on any stream (its error diagnostics are unchanged). Binding on
-//!   S3/S5.
+//!   progress on any stream (its error diagnostics are unchanged). Encoded by
+//!   [`progress_session::decide_mode`](crate::progress_session::decide_mode)
+//!   (S3); binding on S5.
 //! * Review decision OQ-5: the transient TTY line is disabled when any
 //!   `FrozenResource.secret` is set, which avoids prompt/redraw races. Binding
-//!   on S4. Nothing in S1/S2 coordinates with prompts.
+//!   on S4; S3 only reports the fact to the consumer
+//!   ([`SessionInfo::references_secrets`](crate::progress_session::SessionInfo)).
+//!   Nothing coordinates with prompts.
 
 use std::sync::{Arc, Mutex};
 

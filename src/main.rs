@@ -10,11 +10,17 @@ use sinter::output::{
     audit_report_json, render_apply, render_audit, render_plan, run_report_json, OutputFormat,
     RenderOptions,
 };
+use sinter::progress::{ProgressSink, RunKind, RunOutcome};
+use sinter::progress_session::{
+    mode_from_environment, outcome_of_audit, outcome_of_error, outcome_of_report,
+    references_secrets, ProgressOptions, ProgressSession, SessionInfo,
+};
 use sinter::sshconfig::TargetRequest;
 use sinter::style;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -387,6 +393,48 @@ impl Phase {
             Phase::Audit => "audit",
         }
     }
+
+    fn kind(self) -> RunKind {
+        match self {
+            Phase::Plan => RunKind::Plan,
+            Phase::Apply => RunKind::Apply,
+            Phase::Audit => RunKind::Audit,
+        }
+    }
+}
+
+/// Progress facts about one recipe, known before it runs.
+fn unit_info(phase: Phase, unit: &RecipeUnit) -> SessionInfo {
+    SessionInfo {
+        kind: phase.kind(),
+        references_secrets: references_secrets(&unit.model),
+    }
+}
+
+/// Progress facts about a whole source (the resolution scope of a multi-
+/// execution invocation).
+fn source_info(phase: Phase, source: &Source) -> SessionInfo {
+    SessionInfo {
+        kind: phase.kind(),
+        references_secrets: source.units().iter().any(|u| references_secrets(&u.model)),
+    }
+}
+
+/// How a progress scope that ran `result` ended. Closed vocabulary only.
+fn scope_outcome<T>(result: &Result<T, SinterError>) -> RunOutcome {
+    match result {
+        Ok(_) => RunOutcome::Completed,
+        Err(e) => outcome_of_error(e),
+    }
+}
+
+/// How an execution ended, for progress: a report maps through its status, a
+/// returned error is never a completed run.
+fn run_outcome_of(result: &Result<Outcome, SinterError>) -> RunOutcome {
+    match result {
+        Ok(outcome) => outcome.run_outcome(),
+        Err(e) => outcome_of_error(e),
+    }
 }
 
 enum Outcome {
@@ -399,6 +447,14 @@ impl Outcome {
         match self {
             Outcome::Run(r) => report_status_code(&r.status),
             Outcome::Audit(report) => report.exit_code(),
+        }
+    }
+
+    /// Closed run outcome for progress; never carries report content.
+    fn run_outcome(&self) -> RunOutcome {
+        match self {
+            Outcome::Run(r) => outcome_of_report(r),
+            Outcome::Audit(r) => outcome_of_audit(r),
         }
     }
 
@@ -430,6 +486,18 @@ impl Outcome {
 
 fn run_phase(phase: Phase, a: &TargetArgs) -> Result<u8, SinterError> {
     let format = parse_format(&a.format)?;
+    // Phase 1 of the progress decision (see `sinter::progress_session`): JSON,
+    // a non-terminal stderr and TERM=dumb all mean no progress at all.
+    let progress = ProgressOptions::new(mode_from_environment(format == OutputFormat::Json));
+    run_phase_with(phase, a, format, &progress)
+}
+
+fn run_phase_with(
+    phase: Phase,
+    a: &TargetArgs,
+    format: OutputFormat,
+    progress: &ProgressOptions,
+) -> Result<u8, SinterError> {
     if a.exec.host.is_some() && a.exec.inventory.is_some() {
         return Err(SinterError::schema(
             "--host and --inventory (--hosts) are mutually exclusive: give one host, or select hosts through the recipe targets and an inventory",
@@ -442,20 +510,39 @@ fn run_phase(phase: Phase, a: &TargetArgs) -> Result<u8, SinterError> {
         color: format == OutputFormat::Text && style::stdout_color(),
     };
     if let Some(inv) = &a.exec.inventory {
-        let plan = inventory_plan(&source, a, inv)?;
-        return run_executions(phase, &source, plan, a, &ro);
+        // Several executions follow, so target resolution is a progress scope
+        // of its own; each execution then gets its own.
+        let session = progress.begin(source_info(phase, &source));
+        let planned = inventory_plan(&source, a, inv, &session);
+        session.end(scope_outcome(&planned));
+        return run_executions(phase, &source, planned?, a, &ro, progress);
     }
-    let target = single_target(a)?;
     match &source {
         Source::Recipe(u) => {
-            // The established single-target path: one document, unchanged.
-            let outcome = execute(phase, u.model.clone(), target.spec, a, None)?;
+            // The established single-target path: one document, unchanged. One
+            // execution, so one progress scope covers resolution (if any) and
+            // the run; it ends before anything is rendered.
+            let session = progress.begin(unit_info(phase, u));
+            let executed = single_target(a, Some(&session)).and_then(|target| {
+                execute(phase, u.model.clone(), target.spec, a, None, session.sink())
+            });
+            session.end(run_outcome_of(&executed));
+            let outcome = executed?;
             outcome.render(phase, &ro)?;
             Ok(outcome.exit_code())
         }
         Source::Bundle(b) => {
             // One explicit target (--host or localhost): every recipe of the
             // bundle, in order, on that target.
+            let target = match &a.exec.host {
+                None => single_target(a, None)?,
+                Some(_) => {
+                    let session = progress.begin(source_info(phase, &source));
+                    let resolved = single_target(a, Some(&session));
+                    session.end(scope_outcome(&resolved));
+                    resolved?
+                }
+            };
             let executions = (0..b.recipes.len())
                 .map(|i| Execution {
                     unit: i,
@@ -467,7 +554,7 @@ fn run_phase(phase: Phase, a: &TargetArgs) -> Result<u8, SinterError> {
                 resolutions: Vec::new(),
                 executions,
             };
-            run_executions(phase, &source, plan, a, &ro)
+            run_executions(phase, &source, plan, a, &ro, progress)
         }
     }
 }
@@ -504,7 +591,11 @@ impl Target {
     }
 }
 
-fn single_target(a: &TargetArgs) -> Result<Target, SinterError> {
+/// The explicit target of a single-target invocation. `session` is the progress
+/// scope when one exists: the `Resolve` stage covers the local `ssh -G`
+/// evaluation (the only real wait here) and is absent with `--no-ssh-config`
+/// and for localhost.
+fn single_target(a: &TargetArgs, session: Option<&ProgressSession>) -> Result<Target, SinterError> {
     Ok(match &a.exec.host {
         None => Target {
             name: "localhost".to_string(),
@@ -519,11 +610,21 @@ fn single_target(a: &TargetArgs) -> Result<Target, SinterError> {
                 known_hosts: a.exec.known_hosts.clone(),
                 identity_files: a.exec.identity.clone(),
             };
+            let use_ssh_config = !a.exec.no_ssh_config;
+            let mut stage = session
+                .filter(|_| use_ssh_config)
+                .map(|s| s.resolve_stage(1));
+            if let Some(stage) = stage.as_mut() {
+                stage.host_started();
+            }
+            // On error `stage` is dropped here and ends `Failed`.
+            let ssh = resolve_request(&req, use_ssh_config)?;
+            if let Some(stage) = stage {
+                stage.end();
+            }
             Target {
                 name: host.clone(),
-                spec: TargetSpec {
-                    ssh: Some(resolve_request(&req, !a.exec.no_ssh_config)?),
-                },
+                spec: TargetSpec { ssh: Some(ssh) },
             }
         }
     })
@@ -572,6 +673,7 @@ fn inventory_plan(
     source: &Source,
     a: &TargetArgs,
     inv_path: &Path,
+    session: &ProgressSession,
 ) -> Result<ExecutionPlan, SinterError> {
     let inv = load_inventory(inv_path)?;
     let mut resolutions = Vec::new();
@@ -583,10 +685,18 @@ fn inventory_plan(
         )?);
     }
     let mut targets: BTreeMap<String, Target> = BTreeMap::new();
+    // `Resolve` stage: one item per distinct selected host, each of which costs
+    // a local `ssh -G` evaluation. Absent when that evaluation is skipped.
+    let distinct: BTreeSet<&str> = resolutions.iter().flat_map(|r| r.selected()).collect();
+    let mut stage = (!a.exec.no_ssh_config && !distinct.is_empty())
+        .then(|| session.resolve_stage(distinct.len()));
     for r in &resolutions {
         for name in r.selected() {
             if targets.contains_key(name) {
                 continue;
+            }
+            if let Some(stage) = stage.as_mut() {
+                stage.host_started();
             }
             let h = &inv.hosts[name];
             let req = TargetRequest {
@@ -624,6 +734,9 @@ fn inventory_plan(
                 },
             );
         }
+    }
+    if let Some(stage) = stage {
+        stage.end();
     }
     let mut executions = Vec::new();
     for (i, r) in resolutions.iter().enumerate() {
@@ -780,6 +893,7 @@ fn run_executions(
     plan: ExecutionPlan,
     a: &TargetArgs,
     ro: &RenderOptions,
+    progress: &ProgressOptions,
 ) -> Result<u8, SinterError> {
     let text = ro.format == OutputFormat::Text;
     let units = source.units();
@@ -807,7 +921,19 @@ fn run_executions(
             println!("== {} ({}) ==", sanitize_line(&what), ex.target.describe());
         }
         let id = backup_id(&run_id, units, ex.unit);
-        let executed = execute(phase, u.model.clone(), ex.target.spec.clone(), a, Some(&id));
+        // One progress scope per executed (recipe, target) pair, ended before
+        // anything of this execution is rendered. Executions that are not run
+        // have no scope.
+        let session = progress.begin(unit_info(phase, u));
+        let executed = execute(
+            phase,
+            u.model.clone(),
+            ex.target.spec.clone(),
+            a,
+            Some(&id),
+            session.sink(),
+        );
+        session.end(run_outcome_of(&executed));
         let backup = backup_record(phase, u, Some(&executed));
         let (code, label, json) = match executed {
             Ok(outcome) => {
@@ -957,6 +1083,7 @@ fn execute(
     target: TargetSpec,
     a: &TargetArgs,
     backup_run_id: Option<&str>,
+    progress: Arc<dyn ProgressSink>,
 ) -> Result<Outcome, SinterError> {
     // Audit uses Plan-mode construction: a read-only TargetFs, and run_audit
     // additionally refuses any engine that can produce a mutation permit, so
@@ -972,12 +1099,12 @@ fn execute(
         target,
         verbose: a.verbose,
         fault: None,
-        fake_target: None,
+        fake_target: test_fake_target(),
     };
     // Secrets are opened lazily: a recipe that names none never touches an
     // identity or the terminal.
-    let mut engine =
-        Engine::new(model, opts)?.with_secrets(sinter::secret_source::process_secrets());
+    let mut engine = Engine::new_with_progress(model, opts, progress)?
+        .with_secrets(sinter::secret_source::process_secrets());
     if let Some(id) = backup_run_id {
         engine = engine.with_backup_run_id(id.to_string());
     }
@@ -985,6 +1112,17 @@ fn execute(
         Phase::Audit => Outcome::Audit(run_audit(engine)?),
         _ => Outcome::Run(Box::new(engine.run()?)),
     })
+}
+
+/// The CLI never runs against a scripted target; unit tests of this file do.
+#[cfg(not(test))]
+fn test_fake_target() -> Option<sinter::executor::FakeTarget> {
+    None
+}
+
+#[cfg(test)]
+fn test_fake_target() -> Option<sinter::executor::FakeTarget> {
+    tests::FAKE_TARGETS.with(|f| f.borrow_mut().pop_front())
 }
 
 /// Apply fail-fast rule: during apply, any execution that does not exit 0
@@ -1059,6 +1197,543 @@ fn report_status_code(status: &sinter::engine::AggregateStatus) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// Scripted targets for [`execute`], one per execution, in order
+        /// (compiled in tests only).
+        pub(super) static FAKE_TARGETS: std::cell::RefCell<std::collections::VecDeque<sinter::executor::FakeTarget>> =
+            const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    }
+
+    // -----------------------------------------------------------------------
+    // WP-PROGRESS S3: the real `run_phase_with` wiring, driven in-process.
+    //
+    // Each execution runs against a scripted target (`FAKE_TARGETS`); the
+    // consumer records every session's stream. What a session streams is the
+    // contract here; what reaches stdout/stderr is proven by the binary-level
+    // tests in `tests/progress_cli_output.rs`.
+    // -----------------------------------------------------------------------
+
+    use sinter::executor::FakeTarget;
+    use sinter::progress::{validate_stream, ProgressEvent, Stage};
+    use sinter::progress_session::{ProgressConsumer, ProgressMode};
+    use std::sync::Mutex;
+
+    type Stream = Arc<Mutex<Vec<ProgressEvent>>>;
+
+    struct Rec(Stream);
+
+    impl ProgressConsumer for Rec {
+        fn consume(&mut self, event: &ProgressEvent) {
+            self.0.lock().unwrap().push(event.clone());
+        }
+    }
+
+    struct Wiring {
+        streams: Arc<Mutex<Vec<Stream>>>,
+        infos: Arc<Mutex<Vec<SessionInfo>>>,
+        opts: ProgressOptions,
+    }
+
+    fn wiring(mode: ProgressMode) -> Wiring {
+        let streams: Arc<Mutex<Vec<Stream>>> = Arc::default();
+        let infos: Arc<Mutex<Vec<SessionInfo>>> = Arc::default();
+        let (s, i) = (streams.clone(), infos.clone());
+        let opts = ProgressOptions::new(mode).with_consumer_factory(Arc::new(move |info| {
+            i.lock().unwrap().push(*info);
+            let stream: Stream = Arc::default();
+            s.lock().unwrap().push(stream.clone());
+            Box::new(Rec(stream))
+        }));
+        Wiring {
+            streams,
+            infos,
+            opts,
+        }
+    }
+
+    impl Wiring {
+        fn streams(&self) -> Vec<Vec<String>> {
+            self.streams
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|s| {
+                    let ev = s.lock().unwrap().clone();
+                    validate_stream(&ev).unwrap_or_else(|e| panic!("{e}: {ev:#?}"));
+                    shape(&ev)
+                })
+                .collect()
+        }
+    }
+
+    fn shape(events: &[ProgressEvent]) -> Vec<String> {
+        events
+            .iter()
+            .map(|e| match e {
+                ProgressEvent::RunStarted { command } => format!("run start {command:?}"),
+                ProgressEvent::RunEnded { outcome } => format!("run end {outcome:?}"),
+                ProgressEvent::StageStarted { stage, total } => {
+                    format!("{} start {total:?}", stage.label())
+                }
+                ProgressEvent::Progress { stage, done, .. } if *stage == Stage::Resolve => {
+                    format!("resolve item {done}")
+                }
+                ProgressEvent::Progress { .. } => "item".to_string(),
+                ProgressEvent::StageEnded {
+                    stage,
+                    outcome,
+                    done,
+                } => format!("{} end {outcome:?} {done}", stage.label()),
+                _ => "other".to_string(),
+            })
+            .collect()
+    }
+
+    fn target_args(phase: Phase, argv: &[&str]) -> TargetArgs {
+        let mut full = vec!["sinter", phase.name()];
+        full.extend_from_slice(argv);
+        match Cli::try_parse_from(full).unwrap().command {
+            Command::Plan(a) | Command::Apply(a) | Command::Audit(a) => a,
+            _ => unreachable!(),
+        }
+    }
+
+    fn base() -> FakeTarget {
+        FakeTarget::ubuntu2404()
+            .with_fake_fs()
+            .with_fs_dir("/etc/perf")
+    }
+
+    /// Run the real wiring. `targets` are consumed one per execution.
+    fn drive(
+        phase: Phase,
+        argv: &[&str],
+        w: &Wiring,
+        targets: Vec<FakeTarget>,
+    ) -> Result<u8, SinterError> {
+        let a = target_args(phase, argv);
+        let format = parse_format(&a.format).unwrap();
+        FAKE_TARGETS.with(|f| *f.borrow_mut() = targets.into());
+        let r = run_phase_with(phase, &a, format, &w.opts);
+        FAKE_TARGETS.with(|f| f.borrow_mut().clear());
+        r
+    }
+
+    const RECIPE: &str = "version: 1\nresources:\n  - id: a\n    type: file\n    with:\n      path: /etc/perf/a\n      content: x\n";
+    /// Needs the package backend, so a target without one fails at connect.
+    const PKG_RECIPE: &str = "version: 1\nresources:\n  - id: p\n    type: package\n    with:\n      name: jq\n      state: present\n";
+    const WEB_RECIPE: &str = "version: 1\ntargets:\n  groups: [web]\nresources:\n  - id: p\n    type: package\n    with:\n      name: jq\n      state: present\n";
+
+    fn fixture() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    fn write(dir: &tempfile::TempDir, name: &str, body: &str) -> String {
+        let p = dir.path().join(name);
+        std::fs::write(&p, body).unwrap();
+        p.display().to_string()
+    }
+
+    fn inventory(dir: &tempfile::TempDir) -> String {
+        let kh = write(dir, "known_hosts", "");
+        write(
+            dir,
+            "hosts.yaml",
+            &format!(
+                "hosts:\n  web01:\n    address: 127.0.0.1\n    port: 20101\n    user: u\n    known_hosts: {kh}\n  web02:\n    address: 127.0.0.1\n    port: 20102\n    user: u\n    known_hosts: {kh}\ngroups:\n  web:\n    hosts: [web01, web02]\n"
+            ),
+        )
+    }
+
+    fn web_recipe(dir: &tempfile::TempDir, name: &str) -> String {
+        write(dir, name, WEB_RECIPE)
+    }
+
+    #[test]
+    fn single_recipe_is_one_valid_run_covering_connect_and_resources() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", RECIPE);
+        let w = wiring(ProgressMode::Tty);
+        let code = drive(Phase::Plan, &[&r, "--format", "json"], &w, vec![base()]).unwrap();
+        assert_eq!(code, 0);
+        let streams = w.streams();
+        assert_eq!(streams.len(), 1);
+        assert_eq!(
+            streams[0],
+            [
+                "run start Plan",
+                "connect start None",
+                "connect end Completed 0",
+                "resources start Some(1)",
+                "item",
+                "resources end Completed 1",
+                "run end Completed"
+            ]
+        );
+        assert_eq!(
+            w.infos.lock().unwrap().as_slice(),
+            &[SessionInfo {
+                kind: RunKind::Plan,
+                references_secrets: false
+            }]
+        );
+    }
+
+    #[test]
+    fn each_command_reports_its_own_run_kind() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", RECIPE);
+        for (phase, want) in [
+            (Phase::Plan, "run start Plan"),
+            (Phase::Apply, "run start Apply"),
+            (Phase::Audit, "run start Audit"),
+        ] {
+            let w = wiring(ProgressMode::Tty);
+            let _ = drive(phase, &[&r, "--format", "json"], &w, vec![base()]);
+            assert_eq!(w.streams()[0][0], want);
+        }
+    }
+
+    #[test]
+    fn audit_drift_completes_the_run() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", RECIPE);
+        let w = wiring(ProgressMode::Tty);
+        // /etc/perf/a is absent: drift, exit 7, which is a finding not a failure.
+        let code = drive(Phase::Audit, &[&r, "--format", "json"], &w, vec![base()]).unwrap();
+        assert_eq!(code, 7);
+        assert_eq!(w.streams()[0].last().unwrap(), "run end Completed");
+    }
+
+    #[test]
+    fn a_connect_failure_ends_the_run_and_returns_the_unchanged_error() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", PKG_RECIPE);
+        let w = wiring(ProgressMode::Tty);
+        let err = drive(
+            Phase::Apply,
+            &[&r, "--format", "json"],
+            &w,
+            vec![FakeTarget::unsupported()],
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Connect);
+        assert_eq!(
+            w.streams(),
+            vec![vec![
+                "run start Apply".to_string(),
+                "connect start None".into(),
+                "connect end Failed 0".into(),
+                "run end Failed".into()
+            ]]
+        );
+    }
+
+    #[test]
+    fn a_disabled_mode_builds_no_session_at_all() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", RECIPE);
+        let inv = inventory(&dir);
+        let q = web_recipe(&dir, "web.yaml");
+        let w = wiring(ProgressMode::Disabled);
+        drive(Phase::Plan, &[&r, "--format", "json"], &w, vec![base()]).unwrap();
+        drive(
+            Phase::Plan,
+            &[&q, "--hosts", &inv, "--no-ssh-config", "--format", "json"],
+            &w,
+            vec![base(), base()],
+        )
+        .unwrap();
+        assert!(w.infos.lock().unwrap().is_empty());
+        assert!(w.streams().is_empty());
+    }
+
+    #[test]
+    fn json_never_enables_progress_whatever_the_terminal() {
+        assert_eq!(mode_from_environment(true), ProgressMode::Disabled);
+    }
+
+    #[test]
+    fn single_host_resolution_is_a_stage_of_the_run() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", RECIPE);
+        let w = wiring(ProgressMode::Tty);
+        // `ssh -G 127.0.0.1` really runs; the engine uses the scripted target.
+        let code = drive(
+            Phase::Plan,
+            &[&r, "--host", "127.0.0.1", "--port", "1", "--format", "json"],
+            &w,
+            vec![base()],
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        let s = w.streams();
+        assert_eq!(s.len(), 1);
+        assert_eq!(
+            s[0][..5],
+            [
+                "run start Plan",
+                "resolve start Some(1)",
+                "resolve item 0",
+                "resolve end Completed 1",
+                "connect start None"
+            ]
+        );
+        assert_eq!(s[0].last().unwrap(), "run end Completed");
+    }
+
+    #[test]
+    fn without_ssh_config_there_is_no_resolve_stage() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", RECIPE);
+        let w = wiring(ProgressMode::Tty);
+        drive(
+            Phase::Plan,
+            &[
+                &r,
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "1",
+                "--no-ssh-config",
+                "--format",
+                "json",
+            ],
+            &w,
+            vec![base()],
+        )
+        .unwrap();
+        assert_eq!(
+            w.streams()[0][..2],
+            ["run start Plan", "connect start None"]
+        );
+    }
+
+    #[test]
+    fn a_resolve_failure_ends_the_run() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", RECIPE);
+        // Rejected before `ssh` is spawned: a deterministic resolve failure.
+        let w = wiring(ProgressMode::Tty);
+        let err = drive(
+            Phase::Plan,
+            &[&r, "--host=-bad", "--format", "json"],
+            &w,
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Schema);
+        assert_eq!(
+            w.streams(),
+            vec![vec![
+                "run start Plan".to_string(),
+                "resolve start Some(1)".into(),
+                "resolve item 0".into(),
+                "resolve end Failed 1".into(),
+                "run end Failed".into()
+            ]]
+        );
+        // The same failure without the OpenSSH evaluation has no stage but
+        // still ends the run that began.
+        let w = wiring(ProgressMode::Tty);
+        let err = drive(
+            Phase::Plan,
+            &[&r, "--host=-bad", "--no-ssh-config", "--format", "json"],
+            &w,
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Schema);
+        assert_eq!(
+            w.streams(),
+            vec![vec!["run start Plan".to_string(), "run end Failed".into()]]
+        );
+    }
+
+    #[test]
+    fn inventory_runs_have_a_resolution_scope_then_one_scope_per_execution() {
+        let dir = fixture();
+        let inv = inventory(&dir);
+        let q = web_recipe(&dir, "web.yaml");
+        let w = wiring(ProgressMode::Tty);
+        let code = drive(
+            Phase::Plan,
+            &[&q, "--hosts", &inv, "--format", "json"],
+            &w,
+            vec![base(), base()],
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        let s = w.streams();
+        assert_eq!(s.len(), 3, "resolution + two executions: {s:#?}");
+        assert_eq!(
+            s[0],
+            [
+                "run start Plan",
+                "resolve start Some(2)",
+                "resolve item 0",
+                "resolve item 1",
+                "resolve end Completed 2",
+                "run end Completed"
+            ]
+        );
+        for exec in &s[1..] {
+            assert_eq!(exec[0], "run start Plan");
+            assert_eq!(exec[1], "connect start None");
+            assert_eq!(exec.last().unwrap(), "run end Completed");
+            assert_eq!(exec.iter().filter(|e| e.starts_with("run ")).count(), 2);
+        }
+    }
+
+    #[test]
+    fn without_ssh_config_the_resolution_scope_has_no_stage() {
+        let dir = fixture();
+        let inv = inventory(&dir);
+        let q = web_recipe(&dir, "web.yaml");
+        let w = wiring(ProgressMode::Tty);
+        drive(
+            Phase::Plan,
+            &[&q, "--hosts", &inv, "--no-ssh-config", "--format", "json"],
+            &w,
+            vec![base(), base()],
+        )
+        .unwrap();
+        assert_eq!(w.streams()[0], ["run start Plan", "run end Completed"]);
+    }
+
+    #[test]
+    fn a_failing_execution_does_not_disturb_the_others_in_plan() {
+        let dir = fixture();
+        let inv = inventory(&dir);
+        let q = web_recipe(&dir, "web.yaml");
+        let w = wiring(ProgressMode::Tty);
+        // web01 succeeds, web02 cannot connect; plan attempts both.
+        let code = drive(
+            Phase::Plan,
+            &[&q, "--hosts", &inv, "--no-ssh-config", "--format", "json"],
+            &w,
+            vec![base(), FakeTarget::unsupported()],
+        )
+        .unwrap();
+        assert_eq!(code, 3, "the most severe execution code");
+        let s = w.streams();
+        assert_eq!(s.len(), 3);
+        assert_eq!(s[1].last().unwrap(), "run end Completed");
+        assert_eq!(
+            s[2],
+            [
+                "run start Plan",
+                "connect start None",
+                "connect end Failed 0",
+                "run end Failed"
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_that_stops_gives_the_unrun_executions_no_session() {
+        let dir = fixture();
+        let inv = inventory(&dir);
+        let q = web_recipe(&dir, "web.yaml");
+        let w = wiring(ProgressMode::Tty);
+        let code = drive(
+            Phase::Apply,
+            &[&q, "--hosts", &inv, "--no-ssh-config", "--format", "json"],
+            &w,
+            vec![FakeTarget::unsupported(), base()],
+        )
+        .unwrap();
+        assert_eq!(code, 3);
+        // resolution + web01 only: web02 was never run, so it has no scope.
+        assert_eq!(w.streams().len(), 2);
+        assert_eq!(w.infos.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn an_inventory_failure_ends_the_resolution_scope() {
+        let dir = fixture();
+        let q = web_recipe(&dir, "web.yaml");
+        let missing = dir.path().join("nope.yaml").display().to_string();
+        let w = wiring(ProgressMode::Tty);
+        let err = drive(
+            Phase::Plan,
+            &[&q, "--hosts", &missing, "--format", "json"],
+            &w,
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Schema);
+        assert_eq!(
+            w.streams(),
+            vec![vec!["run start Plan".to_string(), "run end Failed".into()]]
+        );
+    }
+
+    #[test]
+    fn a_bundle_on_localhost_has_one_scope_per_recipe_and_no_resolution_scope() {
+        let dir = fixture();
+        write(&dir, "a.yaml", RECIPE);
+        write(&dir, "b.yaml", RECIPE);
+        let b = write(
+            &dir,
+            "stack.yaml",
+            "version: 1\nname: stack\nrecipes: [a.yaml, b.yaml]\n",
+        );
+        let w = wiring(ProgressMode::Tty);
+        let code = drive(
+            Phase::Plan,
+            &[&b, "--format", "json"],
+            &w,
+            vec![base(), base()],
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        let s = w.streams();
+        assert_eq!(s.len(), 2);
+        for exec in &s {
+            assert_eq!(exec[0], "run start Plan");
+            assert_eq!(exec.last().unwrap(), "run end Completed");
+        }
+    }
+
+    #[test]
+    fn a_secret_reference_is_reported_to_the_consumer_and_stays_out_of_every_stream() {
+        let dir = fixture();
+        std::fs::create_dir_all(dir.path().join("secrets")).unwrap();
+        let id = sinter::secrets::generate_identity();
+        let ct = sinter::secrets::encrypt_to_recipients(
+            b"MAIN-CANARY-SECRET-PLAINTEXT",
+            std::slice::from_ref(&id.recipient),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("secrets/MAINCANARYREF.age"), ct).unwrap();
+        let r = write(
+            &dir,
+            "r.yaml",
+            "version: 1\nresources:\n  - id: acct\n    type: user\n    with:\n      name: app\n      password_hash: { secret: secrets/MAINCANARYREF.age }\n",
+        );
+        let w = wiring(ProgressMode::Tty);
+        // Fails at target resolution, before the engine exists: the secret is
+        // never opened (a test must not reach for a real identity or a tty).
+        let _ = drive(
+            Phase::Plan,
+            &[&r, "--host=-bad", "--no-ssh-config", "--format", "json"],
+            &w,
+            vec![],
+        );
+        assert_eq!(
+            w.infos.lock().unwrap().as_slice(),
+            &[SessionInfo {
+                kind: RunKind::Plan,
+                references_secrets: true
+            }]
+        );
+        let all = format!("{:?}", w.streams());
+        for canary in ["MAINCANARYREF", "MAIN-CANARY-SECRET-PLAINTEXT", "secrets/"] {
+            assert!(!all.contains(canary), "{canary} in {all}");
+        }
+    }
 
     #[test]
     fn apply_stops_on_every_non_zero_exit_code() {
