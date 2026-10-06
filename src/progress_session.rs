@@ -1,12 +1,14 @@
 //! CLI-layer progress plumbing (WP-PROGRESS S3).
 //!
 //! S1/S2 gave the engine a [`ProgressSink`]. This module is everything between
-//! that sink and a future renderer, with **no renderer**: the only consumer
-//! shipped here is [`NullConsumer`], which drops every event. Nothing in this
-//! module writes to stdout, stderr or a terminal, so S3 changes no user-visible
-//! byte. S4 (TTY) and S5 (explicit plain progress) plug a [`ProgressConsumer`]
-//! in through [`ProgressOptions::with_consumer_factory`]; they own formatting,
-//! clocks and terminal handling.
+//! that sink and a renderer. This module has **no renderer** of its own: the
+//! only consumer shipped here is [`NullConsumer`], which drops every event, and
+//! nothing in this module writes to stdout, stderr or a terminal. The TTY
+//! renderer (S4, [`crate::progress_tty`]) and a later explicit plain progress
+//! (S5) plug a [`ProgressConsumer`] in through
+//! [`ProgressOptions::with_consumer_factory`]; they own formatting, clocks and
+//! terminal handling. The worker only offers them a wake-up when they ask for
+//! one ([`ProgressConsumer::wake_after`]).
 //!
 //! This is library API and, like [`crate::progress`], is not part of the 1.x
 //! CLI/JSON compatibility promise.
@@ -28,8 +30,9 @@
 //!    [`SessionInfo::references_secrets`] (any resource has a `secret`). It is
 //!    information for the consumer: S4 must not draw a transient line when it is
 //!    set (owner decision OQ-5), because a passphrase prompt or a `sinter:`
-//!    secret note may write to the terminal mid-run. S3's null consumer ignores
-//!    it; nothing here coordinates with prompts.
+//!    secret note may write to the terminal mid-run. The null consumer ignores
+//!    it and S4's factory builds the null consumer when it is set; nothing here
+//!    coordinates with prompts.
 //!
 //! # One session per execution
 //!
@@ -109,6 +112,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
+
+/// The shortest wait the worker will ask `recv_timeout` for, whatever a
+/// consumer's [`ProgressConsumer::wake_after`] says (no busy spin).
+pub(crate) const MIN_WAKE: Duration = Duration::from_millis(1);
 
 /// How long [`ProgressSession::end`] waits for its worker before abandoning it.
 /// Generous for a consumer that only erases a line; small enough that a stalled
@@ -207,6 +214,19 @@ impl ProgressSink for ChannelSink {
 /// formatters behind this trait.
 pub trait ProgressConsumer: Send {
     fn consume(&mut self, event: &ProgressEvent);
+
+    /// How long the worker may wait for the next event before it must call
+    /// [`tick`](Self::tick), `None` to wait for events only. Asked again before
+    /// every wait, so the consumer owns its clock and its schedule; the worker
+    /// never waits less than a millisecond. S4's renderer uses it for the quiet
+    /// elapsed refresh; the default (and the null consumer) never ticks.
+    fn wake_after(&mut self) -> Option<Duration> {
+        None
+    }
+
+    /// The wait asked for by [`wake_after`](Self::wake_after) expired with no
+    /// event.
+    fn tick(&mut self) {}
 }
 
 /// The S3 consumer: receives every event and does nothing. No output.
@@ -324,13 +344,30 @@ impl Drop for DoneSignal {
 }
 
 /// The worker: deliver events to the consumer until `RunEnded` or until the
-/// channel closes, then drop everything it owns and only then signal.
+/// channel closes, then drop everything it owns and only then signal. While the
+/// consumer asks for a wake-up the wait for the next event is bounded by it and
+/// an expired wait is a [`ProgressConsumer::tick`]; there is no other timer and
+/// no thread besides this one.
 fn worker_main(rx: Receiver<ProgressEvent>, consumer: Box<dyn ProgressConsumer>, done: Sender<()>) {
     let signal = DoneSignal(done);
     {
         let mut consumer = consumer;
         let rx = rx;
-        while let Ok(event) = rx.recv() {
+        loop {
+            let event = match consumer.wake_after() {
+                None => match rx.recv() {
+                    Ok(event) => event,
+                    Err(_) => break,
+                },
+                Some(wait) => match rx.recv_timeout(wait.max(MIN_WAKE)) {
+                    Ok(event) => event,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        consumer.tick();
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                },
+            };
             consumer.consume(&event);
             if matches!(event, ProgressEvent::RunEnded { .. }) {
                 break;

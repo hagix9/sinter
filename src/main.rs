@@ -15,6 +15,7 @@ use sinter::progress_session::{
     mode_from_environment, outcome_of_audit, outcome_of_error, outcome_of_report,
     references_secrets, ProgressOptions, ProgressSession, SessionInfo,
 };
+use sinter::progress_tty::stderr_consumer_factory;
 use sinter::sshconfig::TargetRequest;
 use sinter::style;
 use std::collections::{BTreeMap, BTreeSet};
@@ -488,7 +489,10 @@ fn run_phase(phase: Phase, a: &TargetArgs) -> Result<u8, SinterError> {
     let format = parse_format(&a.format)?;
     // Phase 1 of the progress decision (see `sinter::progress_session`): JSON,
     // a non-terminal stderr and TERM=dumb all mean no progress at all.
-    let progress = ProgressOptions::new(mode_from_environment(format == OutputFormat::Json));
+    // The TTY renderer (S4) only ever runs in `Tty` mode and never for a recipe
+    // that references secrets (OQ-5).
+    let progress = ProgressOptions::new(mode_from_environment(format == OutputFormat::Json))
+        .with_consumer_factory(stderr_consumer_factory());
     run_phase_with(phase, a, format, &progress)
 }
 
@@ -1760,5 +1764,289 @@ mod tests {
         assert_eq!(worst(&[0, 7]), 7);
         assert_eq!(worst(&[2, 7]), 2);
         assert_eq!(worst(&[0, 0]), 0);
+    }
+    // -----------------------------------------------------------------------
+    // WP-PROGRESS S4: the TTY renderer through the real `run_phase_with`
+    // wiring, drawing on a memory surface. What reaches a real terminal is
+    // proven by the binary-level pty tests in `tests/progress_tty.rs`.
+    // -----------------------------------------------------------------------
+
+    use sinter::progress_tty::{consumer_factory, Surface, CLEAR};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone, Default)]
+    struct Screen {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        /// Surfaces created (a renderer was started).
+        made: Arc<AtomicUsize>,
+        /// Sessions begun, and how many of them reported a secret reference.
+        sessions: Arc<AtomicUsize>,
+        secret_sessions: Arc<AtomicUsize>,
+    }
+
+    struct ScreenSurface(Screen);
+
+    impl Surface for ScreenSurface {
+        fn write_frame(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            self.0.bytes.lock().unwrap().extend_from_slice(bytes);
+            Ok(())
+        }
+        fn columns(&mut self) -> Option<usize> {
+            Some(80)
+        }
+    }
+
+    impl Screen {
+        fn options_for(&self, mode: ProgressMode) -> ProgressOptions {
+            let screen = self.clone();
+            let inner = consumer_factory({
+                let screen = self.clone();
+                Arc::new(move || {
+                    screen.made.fetch_add(1, Ordering::SeqCst);
+                    Box::new(ScreenSurface(screen.clone()))
+                })
+            });
+            ProgressOptions::new(mode).with_consumer_factory(Arc::new(move |info| {
+                screen.sessions.fetch_add(1, Ordering::SeqCst);
+                if info.references_secrets {
+                    screen.secret_sessions.fetch_add(1, Ordering::SeqCst);
+                }
+                inner(info)
+            }))
+        }
+
+        fn options(&self) -> ProgressOptions {
+            self.options_for(ProgressMode::Tty)
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8(self.bytes.lock().unwrap().clone()).unwrap()
+        }
+
+        fn sessions(&self) -> usize {
+            self.sessions.load(Ordering::SeqCst)
+        }
+
+        fn secret_sessions(&self) -> usize {
+            self.secret_sessions.load(Ordering::SeqCst)
+        }
+
+        fn surfaces(&self) -> usize {
+            self.made.load(Ordering::SeqCst)
+        }
+    }
+
+    fn drive_with(
+        phase: Phase,
+        argv: &[&str],
+        opts: &ProgressOptions,
+        targets: Vec<FakeTarget>,
+    ) -> Result<u8, SinterError> {
+        let a = target_args(phase, argv);
+        let format = parse_format(&a.format).unwrap();
+        FAKE_TARGETS.with(|f| *f.borrow_mut() = targets.into());
+        let r = run_phase_with(phase, &a, format, opts);
+        FAKE_TARGETS.with(|f| f.borrow_mut().clear());
+        r
+    }
+
+    /// Every frame between clears is one printable line.
+    fn assert_only_clean_frames(text: &str) {
+        let rest = text.replace(CLEAR, "");
+        assert!(
+            rest.bytes().all(|b| (0x20..=0x7e).contains(&b)),
+            "unexpected bytes: {text:?}"
+        );
+    }
+
+    const SECRET_RECIPE: &str = "version: 1\nresources:\n  - id: acct\n    type: user\n    with:\n      name: app\n      password_hash: { secret: secrets/S4CANARYREF.age }\n";
+
+    /// A secret-referencing recipe whose secret file exists, so that the model
+    /// loads and the run reaches its progress scope (never a prompt: no test
+    /// below gets as far as opening the secret).
+    fn secret_recipe(dir: &tempfile::TempDir, name: &str) -> String {
+        std::fs::create_dir_all(dir.path().join("secrets")).unwrap();
+        let id = sinter::secrets::generate_identity();
+        let ct = sinter::secrets::encrypt_to_recipients(
+            b"S4-CANARY-PLAINTEXT",
+            std::slice::from_ref(&id.recipient),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("secrets/S4CANARYREF.age"), ct).unwrap();
+        write(dir, name, SECRET_RECIPE)
+    }
+
+    #[test]
+    fn an_eligible_run_draws_a_transient_line_and_leaves_the_terminal_clean() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", RECIPE);
+        for phase in [Phase::Plan, Phase::Apply, Phase::Audit] {
+            let screen = Screen::default();
+            let _ = drive_with(phase, &[&r], &screen.options(), vec![base()]).unwrap();
+            let text = screen.text();
+            assert!(text.starts_with(&format!("{CLEAR}connect")), "{text:?}");
+            assert!(text.ends_with(CLEAR), "{text:?}");
+            assert_only_clean_frames(&text);
+            assert_eq!(screen.surfaces(), 1);
+        }
+    }
+
+    #[test]
+    fn the_line_is_erased_on_every_failure_path() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", PKG_RECIPE);
+        // connect failure
+        let screen = Screen::default();
+        let err = drive_with(
+            Phase::Apply,
+            &[&r],
+            &screen.options(),
+            vec![FakeTarget::unsupported()],
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Connect);
+        assert!(screen.text().ends_with(CLEAR), "{:?}", screen.text());
+        assert_only_clean_frames(&screen.text());
+        // resolve failure, before any engine
+        let screen = Screen::default();
+        let err = drive_with(
+            Phase::Plan,
+            &[&r, "--host=-bad", "--no-ssh-config"],
+            &screen.options(),
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Schema);
+        assert_eq!(screen.text(), "", "no stage ever started, nothing drawn");
+    }
+
+    #[test]
+    fn a_secret_bearing_recipe_never_draws_on_a_terminal() {
+        let dir = fixture();
+        let r = secret_recipe(&dir, "r.yaml");
+        let pkg = write(&dir, "p.yaml", PKG_RECIPE);
+        let screen = Screen::default();
+        // Target resolution fails (one scope, the recipe is loaded).
+        let err = drive_with(
+            Phase::Plan,
+            &[&r, "--host=-bad", "--no-ssh-config"],
+            &screen.options(),
+            vec![],
+        )
+        .unwrap_err();
+        assert!(err.message.contains("-bad"), "{}", err.message);
+        // The run fails in every command (one scope each).
+        for phase in [Phase::Plan, Phase::Apply, Phase::Audit] {
+            // Ends before the secret could be opened (a password hash needs
+            // sudo): a test never reaches a prompt. Error or report, either way.
+            let result = drive_with(
+                phase,
+                &[&r],
+                &screen.options(),
+                vec![FakeTarget::unsupported()],
+            );
+            if let Err(err) = result {
+                assert!(!err.message.contains("S4-CANARY"), "{}", err.message);
+            }
+        }
+        assert_eq!(screen.sessions(), 4, "every run reached its progress scope");
+        assert_eq!(
+            screen.secret_sessions(),
+            4,
+            "and reported the secret reference"
+        );
+        assert_eq!(screen.surfaces(), 0, "no renderer was even started");
+        assert_eq!(screen.text(), "", "not one byte, not even a clear");
+        // A secret-free recipe on the same options does draw (control).
+        let _ = drive_with(
+            Phase::Plan,
+            &[&pkg],
+            &screen.options(),
+            vec![FakeTarget::unsupported()],
+        );
+        let text = screen.text();
+        assert_eq!(screen.surfaces(), 1, "only the control run built a surface");
+        assert!(text.contains("connect"), "{text:?}");
+        for forbidden in ["S4CANARYREF", "S4-CANARY", "acct", "secrets/", "password"] {
+            assert!(!text.contains(forbidden), "{forbidden} in {text:?}");
+        }
+    }
+
+    #[test]
+    fn a_bundle_with_one_secret_recipe_suppresses_its_resolution_scope() {
+        let dir = fixture();
+        secret_recipe(&dir, "secret.yaml");
+        write(&dir, "plain.yaml", WEB_RECIPE);
+        let bundle = write(
+            &dir,
+            "bundle.yaml",
+            "version: 1\nrecipes:\n  - secret.yaml\n  - plain.yaml\n",
+        );
+        let screen = Screen::default();
+        // `--host` makes a resolution scope over the whole bundle; it fails.
+        let err = drive_with(
+            Phase::Plan,
+            &[&bundle, "--host=-bad", "--no-ssh-config"],
+            &screen.options(),
+            vec![],
+        )
+        .unwrap_err();
+        // The bundle loaded: the failure is the host argument, not the file.
+        assert!(err.message.contains("-bad"), "{}", err.message);
+        assert_eq!(screen.sessions(), 1);
+        assert_eq!(
+            screen.secret_sessions(),
+            1,
+            "one secret recipe makes the whole resolution scope secret-bearing"
+        );
+        assert_eq!(screen.surfaces(), 0);
+        assert_eq!(screen.text(), "");
+    }
+
+    #[test]
+    fn multiple_executions_leave_one_clean_line_each_and_no_accumulation() {
+        let dir = fixture();
+        let inv = inventory(&dir);
+        let q = web_recipe(&dir, "web.yaml");
+        let screen = Screen::default();
+        let code = drive_with(
+            Phase::Plan,
+            &[&q, "--hosts", &inv, "--no-ssh-config"],
+            &screen.options(),
+            vec![base(), base()],
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        let text = screen.text();
+        // Resolution scope is empty (no ssh -G), then two execution scopes, each
+        // its own consumer: every draw is followed by its clear before the next
+        // scope starts.
+        assert_eq!(screen.surfaces(), 3);
+        assert_only_clean_frames(&text);
+        let draws = text.matches(&format!("{CLEAR}connect")).count();
+        assert_eq!(draws, 2, "{text:?}");
+        assert!(text.ends_with(CLEAR));
+        // Strip every frame: nothing is left.
+        let mut left = String::new();
+        for seg in text.split(CLEAR) {
+            if seg.starts_with("connect") || seg.is_empty() || seg.starts_with("plan") {
+                continue;
+            }
+            left.push_str(seg);
+        }
+        assert_eq!(left, "");
+    }
+
+    #[test]
+    fn json_and_disabled_modes_never_reach_the_renderer() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", RECIPE);
+        let screen = Screen::default();
+        let off = screen.options_for(ProgressMode::Disabled);
+        let _ = drive_with(Phase::Plan, &[&r], &off, vec![base()]).unwrap();
+        assert_eq!(screen.sessions(), 0);
+        assert_eq!(screen.surfaces(), 0);
+        assert_eq!(screen.text(), "");
+        assert_eq!(mode_from_environment(true), ProgressMode::Disabled);
     }
 }

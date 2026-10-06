@@ -1,9 +1,11 @@
-//! WP-PROGRESS S3: what the CLI binary prints.
+//! WP-PROGRESS S3/S4: what the CLI binary prints on a terminal.
 //!
-//! S3 ships a null renderer, so progress must be invisible everywhere: on a
-//! terminal (where progress is automatic and the plumbing is active) the bytes
-//! are exactly what a pipe receives, and in JSON mode no progress can exist on
-//! any stream. These tests run the real binary under a pseudo-terminal
+//! Progress is invisible everywhere except an eligible terminal run (text
+//! format, stderr a terminal, `TERM` not `dumb`), where S4 draws one transient
+//! line. Everywhere else (JSON, `TERM=dumb`) the bytes are exactly what a pipe
+//! receives, and on an eligible run they are the same once the transient line
+//! is removed (`tests/progress_tty.rs` covers the line itself on a stderr-only
+//! pty). These tests run the real binary under a pseudo-terminal
 //! (`script(1)`, as `cli_multihost.rs` does) and compare it with the piped
 //! run of the same command line, stdout and stderr merged in the same order.
 //!
@@ -94,6 +96,16 @@ fn on_a_terminal(args: &[&str], term: &str) -> Option<String> {
     Some(normalized(child.wait_with_output().ok()?.stdout))
 }
 
+/// The persistent output of a terminal run: every draw (`CR ESC[2K text`) and
+/// erase (`CR ESC[2K`) of the transient progress line removed. A frame never
+/// contains a newline and persistent text always ends with one.
+fn without_transient(stream: &str) -> String {
+    stream
+        .split("\r\x1b[2K")
+        .filter(|seg| seg.contains('\n'))
+        .collect()
+}
+
 /// The same command line with stdout and stderr on pipes, merged in order.
 fn piped(args: &[&str]) -> (String, i32) {
     let o = Command::new("sh")
@@ -167,14 +179,25 @@ fn a_terminal_run_prints_exactly_what_a_piped_run_prints() {
                         common::skip_or_fail("script(1) unavailable");
                         return;
                     };
-                    assert_eq!(
-                        got, want,
-                        "{args:?} on a terminal (TERM={term}) differs from the piped run"
-                    );
-                    assert!(
-                        !got.contains('\x1b'),
-                        "{args:?}: no escape sequence on a terminal: {got:?}"
-                    );
+                    // S4: only an eligible run (text format, TERM not dumb) gains
+                    // the transient line; everything else is byte-identical.
+                    let eligible = fmt == "text" && term != "dumb";
+                    if eligible {
+                        assert_eq!(
+                            without_transient(&got),
+                            want,
+                            "{args:?} on a terminal (TERM={term}) differs from the piped run once the transient line is removed"
+                        );
+                    } else {
+                        assert_eq!(
+                            got, want,
+                            "{args:?} on a terminal (TERM={term}) differs from the piped run"
+                        );
+                        assert!(
+                            !got.contains('\x1b'),
+                            "{args:?}: no escape sequence on a terminal: {got:?}"
+                        );
+                    }
                 }
             }
         }

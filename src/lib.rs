@@ -21,6 +21,7 @@ pub mod paths;
 pub mod platform;
 pub mod progress;
 pub mod progress_session;
+pub mod progress_tty;
 pub mod resources;
 pub mod result;
 pub mod secret_source;
