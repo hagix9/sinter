@@ -3,11 +3,10 @@ title: Resources
 description: The resource model — common fields, ordering, dependencies, notifications.
 ---
 
-Resources are the unit of desired state. v1.1.3 implements seven types:
-`file`, `directory`, `link`, `template`, `command`, `package`, `service`.
-On `main` after v1.1.3 (unreleased), two more are added:
-[`group`](/en/reference/resources/group/) and
-[`user`](/en/reference/resources/user/) — local Linux accounts.
+Resources are the unit of desired state. v1.2.0 implements nine types:
+`file`, `directory`, `link`, `template`, `command`, `package`, `service`,
+and, for local Linux accounts, [`group`](/en/reference/resources/group/) and
+[`user`](/en/reference/resources/user/).
 
 ## Common fields
 
@@ -67,7 +66,7 @@ carry secrets. Sinter then redacts the values in every output channel —
 including error messages — and hides content hashes and sizes. Values derived
 from sensitive variables are automatically treated as sensitive. A resource
 that holds an encrypted secret (`content: { secret: … }` or
-`password_hash: { secret: … }`, unreleased) is always sensitive, whatever it
+`password_hash: { secret: … }`) is always sensitive, whatever it
 declares.
 
 ## Observation contract

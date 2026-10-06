@@ -1,14 +1,13 @@
 ---
 title: sinter secrets
-description: Encrypt, decrypt and list secret files in the standard age format (unreleased, after v1.1.3).
+description: Encrypt, decrypt and list secret files in the standard age format.
 ---
 
-:::caution[Unreleased]
-`sinter secrets` and the recipe field `file.content: { secret: … }` are on the
-`main` branch after v1.1.3. They are **not** in the v1.1.3 release binary. The
-`file` resource (`content`) and the `user` resource (`password_hash`) are the
-only recipe uses of a secret so far; MCP use is not available. `secrets list
---recipe` ("used by", "missing", "not referenced") is new on `main` as well.
+:::note
+`sinter secrets` (including `secrets list --recipe`) and the recipe field
+`file.content: { secret: … }` are new in v1.2.0. The `file` resource
+(`content`) and the `user` resource (`password_hash`) are the only recipe
+uses of a secret so far; MCP use is not available.
 :::
 
 **Purpose:** keep secret files (SSH keys, `.env` files, tokens, password hashes,

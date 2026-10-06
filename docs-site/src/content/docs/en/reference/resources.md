@@ -1,9 +1,9 @@
 ---
 title: Resource Reference
-description: All Sinter resource types implemented in v1.1.3.
+description: All Sinter resource types implemented in v1.2.0.
 ---
 
-Sinter v1.1.3 implements seven resource types. Parameters below are the
+Sinter v1.2.0 implements nine resource types. Parameters below are the
 complete supported set — unknown `with` fields are schema errors.
 
 | Type | Purpose | Key parameters |
@@ -15,16 +15,8 @@ complete supported set — unknown `with` fields are schema errors.
 | [command](/en/reference/resources/command/) | Exact-argv program execution | `program`, `args`, `creates`/`removes`, `changed_when`, `register` |
 | [package](/en/reference/resources/package/) | Package install/remove (apt/dnf) | `name`, `state` |
 | [service](/en/reference/resources/service/) | systemd state + enablement | `name`, `state`, `enabled` |
-
-## Unreleased additions (after v1.1.3)
-
-These two types are on `main` and ship with the next release. They are not in
-the v1.1.3 binary.
-
-| Type | Purpose | Key parameters |
-|------|---------|----------------|
-| [group](/en/reference/resources/group/) | Local Linux group (unreleased) | `name`, `state`, `gid`, `system` |
-| [user](/en/reference/resources/user/) | Local Linux user (unreleased) | `name`, `state`, `uid`, `group`, `groups`, `shell`, `home`, `create_home`, `system`, `password_hash` |
+| [group](/en/reference/resources/group/) | Local Linux group | `name`, `state`, `gid`, `system` |
+| [user](/en/reference/resources/user/) | Local Linux user | `name`, `state`, `uid`, `group`, `groups`, `shell`, `home`, `create_home`, `system`, `password_hash` |
 
 ## Shared conventions
 

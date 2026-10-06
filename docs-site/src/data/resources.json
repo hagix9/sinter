@@ -1,5 +1,5 @@
 {
-  "version": "1.1.3",
+  "version": "1.2.0",
   "resourceTypes": [
     {
       "type": "file",
@@ -8,7 +8,7 @@
       "parameters": [
         { "name": "path", "required": true, "type": "string (absolute path)", "default": null, "description": "Absolute path of the managed file." },
         { "name": "state", "required": false, "type": "string", "default": "present", "description": "present or absent." },
-        { "name": "content", "required": false, "type": "string, or { secret: <path> }", "default": null, "description": "Literal file content, or an encrypted secret reference { secret: <path> } (a path relative to the recipe, to an age file; unreleased, after v1.1.3). A secret-backed file is always sensitive. Mutually exclusive with source." },
+        { "name": "content", "required": false, "type": "string, or { secret: <path> }", "default": null, "description": "Literal file content, or an encrypted secret reference { secret: <path> } (a path relative to the recipe, to an age file). A secret-backed file is always sensitive. Mutually exclusive with source." },
         { "name": "source", "required": false, "type": "string", "default": null, "description": "Controller-side file copied to path. Mutually exclusive with content." },
         { "name": "owner", "required": false, "type": "string", "default": null, "description": "File owner name." },
         { "name": "group", "required": false, "type": "string", "default": null, "description": "File group name." },
@@ -104,7 +104,7 @@
     },
     {
       "type": "group",
-      "summary": "UNRELEASED (after v1.1.3): ensure a local Linux group exists or is absent, with an optional fixed gid.",
+      "summary": "Ensure a local Linux group exists or is absent, with an optional fixed gid.",
       "docPath": "reference/resources/group",
       "parameters": [
         { "name": "name", "required": true, "type": "string", "default": null, "description": "Group name ([a-z_][a-z0-9_-]*, at most 32 characters)." },
@@ -117,7 +117,7 @@
     },
     {
       "type": "user",
-      "summary": "UNRELEASED (after v1.1.3): ensure a local Linux user exists or is absent, with optional uid, primary group, shell, home record and additive supplementary groups.",
+      "summary": "Ensure a local Linux user exists or is absent, with optional uid, primary group, shell, home record and additive supplementary groups.",
       "docPath": "reference/resources/user",
       "parameters": [
         { "name": "name", "required": true, "type": "string", "default": null, "description": "User name ([a-z_][a-z0-9_-]*, at most 32 characters)." },
@@ -129,7 +129,7 @@
         { "name": "home", "required": false, "type": "string (absolute path)", "default": null, "description": "Home directory record. Nothing is created or moved." },
         { "name": "create_home", "required": false, "type": "boolean", "default": "false", "description": "Create the home directory (useradd -m). Create-time only." },
         { "name": "system", "required": false, "type": "boolean", "default": "false", "description": "Create a system user. Create-time only." },
-        { "name": "password_hash", "required": false, "type": "{ secret: <path> }", "default": null, "description": "Password hash (not the password) kept as an encrypted secret; one $y$ or $6$ hash. Needs --sudo. Always sensitive; set with chpasswd -e on stdin. Unreleased." }
+        { "name": "password_hash", "required": false, "type": "{ secret: <path> }", "default": null, "description": "Password hash (not the password) kept as an encrypted secret; one $y$ or $6$ hash. Needs --sudo. Always sensitive; set with chpasswd -e on stdin." }
       ],
       "platforms": ["ubuntu", "rocky", "rhel", "almalinux"],
       "example": "resources:\n  - id: app_group\n    type: group\n    with:\n      name: app\n      gid: 990\n      system: true\n  - id: app_user\n    type: user\n    depends_on: [app_group]\n    with:\n      name: app\n      uid: 990\n      group: app\n      shell: /usr/sbin/nologin\n      home: /var/lib/app\n      system: true"

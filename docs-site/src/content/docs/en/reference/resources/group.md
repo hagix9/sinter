@@ -3,11 +3,6 @@ title: group
 description: Ensure a local Linux group exists (or is absent), with an optional fixed gid.
 ---
 
-:::caution[Unreleased]
-`group` and `user` are on the `main` branch after v1.1.3. They are **not** in
-the v1.1.3 release binary; they ship with the next release.
-:::
-
 **Purpose:** declare a **local** Linux group (`/etc/group`): present or
 absent, with an optional fixed `gid`. It is planned, applied and audited like
 any other resource.

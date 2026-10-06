@@ -1,9 +1,9 @@
 ---
 title: リソースリファレンス
-description: v1.1.3 に実装されているすべての Sinter リソースタイプ。
+description: v1.2.0 に実装されているすべての Sinter リソースタイプ。
 ---
 
-Sinter v1.1.3 は 7 つのリソースタイプを実装しています。以下の
+Sinter v1.2.0 は 9 つのリソースタイプを実装しています。以下の
 パラメータはサポートされる完全なセットであり、未知の `with`
 フィールドはスキーマエラーです。
 
@@ -16,16 +16,8 @@ Sinter v1.1.3 は 7 つのリソースタイプを実装しています。以下
 | [command](/ja/reference/resources/command/) | 正確な argv によるプログラム実行 | `program`、`args`、`creates`/`removes`、`changed_when`、`register` |
 | [package](/ja/reference/resources/package/) | パッケージのインストール/削除（apt/dnf） | `name`、`state` |
 | [service](/ja/reference/resources/service/) | systemd の状態と有効化 | `name`、`state`、`enabled` |
-
-## 未リリースの追加分（v1.1.3 より後）
-
-次の 2 つのタイプは `main` にあり、次のリリースで提供されます。v1.1.3 の
-バイナリには含まれません。
-
-| タイプ | 用途 | 主要パラメータ |
-|--------|------|----------------|
-| [group](/ja/reference/resources/group/) | ローカル Linux グループ（未リリース） | `name`、`state`、`gid`、`system` |
-| [user](/ja/reference/resources/user/) | ローカル Linux ユーザー（未リリース） | `name`、`state`、`uid`、`group`、`groups`、`shell`、`home`、`create_home`、`system`、`password_hash` |
+| [group](/ja/reference/resources/group/) | ローカル Linux グループ | `name`、`state`、`gid`、`system` |
+| [user](/ja/reference/resources/user/) | ローカル Linux ユーザー | `name`、`state`、`uid`、`group`、`groups`、`shell`、`home`、`create_home`、`system`、`password_hash` |
 
 ## 共通の規約
 

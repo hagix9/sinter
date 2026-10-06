@@ -12,14 +12,14 @@ Commands:
   apply     Apply a recipe to a target
   audit     Audit whether a target already satisfies a recipe. Read-only.
   mcp       Serve a read-only MCP (Model Context Protocol) endpoint on stdio
-  secrets   Encrypt, decrypt and list secret files (standard age format). Unreleased: not part of v1.1.3.
+  secrets   Encrypt, decrypt and list secret files (standard age format).
 ```
 
 `mcp`サブコマンドと`--targets-file`については[Core MCP](/ja/reference/mcp/)を、
-未リリースの`secrets`サブコマンドについては[sinter secrets](/ja/reference/secrets/)を
+`secrets`サブコマンドについては[sinter secrets](/ja/reference/secrets/)を
 参照してください。
 
-`sinter --version` はバージョンを表示します（例: `sinter 1.1.3`）。
+`sinter --version` はバージョンを表示します（例: `sinter 1.2.0`）。
 
 ## validate
 
@@ -84,8 +84,6 @@ audit は systemd マネージャの同期状態も、独立したドリフト�
 参照）。
 
 ## secrets
-
-*未リリース: v1.1.3 より後の `main` にあり、v1.1.3 のバイナリには含まれません。*
 
 ```sh
 sinter secrets encrypt [--passphrase | -r, --recipient <RECIPIENT>...] [-o, --output <OUT>] [-f, --force] <FILE | ->

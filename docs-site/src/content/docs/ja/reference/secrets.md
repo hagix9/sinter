@@ -1,14 +1,13 @@
 ---
 title: sinter secrets
-description: 標準の age 形式でシークレットファイルを暗号化・復号・一覧する（未リリース、v1.1.3 より後）。
+description: 標準の age 形式でシークレットファイルを暗号化・復号・一覧する。
 ---
 
-:::caution[未リリース]
-`sinter secrets` とレシピのフィールド `file.content: { secret: … }` は v1.1.3
-より後の `main` ブランチにあります。v1.1.3 のリリースバイナリには**含まれません**。
+:::note
+`sinter secrets`（`secrets list --recipe` を含む）とレシピのフィールド
+`file.content: { secret: … }` は v1.2.0 で追加されました。
 レシピでシークレットを使えるのは今のところ `file` リソース（`content`）と
 `user` リソース（`password_hash`）だけです。MCP での利用はできません。
-`secrets list --recipe`（「使用元」「missing」「参照されていない」）も `main` の新機能です。
 :::
 
 **目的:** シークレットファイル（SSH 鍵、`.env`、トークン、パスワードハッシュ、

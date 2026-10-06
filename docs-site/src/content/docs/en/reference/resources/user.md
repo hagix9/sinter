@@ -3,11 +3,6 @@ title: user
 description: Ensure a local Linux user exists (or is absent) with a declared id, primary group, shell, home record and supplementary groups.
 ---
 
-:::caution[Unreleased]
-`group` and `user` are on the `main` branch after v1.1.3. They are **not** in
-the v1.1.3 release binary; they ship with the next release.
-:::
-
 **Purpose:** declare a **local** Linux user (`/etc/passwd`): present or
 absent, and — only for the dimensions you name — its uid, primary group,
 shell, home directory record and supplementary groups. Unnamed dimensions are
@@ -58,7 +53,7 @@ never changed and never audited.
 | `home` | no | string | unmanaged | Absolute path stored as the home directory. **Only the record is set**; nothing is created or moved. See [Path rules](#path-rules-for-home-and-shell). |
 | `create_home` | no | boolean | `false` | Create the home directory (`useradd -m`). Create-time only. With `false`, `-M` is passed explicitly. |
 | `system` | no | boolean | `false` | Create a system user (`useradd --system`). Create-time only; never audited or changed later. |
-| `password_hash` | no | `{ secret: <path> }` | unmanaged | The password **hash** (not the password), kept as an encrypted secret. See [Password hash](#password-hash). Unreleased, after v1.1.3. |
+| `password_hash` | no | `{ secret: <path> }` | unmanaged | The password **hash** (not the password), kept as an encrypted secret. See [Password hash](#password-hash). |
 
 Unknown fields are schema errors. There are no plaintext password, lock,
 expiry, SSH key, `move_home`, `remove_home`, `force` or `non_unique` fields:
@@ -107,10 +102,7 @@ home directory itself.
 
 ## Password hash
 
-:::caution[Unreleased]
-`password_hash` is on the `main` branch after v1.1.3. It needs the unreleased
-[encrypted secrets](/en/reference/secrets/#using-a-secret-in-a-recipe).
-:::
+`password_hash` needs [encrypted secrets](/en/reference/secrets/#using-a-secret-in-a-recipe).
 
 ```yaml
 - id: app_user

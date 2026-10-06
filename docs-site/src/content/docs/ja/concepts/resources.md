@@ -3,12 +3,11 @@ title: リソース
 description: リソースモデル — 共通フィールド、順序、依存関係、通知。
 ---
 
-リソースは目的の状態の単位です。v1.1.3 では 7 つのタイプが実装されて
+リソースは目的の状態の単位です。v1.2.0 では 9 つのタイプが実装されて
 います: `file`、`directory`、`link`、`template`、`command`、`package`、
-`service`。
-v1.1.3 より後の `main`（未リリース）では、ローカル Linux アカウントを扱う
+`service`、そしてローカル Linux アカウントを扱う
 [`group`](/ja/reference/resources/group/) と
-[`user`](/ja/reference/resources/user/) の 2 つが追加されています。
+[`user`](/ja/reference/resources/user/) です。
 
 ## 共通フィールド
 
@@ -68,8 +67,7 @@ blocked として報告されます（fail-fast）。
 `sensitive: true` を指定します。Sinter はエラーメッセージを含むすべての
 出力チャネルで値をマスクし、内容のハッシュとサイズも隠します。
 sensitive 変数から派生した値は自動的に sensitive として扱われます。暗号化された
-シークレットを持つリソース（`content: { secret: … }` や `password_hash: { secret: … }`、
-未リリース）は、宣言に関わらず常に sensitive です。
+シークレットを持つリソース（`content: { secret: … }` や `password_hash: { secret: … }`）は、宣言に関わらず常に sensitive です。
 
 ## 観測の契約
 

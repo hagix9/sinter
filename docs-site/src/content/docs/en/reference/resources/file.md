@@ -25,7 +25,7 @@ and mode — or is absent.
 |-----------|----------|------|---------|-------------|
 | `path` | yes | string (absolute path) | — | Managed file path. |
 | `state` | no | string | `present` | `present` or `absent`. |
-| `content` | no | string, or `{ secret: <path> }` | — | Literal content, or an encrypted secret (unreleased, after v1.1.3: see [sinter secrets](/en/reference/secrets/#using-a-secret-in-a-recipe)). Mutually exclusive with `source`. |
+| `content` | no | string, or `{ secret: <path> }` | — | Literal content, or an encrypted secret (see [sinter secrets](/en/reference/secrets/#using-a-secret-in-a-recipe)). Mutually exclusive with `source`. |
 | `source` | no | string | — | Controller-side file copied to `path`; relative paths are resolved against the recipe file's directory. Mutually exclusive with `content`. |
 | `owner` | no | string | — | Owner name. |
 | `group` | no | string | — | Group name. |
@@ -47,11 +47,6 @@ and mode — or is absent.
   [service](/en/reference/resources/service/#automatic-manager-synchronization).
 
 ## Secret content
-
-:::caution[Unreleased]
-`content: { secret: <path> }` is on the `main` branch after v1.1.3. It is **not**
-in the v1.1.3 release binary.
-:::
 
 ```yaml
 - id: api_key

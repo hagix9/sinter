@@ -30,7 +30,7 @@ is required.
 
 ## Unified Linux x86_64 distribution
 
-Sinter v1.1.3 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for all
+Sinter v1.2.0 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for all
 supported x86_64 version lines. The executable is unified; runtime platform
 detection still selects APT on Ubuntu and DNF on RHEL-family targets. This
 is not a claim of support for arbitrary Linux systems or architectures.
@@ -40,16 +40,17 @@ artifact on the eight supported targets before it is published; the
 acceptance manifest, raw logs, and checksums are published as release assets
 (see [acceptance evidence](https://github.com/hagix9/sinter/blob/main/release/ACCEPTANCE_EVIDENCE.md)).
 
-The current release, Sinter v1.1.3, passed the Linux x86_64 validation gate
+The current release, Sinter v1.2.0, passed the Linux x86_64 validation gate
 and was then acceptance-tested as its exact release artifact,
-`sinter-v1.1.3-linux-x86_64.tar.gz`, on eight real x86_64 Linux hosts. The
+`sinter-v1.2.0-linux-x86_64.tar.gz`, on eight real x86_64 Linux hosts. The
 tested point releases were Ubuntu 24.04.5 LTS, Ubuntu 26.04.1 LTS, Rocky
 Linux 9.8, Rocky Linux 10.2, RHEL 9.8, RHEL 10.2, AlmaLinux 9.8, and
 AlmaLinux 10.2, all x86_64. On every host the tarball and the extracted
-executable were verified byte-identical (SHA-256) and ran the same logical
-acceptance scenario plus artifact-identity and MCP checks.
-**Result: 408 checks passed, 0 failed** (see the
-[v1.1.3 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.1.3)). Sinter v1.1.2, v1.1.1, v1.1.0 and v1.0.0 each passed the same
+executable were verified byte-identical (SHA-256) and ran the established
+acceptance scenario plus artifact-identity and MCP checks, and a real-host
+`group` → `user` → `directory` → `file` lifecycle.
+**Result: 1240 checks passed, 0 failed** (see the
+[v1.2.0 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.2.0)). Sinter v1.1.3, v1.1.2, v1.1.1, v1.1.0 and v1.0.0 each passed the earlier
 eight-host acceptance (408/408), and v0.5.1 and v0.4.1 each passed the
 earlier one (344/344); those records are historical. Other and future point releases have not each been independently
 validated.
@@ -103,10 +104,9 @@ published v0.2.1 retains distro-specific assets (see
 
 ## Real-host acceptance of the unreleased secrets features
 
-The encrypted-secret features on `main` after v1.1.3 (`sinter secrets`,
-`file.content: { secret: … }`, `user.password_hash`) are not part of any
-release, so they have no release artifact and no release acceptance manifest.
-They were nevertheless accepted on real hosts on **2026-10-04**, from source
+The encrypted-secret features (`sinter secrets`, `file.content: { secret: … }`,
+`user.password_hash`) shipped in v1.2.0, but they were accepted on real hosts
+on **2026-10-04**, before the release, on a pre-release build from source
 commit `bce63a5fe8a6ab8e8756f7e117b6c707ea124b91`, on the same eight targets
 as release acceptance:
 
@@ -127,10 +127,12 @@ One binary was built for the run, on Rocky Linux 9.8 x86_64 with
 `cargo build --locked --release` and no extra flags; its SHA-256 is
 `fe1a200e896b287c98543b6450298bc469ab3aff6bb427dbe77be91eb8b4488b` and its
 highest required GLIBC symbol version is `GLIBC_2.34`. That exact binary was
-verified byte-identical on all eight targets before use. **It is not a
+verified byte-identical on all eight targets before use. **It is not the
 published release artifact**: it is not
-`sinter-v1.1.3-linux-x86_64.tar.gz`, and the v1.1.3 acceptance evidence linked
-above still describes the v1.1.3 release binary only.
+`sinter-v1.2.0-linux-x86_64.tar.gz`. The v1.2.0 acceptance evidence linked
+above describes the release artifact; it did not re-run the secrets acceptance
+described here, and the `user.password_hash` path was not re-run on the release
+artifact.
 
 What was accepted:
 

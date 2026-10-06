@@ -3,11 +3,6 @@ title: group
 description: ローカルの Linux グループを存在（または不在）させ、必要なら gid を固定する。
 ---
 
-:::caution[未リリース]
-`group` と `user` は v1.1.3 より後の `main` ブランチにあります。v1.1.3 の
-リリースバイナリには**含まれません**。次のリリースで提供されます。
-:::
-
 **目的:** **ローカル**の Linux グループ（`/etc/group`）を宣言する。
 存在（`present`）または不在（`absent`）、および任意の固定 `gid`。ほかの
 リソースと同様に plan・apply・audit の対象になります。

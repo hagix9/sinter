@@ -25,7 +25,7 @@ description: 通常ファイルの内容とメタデータを管理する。
 |-----------|------|-----|-----------|------|
 | `path` | はい | string（絶対パス） | — | 管理対象ファイルのパス。 |
 | `state` | いいえ | string | `present` | `present` または `absent`。 |
-| `content` | いいえ | string、または `{ secret: <path> }` | — | リテラルな内容、または暗号化されたシークレット（未リリース、v1.1.3 より後。[sinter secrets](/ja/reference/secrets/#レシピでシークレットを使う) を参照）。`source` とは排他。 |
+| `content` | いいえ | string、または `{ secret: <path> }` | — | リテラルな内容、または暗号化されたシークレット（[sinter secrets](/ja/reference/secrets/#レシピでシークレットを使う) を参照）。`source` とは排他。 |
 | `source` | いいえ | string | — | `path` にコピーするコントローラ側ファイル。相対パスはレシピファイルのディレクトリから解決されます。`content` とは排他。 |
 | `owner` | いいえ | string | — | 所有者名。 |
 | `group` | いいえ | string | — | グループ名。 |
@@ -49,11 +49,6 @@ description: 通常ファイルの内容とメタデータを管理する。
   ください。
 
 ## シークレットの内容
-
-:::caution[未リリース]
-`content: { secret: <path> }` は v1.1.3 より後の `main` ブランチにあります。v1.1.3 の
-リリースバイナリには**含まれません**。
-:::
 
 ```yaml
 - id: api_key

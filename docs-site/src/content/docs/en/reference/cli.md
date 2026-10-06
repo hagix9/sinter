@@ -12,14 +12,14 @@ Commands:
   apply     Apply a recipe to a target
   audit     Audit whether a target already satisfies a recipe. Read-only.
   mcp       Serve a read-only MCP (Model Context Protocol) endpoint on stdio
-  secrets   Encrypt, decrypt and list secret files (standard age format). Unreleased: not part of v1.1.3.
+  secrets   Encrypt, decrypt and list secret files (standard age format).
 ```
 
 See [Core MCP](/en/reference/mcp/) for the `mcp` subcommand and `--targets-file`,
-and [sinter secrets](/en/reference/secrets/) for the unreleased `secrets`
+and [sinter secrets](/en/reference/secrets/) for the `secrets`
 subcommand.
 
-`sinter --version` prints the version (e.g. `sinter 1.1.3`).
+`sinter --version` prints the version (e.g. `sinter 1.2.0`).
 
 ## validate
 
@@ -80,8 +80,6 @@ Audit also reports systemd manager synchronization as its own drift dimension,
 `manager_reload` (see [Reading audit output](#reading-audit-output)).
 
 ## secrets
-
-*Unreleased: on `main` after v1.1.3; not in the v1.1.3 binary.*
 
 ```sh
 sinter secrets encrypt [--passphrase | -r, --recipient <RECIPIENT>...] [-o, --output <OUT>] [-f, --force] <FILE | ->
