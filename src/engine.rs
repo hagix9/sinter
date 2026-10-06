@@ -5,12 +5,16 @@ use crate::executor::{
 use crate::expressions::{eval_boolean, eval_value_interpolated, parse_expr, EvalVal, Scope};
 use crate::facts::Facts;
 use crate::model::{FrozenResource, Model};
+use crate::progress::{
+    ItemRef, NoopSink, ProgressEvent, ProgressSink, Stage, StageOutcome, StageTracker,
+};
 
 use crate::result::*;
 use crate::targetfs::TargetFs;
 use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -107,10 +111,47 @@ pub struct Engine {
     /// Where `content: { secret: … }` is opened. `None` (the default) means
     /// no secret can be opened: such a resource fails, closed.
     pub(crate) secrets: Option<crate::secret_source::SharedSecrets>,
+    /// Observation-only progress sink (`NoopSink` unless the engine was built
+    /// with `new_with_progress`). Nothing reads anything back from it.
+    pub(crate) progress: Arc<dyn ProgressSink>,
 }
 
 impl Engine {
     pub fn new(model: Model, opts: RunOptions) -> Result<Self> {
+        Self::new_with_progress(model, opts, Arc::new(NoopSink))
+    }
+
+    /// `new`, reporting the `connect` stage and keeping `progress` for
+    /// `run` / `run_audit`. Connecting happens here, so the sink must arrive
+    /// at construction: a failed connection emits `StageStarted(connect)` and
+    /// `StageEnded(connect, Failed)` before the unchanged error is returned.
+    /// The sink only observes; see [`crate::progress`].
+    pub fn new_with_progress(
+        model: Model,
+        opts: RunOptions,
+        progress: Arc<dyn ProgressSink>,
+    ) -> Result<Self> {
+        progress.emit(&ProgressEvent::StageStarted {
+            stage: Stage::Connect,
+            total: None,
+        });
+        let built = Self::connect(model, opts, progress.clone());
+        let outcome = match &built {
+            Ok(_) => StageOutcome::Completed,
+            Err(e) if e.kind == crate::error::ErrorKind::Indeterminate => {
+                StageOutcome::Indeterminate
+            }
+            Err(_) => StageOutcome::Failed,
+        };
+        progress.emit(&ProgressEvent::StageEnded {
+            stage: Stage::Connect,
+            outcome,
+            done: 0,
+        });
+        built
+    }
+
+    fn connect(model: Model, opts: RunOptions, progress: Arc<dyn ProgressSink>) -> Result<Self> {
         let mut ex = build_executor(&opts)?;
         ex = connect_and_prepare(ex, opts.sudo)?;
         let has_getfattr = command_present(&mut ex, "/usr/bin/getfattr")?;
@@ -178,6 +219,7 @@ impl Engine {
             backup_run_id: None,
             manager: crate::manager::ManagerState::default(),
             secrets: None,
+            progress,
         })
     }
 
@@ -211,6 +253,10 @@ impl Engine {
 
     pub fn run(mut self) -> Result<RunReport> {
         let order = execution_order(&self.model)?;
+        // Cloned so the stage trackers borrow this handle, not `self`, which
+        // the traversal needs mutably. Observation only: nothing below reads
+        // anything back from it.
+        let progress = self.progress.clone();
         // Declared backups run before any resource. Plan only lists them;
         // apply copies them and aborts on any backup failure.
         let backup = if self.model.backups.is_empty() {
@@ -222,7 +268,12 @@ impl Engine {
                 .unwrap_or_else(crate::backup::new_run_id);
             let paths = self.model.backups.clone();
             self.fs.set_stats_scope("backup");
-            Some(crate::backup::perform(&mut self.fs, &paths, &id)?)
+            // A failure leaves through `?`; the tracker then ends the stage
+            // as `Failed` with the items attempted so far.
+            let mut stage = StageTracker::start(&*progress, Stage::Backup, Some(paths.len()));
+            let report = crate::backup::perform(&mut self.fs, &paths, &id, &mut stage)?;
+            stage.end(StageOutcome::Completed);
+            Some(report)
         } else {
             Some(crate::backup::planned(&self.model.backups))
         };
@@ -234,16 +285,23 @@ impl Engine {
         let mut notified: BTreeMap<String, bool> = BTreeMap::new();
         let mut stopped = false;
         let mut stop_reason: Option<String> = None;
+        // How the resource stage ends if `stopped` (a plan error leaves
+        // through `return Err`, where the tracker ends the stage as `Failed`).
+        let mut stop_outcome = StageOutcome::Failed;
 
+        let mut stage = StageTracker::start(&*progress, Stage::Resources, Some(order.len()));
         for (pos, ridx) in order.iter().enumerate() {
             let res = self.model.resources[*ridx].clone();
             if stopped {
+                // Fast-forwarded, never visited: not announced, not counted.
                 let mut r = blocked_fail_fast(&res);
                 r.reason = stop_reason.clone();
                 results.insert(res.id.clone(), out_results.len());
                 out_results.push(r);
                 continue;
             }
+            // The previous item is terminal now; this one is in flight.
+            stage.item_started(Some(ItemRef::resource(&res.type_, &res.id)));
 
             // Evaluate the resource's own condition BEFORE dependency gating.
             // A false condition makes the resource skipped_by_condition
@@ -357,6 +415,9 @@ impl Engine {
             let is_stop = rr.is_failure() || rr.is_indeterminate();
             if is_stop {
                 stopped = true;
+                if rr.is_indeterminate() {
+                    stop_outcome = StageOutcome::Indeterminate;
+                }
                 stop_reason = Some(rr.reason.clone().unwrap_or_else(|| {
                     if rr.is_indeterminate() {
                         "resource became indeterminate".into()
@@ -384,6 +445,11 @@ impl Engine {
             out_results.push(rr);
             let _ = pos;
         }
+        stage.end(if stopped {
+            stop_outcome
+        } else {
+            StageOutcome::Completed
+        });
 
         let mut handlers_run = Vec::new();
         let mut handlers_pending = Vec::new();
@@ -406,6 +472,10 @@ impl Engine {
             });
             let mut hstopped = false;
             let mut hstop_reason: Option<String> = None;
+            let mut hstop_outcome = StageOutcome::Failed;
+            // No handler queued means no handler stage.
+            let mut hstage = (!ids.is_empty())
+                .then(|| StageTracker::start(&*progress, Stage::Handlers, Some(ids.len())));
             for id in ids {
                 let hi = self.model.handler_index[id];
                 let mut h = self.model.handlers[hi].clone();
@@ -418,6 +488,9 @@ impl Engine {
                     handlers_pending.push(id.clone());
                     let _ = hstop_reason.take();
                     continue;
+                }
+                if let Some(s) = hstage.as_mut() {
+                    s.item_started(Some(ItemRef::handler(&h.id)));
                 }
                 let action = match h.action {
                     crate::ir::HandlerAction::Restart => "restart",
@@ -450,9 +523,19 @@ impl Engine {
                 );
                 if stop {
                     hstopped = true;
+                    if hr.state == HandlerOutcomeState::Indeterminate {
+                        hstop_outcome = StageOutcome::Indeterminate;
+                    }
                     hstop_reason = hr.reason.clone();
                 }
                 handlers_run.push(hr);
+            }
+            if let Some(s) = hstage {
+                s.end(if hstopped {
+                    hstop_outcome
+                } else {
+                    StageOutcome::Completed
+                });
             }
         } else {
             for id in notified.keys() {

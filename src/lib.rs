@@ -19,6 +19,7 @@ pub mod output;
 pub mod passwd_hash;
 pub mod paths;
 pub mod platform;
+pub mod progress;
 pub mod resources;
 pub mod result;
 pub mod secret_source;

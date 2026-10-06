@@ -37,6 +37,7 @@
 //!   object kinds and the store location appear in output.
 
 use crate::error::{Result, SinterError};
+use crate::progress::StageTracker;
 use crate::targetfs::{ObjKind, TargetFs};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,7 +270,16 @@ fn check_existing_store_dir(fs: &TargetFs, dir: &str, st: &crate::targetfs::Stat
 }
 
 /// Apply-mode backup. Runs before any resource; any error aborts apply.
-pub(crate) fn perform(fs: &mut TargetFs, paths: &[String], run_id: &str) -> Result<BackupReport> {
+///
+/// `stage` observes the copy of each declared path (one item per path, with no
+/// identity: a backup path is target data). Store setup before the first copy
+/// is not an item. It never influences the copy.
+pub(crate) fn perform(
+    fs: &mut TargetFs,
+    paths: &[String],
+    run_id: &str,
+    stage: &mut StageTracker<'_>,
+) -> Result<BackupReport> {
     let sudo = fs.sudo();
     let home = fs.home_env();
     let root = store_root(sudo, &home);
@@ -319,6 +329,7 @@ pub(crate) fn perform(fs: &mut TargetFs, paths: &[String], run_id: &str) -> Resu
 
     let mut entries: Vec<BackupEntry> = Vec::new();
     for p in paths {
+        stage.item_started(None);
         match copy_one(fs, &permit, p, &run_dir) {
             Ok(entry) => entries.push(entry),
             Err(e) => {

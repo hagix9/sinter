@@ -264,6 +264,7 @@ impl AuditReport {
 // ---------------------------------------------------------------------------
 
 use crate::expressions::EvalVal;
+use crate::progress::{ItemRef, Stage, StageOutcome, StageTracker};
 use crate::resources::{ev_bool, ev_str, sha256_hex, PackageState};
 use crate::targetfs::ObjKind;
 use crate::value::Value;
@@ -300,13 +301,29 @@ pub fn run_audit(mut engine: Engine) -> Result<AuditReport> {
     // already validated acyclic — but no dependency gates an observation:
     // every resource is visited independently (RA-05).
     let order = crate::engine::execution_order(&engine.model)?;
+    // Same stage model as apply: one `resources` stage, one item per resource.
+    // Audit never aborts, so the stage always runs to the end; drift is a
+    // finding (`Completed`), an observation error is `Indeterminate`.
+    let progress = engine.progress.clone();
+    let mut stage = StageTracker::start(&*progress, Stage::Resources, Some(order.len()));
     for &ridx in &order {
         let res = engine.model.resources[ridx].clone();
+        stage.item_started(Some(ItemRef::resource(&res.type_, &res.id)));
         engine
             .fs
             .set_stats_scope(crate::engine::scope_label(&res.type_));
         results.push(audit_resource(&mut engine, &res));
     }
+    stage.end(
+        if results
+            .iter()
+            .any(|r| r.status == AuditResourceStatus::Error)
+        {
+            StageOutcome::Indeterminate
+        } else {
+            StageOutcome::Completed
+        },
+    );
     let summary = AuditSummary::from_results(&results);
     let commands = engine.fs.log();
     Ok(AuditReport {
