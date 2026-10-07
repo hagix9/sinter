@@ -314,6 +314,191 @@ messages red) only when the stream is a terminal. Pipes, redirects and CI
 logs get plain text; `NO_COLOR` (any non-empty value) and `TERM=dumb` turn
 color off. `--format json` output never contains color codes.
 
+## Progress output
+
+*Available in releases after v1.2.0.*
+
+While `plan`, `apply` and `audit` run, Sinter can show where it is. Progress is
+written to **standard error** only: it never touches standard output, the report,
+the JSON document or the exit code, and it is best effort (if progress cannot be
+written, the run goes on without it). `validate`, `secrets` and `mcp` never print
+progress.
+
+| Situation | Progress |
+|-----------|----------|
+| Text output, stderr is a terminal, `TERM` is not `dumb` | **Transient line** (automatic) |
+| Text output, stderr is not a terminal (pipe, redirect, CI log) | Off |
+| Text output, `TERM=dumb` | Off |
+| `SINTER_PROGRESS=plain`, text output | **Plain lines**, on any stderr |
+| `--format json` | Always off |
+| The recipe references an encrypted secret | Always off |
+
+Precedence, strongest first:
+
+1. `--format json` and recipes that reference secrets get no progress, whatever
+   else is set.
+2. `SINTER_PROGRESS=plain` selects plain lines, even on a terminal and even with
+   `TERM=dumb`; it replaces the transient line there rather than adding to it.
+3. Otherwise a terminal gets the transient line and everything else gets nothing.
+
+A run that does not set `SINTER_PROGRESS` prints exactly what it printed before
+progress existed, except on an interactive terminal, where the transient line
+appears while the command runs and is gone when it ends.
+
+### SINTER_PROGRESS
+
+`SINTER_PROGRESS=plain` is the only way to ask for plain lines; there is no command-line
+flag and no configuration setting. Only the exact value `plain` has an effect.
+Any other value (`Plain`, `PLAIN`, `1`, `auto`, `off`, an empty string, `plain `
+with a trailing space) is ignored without a warning, as if the variable were
+unset. There is no value that turns progress off; to hide the transient line,
+set `TERM=dumb` for that run or redirect stderr.
+
+### Transient line (terminal)
+
+One line on stderr, overwritten in place and erased when the run ends, so the
+output that remains (the report on stdout, any `sinter:` error line) is exactly
+what it would be without progress:
+
+```text
+resolve 0/3
+connect
+backup 1/2
+apply 17/42 package:nginx 8s
+handlers 0/1 handler:reload-nginx
+```
+
+- The first word is the stage: `resolve` (while Sinter asks the OpenSSH client
+  for a host's configuration; not shown for localhost or with
+  `--no-ssh-config`), `connect`, `backup`, the command itself (`plan`, `apply`
+  or `audit`) for the resources, and `handlers`.
+- `17/42` is the number of items that have finished out of the number that
+  exist. It is a count, not a percentage, and there is no time-remaining
+  estimate. A stage without a known total (`connect`) shows no count.
+- `package:nginx` is the resource type and the recipe `id` of the item being
+  processed.
+- The time (`8s`, `2m05s`, `1h02m`) appears only after nothing has changed for a
+  few seconds. It is the time since Sinter last moved on to a new item or
+  stage. It is **not** the total run time, and it starts over with every item.
+- A stage that ends badly says so (`apply 5/5 failed`, `indeterminate`); the
+  count alone never means success.
+- The line is cut to fit the terminal width, shortening the item first. When
+  the width cannot be determined, 60 columns are assumed.
+
+The line only says how long Sinter has been waiting; it never claims that the
+target is alive.
+
+### Plain lines (`SINTER_PROGRESS=plain`)
+
+Plain progress is for logs: CI jobs, redirected stderr, automation, and any
+other place where progress should stay visible after it happens. Unlike the
+transient line, plain lines are persistent. Nothing erases them, no cursor
+control or color is used, and they are plain ASCII on stderr, never on stdout.
+Every line starts with `progress: ` (never `sinter:`, which marks errors).
+
+```text
+progress: run: apply started
+progress: connect: start
+progress: connect: done (1s)
+progress: apply: start 0/42
+progress: apply: 5/42 (7s)
+progress: apply: 5/42 on package:nginx, 30s since last progress
+progress: apply: 5/42 on package:nginx, 1m30s since last progress
+progress: apply: 9/42 (1m52s)
+progress: apply: done 42/42 (3m41s)
+progress: run: apply completed (3m43s)
+```
+
+- `run:` lines open and close one execution. An inventory or bundle run prints
+  one pair per execution (and one for target resolution when that has work to
+  do), in the order the executions run. Progress lines carry no host name or
+  address; the persistent output that identifies the host (for example
+  `sinter: [web @ web02] ...`) follows that execution's progress lines.
+- `start`, `done`, `failed` and `indeterminate` mark a stage. A stage that does
+  not succeed ends with `failed` or `indeterminate`, for example
+  `progress: apply: failed 6/42 (12s)`, and the run line says the same
+  (`run: apply failed`). Sinter's usual error text and report are unchanged and
+  remain the only place a reason is given.
+- `5/42 (7s)` is a count milestone: the number of finished items, and the time
+  since the stage started. On the closing `run:` line the time is since the run
+  started.
+- The number of lines depends on the stages and on how long Sinter waits, never
+  on how many resources the recipe has. Per stage there are a start line, an end
+  line, and at most ten count milestones (about one per tenth of the items).
+- Item ids are shown as the report shows them, except that any character that is
+  not printable ASCII becomes `?` and an id longer than 64 characters is cut and
+  ends with `...`.
+
+#### Heartbeat lines
+
+If a stage is quiet, Sinter writes a heartbeat line so the log shows that it is
+still waiting. After 30 seconds without any line, the first heartbeat is
+written. After each heartbeat the wait doubles (60, 120, then 240 seconds) up
+to a maximum of 300 seconds, so while a stage is active a heartbeat appears at
+least every five minutes. A start, milestone or end line puts the wait back to
+30 seconds. A new item that does not complete a milestone does not.
+
+`30s since last progress` is the time since the stage last started or moved on
+to a new item. It is not the time since the last line and not the total run
+time, so a heartbeat can report a short time (for example `5s`) while the
+stage is making progress between milestones. Like the transient line, it states
+elapsed time and does not claim the target is alive or hung.
+
+A very long stall keeps adding one heartbeat line per five minutes until the
+command ends or times out. This is deliberate: the log never goes quiet for
+longer than five minutes, at the cost of output that grows with waiting time
+(not with the number of resources). How well these intervals fit the idle-output
+limits of particular CI systems has not been verified.
+
+#### Interrupted or crashed runs
+
+If Sinter is interrupted (Ctrl-C, `SIGTERM`) or stops because of an internal
+error, the plain stream simply ends: there may be no closing
+`run: ... completed` or `run: ... failed` line. Sinter does not invent an
+outcome it does not know, so a log without a closing line means that the run did
+not finish normally, not that it succeeded or failed. The exit status, as
+always, is the authority. Sinter installs no signal handler for these commands;
+on a terminal, an interrupted run can leave the last transient line on screen.
+
+### No progress for JSON and for secrets
+
+- **`--format json`** never produces progress on any stream, whatever
+  `SINTER_PROGRESS` says and whether or not stderr is a terminal. Standard
+  output is exactly the JSON document, and standard error contains only what it
+  contained before (the `sinter:` error lines). See the
+  [JSON output contract](#json-output-contract).
+- **Recipes that reference encrypted secrets** (`content: { secret: <path> }`
+  or `password_hash: { secret: <path> }`) never produce progress, not even with
+  `SINTER_PROGRESS=plain`. Passphrase prompts and secret-related messages can
+  appear during such a run, and progress is switched off so that nothing is
+  ever mixed with them. In a bundle this applies to the executions of the
+  recipes that reference secrets, and to target resolution for that invocation.
+
+### What progress contains and what it does not
+
+Progress is built only from the stage, the counts, the resource type and recipe
+`id` of the item, the command name and a fixed set of outcome words. It never
+contains host names, addresses, user names, key paths, command lines or their
+output, file content, diffs, secret references, or error messages. Showing a
+host or recipe label in progress is not part of the current behavior.
+
+Progress text is informational, like other stderr text: do not parse it. Its
+wording and the exact set of lines may change in a minor release. Use
+`--format json` and the [exit code](#exit-codes) in automation.
+
+### Limits
+
+- On the transient line, a failure that happens within about a tenth of a second
+  of the previous redraw can end the run before the line shows the failure word.
+  The `sinter:` error line, the report and the exit code are unaffected.
+- If the terminal stops accepting output for longer than about half a second at
+  the end of a run, Sinter does not wait for it any longer: the run, its output
+  and its exit code are not held up. In that rare case a progress write that had
+  already begun can still appear later, possibly mixed into text printed in
+  the meantime. Progress writes are not synchronized with Sinter's other stderr
+  output.
+- Elapsed times are whole seconds; a stage shorter than a second shows `0s`.
+
 ## Reading plan / apply output
 
 A `plan` starts with `== Sinter PLAN ==`, an `apply` with

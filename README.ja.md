@@ -140,6 +140,13 @@ v1.1.0 以降、`validate` はレシピだけを検証します。`--host`、`--
 コマンドラインを全フェーズで使えます。状態語の色付けはターミナル出力時のみ
 です（パイプ、`NO_COLOR`、`--format json` では色なし）。
 
+`plan`、`apply`、`audit` の実行中、対話的なターミナルでは stderr に一時的な進捗行が
+表示され、実行が終わると消えます。`SINTER_PROGRESS=plain` を設定すると、代わりに
+ログや CI 向けの `progress:` 行が stderr に残ります。`--format json` の場合、暗号化
+シークレットを参照するレシピの場合、およびデフォルトで stderr がターミナルでない
+場合は、進捗は出ません。詳細:
+[進捗表示](https://sinter.fulltrust.co.jp/ja/reference/cli/#進捗表示)。
+
 ### 複数ホスト、バンドル、バックアップ
 
 Sinter v1.1.0 以降で利用できます。既存の単一ホスト用レシピと `--host` の
@@ -389,6 +396,10 @@ src/
   diff.rs          truthful, sanitized diff rendering
   output.rs        human and JSON rendering with sensitive redaction
   error.rs         error kinds and exit codes
+  progress.rs      internal progress events (stage, count, item kind and id only)
+  progress_session.rs  progress mode decision, session worker, bounded teardown
+  progress_tty.rs  transient terminal progress line (stderr)
+  progress_plain.rs  opt-in persistent progress lines (SINTER_PROGRESS=plain)
   mcp.rs           read-only MCP stdio adapter
   targets.rs       administrator-owned named SSH target profiles for MCP
   main.rs          CLI

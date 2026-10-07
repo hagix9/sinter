@@ -2,6 +2,47 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+Progress output for `plan`, `apply` and `audit`, on standard error only.
+Recipes, command lines, `--format json` documents, standard output, exit codes
+and the output of non-interactive runs are unchanged unless `SINTER_PROGRESS` is
+set.
+
+### Added
+
+- **Transient progress line on interactive terminals.** When stderr is a
+  terminal, `TERM` is not `dumb` and the output format is text, `plan`, `apply`
+  and `audit` show one line that names the stage, the count of finished items
+  (`17/42`, never a percentage or an estimate), the resource type and `id` in
+  flight, and, after a quiet spell, the time since Sinter last moved on to a new
+  item. The line is erased when the run ends, so the output that remains is what
+  it was without progress.
+- **Opt-in persistent progress lines: `SINTER_PROGRESS=plain`.** Writes
+  `progress: ...` lines to stderr for logs and CI: run, stage and count
+  milestones, and heartbeat lines (`30s since last progress`) after 30 seconds of
+  silence, backing off to one per 300 seconds. The number of lines depends on the
+  stages and on waiting time, not on the number of resources. It applies on a
+  terminal too, where it replaces the transient line, and even with
+  `TERM=dumb`. Only the exact value `plain` has an effect; any other value is
+  ignored. There is no command-line flag or configuration setting.
+- **No progress where it could interfere.** `--format json` never produces
+  progress on any stream, and neither does a recipe that references an encrypted
+  secret, whatever `SINTER_PROGRESS` says. By default a non-terminal stderr gets
+  no progress, so scripted and CI output is byte-for-byte unchanged.
+- Progress contains only the stage, counts, the resource type and `id` of the
+  item and fixed outcome words: no host, address, user, command, file content,
+  diff, secret reference or error text. Progress text is informational and, like
+  other stderr text, not part of the stable 1.x interface. See
+  [Progress output](https://sinter.fulltrust.co.jp/en/reference/cli/#progress-output).
+
+### Notes
+
+- If Sinter is interrupted or stops because of an internal error, the plain
+  progress stream ends without a closing `run: ... completed` or `failed` line.
+- A stalled terminal cannot hold up a run or change its exit code; at the end
+  of a run Sinter waits at most half a second for the progress writer.
+
 ## [1.2.0] - 2026-10-06
 
 Local account management (`group` and `user` resources), encrypted secrets, and

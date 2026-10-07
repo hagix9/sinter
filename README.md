@@ -141,6 +141,13 @@ accepted on every command and ignored by `validate`, so one command line works
 for every phase. Status words are colored on a terminal only (never in pipes,
 with `NO_COLOR`, or in `--format json`).
 
+While `plan`, `apply` and `audit` run, an interactive terminal shows a transient
+progress line on stderr that disappears when the run ends. `SINTER_PROGRESS=plain`
+writes persistent `progress:` lines to stderr instead, for logs and CI. There is
+no progress in `--format json`, for recipes that reference encrypted secrets, or
+by default when stderr is not a terminal. Details:
+[Progress output](https://sinter.fulltrust.co.jp/en/reference/cli/#progress-output).
+
 ### Multiple hosts, bundles and backups
 
 Available from Sinter v1.1.0. Existing single-host recipes and `--host`
@@ -391,6 +398,10 @@ src/
   diff.rs          truthful, sanitized diff rendering
   output.rs        human and JSON rendering with sensitive redaction
   error.rs         error kinds and exit codes
+  progress.rs      internal progress events (stage, count, item kind and id only)
+  progress_session.rs  progress mode decision, session worker, bounded teardown
+  progress_tty.rs  transient terminal progress line (stderr)
+  progress_plain.rs  opt-in persistent progress lines (SINTER_PROGRESS=plain)
   mcp.rs           read-only MCP stdio adapter
   targets.rs       administrator-owned named SSH target profiles for MCP
   main.rs          CLI
