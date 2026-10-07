@@ -85,6 +85,7 @@ fn on_a_terminal(args: &[&str], term: &str) -> Option<String> {
     c.env("TERM", term)
         .env("NO_COLOR", "1")
         .env_remove("CI")
+        .env_remove("SINTER_PROGRESS")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -119,6 +120,7 @@ fn piped(args: &[&str]) -> (String, i32) {
         .env("TERM", "xterm")
         .env("NO_COLOR", "1")
         .env_remove("CI")
+        .env_remove("SINTER_PROGRESS")
         .stdin(Stdio::null())
         .output()
         .unwrap();

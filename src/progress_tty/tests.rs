@@ -1370,7 +1370,7 @@ fn a_really_stalled_terminal_costs_one_bound_and_recovers_when_it_drains() {
 // secret canary: the transient bytes of a real engine stream
 // ---------------------------------------------------------------------------
 
-const CANARIES: &[&str] = &[
+pub(crate) const CANARIES: &[&str] = &[
     "CANARY-FILE-CONTENT-5d3a",
     "CANARY-VAR-VALUE-5d3a",
     "CANARY-CMD-ARG-5d3a",
@@ -1440,7 +1440,7 @@ handlers:
 
 /// The events one real engine run produces (scripted target, canary-laden
 /// recipe), framed by the run-level events the CLI adds.
-fn engine_stream(
+pub(crate) fn engine_stream(
     mode: Option<crate::engine::Mode>,
     with_secret: bool,
 ) -> (RunKind, Vec<ProgressEvent>) {

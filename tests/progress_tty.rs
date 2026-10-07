@@ -181,6 +181,7 @@ fn run(args: &[&str], s: &Setup) -> Run {
     cmd.args(args)
         .env("TERM", s.term)
         .env_remove("CI")
+        .env_remove("SINTER_PROGRESS")
         .env_remove("NO_COLOR")
         .stdin(Stdio::null());
     if let Some(v) = s.no_color {

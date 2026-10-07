@@ -207,6 +207,13 @@ impl Surface for StderrSurface {
     }
 }
 
+/// The production surface (see [`StderrSurface`]), for the other stderr
+/// renderer ([`crate::progress_plain`]), which needs the same private
+/// descriptor and for the same reasons.
+pub(crate) fn stderr_surface() -> Box<dyn Surface> {
+    Box::new(StderrSurface::new())
+}
+
 /// Width of the terminal on `fd`, `None` when `fd` is not a terminal, the
 /// `ioctl` fails or the terminal reports no width.
 fn columns_of_fd(fd: std::os::fd::RawFd) -> Option<usize> {
@@ -232,7 +239,7 @@ fn columns_of_fd(fd: std::os::fd::RawFd) -> Option<usize> {
 
 /// The production consumer factory: the transient line on stderr.
 pub fn stderr_consumer_factory() -> ConsumerFactory {
-    consumer_factory(Arc::new(|| Box::new(StderrSurface::new())))
+    consumer_factory(Arc::new(stderr_surface))
 }
 
 /// A consumer factory that draws on the given surface. A session that
@@ -351,7 +358,7 @@ impl View {
 
 /// Printable ASCII only; every other character becomes `?`. At most `limit`
 /// characters of `s` are looked at, so a huge id costs a bounded amount of work.
-fn sanitize_display(s: &str, limit: usize) -> String {
+pub(crate) fn sanitize_display(s: &str, limit: usize) -> String {
     s.chars()
         .take(limit)
         .map(|c| if (' '..='~').contains(&c) { c } else { '?' })
@@ -372,7 +379,7 @@ fn stage_label(stage: Stage, command: Option<RunKind>) -> &'static str {
 }
 
 /// `8s`, `2m05s`, `1h02m`: whole units, stable, ASCII.
-fn format_elapsed(d: Duration) -> String {
+pub(crate) fn format_elapsed(d: Duration) -> String {
     let secs = d.as_secs();
     if secs < 60 {
         format!("{secs}s")
@@ -681,4 +688,4 @@ impl ProgressConsumer for TtyConsumer {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

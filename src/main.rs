@@ -11,9 +11,11 @@ use sinter::output::{
     RenderOptions,
 };
 use sinter::progress::{ProgressSink, RunKind, RunOutcome};
+use sinter::progress_plain::stderr_plain_consumer_factory;
 use sinter::progress_session::{
     mode_from_environment, outcome_of_audit, outcome_of_error, outcome_of_report,
-    references_secrets, ProgressOptions, ProgressSession, SessionInfo,
+    references_secrets, ConsumerFactory, ProgressMode, ProgressOptions, ProgressSession,
+    SessionInfo,
 };
 use sinter::progress_tty::stderr_consumer_factory;
 use sinter::sshconfig::TargetRequest;
@@ -485,14 +487,27 @@ impl Outcome {
     }
 }
 
+/// The renderer that belongs to the decided mode. The decision itself is
+/// `mode_from_environment`, once per invocation; this only maps its result to
+/// the consumer, and neither renderer looks at the terminal, `TERM`, the
+/// format or the environment again. Neither builds a surface for a recipe that
+/// references secrets (OQ-5).
+fn consumer_factory_for(mode: ProgressMode) -> ConsumerFactory {
+    match mode {
+        ProgressMode::Plain => stderr_plain_consumer_factory(),
+        // `Disabled` never builds a consumer; any other mode is the terminal one.
+        _ => stderr_consumer_factory(),
+    }
+}
+
 fn run_phase(phase: Phase, a: &TargetArgs) -> Result<u8, SinterError> {
     let format = parse_format(&a.format)?;
-    // Phase 1 of the progress decision (see `sinter::progress_session`): JSON,
-    // a non-terminal stderr and TERM=dumb all mean no progress at all.
-    // The TTY renderer (S4) only ever runs in `Tty` mode and never for a recipe
-    // that references secrets (OQ-5).
-    let progress = ProgressOptions::new(mode_from_environment(format == OutputFormat::Json))
-        .with_consumer_factory(stderr_consumer_factory());
+    // Phase 1 of the progress decision (see `sinter::progress_session`): JSON
+    // means no progress at all; otherwise `SINTER_PROGRESS=plain` asks for the
+    // plain renderer (S5) and without it an eligible terminal gets the
+    // transient line (S4) and everything else (pipes, CI, TERM=dumb) none.
+    let mode = mode_from_environment(format == OutputFormat::Json);
+    let progress = ProgressOptions::new(mode).with_consumer_factory(consumer_factory_for(mode));
     run_phase_with(phase, a, format, &progress)
 }
 
@@ -1771,6 +1786,7 @@ mod tests {
     // proven by the binary-level pty tests in `tests/progress_tty.rs`.
     // -----------------------------------------------------------------------
 
+    use sinter::progress_plain::plain_consumer_factory;
     use sinter::progress_tty::{consumer_factory, Surface};
 
     /// The wire contract of the transient line, restated here on purpose: an
@@ -1821,6 +1837,26 @@ mod tests {
 
         fn options(&self) -> ProgressOptions {
             self.options_for(ProgressMode::Tty)
+        }
+
+        /// The S5 plain renderer on the same memory surface, counting sessions
+        /// and secret-bearing sessions the same way.
+        fn plain_options(&self) -> ProgressOptions {
+            let screen = self.clone();
+            let inner = plain_consumer_factory({
+                let screen = self.clone();
+                Arc::new(move || {
+                    screen.made.fetch_add(1, Ordering::SeqCst);
+                    Box::new(ScreenSurface(screen.clone()))
+                })
+            });
+            ProgressOptions::new(ProgressMode::Plain).with_consumer_factory(Arc::new(move |info| {
+                screen.sessions.fetch_add(1, Ordering::SeqCst);
+                if info.references_secrets {
+                    screen.secret_sessions.fetch_add(1, Ordering::SeqCst);
+                }
+                inner(info)
+            }))
         }
 
         fn text(&self) -> String {
@@ -2052,5 +2088,223 @@ mod tests {
         assert_eq!(screen.surfaces(), 0);
         assert_eq!(screen.text(), "");
         assert_eq!(mode_from_environment(true), ProgressMode::Disabled);
+    }
+    // -----------------------------------------------------------------------
+    // WP-PROGRESS S5: the plain renderer through the real `run_phase_with`
+    // wiring (`ProgressMode::Plain`), on a memory surface. The environment
+    // switch and the bytes a real process writes are covered by
+    // `tests/progress_plain_output.rs`.
+    // -----------------------------------------------------------------------
+
+    /// What the plain renderer wrote, as lines; every one is a bounded ASCII
+    /// `progress:` line (no escape, no carriage return, no `sinter:`).
+    fn plain_lines(screen: &Screen) -> Vec<String> {
+        let text = screen.text();
+        assert!(
+            text.is_empty() || text.ends_with('\n'),
+            "output must be whole lines: {text:?}"
+        );
+        assert!(
+            text.bytes()
+                .all(|b| (0x20..=0x7e).contains(&b) || b == b'\n'),
+            "unexpected bytes: {text:?}"
+        );
+        text.lines()
+            .map(|l| {
+                assert!(l.starts_with("progress: "), "{l:?}");
+                l.to_string()
+            })
+            .collect()
+    }
+
+    /// The line with the elapsed time cut off (it varies from run to run).
+    fn without_time(line: &str) -> &str {
+        line.rsplit_once(" (").map_or(line, |(head, _)| head)
+    }
+
+    #[test]
+    fn a_plain_run_prints_bounded_lines_for_every_command() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", RECIPE);
+        for (phase, word) in [
+            (Phase::Plan, "plan"),
+            (Phase::Apply, "apply"),
+            (Phase::Audit, "audit"),
+        ] {
+            let screen = Screen::default();
+            let _ = drive_with(phase, &[&r], &screen.plain_options(), vec![base()]).unwrap();
+            let lines = plain_lines(&screen);
+            let shaped: Vec<&str> = lines.iter().map(|l| without_time(l)).collect();
+            assert_eq!(
+                shaped.first().copied(),
+                Some(&*format!("progress: run: {word} started"))
+            );
+            assert_eq!(
+                shaped.last().copied(),
+                Some(&*format!("progress: run: {word} completed")),
+                "{lines:?}"
+            );
+            assert!(shaped.contains(&"progress: connect: start"), "{lines:?}");
+            assert!(shaped.contains(&"progress: connect: done"), "{lines:?}");
+            assert!(
+                lines.len() <= 20,
+                "bounded by stages, not by resources: {lines:?}"
+            );
+            assert_eq!(screen.surfaces(), 1);
+        }
+    }
+
+    #[test]
+    fn plain_progress_reports_every_failure_with_a_word_and_never_a_message() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", PKG_RECIPE);
+        // connect failure
+        let screen = Screen::default();
+        let err = drive_with(
+            Phase::Apply,
+            &[&r],
+            &screen.plain_options(),
+            vec![FakeTarget::unsupported()],
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Connect);
+        let lines = plain_lines(&screen);
+        let shaped: Vec<&str> = lines.iter().map(|l| without_time(l)).collect();
+        assert_eq!(
+            shaped,
+            [
+                "progress: run: apply started",
+                "progress: connect: start",
+                "progress: connect: failed",
+                "progress: run: apply failed",
+            ]
+        );
+        for l in &lines {
+            assert!(!l.contains(&err.message), "no error text in progress: {l}");
+        }
+        // resolution failure, before any engine: only the run's own two lines
+        let screen = Screen::default();
+        let err = drive_with(
+            Phase::Plan,
+            &[&r, "--host=-bad", "--no-ssh-config"],
+            &screen.plain_options(),
+            vec![],
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Schema);
+        let lines = plain_lines(&screen);
+        let shaped: Vec<&str> = lines.iter().map(|l| without_time(l)).collect();
+        assert_eq!(
+            shaped,
+            ["progress: run: plan started", "progress: run: plan failed"]
+        );
+    }
+
+    #[test]
+    fn a_secret_bearing_recipe_prints_no_plain_progress_either() {
+        let dir = fixture();
+        let r = secret_recipe(&dir, "r.yaml");
+        let pkg = write(&dir, "p.yaml", PKG_RECIPE);
+        let screen = Screen::default();
+        let err = drive_with(
+            Phase::Plan,
+            &[&r, "--host=-bad", "--no-ssh-config"],
+            &screen.plain_options(),
+            vec![],
+        )
+        .unwrap_err();
+        assert!(err.message.contains("-bad"), "{}", err.message);
+        for phase in [Phase::Plan, Phase::Apply, Phase::Audit] {
+            let _ = drive_with(
+                phase,
+                &[&r],
+                &screen.plain_options(),
+                vec![FakeTarget::unsupported()],
+            );
+        }
+        assert_eq!(screen.sessions(), 4);
+        assert_eq!(screen.secret_sessions(), 4);
+        assert_eq!(screen.surfaces(), 0, "no surface, so no descriptor either");
+        assert_eq!(screen.text(), "", "not one byte");
+        // Control: the same options do write for a secret-free recipe.
+        let _ = drive_with(
+            Phase::Plan,
+            &[&pkg],
+            &screen.plain_options(),
+            vec![FakeTarget::unsupported()],
+        );
+        let text = screen.text();
+        assert_eq!(screen.surfaces(), 1);
+        assert!(text.contains("progress: connect: start"), "{text:?}");
+        for forbidden in ["S4CANARYREF", "S4-CANARY", "acct", "secrets/", "password"] {
+            assert!(!text.contains(forbidden), "{forbidden} in {text:?}");
+        }
+    }
+
+    #[test]
+    fn plain_multiple_executions_are_delimited_run_by_run() {
+        let dir = fixture();
+        let inv = inventory(&dir);
+        let q = web_recipe(&dir, "web.yaml");
+        let screen = Screen::default();
+        let code = drive_with(
+            Phase::Plan,
+            &[&q, "--hosts", &inv, "--no-ssh-config"],
+            &screen.plain_options(),
+            vec![base(), base()],
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        let lines = plain_lines(&screen);
+        let shaped: Vec<&str> = lines.iter().map(|l| without_time(l)).collect();
+        // A resolution scope (no `ssh -G`, so no stage), then one scope per host.
+        assert_eq!(screen.surfaces(), 3);
+        let starts = shaped
+            .iter()
+            .filter(|l| **l == "progress: run: plan started")
+            .count();
+        let ends = shaped
+            .iter()
+            .filter(|l| **l == "progress: run: plan completed")
+            .count();
+        assert_eq!((starts, ends), (3, 3), "{lines:?}");
+        // Strictly sequential: each started run ends before the next starts.
+        let mut open = 0i32;
+        for l in &shaped {
+            match *l {
+                "progress: run: plan started" => {
+                    open += 1;
+                    assert_eq!(open, 1, "runs overlap: {lines:?}");
+                }
+                "progress: run: plan completed" => open -= 1,
+                _ => assert_eq!(open, 1, "a line outside any run: {l}"),
+            }
+        }
+    }
+
+    #[test]
+    fn json_stays_silent_whatever_mode_a_plain_request_would_pick() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", RECIPE);
+        let screen = Screen::default();
+        // The decision, not the renderer, keeps JSON silent: a `Disabled` mode
+        // never builds a consumer even though the plain factory is installed.
+        let opts = ProgressOptions::new(ProgressMode::Disabled).with_consumer_factory(
+            plain_consumer_factory(Arc::new({
+                let screen = screen.clone();
+                move || Box::new(ScreenSurface(screen.clone()))
+            })),
+        );
+        let _ = drive_with(Phase::Plan, &[&r, "--format", "json"], &opts, vec![base()]).unwrap();
+        assert_eq!(screen.text(), "");
+        assert_eq!(
+            sinter::progress_session::decide_mode(&sinter::progress_session::ModeInputs {
+                json: true,
+                stderr_is_tty: false,
+                term_is_dumb: false,
+                plain_requested: true,
+            }),
+            ProgressMode::Disabled
+        );
     }
 }

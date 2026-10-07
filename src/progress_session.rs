@@ -4,8 +4,8 @@
 //! that sink and a renderer. This module has **no renderer** of its own: the
 //! only consumer shipped here is [`NullConsumer`], which drops every event, and
 //! nothing in this module writes to stdout, stderr or a terminal. The TTY
-//! renderer (S4, [`crate::progress_tty`]) and a later explicit plain progress
-//! (S5) plug a [`ProgressConsumer`] in through
+//! renderer (S4, [`crate::progress_tty`]) and the explicit plain renderer (S5,
+//! [`crate::progress_plain`]) plug a [`ProgressConsumer`] in through
 //! [`ProgressOptions::with_consumer_factory`]; they own formatting, clocks and
 //! terminal handling. The worker only offers them a wake-up when they ask for
 //! one ([`ProgressConsumer::wake_after`]).
@@ -17,9 +17,12 @@
 //!
 //! * TTY, text format: progress is automatic ([`ProgressMode::Tty`]).
 //! * Not a TTY (pipes, redirects, CI): off by default ([`ProgressMode::Disabled`]).
-//!   A future explicit plain mode is a new variant, not a changed default.
-//! * JSON: off on every stream, whatever the terminal ([`decide_mode`]).
-//!   Existing JSON-mode error diagnostics are not progress and are untouched.
+//!   Plain progress ([`ProgressMode::Plain`]) is an explicit opt-in only:
+//!   `SINTER_PROGRESS=plain` ([`PROGRESS_ENV`]). Nothing else turns it on, and
+//!   no value of that variable changes the automatic behaviour.
+//! * JSON: off on every stream, whatever the terminal and whatever the
+//!   environment ([`decide_mode`]). Existing JSON-mode error diagnostics are not
+//!   progress and are untouched.
 //!
 //! # The decision happens in two phases
 //!
@@ -28,11 +31,11 @@
 //!    `validate`, `secrets` and `mcp` never construct a session.
 //! 2. Per execution, once the recipe model exists: [`SessionInfo`] carries
 //!    [`SessionInfo::references_secrets`] (any resource has a `secret`). It is
-//!    information for the consumer: S4 must not draw a transient line when it is
-//!    set (owner decision OQ-5), because a passphrase prompt or a `sinter:`
-//!    secret note may write to the terminal mid-run. The null consumer ignores
-//!    it and S4's factory builds the null consumer when it is set; nothing here
-//!    coordinates with prompts.
+//!    information for the consumer: no renderer may write when it is set (owner
+//!    decision OQ-5), because a passphrase prompt or a `sinter:` secret note may
+//!    write to the terminal mid-run. The null consumer ignores it and the
+//!    factories of both renderers (S4 and S5) build the null consumer when it is
+//!    set; nothing here coordinates with prompts.
 //!
 //! # One session per execution
 //!
@@ -93,10 +96,15 @@
 //!   while it blocks (the renderer writes through a private descriptor, never
 //!   through `std::io::stderr()`), so an abandoned worker can neither hold the
 //!   run up nor write after the run has moved on.
-//! * **Panic of the run itself.** `Drop` emits nothing while the thread is
-//!   panicking and does not wait, so a panic cannot become a double panic or be
-//!   delayed. The worker then sees the channel close and exits by itself. No
-//!   stronger panic guarantee is claimed: a stream may end without `RunEnded`.
+//! * **Panic of the run itself.** While the thread is panicking `Drop` emits
+//!   nothing, does not wait and does not join, so a panic cannot become a double
+//!   panic or be delayed. It does set the [`AbandonLatch`] (one atomic store):
+//!   the worker is detached, and a detached worker that still had events queued
+//!   would otherwise draw them after the panic message. Muted, it processes
+//!   nothing, schedules nothing and writes nothing (no final erase either) and
+//!   exits when the channel closes. The one write that may already be blocked in
+//!   the kernel is the same residual as for an abandoned worker. No stronger
+//!   panic guarantee is claimed: a stream may end without `RunEnded`.
 //!
 //! The production path (`ChannelSink`, the worker loop, `Drop`) contains no
 //! `unwrap`/`expect` and no operation that panics on a closed channel. An
@@ -131,16 +139,24 @@ pub const DEFAULT_TEARDOWN_BOUND: Duration = Duration::from_millis(500);
 // Mode decision
 // ---------------------------------------------------------------------------
 
-/// Whether progress is produced for an invocation. The only two states S3
-/// needs; plain (non-TTY) progress is a later, explicit opt-in.
+/// Whether progress is produced for an invocation, and which kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProgressMode {
     /// No events, no thread, no channel.
     Disabled,
-    /// Events flow to the consumer. In S3 the consumer is the null consumer.
+    /// Events flow to the consumer: the automatic mode of an eligible terminal
+    /// (the transient line of [`crate::progress_tty`]).
     Tty,
+    /// Events flow to the consumer: the explicit opt-in (`SINTER_PROGRESS=plain`)
+    /// of [`crate::progress_plain`], bounded persistent lines on stderr.
+    Plain,
 }
+
+/// The environment variable that opts in to [`ProgressMode::Plain`]. The only
+/// value it recognises is `plain`; any other value (or none) leaves the
+/// automatic behaviour untouched.
+pub const PROGRESS_ENV: &str = "SINTER_PROGRESS";
 
 /// The command-line facts the first phase of the decision depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,12 +167,28 @@ pub struct ModeInputs {
     pub stderr_is_tty: bool,
     /// `TERM=dumb`.
     pub term_is_dumb: bool,
+    /// `SINTER_PROGRESS=plain` ([`plain_requested`]).
+    pub plain_requested: bool,
 }
 
-/// Pure phase-1 decision. JSON wins over everything; `NO_COLOR` is irrelevant
-/// here (it affects colour, not whether a line may exist).
+/// Whether the value of [`PROGRESS_ENV`] asks for plain progress: exactly
+/// `plain`, nothing else.
+pub fn plain_requested(value: Option<&OsStr>) -> bool {
+    value.is_some_and(|v| v == OsStr::new("plain"))
+}
+
+/// Pure phase-1 decision, the only place progress is decided. JSON wins over
+/// everything. Otherwise an explicit request for plain progress wins (it has no
+/// terminal, `TERM` or colour dependency: it writes persistent ASCII lines),
+/// and without one an eligible terminal gets the transient line and everything
+/// else gets nothing. `NO_COLOR` is irrelevant (it affects colour, not whether
+/// a line may exist).
 pub fn decide_mode(inputs: &ModeInputs) -> ProgressMode {
-    if inputs.json || !inputs.stderr_is_tty || inputs.term_is_dumb {
+    if inputs.json {
+        ProgressMode::Disabled
+    } else if inputs.plain_requested {
+        ProgressMode::Plain
+    } else if !inputs.stderr_is_tty || inputs.term_is_dumb {
         ProgressMode::Disabled
     } else {
         ProgressMode::Tty
@@ -169,6 +201,7 @@ pub fn mode_from_environment(json: bool) -> ProgressMode {
         json,
         stderr_is_tty: std::io::stderr().is_terminal(),
         term_is_dumb: std::env::var_os("TERM").is_some_and(|t| t == OsStr::new("dumb")),
+        plain_requested: plain_requested(std::env::var_os(PROGRESS_ENV).as_deref()),
     })
 }
 
@@ -215,8 +248,8 @@ impl ProgressSink for ChannelSink {
 // ---------------------------------------------------------------------------
 
 /// What a worker thread does with the events of one session. Owns no business
-/// logic and cannot influence the run (it has no handle to it). S4/S5 implement
-/// formatters behind this trait.
+/// logic and cannot influence the run (it has no handle to it). The S4 and S5
+/// renderers implement formatters behind this trait.
 pub trait ProgressConsumer: Send {
     fn consume(&mut self, event: &ProgressEvent);
 
@@ -273,7 +306,7 @@ impl ProgressConsumer for NullConsumer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionInfo {
     pub kind: RunKind,
-    /// See the module documentation (OQ-5): S4 draws no transient line when set.
+    /// See the module documentation (OQ-5): no renderer writes when set.
     pub references_secrets: bool,
 }
 
@@ -307,7 +340,9 @@ impl ProgressOptions {
         Self::new(ProgressMode::Disabled)
     }
 
-    /// Replace the consumer (the S4/S5 seam, and the test seam).
+    /// Replace the consumer (the S4/S5 seam, and the test seam). Which renderer
+    /// belongs to the decided [`mode`](Self::mode) is the caller's choice; a
+    /// renderer never decides whether it runs.
     pub fn with_consumer_factory(mut self, factory: ConsumerFactory) -> Self {
         self.factory = factory;
         self
@@ -506,8 +541,14 @@ impl Drop for ProgressSession {
             return;
         }
         if std::thread::panicking() {
-            // No event, no wait: unwinding must not be delayed or doubled. The
+            // No event, no wait, no join: unwinding must not be delayed or
+            // doubled. The worker is about to be detached, so mute it first
+            // (one atomic store): events still queued must not be drawn after
+            // the panic message, and a muted worker does not even erase. The
             // sender drops with `self`; the worker sees the close and exits.
+            if let Some(worker) = &self.worker {
+                worker.latch.set();
+            }
             return;
         }
         let _ = self.finish(RunOutcome::Failed);
@@ -573,6 +614,7 @@ mod tests {
             json,
             stderr_is_tty: tty,
             term_is_dumb: dumb,
+            plain_requested: false,
         }
     }
 
@@ -595,6 +637,151 @@ mod tests {
                 "json={json} tty={tty} dumb={dumb}"
             );
         }
+    }
+
+    #[test]
+    fn mode_table_with_an_explicit_plain_request() {
+        use ProgressMode::*;
+        // JSON wins; otherwise an explicit request wins over every terminal
+        // fact; without one the table above applies unchanged.
+        for (json, tty, dumb, want) in [
+            (false, true, false, Plain),
+            (false, true, true, Plain),
+            (false, false, false, Plain),
+            (false, false, true, Plain),
+            (true, true, false, Disabled),
+            (true, true, true, Disabled),
+            (true, false, false, Disabled),
+            (true, false, true, Disabled),
+        ] {
+            let mut i = inputs(json, tty, dumb);
+            i.plain_requested = true;
+            assert_eq!(
+                decide_mode(&i),
+                want,
+                "json={json} tty={tty} dumb={dumb} plain"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_exact_value_plain_requests_plain_progress() {
+        assert!(plain_requested(Some(OsStr::new("plain"))));
+        for other in [
+            "", "Plain", "PLAIN", " plain", "plain ", "1", "true", "auto", "off", "tty", "plain,x",
+        ] {
+            assert!(
+                !plain_requested(Some(OsStr::new(other))),
+                "{other:?} must not enable plain progress"
+            );
+        }
+        assert!(!plain_requested(None));
+    }
+
+    /// Keeps the latch it is given so a test can look at it from outside.
+    struct KeepsLatch(Arc<std::sync::Mutex<Option<AbandonLatch>>>);
+
+    impl ProgressConsumer for KeepsLatch {
+        fn consume(&mut self, _event: &ProgressEvent) {}
+
+        fn attach_abandon_latch(&mut self, latch: AbandonLatch) {
+            if let Ok(mut slot) = self.0.lock() {
+                *slot = Some(latch);
+            }
+        }
+    }
+
+    fn latch_probe() -> (ProgressOptions, Arc<std::sync::Mutex<Option<AbandonLatch>>>) {
+        let slot = Arc::new(std::sync::Mutex::new(None));
+        let handed = slot.clone();
+        let opts =
+            ProgressOptions::new(ProgressMode::Tty).with_consumer_factory(Arc::new(move |_| {
+                Box::new(KeepsLatch(handed.clone())) as Box<dyn ProgressConsumer>
+            }));
+        (opts, slot)
+    }
+
+    fn the_latch(slot: &Arc<std::sync::Mutex<Option<AbandonLatch>>>) -> AbandonLatch {
+        slot.lock()
+            .unwrap()
+            .clone()
+            .expect("the session attached a latch")
+    }
+
+    fn info() -> SessionInfo {
+        SessionInfo {
+            kind: RunKind::Apply,
+            references_secrets: false,
+        }
+    }
+
+    /// RA-L1: a session dropped while the thread unwinds from a panic detaches
+    /// its worker, so it must mute it first.
+    #[test]
+    fn a_session_dropped_by_a_panic_mutes_its_detached_worker() {
+        let (opts, slot) = latch_probe();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _session = opts.begin(info());
+            assert!(!the_latch(&slot).is_set(), "not muted while healthy");
+            panic!("the run panicked (expected by this test)");
+        }));
+        assert!(caught.is_err());
+        assert!(
+            the_latch(&slot).is_set(),
+            "the panic-unwind drop left the detached worker unmuted"
+        );
+    }
+
+    /// The panic branch only mutes: no `RunEnded`, no wait, no join.
+    #[test]
+    fn the_panic_branch_neither_waits_nor_emits() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::<ProgressEvent>::new()));
+        struct Rec(Arc<std::sync::Mutex<Vec<ProgressEvent>>>);
+        impl ProgressConsumer for Rec {
+            fn consume(&mut self, event: &ProgressEvent) {
+                if let Ok(mut v) = self.0.lock() {
+                    v.push(event.clone());
+                }
+            }
+        }
+        let handed = events.clone();
+        let opts = ProgressOptions::new(ProgressMode::Tty)
+            .with_consumer_factory(Arc::new(move |_| {
+                Box::new(Rec(handed.clone())) as Box<dyn ProgressConsumer>
+            }))
+            .with_teardown_bound(Duration::from_secs(30));
+        let started = std::time::Instant::now();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _session = opts.begin(info());
+            panic!("expected by this test");
+        }));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the panic path waited for the worker"
+        );
+        // Give the detached worker the chance to deliver anything it was sent.
+        std::thread::sleep(Duration::from_millis(100));
+        let seen = events.lock().unwrap().clone();
+        assert!(
+            !seen
+                .iter()
+                .any(|e| matches!(e, ProgressEvent::RunEnded { .. })),
+            "the panic branch must not emit RunEnded: {seen:?}"
+        );
+    }
+
+    /// The normal early-exit drop is unchanged: it ends the run `Failed` and
+    /// does not mute a worker that finished in time.
+    #[test]
+    fn a_normal_drop_still_ends_the_run_and_leaves_the_latch_alone() {
+        let (opts, slot) = latch_probe();
+        {
+            let _session = opts.begin(info());
+        }
+        assert!(
+            !the_latch(&slot).is_set(),
+            "a clean teardown must not set the latch"
+        );
     }
 
     #[test]

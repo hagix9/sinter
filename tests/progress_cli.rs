@@ -562,6 +562,7 @@ fn mode_decision_follows_the_owner_policy() {
         json: false,
         stderr_is_tty: true,
         term_is_dumb: false,
+        plain_requested: false,
     };
     assert_eq!(decide_mode(&tty_text), ProgressMode::Tty);
     // non-TTY / CI: off by default
@@ -588,6 +589,27 @@ fn mode_decision_follows_the_owner_policy() {
         }),
         ProgressMode::Disabled
     );
+    // S5: only an explicit request turns plain progress on, wherever stderr
+    // goes; JSON still wins over it.
+    for (stderr_is_tty, term_is_dumb) in
+        [(true, false), (true, true), (false, false), (false, true)]
+    {
+        let asked = ModeInputs {
+            stderr_is_tty,
+            term_is_dumb,
+            plain_requested: true,
+            ..tty_text
+        };
+        assert_eq!(decide_mode(&asked), ProgressMode::Plain, "{asked:?}");
+        assert_eq!(
+            decide_mode(&ModeInputs {
+                json: true,
+                ..asked
+            }),
+            ProgressMode::Disabled,
+            "JSON must stay silent even when plain progress is requested: {asked:?}"
+        );
+    }
 }
 
 #[test]
@@ -621,6 +643,69 @@ fn the_production_null_consumer_is_silent_and_changes_nothing() {
     c.consume(&ProgressEvent::RunEnded {
         outcome: RunOutcome::Completed,
     });
+}
+
+/// S5: the production plain renderer, installed the way the CLI installs it in
+/// `Plain` mode, changes no result and adds no target command in any scenario,
+/// and what it writes is whole `progress:` lines only.
+#[test]
+fn the_plain_renderer_changes_no_result_and_adds_no_command() {
+    use sinter::progress_plain::plain_consumer_factory;
+    use sinter::progress_tty::Surface;
+
+    struct Lines(Arc<Mutex<Vec<u8>>>);
+    impl Surface for Lines {
+        fn write_frame(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(())
+        }
+        fn columns(&mut self) -> Option<usize> {
+            None
+        }
+    }
+
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let sink_bytes = written.clone();
+    let opts = ProgressOptions::new(ProgressMode::Plain).with_consumer_factory(
+        plain_consumer_factory(Arc::new(move || Box::new(Lines(sink_bytes.clone())))),
+    );
+    for s in matrix() {
+        let legacy = execute(&s, None);
+        written.lock().unwrap().clear();
+        let (done, teardown) = scoped(&opts, &s);
+        assert_eq!(teardown, Teardown::Clean, "{}", s.name);
+        assert_eq!(done.fingerprint, legacy.fingerprint, "{}", s.name);
+        assert_eq!(done.commands, legacy.commands, "{}: command budget", s.name);
+        let text = String::from_utf8(written.lock().unwrap().clone()).unwrap();
+        assert!(text.ends_with('\n'), "{}: {text:?}", s.name);
+        assert!(
+            text.bytes()
+                .all(|b| (0x20..=0x7e).contains(&b) || b == b'\n'),
+            "{}: {text:?}",
+            s.name
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines.iter().all(|l| l.starts_with("progress: ")),
+            "{}",
+            s.name
+        );
+        assert!(lines.len() <= 20, "{}: {} lines", s.name, lines.len());
+        assert!(
+            lines
+                .first()
+                .is_some_and(|l| l.starts_with("progress: run: ")),
+            "{}: {lines:?}",
+            s.name
+        );
+        assert!(
+            lines
+                .last()
+                .is_some_and(|l| l.starts_with("progress: run: ")),
+            "{}: {lines:?}",
+            s.name
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

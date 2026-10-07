@@ -20,6 +20,7 @@ pub mod passwd_hash;
 pub mod paths;
 pub mod platform;
 pub mod progress;
+pub mod progress_plain;
 pub mod progress_session;
 pub mod progress_tty;
 pub mod resources;
