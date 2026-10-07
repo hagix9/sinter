@@ -14,6 +14,7 @@
 //! pinned suites (`json_contract`, `cli`, `cli_multihost`), which are unchanged.
 #![cfg(unix)]
 mod common;
+use common::ClosedPorts;
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -24,18 +25,14 @@ fn bin() -> &'static str {
 
 struct Fx {
     dir: tempfile::TempDir,
-    ports: Vec<u16>,
+    closed: ClosedPorts,
 }
 
 impl Fx {
     fn new() -> Self {
-        let ls: Vec<_> = (0..2)
-            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
-            .collect();
-        let ports = ls.iter().map(|l| l.local_addr().unwrap().port()).collect();
         Fx {
             dir: tempfile::tempdir().unwrap(),
-            ports,
+            closed: ClosedPorts::reserve(2),
         }
     }
 
@@ -99,6 +96,12 @@ fn on_a_terminal(args: &[&str], term: &str) -> Option<String> {
 /// The persistent output of a terminal run: every draw (`CR ESC[2K text`) and
 /// erase (`CR ESC[2K`) of the transient progress line removed. A frame never
 /// contains a newline and persistent text always ends with one.
+///
+/// The filter's invariant is exactly that: **persistent output is newline
+/// terminated**. It can only fail an equality, never forge one (a frame left on
+/// screen shares a segment with the newline-terminated text after it, so it
+/// stays in the compared string); do not reuse it for output that may end
+/// without a newline.
 fn without_transient(stream: &str) -> String {
     stream
         .split("\r\x1b[2K")
@@ -135,10 +138,10 @@ fn a_terminal_run_prints_exactly_what_a_piped_run_prints() {
         "hosts.yaml",
         &format!(
             "hosts:\n  web01:\n    address: 127.0.0.1\n    port: {}\n    user: u\n    known_hosts: {kh}\n  web02:\n    address: 127.0.0.1\n    port: {}\n    user: u\n    known_hosts: {kh}\ngroups:\n  web:\n    hosts: [web01, web02]\n",
-            f.ports[0], f.ports[1]
+            f.closed.port(0), f.closed.port(1)
         ),
     );
-    let port = f.ports[0].to_string();
+    let port = f.closed.port(0).to_string();
     for phase in ["plan", "apply", "audit"] {
         for fmt in ["text", "json"] {
             let cases: Vec<Vec<&str>> = vec![
@@ -209,7 +212,7 @@ fn json_mode_on_a_terminal_adds_nothing_to_any_stream() {
     let f = Fx::new();
     let r = f.write("web.yaml", RECIPE);
     let kh = f.write("known_hosts", "");
-    let port = f.ports[0].to_string();
+    let port = f.closed.port(0).to_string();
     let args = [
         "plan",
         r.as_str(),

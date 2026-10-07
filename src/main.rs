@@ -1771,7 +1771,11 @@ mod tests {
     // proven by the binary-level pty tests in `tests/progress_tty.rs`.
     // -----------------------------------------------------------------------
 
-    use sinter::progress_tty::{consumer_factory, Surface, CLEAR};
+    use sinter::progress_tty::{consumer_factory, Surface};
+
+    /// The wire contract of the transient line, restated here on purpose: an
+    /// independent oracle for the renderer's own constant.
+    const CLEAR: &str = "\r\x1b[2K";
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Clone, Default)]

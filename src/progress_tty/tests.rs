@@ -903,6 +903,58 @@ fn wake_after_is_never_zero_and_asks_nothing_when_there_is_nothing_to_show() {
     }
 }
 
+#[test]
+fn a_terminal_with_no_room_for_a_line_asks_for_no_wakeups() {
+    // S4-L2: at one column nothing can ever be drawn, so the 1 Hz elapsed
+    // schedule would only wake the worker to write nothing.
+    let mem = Mem::new(Some(1));
+    let t0 = Instant::now();
+    let mut c = core(&mem, RunKind::Apply, t0);
+    c.on_event(&started(Stage::Connect, None), t0);
+    assert_eq!(c.wake_after(t0), None, "nothing can be drawn");
+    assert_eq!(c.wake_after(t0 + secs(30)), None, "still nothing, later");
+    assert_eq!(mem.write_count(), 0);
+    // The next event asks the width again: a resized terminal is drawn on, and
+    // the schedule is back.
+    mem.set_columns(Some(40));
+    c.on_event(&started(Stage::Resources, Some(2)), t0 + ms(10));
+    assert!(mem.text().ends_with("apply 0/2"), "{}", mem.text());
+    assert!(c.wake_after(t0 + ms(10)).is_some());
+    // And narrowing to one column erases the line and stops the wakeups again.
+    mem.set_columns(Some(1));
+    c.on_event(&started(Stage::Handlers, Some(1)), t0 + secs(1));
+    assert!(mem.text().ends_with(CLEAR), "{}", mem.text());
+    assert_eq!(c.wake_after(t0 + secs(1)), None);
+}
+
+#[test]
+fn an_abandoned_renderer_is_mute_in_every_entry_point_and_in_drop() {
+    let mem = Mem::new(Some(80));
+    let t0 = Instant::now();
+    let mut c = core(&mem, RunKind::Apply, t0);
+    let latch = AbandonLatch::default();
+    c.latch = latch.clone();
+    c.on_event(&started(Stage::Connect, None), t0);
+    assert_eq!(mem.text(), format!("{CLEAR}connect"));
+    latch.set();
+    let n = mem.write_count();
+    c.on_event(&started(Stage::Resources, Some(2)), t0 + secs(1));
+    c.on_event(
+        &progress(Stage::Resources, 1, Some(2), item(ItemKind::File, "x")),
+        t0 + secs(2),
+    );
+    c.tick(t0 + secs(10));
+    assert_eq!(c.wake_after(t0 + secs(10)), None, "no wakeups either");
+    c.on_event(&run_ended(RunOutcome::Failed), t0 + secs(11));
+    drop(c);
+    assert_eq!(
+        mem.write_count(),
+        n,
+        "no frame, no erase after the latch: {:?}",
+        mem.text()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // factory: OQ-5
 // ---------------------------------------------------------------------------
@@ -1297,14 +1349,21 @@ fn a_really_stalled_terminal_costs_one_bound_and_recovers_when_it_drains() {
         took >= ms(150) && took < secs(3),
         "a stalled terminal must cost about one bound, took {took:?}"
     );
-    // The terminal drains: the abandoned worker finishes its write, sees the
-    // queued end of run and exits, leaving the erase as its last bytes.
+    // The terminal drains: the write that was already blocked lands, once, and
+    // the abandoned worker then stays mute: no erase, no further frame.
     let mut seen = Vec::new();
-    wait_until("the stalled worker to finish", || {
+    wait_until("the blocked write to land", || {
         seen.extend(pty.read_available());
-        let s = String::from_utf8_lossy(&seen);
-        s.contains("connect") && s.ends_with(CLEAR)
+        String::from_utf8_lossy(&seen).contains("connect")
     });
+    std::thread::sleep(ms(300));
+    seen.extend(pty.read_available());
+    let seen = String::from_utf8_lossy(&seen).to_string();
+    assert!(
+        seen.ends_with("connect"),
+        "nothing follows the frame: {seen:?}"
+    );
+    assert_eq!(seen.matches(CLEAR).count(), 1, "{seen:?}");
 }
 
 // ---------------------------------------------------------------------------

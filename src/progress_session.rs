@@ -88,7 +88,11 @@
 //!   `recv_timeout` on a completion channel. When it expires the worker is
 //!   abandoned (detached) and [`Teardown::Abandoned`] is reported; the process
 //!   may exit while it is blocked. One abandoned worker per stuck execution is
-//!   the worst case, and only a consumer that blocks can cause it.
+//!   the worst case, and only a consumer that blocks can cause it. The consumer
+//!   is told through an [`AbandonLatch`] and must hold no lock the run needs
+//!   while it blocks (the renderer writes through a private descriptor, never
+//!   through `std::io::stderr()`), so an abandoned worker can neither hold the
+//!   run up nor write after the run has moved on.
 //! * **Panic of the run itself.** `Drop` emits nothing while the thread is
 //!   panicking and does not wait, so a panic cannot become a double panic or be
 //!   delayed. The worker then sees the channel close and exits by itself. No
@@ -108,6 +112,7 @@ use crate::progress::{
 };
 use std::ffi::OsStr;
 use std::io::IsTerminal;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -227,6 +232,32 @@ pub trait ProgressConsumer: Send {
     /// The wait asked for by [`wake_after`](Self::wake_after) expired with no
     /// event.
     fn tick(&mut self) {}
+
+    /// Called once, on the caller's thread, before the consumer moves to its
+    /// worker. A consumer that writes somewhere a stall can block must keep the
+    /// latch and stop writing for good as soon as it is set (see
+    /// [`AbandonLatch`]). The default ignores it.
+    fn attach_abandon_latch(&mut self, _latch: AbandonLatch) {}
+}
+
+/// Set by [`ProgressSession::end`] at the moment it gives up waiting for the
+/// worker and returns [`Teardown::Abandoned`]. From then on the run goes on
+/// without the worker, so the worker's consumer must not write again: a late
+/// write would land after (or inside) output that the run has printed since.
+/// One write that is already blocked in the kernel cannot be called back; the
+/// latch stops everything after it.
+#[derive(Debug, Clone, Default)]
+pub struct AbandonLatch(Arc<AtomicBool>);
+
+impl AbandonLatch {
+    /// Whether the session has abandoned the worker.
+    pub fn is_set(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 /// The S3 consumer: receives every event and does nothing. No output.
@@ -301,7 +332,9 @@ impl ProgressOptions {
         if self.mode == ProgressMode::Disabled {
             return ProgressSession::inert(self.teardown_bound);
         }
-        let consumer = (self.factory)(&info);
+        let mut consumer = (self.factory)(&info);
+        let latch = AbandonLatch::default();
+        consumer.attach_abandon_latch(latch.clone());
         let (sink, rx) = ChannelSink::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let spawned = std::thread::Builder::new()
@@ -318,6 +351,7 @@ impl ProgressOptions {
             worker: Some(Worker {
                 done: done_rx,
                 handle,
+                latch,
             }),
             ended: false,
             teardown_bound: self.teardown_bound,
@@ -380,6 +414,7 @@ fn worker_main(rx: Receiver<ProgressEvent>, consumer: Box<dyn ProgressConsumer>,
 struct Worker {
     done: Receiver<()>,
     handle: JoinHandle<()>,
+    latch: AbandonLatch,
 }
 
 /// How a session's worker ended.
@@ -456,7 +491,11 @@ impl ProgressSession {
                 Ok(()) => Teardown::Clean,
                 Err(_) => Teardown::WorkerPanicked,
             },
-            Err(mpsc::RecvTimeoutError::Timeout) => Teardown::Abandoned,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Mute the worker before the run prints anything else.
+                worker.latch.set();
+                Teardown::Abandoned
+            }
         }
     }
 }

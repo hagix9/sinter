@@ -38,7 +38,8 @@
 //! * **elapsed**: time since the last progress event of any kind, measured by
 //!   the renderer's own monotonic clock, shown only once it reaches
 //!   [`QUIET_AFTER`] (`8s`, `2m05s`, `1h02m`). It says Sinter has been waiting
-//!   that long on the current item; it never claims the engine is alive.
+//!   that long on the current item; it never claims the engine is alive. It
+//!   restarts at every event, so it is **not** the run's total elapsed time.
 //!
 //! # Safety of the displayed text
 //!
@@ -53,7 +54,9 @@
 //! The line is bounded to the width of the terminal on **stderr**
 //! (`ioctl(TIOCGWINSZ)`, asked again at every draw), minus one column so the
 //! cursor never reaches the wrap position. A failing `ioctl` or a reported width
-//! of `0` means *unknown* and uses [`FALLBACK_COLUMNS`] (60). A terminal of one
+//! of `0` means *unknown* and uses [`FALLBACK_COLUMNS`] (60); the `COLUMNS`
+//! environment variable is deliberately not consulted (one input fewer, and a
+//! small fallback is the conservative choice). A terminal of one
 //! column has no room for a line and draws nothing. When the line does not fit,
 //! the item is shortened first (`kind:abc...`), then dropped, then the elapsed
 //! text, then the label and counter are cut to the budget.
@@ -64,7 +67,11 @@
 //! no newline is ever written, so nothing is left behind and the next output
 //! starts at column 0. No cursor hiding, no vertical movement, no alternate
 //! screen, no termios change. Redraws are coalesced to one per
-//! [`MIN_REDRAW`] and an unchanged line is not rewritten.
+//! [`MIN_REDRAW`] and an unchanged line is not rewritten. A consequence of the
+//! coalescing: a change that arrives within that interval of the last write is
+//! held, and a run that ends first never shows it (a failure that happens within
+//! 100 ms of the previous draw never displays its `failed` word; the persistent
+//! `sinter:` line still carries the failure).
 //!
 //! # Ticking
 //!
@@ -82,35 +89,62 @@
 //!
 //! # Failure
 //!
-//! Progress is best effort and cannot change a result. A write or flush error,
-//! an unavailable width and a vanished terminal degrade silently: after the
-//! first write error the renderer stops drawing for good. The renderer contains
-//! no `unwrap`, `expect`, indexing or unchecked arithmetic on the paths taken
-//! for valid events, so it cannot reach Rust's panic hook (which would write to
-//! the very terminal being drawn on).
+//! Progress is best effort and cannot change a result. A write error, an
+//! unavailable width and a vanished terminal degrade silently: after the first
+//! write error the renderer stops drawing for good. The renderer contains no
+//! `unwrap`, `expect`, indexing or unchecked arithmetic on the paths taken for
+//! valid events, so it cannot reach Rust's panic hook (which would write to the
+//! very terminal being drawn on).
+//!
+//! # A stalled terminal
+//!
+//! A write to a terminal whose output is not being read blocks. The worker may
+//! block, but only the worker:
+//!
+//! * The production surface writes through **its own descriptor**, a `dup` of
+//!   stderr taken when the scope begins and owned by the surface, and never
+//!   through [`std::io::stderr`]. `Stderr` is one process-wide lock; a blocked
+//!   write that held it would hold up every `eprintln!` of the run, however
+//!   short the teardown bound. No lock at all is needed on the private
+//!   descriptor: a surface belongs to one worker (`&mut self`).
+//! * The descriptor is **not** made non-blocking. A `dup` shares the open file
+//!   description with stderr, so `O_NONBLOCK` on it would silently turn
+//!   `eprintln!` non-blocking too, and a second description cannot be obtained
+//!   portably (`/dev/fd/N` duplicates on macOS). A non-blocking write may also
+//!   stop half way through a frame and leave part of it on the terminal.
+//! * When [`ProgressSession::end`](crate::progress_session::ProgressSession::end)
+//!   gives up on the worker it sets the [`AbandonLatch`]. From then on the
+//!   renderer processes no event and writes nothing, not even the final erase
+//!   (stderr is unbuffered, so an `eprintln!` may reach the terminal in several
+//!   writes and an erase landing between them could destroy persistent text; a
+//!   leftover frame only prefixes it). The one write already blocked
+//!   in the kernel cannot be called back: it may still land, once, after the run
+//!   has printed more. That is the whole residual, and only a terminal that has
+//!   not drained for longer than the teardown bound can cause it.
 
 use crate::progress::{ItemRef, ProgressEvent, RunKind, Stage, StageOutcome};
 use crate::progress_session::{
-    ConsumerFactory, NullConsumer, ProgressConsumer, SessionInfo, MIN_WAKE,
+    AbandonLatch, ConsumerFactory, NullConsumer, ProgressConsumer, SessionInfo, MIN_WAKE,
 };
 use std::io::Write;
+use std::os::fd::{AsFd, AsRawFd};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Erase the current line and return to column 0. The only control sequence
 /// the renderer writes.
-pub const CLEAR: &str = "\r\x1b[2K";
+pub(crate) const CLEAR: &str = "\r\x1b[2K";
 
 /// Width assumed when the terminal's width is unknown (`ioctl` failed or
 /// reported `0`).
-pub const FALLBACK_COLUMNS: usize = 60;
+pub(crate) const FALLBACK_COLUMNS: usize = 60;
 
 /// How long nothing may have happened before the elapsed time is shown.
-pub const QUIET_AFTER: Duration = Duration::from_secs(3);
+pub(crate) const QUIET_AFTER: Duration = Duration::from_secs(3);
 
 /// Minimum time between two writes of the line (events in between are
 /// coalesced into the next draw).
-pub const MIN_REDRAW: Duration = Duration::from_millis(100);
+pub(crate) const MIN_REDRAW: Duration = Duration::from_millis(100);
 
 /// The elapsed time is shown in whole seconds, so it can change once a second.
 const ELAPSED_STEP: Duration = Duration::from_secs(1);
@@ -135,20 +169,41 @@ pub trait Surface: Send {
 /// Builds the surface of one session (called on the caller's thread).
 pub type SurfaceFactory = Arc<dyn Fn() -> Box<dyn Surface> + Send + Sync>;
 
-/// The real surface: this process's stderr.
-struct StderrSurface;
+/// The real surface: a private duplicate of this process's stderr. See the
+/// module documentation, "A stalled terminal", for why it is not
+/// [`std::io::stderr`] and not non-blocking.
+struct StderrSurface {
+    /// `None` when stderr could not be duplicated (closed): every write then
+    /// fails and the renderer stays silent.
+    file: Option<std::fs::File>,
+}
+
+impl StderrSurface {
+    fn new() -> Self {
+        StderrSurface {
+            file: std::io::stderr()
+                .as_fd()
+                .try_clone_to_owned()
+                .ok()
+                .map(std::fs::File::from),
+        }
+    }
+}
 
 impl Surface for StderrSurface {
     fn write_frame(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        // `write_all` on the raw handle, never `eprint!` (which panics when the
-        // write fails).
-        let mut err = std::io::stderr().lock();
-        err.write_all(bytes)?;
-        err.flush()
+        // `write_all` on a plain `File`: no std lock is held while it blocks, and
+        // a failure is returned, never printed (unlike `eprint!`, which panics).
+        match self.file.as_mut() {
+            Some(file) => file.write_all(bytes),
+            None => Err(std::io::ErrorKind::NotConnected.into()),
+        }
     }
 
     fn columns(&mut self) -> Option<usize> {
-        columns_of_fd(2)
+        self.file
+            .as_ref()
+            .and_then(|file| columns_of_fd(file.as_raw_fd()))
     }
 }
 
@@ -177,7 +232,7 @@ fn columns_of_fd(fd: std::os::fd::RawFd) -> Option<usize> {
 
 /// The production consumer factory: the transient line on stderr.
 pub fn stderr_consumer_factory() -> ConsumerFactory {
-    consumer_factory(Arc::new(|| Box::new(StderrSurface)))
+    consumer_factory(Arc::new(|| Box::new(StderrSurface::new())))
 }
 
 /// A consumer factory that draws on the given surface. A session that
@@ -436,8 +491,14 @@ struct Core {
     last_write: Option<Instant>,
     /// A change is waiting for the redraw interval to pass.
     dirty: bool,
-    /// A write failed: nothing more is ever written.
+    /// A write failed, or the session abandoned the worker: nothing more is
+    /// ever written.
     dead: bool,
+    /// Set by the session when it stops waiting for the worker.
+    latch: AbandonLatch,
+    /// The last width left no room for any text, so there is nothing to refresh
+    /// until the next event asks again.
+    no_room: bool,
 }
 
 impl Core {
@@ -451,11 +512,24 @@ impl Core {
             last_write: None,
             dirty: false,
             dead: false,
+            latch: AbandonLatch::default(),
+            no_room: false,
         }
     }
 
+    /// Whether nothing may be written any more. Checked before every write, so
+    /// a worker the session has abandoned stays mute, including in `Drop`.
+    fn silenced(&mut self) -> bool {
+        if !self.dead && self.latch.is_set() {
+            self.dead = true;
+            self.drawn = None;
+            self.dirty = false;
+        }
+        self.dead
+    }
+
     fn on_event(&mut self, event: &ProgressEvent, now: Instant) {
-        if self.dead || self.view.finished {
+        if self.silenced() || self.view.finished {
             return;
         }
         self.view.apply(event);
@@ -468,7 +542,7 @@ impl Core {
     }
 
     fn tick(&mut self, now: Instant) {
-        if self.dead || self.view.finished {
+        if self.silenced() || self.view.finished {
             return;
         }
         self.refresh(now);
@@ -477,7 +551,7 @@ impl Core {
     /// Time until the line next needs attention, `None` when it never will
     /// without a new event (nothing drawn, finished, or dead).
     fn wake_after(&mut self, now: Instant) -> Option<Duration> {
-        if self.dead || !self.view.has_line() {
+        if self.silenced() || self.no_room || !self.view.has_line() {
             return None;
         }
         let mut wake = self.next_elapsed_change(now);
@@ -511,7 +585,9 @@ impl Core {
         let quiet = now.saturating_duration_since(self.last_event);
         let shown = (quiet >= self.timing.quiet_after).then_some(quiet);
         let columns = self.surface.columns();
-        let text = format_line(&self.view, shown, line_budget(columns));
+        let budget = line_budget(columns);
+        self.no_room = budget == 0;
+        let text = format_line(&self.view, shown, budget);
         match text {
             None => {
                 self.dirty = false;
@@ -547,7 +623,7 @@ impl Core {
 
     /// Erase the line if one is drawn.
     fn clear(&mut self) {
-        if self.dead || self.drawn.is_none() {
+        if self.silenced() || self.drawn.is_none() {
             return;
         }
         if self.write(CLEAR.as_bytes()) {
@@ -557,6 +633,9 @@ impl Core {
 
     /// One write; any error ends all drawing. `true` on success.
     fn write(&mut self, bytes: &[u8]) -> bool {
+        if self.silenced() {
+            return false;
+        }
         match self.surface.write_frame(bytes) {
             Ok(()) => true,
             Err(_) => {
@@ -594,6 +673,10 @@ impl ProgressConsumer for TtyConsumer {
 
     fn tick(&mut self) {
         self.core.tick(Instant::now());
+    }
+
+    fn attach_abandon_latch(&mut self, latch: AbandonLatch) {
+        self.core.latch = latch;
     }
 }
 

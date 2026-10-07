@@ -1142,3 +1142,56 @@ pub fn require_synchronized_manager(unit: &str) -> bool {
         }
     }
 }
+
+/// Loopback TCP ports with nothing listening, and no sibling test able to take
+/// them while the value lives.
+///
+/// "Pick a free port, close it, connect later" loses a race whenever another
+/// `bind(0)` runs in between: the kernel may hand the port to a sibling test of
+/// the same binary, which then listens or connects on it, and the "refused"
+/// connection succeeds. Holding the sockets is no answer: a `TcpListener` accepts
+/// the connection, and on BSD/macOS a bound socket that is not listening drops
+/// the SYN instead of refusing it (the connect times out), so no held socket can
+/// make a port both reserved and refused on every OS.
+///
+/// So the window is closed by exclusion instead: a process-wide lease is taken
+/// before the ports are chosen and released when the value drops, so while any
+/// test connects to its closed ports no other test of the binary can bind (or
+/// choose) an ephemeral port. Keep the value alive until the process that
+/// connects has exited. What this cannot exclude is an unrelated *process*
+/// binding the same port in that window.
+pub struct ClosedPorts {
+    ports: Vec<u16>,
+    _lease: std::sync::MutexGuard<'static, ()>,
+}
+
+static PORT_LEASE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+impl ClosedPorts {
+    /// Takes the lease, so a thread may hold one `ClosedPorts` at a time.
+    pub fn reserve(n: usize) -> Self {
+        // A panicking test must not poison the lease for the others.
+        let lease = PORT_LEASE.lock().unwrap_or_else(|e| e.into_inner());
+        // All listeners stay open until every port is chosen, so the ports are
+        // distinct; they are closed before returning, so nothing listens.
+        let listeners: Vec<_> = (0..n)
+            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+            .collect();
+        let ports = listeners
+            .iter()
+            .map(|l| l.local_addr().unwrap().port())
+            .collect();
+        ClosedPorts {
+            ports,
+            _lease: lease,
+        }
+    }
+
+    pub fn ports(&self) -> &[u16] {
+        &self.ports
+    }
+
+    pub fn port(&self, i: usize) -> u16 {
+        self.ports[i]
+    }
+}

@@ -27,6 +27,9 @@ use std::process::{Command, Stdio};
 
 const CLEAR: &str = "\r\x1b[2K";
 
+mod common;
+use common::ClosedPorts;
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_sinter")
 }
@@ -37,16 +40,6 @@ fn bin() -> &'static str {
 
 struct Fx {
     dir: tempfile::TempDir,
-}
-
-fn closed_ports(n: usize) -> Vec<u16> {
-    let listeners: Vec<_> = (0..n)
-        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
-        .collect();
-    listeners
-        .iter()
-        .map(|l| l.local_addr().unwrap().port())
-        .collect()
 }
 
 impl Fx {
@@ -321,7 +314,8 @@ fn an_eligible_run_draws_on_stderr_only_and_its_persistent_output_is_unchanged()
     let f = Fx::new();
     let r = f.write("web.yaml", RECIPE);
     let kh = f.write("known_hosts", "");
-    let port = closed_ports(1)[0].to_string();
+    let held = ClosedPorts::reserve(1);
+    let port = held.port(0).to_string();
     for phase in ["plan", "apply", "audit"] {
         let args = refused_args(&r, &kh, &port, phase);
         let want = run(&args, &Setup::piped());
@@ -357,7 +351,8 @@ fn colour_settings_never_change_the_persistent_output() {
     let f = Fx::new();
     let r = f.write("web.yaml", RECIPE);
     let kh = f.write("known_hosts", "");
-    let port = closed_ports(1)[0].to_string();
+    let held = ClosedPorts::reserve(1);
+    let port = held.port(0).to_string();
     let args = refused_args(&r, &kh, &port, "plan");
     let plain = run(&args, &Setup::piped());
     // NO_COLOR: no colour, only the transient sequence appears.
@@ -389,7 +384,8 @@ fn the_terminal_width_bounds_every_frame() {
     let f = Fx::new();
     let r = f.write("web.yaml", RECIPE);
     let kh = f.write("known_hosts", "");
-    let port = closed_ports(1)[0].to_string();
+    let held = ClosedPorts::reserve(1);
+    let port = held.port(0).to_string();
     let args = refused_args(&r, &kh, &port, "plan");
     let want = run(&args, &Setup::piped());
     // (reported width, widest frame allowed, "connect" shown whole?)
@@ -421,7 +417,8 @@ fn a_terminal_one_column_wide_has_no_room_for_a_line_and_nothing_breaks() {
     let f = Fx::new();
     let r = f.write("web.yaml", RECIPE);
     let kh = f.write("known_hosts", "");
-    let port = closed_ports(1)[0].to_string();
+    let held = ClosedPorts::reserve(1);
+    let port = held.port(0).to_string();
     let args = refused_args(&r, &kh, &port, "plan");
     let want = run(&args, &Setup::piped());
     let got = run(
@@ -444,7 +441,8 @@ fn an_unknown_width_uses_the_documented_fallback() {
     let f = Fx::new();
     let r = f.write("web.yaml", RECIPE);
     let kh = f.write("known_hosts", "");
-    let port = closed_ports(1)[0].to_string();
+    let held = ClosedPorts::reserve(1);
+    let port = held.port(0).to_string();
     let args = refused_args(&r, &kh, &port, "plan");
     let got = run(
         &args,
@@ -466,7 +464,8 @@ fn json_on_a_terminal_has_no_progress_on_any_stream() {
     let f = Fx::new();
     let r = f.write("web.yaml", RECIPE);
     let kh = f.write("known_hosts", "");
-    let port = closed_ports(1)[0].to_string();
+    let held = ClosedPorts::reserve(1);
+    let port = held.port(0).to_string();
     for phase in ["plan", "apply", "audit"] {
         let mut args = refused_args(&r, &kh, &port, phase);
         args.extend(["--format", "json"]);
@@ -485,7 +484,8 @@ fn term_dumb_has_no_progress() {
     let f = Fx::new();
     let r = f.write("web.yaml", RECIPE);
     let kh = f.write("known_hosts", "");
-    let port = closed_ports(1)[0].to_string();
+    let held = ClosedPorts::reserve(1);
+    let port = held.port(0).to_string();
     let args = refused_args(&r, &kh, &port, "plan");
     let want = run(&args, &Setup::piped());
     for no_color in [Some("1"), None] {
@@ -507,7 +507,8 @@ fn a_non_terminal_stderr_has_no_progress_even_when_stdout_is_a_terminal() {
     let f = Fx::new();
     let r = f.write("web.yaml", RECIPE);
     let kh = f.write("known_hosts", "");
-    let port = closed_ports(1)[0].to_string();
+    let held = ClosedPorts::reserve(1);
+    let port = held.port(0).to_string();
     let args = refused_args(&r, &kh, &port, "plan");
     let want = run(&args, &Setup::piped());
     let got = run(
@@ -558,7 +559,8 @@ fn a_secret_bearing_recipe_has_no_progress_at_all() {
         "version: 1\nresources:\n  - id: acct\n    type: user\n    with:\n      name: app\n      password_hash: { secret: secrets/S4PTYREF.age }\n",
     );
     let kh = f.write("known_hosts", "");
-    let port = closed_ports(1)[0].to_string();
+    let held = ClosedPorts::reserve(1);
+    let port = held.port(0).to_string();
     for phase in ["plan", "apply", "audit"] {
         let args = refused_args(&r, &kh, &port, phase);
         let want = run(&args, &Setup::piped());
@@ -587,8 +589,9 @@ fn a_secret_bearing_recipe_has_no_progress_at_all() {
 fn every_scope_draws_and_erases_its_own_line_and_nothing_accumulates() {
     let f = Fx::new();
     let r = f.write("web.yaml", RECIPE);
-    let ports = closed_ports(2);
-    let inv = f.inventory(&ports);
+    let held = ClosedPorts::reserve(2);
+    let ports = held.ports();
+    let inv = f.inventory(ports);
     // `ssh -G` is scripted, so the resolution scope has a Resolve stage.
     f.fake_ssh("hostname 127.0.0.1\n");
     let path = Some(f.path_env());
@@ -680,5 +683,64 @@ fn an_invalid_recipe_starts_nothing() {
         let got = run(&args, &Setup::tty());
         assert_eq!(got.stderr, want.stderr, "{phase}");
         assert_eq!(got.code, want.code, "{phase}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// the fixture's own premise (S4-L1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn closed_ports_are_refused_and_no_two_live_reservations_overlap() {
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    // Closed: a connection is refused, not accepted and not hung.
+    {
+        let held = ClosedPorts::reserve(4);
+        let mut distinct = held.ports().to_vec();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 4, "the ports are distinct");
+        for &port in held.ports() {
+            let err = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::ConnectionRefused, "{port}");
+        }
+    }
+
+    // The old fixture's failure: while one test still had to connect to its
+    // port, a sibling's `bind(0)` was handed the same number. Here many threads
+    // reserve and "connect later" (a pause stands for the child's spawn) and a
+    // registry of live reservations must never see a port twice, nor see any
+    // port that another reservation could have taken.
+    let live: Arc<Mutex<HashSet<u16>>> = Arc::default();
+    let handles: Vec<_> = (0..6)
+        .map(|_| {
+            let live = live.clone();
+            std::thread::spawn(move || {
+                for _ in 0..50 {
+                    let held = ClosedPorts::reserve(2);
+                    {
+                        let mut live = live.lock().unwrap();
+                        for &p in held.ports() {
+                            assert!(live.insert(p), "port {p} is in two live reservations");
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    // Nothing took them in the meantime: still refused.
+                    for &p in held.ports() {
+                        let err = std::net::TcpStream::connect(("127.0.0.1", p)).unwrap_err();
+                        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionRefused, "{p}");
+                    }
+                    let mut live = live.lock().unwrap();
+                    for &p in held.ports() {
+                        live.remove(&p);
+                    }
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
     }
 }
