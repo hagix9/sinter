@@ -1141,7 +1141,7 @@ impl Pty {
                 &mut slave,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut ws,
+                &raw mut ws,
             )
         };
         assert_eq!(rc, 0, "openpty failed");
@@ -1323,9 +1323,19 @@ fn a_really_stalled_terminal_costs_one_bound_and_recovers_when_it_drains() {
         let chunk = [b'.'; 512];
         let mut slave = &pty.slave;
         let mut filled = 0usize;
-        while slave.write(&chunk).is_ok() {
-            filled += chunk.len();
-            assert!(filled < 16 * 1024 * 1024, "the pty never filled up");
+        // Linux frees pty room asynchronously after the first EAGAIN, so the
+        // terminal only counts as full once nothing was accepted for 150 ms.
+        let mut last_written = Instant::now();
+        loop {
+            match slave.write(&chunk) {
+                Ok(n) => {
+                    filled += n;
+                    last_written = Instant::now();
+                    assert!(filled < 16 * 1024 * 1024, "the pty never filled up");
+                }
+                Err(_) if last_written.elapsed() >= ms(150) => break,
+                Err(_) => std::thread::sleep(ms(1)),
+            }
         }
         // SAFETY: as above, restoring blocking mode.
         unsafe {

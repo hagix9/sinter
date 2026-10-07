@@ -142,7 +142,7 @@ fn open_pty() -> (File, File) {
             &mut s,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut ws,
+            &raw mut ws,
         )
     };
     assert_eq!(rc, 0, "openpty");

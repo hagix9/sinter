@@ -96,20 +96,31 @@ fn set_nonblocking(fd: i32, on: bool) {
 
 /// Fill fd 2's output buffer (nobody reads the master), so the next blocking
 /// write to it stalls.
+///
+/// "Full" is only believed once nothing could be written for `SETTLE`: Linux
+/// frees pty room asynchronously (the flip buffer is flushed into the line
+/// discipline after the first `EAGAIN`), so a stop at the first failure can
+/// leave room for a small line and the "stalled" worker would not stall.
 fn fill_stderr() {
+    const SETTLE: Duration = Duration::from_millis(150);
     set_nonblocking(2, true);
     let chunk = [b'.'; 512];
     let mut filled = 0usize;
+    let mut last_written = Instant::now();
     loop {
         // SAFETY: writes a live buffer to fd 2.
         let n = unsafe { libc::write(2, chunk.as_ptr().cast(), chunk.len()) };
-        if n < 0 {
+        if n >= 0 {
+            filled += n as usize;
+            last_written = Instant::now();
+            if filled > 16 * 1024 * 1024 {
+                say("FAIL the pty never filled up");
+                std::process::exit(1);
+            }
+        } else if last_written.elapsed() >= SETTLE {
             break;
-        }
-        filled += n as usize;
-        if filled > 16 * 1024 * 1024 {
-            say("FAIL the pty never filled up");
-            std::process::exit(1);
+        } else {
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
     set_nonblocking(2, false);
@@ -446,7 +457,7 @@ impl Pty {
                 &mut s,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut ws,
+                &raw mut ws,
             )
         };
         assert_eq!(rc, 0, "openpty");
