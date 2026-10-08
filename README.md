@@ -141,12 +141,15 @@ accepted on every command and ignored by `validate`, so one command line works
 for every phase. Status words are colored on a terminal only (never in pipes,
 with `NO_COLOR`, or in `--format json`).
 
+*Available in releases after v1.2.0 (implemented on `main`; not part of v1.2.0).*
+
 While `plan`, `apply` and `audit` run, an interactive terminal shows a transient
 progress line on stderr that disappears when the run ends. `SINTER_PROGRESS=plain`
 writes persistent `progress:` lines to stderr instead, for logs and CI. There is
 no progress in `--format json`, for recipes that reference encrypted secrets, or
 by default when stderr is not a terminal. Details:
-[Progress output](https://sinter.fulltrust.co.jp/en/reference/cli/#progress-output).
+[Progress output](https://sinter.fulltrust.co.jp/en/reference/cli/#progress-output);
+design record: [ADR 0001](docs/adr/0001-progress-output.md).
 
 ### Multiple hosts, bundles and backups
 

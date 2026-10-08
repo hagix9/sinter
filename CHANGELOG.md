@@ -40,8 +40,11 @@ set.
 
 - If Sinter is interrupted or stops because of an internal error, the plain
   progress stream ends without a closing `run: ... completed` or `failed` line.
-- A stalled terminal cannot hold up a run or change its exit code; at the end
-  of a run Sinter waits at most half a second for the progress writer.
+- A stalled terminal cannot change a run's exit code; at the end of each
+  progress scope (each execution that runs, and target resolution in an
+  inventory run or a bundle run with `--host`) Sinter waits at most half a
+  second for the progress writer. The wait applies to each scope, not to the run
+  as a whole.
 
 ## [1.2.0] - 2026-10-06
 

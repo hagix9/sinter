@@ -412,8 +412,16 @@ progress: run: apply completed (3m43s)
 - `run:` lines open and close one execution. An inventory or bundle run prints
   one pair per execution (and one for target resolution when that has work to
   do), in the order the executions run. Progress lines carry no host name or
-  address; the persistent output that identifies the host (for example
-  `sinter: [web @ web02] ...`) follows that execution's progress lines.
+  address. In an inventory or bundle run, the output that identifies the
+  execution is Sinter's usual persistent output: the `== web @ web02 (...) ==`
+  header on standard output, printed before that execution's progress lines, and,
+  when the execution ends with an error instead of a report (for example when the
+  connection fails), an error line on standard error of the form
+  `sinter: [web @ web02] <message>`, printed after them. An execution that ends
+  with a report, even a failing one, is shown in the report and gets no such
+  line. Any other error, including one that stops the command before an execution
+  starts, and every error of a single recipe run without an inventory, is
+  `sinter: <message>` as before, with no header or prefix.
 - `start`, `done`, `failed` and `indeterminate` mark a stage. A stage that does
   not succeed ends with `failed` or `indeterminate`, for example
   `progress: apply: failed 6/42 (12s)`, and the run line says the same
@@ -491,12 +499,21 @@ wording and the exact set of lines may change in a minor release. Use
 - On the transient line, a failure that happens within about a tenth of a second
   of the previous redraw can end the run before the line shows the failure word.
   The `sinter:` error line, the report and the exit code are unaffected.
-- If the terminal stops accepting output for longer than about half a second at
-  the end of a run, Sinter does not wait for it any longer: the run, its output
-  and its exit code are not held up. In that rare case a progress write that had
-  already begun can still appear later, possibly mixed into text printed in
-  the meantime. Progress writes are not synchronized with Sinter's other stderr
-  output.
+- At the end of each progress scope, Sinter waits at most about half a second for
+  the progress writer. A scope is each execution that runs (an inventory or
+  bundle run has one per execution; executions that are not run have none), the
+  target resolution of an inventory run or of a bundle run with `--host`, or, for
+  a single recipe run without an inventory, its resolution and execution together
+  as one scope (the report is printed after that scope has ended). Nothing is waited
+  for when no progress is shown. If the terminal has stopped accepting output,
+  Sinter then stops waiting for it and the run goes on: its output and its exit
+  code are not changed. The wait applies to each scope separately, so a run of
+  several scopes on a terminal that stays stalled can wait that long once per
+  scope; it is not a limit on the whole run, and it does not limit other writes
+  to the terminal. In that rare case, or if Sinter stops because of an internal
+  error, a progress write that had already begun can still appear later,
+  possibly mixed into text printed in the meantime. Progress writes are not
+  synchronized with Sinter's other stderr output.
 - Elapsed times are whole seconds; a stage shorter than a second shows `0s`.
 
 ## Reading plan / apply output

@@ -140,12 +140,15 @@ v1.1.0 以降、`validate` はレシピだけを検証します。`--host`、`--
 コマンドラインを全フェーズで使えます。状態語の色付けはターミナル出力時のみ
 です（パイプ、`NO_COLOR`、`--format json` では色なし）。
 
+*v1.2.0 より後のリリースで利用できます（`main` には実装済みですが、v1.2.0 には含まれません）。*
+
 `plan`、`apply`、`audit` の実行中、対話的なターミナルでは stderr に一時的な進捗行が
 表示され、実行が終わると消えます。`SINTER_PROGRESS=plain` を設定すると、代わりに
 ログや CI 向けの `progress:` 行が stderr に残ります。`--format json` の場合、暗号化
 シークレットを参照するレシピの場合、およびデフォルトで stderr がターミナルでない
 場合は、進捗は出ません。詳細:
 [進捗表示](https://sinter.fulltrust.co.jp/ja/reference/cli/#進捗表示)。
+設計記録（英語）: [ADR 0001](docs/adr/0001-progress-output.md)。
 
 ### 複数ホスト、バンドル、バックアップ
 

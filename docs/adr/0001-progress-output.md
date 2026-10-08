@@ -235,8 +235,13 @@ missing final line.
   conservative choice. When the line does not fit, the item is shortened first, then
   dropped, then the elapsed text, then the label and counter are cut. A terminal of
   width 1 has no room and nothing is drawn.
-- Order at the end: the renderer is torn down (erased) before the run prints its
-  report or error, so persistent output is unchanged and starts at column 0.
+- Order at the end: after a normal teardown the renderer has finished and erased
+  its line before the run prints its report or error, so persistent output is
+  unchanged and starts at column 0. That holds only for a normal teardown. When a
+  scope is abandoned (the bound expired) an erase that had already started can
+  still complete after the run has printed more, and a panic waits for nothing, so
+  a write in progress at that moment can complete late too. A late write can then
+  affect persistent text printed in the meantime; see 6.4 and section 7.
 
 ## 6. Isolation and teardown
 
@@ -260,13 +265,34 @@ and used by one worker. It never goes through `std::io::stderr()`.
 
 ### 6.2 Bounded teardown and the abandon latch
 
-The engine only calls an infallible, non-blocking channel send. At the end of an
-execution the session asks the worker to stop and waits at most 500 ms; if the worker
-is blocked in a write it is abandoned (detached) and the `AbandonLatch` is set. From
-then on every renderer entry point (`on_event`, tick, wake-up, the final erase,
-`Drop`) is muted. A stalled terminal therefore delays process exit by about half a
-second at most, and an abandoned worker can neither hold the run up nor write after
-the run has moved on.
+The engine only calls an infallible, non-blocking channel send. When a progress scope
+ends, the session asks the worker to stop and waits at most 500 ms
+(`DEFAULT_TEARDOWN_BOUND`) for its completion signal; if the worker is blocked in a
+write it is abandoned (detached) and the `AbandonLatch` is set. From then on every
+renderer entry point (`on_event`, tick, wake-up, the final erase, `Drop`) is muted. An
+abandoned worker can neither hold the run up nor start a new write after the run has
+moved on (except for a write already in progress, 6.4).
+
+The bound is **per progress scope**, not per run. A scope exists in these cases:
+
+- each execution that is actually run (an inventory or bundle run has one per
+  executed recipe and target; executions reported `not_run` after an apply stop have
+  none);
+- target resolution in an inventory run, as a scope of its own (also when a single
+  execution is selected);
+- target resolution in a bundle run with an explicit `--host`, as a scope of its own
+  (a bundle on the local host has none);
+- a single recipe run without an inventory: one scope for resolution and execution
+  together.
+
+When progress is disabled (JSON, or an ineligible stderr without `plain`) the session
+is inert and nothing is waited for. A stalled terminal costs at most about half a
+second per scope, so a run of N executions plus a resolution scope on a terminal that
+stays stalled can wait up to N+1 times that; the bound is not a limit on the whole
+run. A scope whose run is unwinding from a panic does not wait at all (6.3). The bound
+limits only the wait for the progress worker; it says nothing about writes the main
+thread makes to the same stalled terminal, which block in the kernel exactly as they
+did before this feature; progress neither causes nor removes that.
 
 ### 6.3 Panic of the run itself
 
@@ -278,29 +304,46 @@ the detached worker drew its queued frames (and an erase) after the panic text.
 
 ### 6.4 Wording of the residual: an in-flight write cannot be recalled
 
-A write (a frame, a plain line, or an erase) that is already blocked in the kernel
-when the bound expires, or when the run panics, cannot be called back. It may still
-land, once, after the run has printed more. The latch stops everything after that
-write. Accordingly, "no late write is reachable" is **not** a claim this design
-makes; the claim is: at most one write per abandoned scope or panic can be late,
-only when the terminal has not drained for longer than the bound, and it cannot cut
-into persistent text, because it refers to the same open file description as
-stderr, so the terminal's own write queue orders it before any later persistent
-write (it can prefix a line, not split one). A captured, non-terminal stderr has no
-transient renderer. This corrects the earlier wording "clear-after-report:
-eliminated", which over-stated the result for the erase write; the historical
-reports are not edited.
+A write operation (a frame, a plain line, or an erase) that has already started when
+the bound expires, or when the run panics, cannot be called back. The latch is
+checked before the renderer starts anything new; it does not interrupt a write
+already under way. That operation may therefore still complete after the run has
+printed more. Accordingly, "no late write is reachable" is **not** a claim this
+design makes. What the design supports:
+
+- After a normal teardown the worker has finished and that scope has no write left.
+- After an abandon (the bound expired) or a panic, a write operation that had started
+  before the latch was set may still complete. The latch mutes the renderer's later
+  entry points (events, ticks, wake-ups, the final erase, `Drop`); it does not
+  cancel the operation in progress.
+- The two causes differ. An abandon means the worker had not signalled completion
+  within the bound. A panic waits for nothing, so a write that is merely in progress
+  at that moment can also complete late, whether or not the terminal is stalled.
+
+What the design does **not** claim: that a late write can only land at the start of a
+line, that it cannot appear inside later persistent text, or that its bytes cannot
+interleave with persistent bytes. The private descriptor shares an open file
+description with stderr, but that gives no ordering or atomicity between the
+progress worker and other stderr writers, and nothing in the code synchronises
+them (6.1, section 7). A renderer write operation is `write_all`, which may issue
+more than one write request when a write is short, so it is not one atomic kernel
+write either. The exact byte order on the terminal depends on the terminal, the
+operating system and scheduling. A captured, non-terminal stderr has no transient
+renderer. This corrects the earlier wording "clear-after-report: eliminated", which
+over-stated the result for the erase write, and a later wording that promised a
+late write could only prefix a line; the historical reports are not edited.
 
 ## 7. Residuals accepted by this decision
 
 - **Progress writes are not serialised with `eprintln!`.** Because the stderr lock
   was deliberately removed from the write path (6.1), a short write to a nearly full
   terminal buffer can be interleaved with persistent stderr text: persistent text can
-  appear inside a transient frame, or a late plain line can precede a persistent one.
-  Full serialisation is exactly what produced the stall defect. It needs a stalled or
-  nearly full terminal, changes no persistent byte, leaves no effect on exit status or
-  JSON, and for plain mode the exposure is smaller (lines are single short writes, and
-  the session is joined before the report or error is printed).
+  appear inside a transient frame, or a late write can land before, between or inside
+  persistent writes (6.4). Full serialisation is exactly what produced the stall
+  defect. It needs a stalled or nearly full terminal (or a panic), changes no
+  persistent byte, leaves no effect on exit status or JSON, and for plain mode the
+  exposure is expected to be smaller (lines are short, and after a normal teardown the
+  worker has been joined before the report or error is printed).
 - **A terminal narrowed to one column and widened again** shows no transient line
   until the next event. At width 1 nothing can be drawn, so the renderer asks for no
   wake-up, and nothing triggers a redraw until an event arrives (in practice
@@ -311,7 +354,8 @@ reports are not edited.
 - **Elapsed is not total time** (sections 4.3 and 5), and it is in whole seconds.
 - **A heartbeat can report a small `T`** (4.3).
 - **An unterminated plain stream after a panic or interrupt** (4.5).
-- **One late in-flight write** per abandoned scope or panic (6.4).
+- **A late in-flight write operation** after an abandoned scope or a panic, not
+  synchronised with other stderr output (6.4).
 - **The heartbeat numbers are judgement calls.** The numbers (30/60/120/240/300 s)
   have no real-CI evidence; fitness against hosted-CI idle-output limits is
   unverified.
@@ -320,9 +364,16 @@ reports are not edited.
 
 - **No target or recipe label (open question OQ-8).** Current behaviour: no progress
   line carries a target. `ItemRef` is `kind + id` and the event has no target, host,
-  address, user or key field. In a multi-execution run the `run:` lines delimit
-  executions and the following `sinter: [recipe @ host]` line identifies the host,
-  but a reader of progress lines alone cannot tell which host a line belongs to. The
+  address, user or key field. In an inventory or bundle run the `run:` lines delimit
+  executions; the usual persistent output identifies the execution (the
+  `== recipe @ host (...) ==` header on standard output before the execution's progress
+  lines, and `sinter: [recipe @ host] <message>` on standard error after them when the
+  execution ends with an error instead of a report, for example a failed connection;
+  an execution that ends with a report, even a failing one, is shown in the report and
+  gets no such line). Any other error, including one that stops the command before an
+  execution starts, prints `sinter: <message>` without a prefix. A single recipe run
+  without an inventory has neither header nor prefix, and a reader of progress
+  lines alone cannot tell which host a line belongs to. The
   omission is deliberate and is not a contract violation. Adding a label would be an
   event-contract change (the S1/S2 event model), with the rule that a label is an
   opaque name and never connection data (hostname, IP, SSH destination, user). It is
@@ -334,6 +385,18 @@ reports are not edited.
   Changing the visibility is a source change and was left out of the documentation
   closeout; the user-facing documents describe the observable 64-character limit and
   do not name the constant.
+- **Interrupt and cancellation (research OQ-7; deferred to the cancellation work,
+  RW-002).** OQ-7 asked to confirm that interrupt behaviour stays as it is in this
+  version and is handed to the cancellation work as a documented prerequisite. That is
+  what this record does. *Guaranteed now:* nothing about interrupts; no signal handler
+  is installed for `plan`, `apply` or `audit`, and an interrupted run ends however it
+  ended before this feature. *Documented behaviour (4.5, 5):* an interrupted or
+  panicking run leaves the plain stream without a closing `run:` line, and an
+  interrupted terminal run may leave one stale transient line. *Not implemented:*
+  cancellation, graceful interrupt, restoring terminal state, and any statement of what
+  a cancelled `apply` means. *Not measured:* interrupt behaviour on Linux (the statements
+  above rest on the design research and the earlier reviews). *Deferred to RW-002:* all
+  of the above; no decision on them is made here.
 - **Relaxing the secret rule for plain lines**, a default-on plain mode for CI
   (for example keyed on `CI` being set), progress for MCP, cancellation, and a
   structured progress stream are all out of scope and would each be a new decision.
@@ -352,15 +415,21 @@ informational.
 
 ## 10. Validation status and deferred real-OS evidence
 
-Evidence so far is from the test suite and from a macOS (arm64) real binary, on
-pipes and real pseudo-terminals. For plain mode a real run produced
+This section is a dated record. The first part below is the state when the ADR was
+written, before the Real-Linux gate; the addendum at the end of the section gives the
+current state.
+
+Evidence at the time of writing was from the test suite and from a macOS (arm64) real
+binary, on pipes and real pseudo-terminals. For plain mode a real run produced
 `progress: connect: 30s since last progress` during a genuine 60 s connect timeout,
 which confirms the base interval, the wording, the elapsed value, and the order
 against the persistent error line. **Not confirmed in a real run:** the doubling
 (60/120/240) and the 300 s cap, which need a stall of at least 450 s; they are
 asserted only on a driven clock.
 
-Real-Linux validation is deferred to the full WP-PROGRESS gate and is **not** done:
+At that time, real-Linux validation was deferred to the full WP-PROGRESS gate and was
+**not** done. The original list of what the gate had to cover (history; see the
+addendum for the outcome):
 
 1. Linux terminal detection on fd 2.
 2. The `TIOCGWINSZ` ABI.
@@ -379,3 +448,54 @@ Real-Linux validation is deferred to the full WP-PROGRESS gate and is **not** do
     pipe: stdout and exit unchanged, bounded line count.
 15. Heartbeat doubling and the 300 s cap in a real run, and CI idle-output fitness.
 16. `SINTER_PROGRESS` unset in the gate environment for the pinned stderr suites.
+
+### Real-Linux validation addendum (2026-10-08)
+
+The deferred gate has since been run. What it recorded, and no more:
+
+- **Real-Linux Full Gate (2026-10-07), on commit `0d659ad`.** Hosts: Ubuntu 24.04
+  (kernel 7.0, x86_64) and Rocky Linux 9.8 (kernel 5.14, x86_64), both with
+  rustc/cargo 1.98.1. Verdict NO-GO because of two defects in the test code, not in
+  production code: **F-1**, `clippy -D warnings` failed at four `libc::openpty` call
+  sites (the `winsize` argument is `*mut` on macOS and `*const` on Linux); and
+  **F-2**, the real-PTY stall fixtures were flaky on the Ubuntu 7.0 kernel (9 of 20
+  whole-suite runs failed) because the pty regains room asynchronously after the first
+  `EAGAIN`. Every other gate item (RL-01 to RL-16 above, except RL-05, which failed as
+  F-2) was observed as PASS against
+  the real binary, among them the mode matrix, `dup`/`F_DUPFD_CLOEXEC` and `ioctl` on
+  the duplicate, bounded teardown on a stalled pty, plain output to a file and a pipe,
+  secret and JSON suppression, an unchanged target-command count compared with v1.2.0
+  (real `sshd`), and a 19-minute real heartbeat run including the doubling and two
+  consecutive 300 s gaps at the cap.
+- **Remediation.** A test-only patch of four files (the `&raw mut` argument, and pty-fill
+  fixtures that count the pty as full only after 150 ms without an accepted write),
+  later committed as `bdc302e`. A focused independent re-audit closed F-1 and F-2 (GO
+  WITH LOW FINDINGS).
+- **Real-Linux Re-gate (2026-10-08): GO**, with no finding of any severity. On the
+  `0d659ad` tree plus the audited patch, whose content is that of `bdc302e`, on each of
+  Ubuntu 24.04 and Rocky Linux 9.8: `cargo fmt --check`, `cargo clippy --locked
+  --all-targets --all-features -- -D warnings` and `cargo test --locked --all-targets
+  --all-features` all passed, the latter with 1513 passed / 0 failed / 0 ignored in 41
+  test binaries; the stall suite passed 100 of 100 iterations with default parallelism
+  and 30 of 30 with `--test-threads=1`, on each of the two systems. F-1 and F-2 are
+  CLOSED. The production evidence of the Full Gate was reused, not re-measured, because
+  production code, dependencies and documentation were unchanged.
+- **Supersedes:** the "Not confirmed in a real run" remark above, for Linux. The
+  doubling and the 300 s cap were observed on both Linux hosts in the Full Gate.
+- **Reports:** `SINTER_WP_PROGRESS_REAL_LINUX_GATE_2026-10-07.md`,
+  `SINTER_WP_PROGRESS_REAL_LINUX_REMEDIATION_2026-10-07.md` and
+  `SINTER_WP_PROGRESS_REAL_LINUX_REGATE_2026-10-08.md`. They are historical records and
+  are not edited by this ADR.
+
+**Still not validated:**
+
+- Fitness of the 30/60/120/240/300 s heartbeat schedule against the idle-output limit
+  of any CI provider (accepted residual; plain mode is opt-in).
+- Interrupt (Ctrl-C) and cancellation behaviour on Linux (section 8).
+- musl, aarch64, and Linux distributions or versions other than the two named above.
+- Repetition of the panic and `ClosedPorts` tests 100 times after the patch (they passed
+  within the full suites).
+- The 150 ms settle window of the stall fixtures is empirical, not a kernel guarantee.
+  It can make a test fail but not make one pass falsely.
+- The Linux runs used the `0d659ad` tree plus the patch as a work-tree overlay, not the
+  commit `bdc302e` itself; the tree content is the same.
