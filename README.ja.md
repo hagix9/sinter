@@ -6,6 +6,8 @@
 
 **Small enough to understand, strong enough to trust.**
 
+[![リリース](https://img.shields.io/github/v/release/hagix9/sinter?label=release)](https://github.com/hagix9/sinter/releases/latest) [![CI](https://github.com/hagix9/sinter/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hagix9/sinter/actions/workflows/ci.yml) [![ライセンス: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#ライセンス)
+
 [![GitHub Codespaces で開く](https://github.com/codespaces/badge.svg)](https://codespaces.new/hagix9/sinter?quickstart=1)
 
 ブラウザ上の使い捨て Ubuntu コンテナで Sinter v1.2.0 を試せます。ローカルへの

@@ -6,6 +6,8 @@
 
 **Small enough to understand, strong enough to trust.**
 
+[![Release](https://img.shields.io/github/v/release/hagix9/sinter?label=release)](https://github.com/hagix9/sinter/releases/latest) [![CI](https://github.com/hagix9/sinter/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hagix9/sinter/actions/workflows/ci.yml) [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/hagix9/sinter?quickstart=1)
 
 Try Sinter v1.2.0 in a disposable Ubuntu container in your browser — nothing to
