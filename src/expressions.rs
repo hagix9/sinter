@@ -1061,6 +1061,98 @@ pub fn collect_register_refs(
     }
 }
 
+/// A Jinja-style tag in a template body (see [`unsupported_template_tag`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateTag {
+    /// `{%` (a statement such as `if`, `for` or `set`) or `{#` (a comment).
+    pub opener: &'static str,
+    /// 1-based line, and 1-based column in characters, of the opener.
+    pub line: usize,
+    pub column: usize,
+}
+
+impl TemplateTag {
+    /// What is wrong and what to write instead. Carries no template text, so
+    /// it is safe for a sensitive template too.
+    pub fn describe(&self) -> String {
+        let (kind, closer) = if self.opener == "{%" {
+            ("statement", "%}")
+        } else {
+            ("comment", "#}")
+        };
+        format!(
+            "line {}, column {}: `{} ... {}` is a Jinja {} tag, which Sinter templates do not support \
+             (only `{{{{ expression }}}}` interpolation is rendered; write {{{{ \"{}\" }}}} for a literal `{}`)",
+            self.line, self.column, self.opener, closer, kind, self.opener, self.opener
+        )
+    }
+}
+
+/// The first Jinja statement (`{% ... %}`) or comment (`{# ... #}`) tag in a
+/// template body, outside `{{ ... }}` interpolations.
+///
+/// Sinter templates render only `{{ expression }}` (DESIGN §26.4). Such a tag
+/// used to be published verbatim, so a template ported from Jinja/Ansible
+/// produced a broken file without any error; the caller now refuses it. This
+/// is detection, not parsing; nothing is interpreted. An opener is a tag when
+/// the nearest closer of its own kind (`%}` for `{%`, `#}` for `{#`) that
+/// starts after the opener comes before any further opener of that kind.
+/// Text that merely contains an opener stays plain text: an opener with no
+/// such closer (an Elixir map in a tuple, a Perl `{%h}`), a closer of the
+/// other kind, and a `{#` directly after `$` (shell `${#var}`). Interpolations
+/// and `\{{` are skipped, so a closer written inside `{{ "%}" }}` closes
+/// nothing.
+pub fn unsupported_template_tag(s: &str) -> Option<TemplateTag> {
+    let chars: Vec<char> = s.chars().collect();
+    // Positions of openers and closers outside interpolations, per kind:
+    // index 0 is the statement kind (`%`), index 1 the comment kind (`#`).
+    let mut openers: [Vec<usize>; 2] = Default::default();
+    let mut closers: [Vec<usize>; 2] = Default::default();
+    let mut i = 0;
+    while i < chars.len() {
+        let next = chars.get(i + 1).copied();
+        if chars[i] == '\\' && next == Some('{') && chars.get(i + 2) == Some(&'{') {
+            i += 3;
+            continue;
+        }
+        if chars[i] == '{' && next == Some('{') {
+            // An unterminated interpolation is the expression parser's error;
+            // here it is ordinary text.
+            if let Some(end) = find_close(&chars, i + 2) {
+                i = end + 2;
+                continue;
+            }
+        }
+        for (kind, c) in [(0, '%'), (1, '#')] {
+            if chars[i] == '{' && next == Some(c) && (kind == 0 || i == 0 || chars[i - 1] != '$') {
+                openers[kind].push(i);
+            }
+            if chars[i] == c && next == Some('}') {
+                closers[kind].push(i);
+            }
+        }
+        i += 1;
+    }
+    let found = (0..2)
+        .filter_map(|kind| {
+            openers[kind].iter().enumerate().find_map(|(n, &open)| {
+                let at = closers[kind].partition_point(|&c| c < open + 2);
+                let close = *closers[kind].get(at)?;
+                let before_next_opener = openers[kind].get(n + 1).is_none_or(|&o| close < o);
+                before_next_opener.then_some((open, kind))
+            })
+        })
+        .min()?;
+    let (at, kind) = found;
+    let before = &chars[..at];
+    let line_start = before.iter().rposition(|&c| c == '\n').map_or(0, |n| n + 1);
+    Some(TemplateTag {
+        opener: if kind == 0 { "{%" } else { "{#" },
+        line: 1 + before.iter().filter(|&&c| c == '\n').count(),
+        column: 1 + at - line_start,
+    })
+}
+
 /// Whether an expression text contains any interpolation token.
 pub fn has_interpolation(s: &str) -> bool {
     let chars: Vec<char> = s.chars().collect();
@@ -1253,5 +1345,90 @@ mod tests {
         let e = parse_expr("R8_TEXT_SENTINEL_m4n5").unwrap_err();
         assert_eq!(e.category(), "unqualified reference");
         assert!(!e.category().contains("R8_TEXT"));
+    }
+
+    #[test]
+    fn jinja_tags_are_found_with_their_position() {
+        let at = |s: &str| unsupported_template_tag(s).map(|t| (t.opener, t.line, t.column));
+        assert_eq!(at("{% if x %}a{% endif %}"), Some(("{%", 1, 1)));
+        assert_eq!(at("a = 1\nb {# note #}\n"), Some(("{#", 2, 3)));
+        assert_eq!(at("x={{ vars.a }} {%- raw -%}"), Some(("{%", 1, 16)));
+        assert_eq!(
+            at("\u{e9} {% x %}"),
+            Some(("{%", 1, 3)),
+            "columns count characters"
+        );
+        // Inside an interpolation the opener is expression text, not a tag.
+        assert_eq!(at("{{ \"{%\" }} raw {{ \"%}\" }}"), None);
+    }
+
+    #[test]
+    fn text_that_only_contains_an_opener_is_not_a_tag() {
+        for s in [
+            "plain text",
+            "len=${#arr[@]} args=${#} end #}", // shell length expansions
+            "config :app, key: {%{a: 1}, :b}", // no closing %}
+            "{%}",                             // the closer overlaps the opener
+            "\\{{ literal }} and {# never closed",
+            "{{ unterminated",
+            "100%} done {",
+        ] {
+            assert_eq!(unsupported_template_tag(s), None, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn a_tag_is_paired_with_its_own_closer() {
+        let at = |s: &str| unsupported_template_tag(s).map(|t| (t.opener, t.line, t.column));
+        // A closer inside an interpolation is expression text, not a closer.
+        assert_eq!(at("{%{a: 1}} {{ \"%}\" }}"), None);
+        assert_eq!(at("{#x {{ \"#}\" }}"), None);
+        // A closer of the other kind does not close an opener.
+        assert_eq!(at("{%{a: 1}} and {# c"), None);
+        assert_eq!(at("{% x #}"), None);
+        assert_eq!(at("{# x %}"), None);
+        // An opener with another opener of its kind before any closer is not
+        // a tag; the opener that has a closer is, and it is the one reported.
+        assert_eq!(at("{%{a: 1}, :b}\nok {% if x %}"), Some(("{%", 2, 4)));
+        assert_eq!(at("{# a\n{# b #}"), Some(("{#", 2, 1)));
+        // A tag may span lines and may carry whitespace control.
+        assert_eq!(at("a\n{%-\n if x\n -%}"), Some(("{%", 2, 1)));
+        // A string literal inside the tag may contain an interpolation opener.
+        assert_eq!(at("{% if x == \"{{\" %}"), Some(("{%", 1, 1)));
+        assert_eq!(at("{% if x == \"{{ a }}\" %}"), Some(("{%", 1, 1)));
+        // An unterminated interpolation earlier in the body hides nothing: it
+        // is the expression parser's error, and the later tag is still found.
+        assert_eq!(at("{{ oops\n{% if x %}"), Some(("{%", 2, 1)));
+        // Overlap: the closer must start after the opener.
+        assert_eq!(at("{%}"), None);
+        assert_eq!(at("{%%}"), Some(("{%", 1, 1)));
+    }
+
+    #[test]
+    fn an_opener_without_a_closer_stays_plain_text() {
+        // Documented behavior: text such as an Elixir map in a tuple, a Perl
+        // hash dereference or a lone `{#` is published as written.
+        for s in [
+            "x = [{%{id: 1}, 2}]",
+            "foo({%h})",
+            "{# unterminated",
+            "{% unterminated",
+            "a %} b {% c",
+            "a #} b {# c",
+        ] {
+            assert_eq!(unsupported_template_tag(s), None, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn the_description_names_the_fix_and_no_template_text() {
+        let t = unsupported_template_tag("secret-word {% if x %}").unwrap();
+        let d = t.describe();
+        assert!(
+            d.starts_with("line 1, column 13: `{% ... %}` is a Jinja statement tag"),
+            "{d}"
+        );
+        assert!(d.contains("write {{ \"{%\" }} for a literal `{%`"), "{d}");
+        assert!(!d.contains("secret-word"), "{d}");
     }
 }

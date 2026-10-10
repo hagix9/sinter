@@ -542,11 +542,13 @@ fn out_ok(stdout: &str) -> sinter::executor::Output {
 }
 
 fn file_target(current: &str) -> FakeTarget {
-    let t = FakeTarget::ubuntu2404();
-    // `cat` serves /etc/os-release first (platform detection), then the file.
-    let os_release = t.os_release.clone();
-    t.with_observations("stat", vec![out_ok(&format!("{STAT_REGULAR}\n"))])
-        .with_observations("cat", vec![out_ok(&os_release), out_ok(current)])
+    // Plan runs apply's parent path check for the planned change, so the
+    // parents of /opt/f must exist: a modeled filesystem holds both.
+    let mut t = FakeTarget::ubuntu2404().with_fake_fs();
+    t.fs.as_mut()
+        .unwrap()
+        .put_file("/opt/f", current.as_bytes(), 0o644, 0, 0);
+    t
 }
 
 #[test]

@@ -667,18 +667,35 @@ fn an_unsafe_ancestor_refuses_in_every_position_and_kind_like_the_sequential_wal
 }
 
 #[test]
-fn plan_mode_is_unaffected_and_audit_style_reads_issue_no_walk() {
+fn plan_runs_the_apply_walk_only_for_a_planned_change() {
+    // WP-2: plan runs apply's parent path check for a change it plans, through
+    // the same walk (batched without getfacl, sequential with it).
     let dir = tempfile::tempdir().unwrap();
     let p = new_file_recipe(&dir);
-    for getfacl in [false, true] {
+    for (getfacl, walk) in [(false, 2), (true, 9)] {
         let r = run(&p, Mode::Plan, false, target(getfacl, &["/etc/perf"]));
         assert_eq!(r.status, AggregateStatus::Success);
-        assert!(r
-            .trace
-            .iter()
-            .all(|c| !c.is_stat_batch() && c.getfattr_operands().is_none()));
-        assert_eq!(r.commands, 3, "stat, getent passwd, getent group");
+        let batched = usize::from(!getfacl);
+        assert_eq!(position(&r.trace, Cmd::is_stat_batch).len(), batched);
+        assert_eq!(position(&r.trace, is_walk_getfattr).len(), batched);
+        assert_eq!(
+            r.commands,
+            3 + walk,
+            "stat, getent passwd, getent group, then the walk: {}",
+            r.debug
+        );
     }
+    // Nothing to change: no walk.
+    let mut t = target(false, &["/etc/perf"]);
+    t.fs.as_mut()
+        .unwrap()
+        .put_file(NEW_FILE, b"x\n", 0o644, 0, 0);
+    let r = run(&p, Mode::Plan, false, t);
+    assert_eq!(r.status, AggregateStatus::Success);
+    assert!(r
+        .trace
+        .iter()
+        .all(|c| !c.is_stat_batch() && c.getfattr_operands().is_none()));
 }
 
 // ---------------------------------------------------------------------------

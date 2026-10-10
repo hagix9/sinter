@@ -95,6 +95,18 @@ pub fn store_root(sudo: bool, home: &str) -> String {
     }
 }
 
+/// The directories `perform` creates, in order, when they are absent: the
+/// store's base and the store root. The run directory below the root is also
+/// created, under a name no recipe can know in advance.
+pub(crate) fn store_chain(sudo: bool, home: &str) -> Vec<String> {
+    let base = if sudo {
+        "/var/lib/sinter".to_string()
+    } else {
+        format!("{}/.sinter", home.trim_end_matches('/'))
+    };
+    vec![base, store_root(sudo, home)]
+}
+
 /// A fresh run id: `YYYYMMDDTHHMMSSZ-<8 hex>` (UTC).
 pub fn new_run_id() -> String {
     let now = std::time::SystemTime::now()
@@ -294,15 +306,7 @@ pub(crate) fn perform(
         check_overlap(p, &root).map_err(|e| fail(&before_store, e))?;
     }
     // Create the store chain below an existing trusted base.
-    let chain: Vec<String> = if sudo {
-        vec!["/var/lib/sinter".to_string(), root.clone()]
-    } else {
-        vec![
-            format!("{}/.sinter", home.trim_end_matches('/')),
-            root.clone(),
-        ]
-    };
-    for d in &chain {
+    for d in &store_chain(sudo, &home) {
         ensure_dir(fs, d).map_err(|e| fail(&before_store, e))?;
     }
     let run_dir = format!("{}/{}", root, run_id);
@@ -419,6 +423,18 @@ mod tests {
         assert_eq!(store_root(true, "/root"), "/var/lib/sinter/backups");
         assert_eq!(store_root(false, "/home/u"), "/home/u/.sinter/backups");
         assert_eq!(store_root(false, "/home/u/"), "/home/u/.sinter/backups");
+    }
+
+    #[test]
+    fn store_chains() {
+        assert_eq!(
+            store_chain(true, "/root"),
+            ["/var/lib/sinter", "/var/lib/sinter/backups"]
+        );
+        assert_eq!(
+            store_chain(false, "/home/u/"),
+            ["/home/u/.sinter", "/home/u/.sinter/backups"]
+        );
     }
 
     #[test]

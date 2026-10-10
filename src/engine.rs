@@ -10,7 +10,7 @@ use crate::progress::{
 };
 
 use crate::result::*;
-use crate::targetfs::TargetFs;
+use crate::targetfs::{ObjKind, TargetFs};
 use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -96,6 +96,90 @@ pub enum AggregateStatus {
     Indeterminate,
 }
 
+/// What the resources planned so far may change before apply reaches the
+/// next one (plan only).
+///
+/// Plan observes the target as it is now, but apply reaches a resource after
+/// the changes of every resource before it. A plan-time refusal of the parent
+/// path check (DESIGN §23) is therefore decisive only when none of those
+/// changes can alter what plan observed (see `Engine::plan_parent_check`).
+#[derive(Debug, Default)]
+pub(crate) struct PlannedEffects {
+    /// Path and resource ID of each earlier `file`, `directory`, `link` and
+    /// `template` that is planned to change or is unknown. Such a change
+    /// touches exactly its own path.
+    pub(crate) paths: Vec<(String, String)>,
+    /// The first earlier resource of any other kind (package, command,
+    /// service, user) that is planned to change or is unknown. Plan cannot
+    /// know which paths it creates or changes. A group changes no path.
+    pub(crate) opaque: Option<String>,
+}
+
+impl PlannedEffects {
+    fn record(&mut self, res: &FrozenResource, r: &ResourceResult) {
+        if r.change == Change::None && !r.unknown {
+            return;
+        }
+        match (res.type_.as_str(), &res.path) {
+            ("file" | "directory" | "link" | "template", Some(p)) => {
+                self.paths.push((p.clone(), res.id.clone()))
+            }
+            ("group", _) => {}
+            _ => {
+                if self.opaque.is_none() {
+                    self.opaque = Some(res.id.clone());
+                }
+            }
+        }
+    }
+
+    /// A command whose `creates`/`removes` guard holds now but whose guard
+    /// path an earlier planned change can alter: apply may run it, and plan
+    /// cannot know which paths it then changes.
+    pub(crate) fn guarded_command_may_run(&mut self, command_id: &str, guard_path: &str) {
+        if self.affecting(guard_path).is_some() && self.opaque.is_none() {
+            self.opaque = Some(command_id.to_string());
+        }
+    }
+
+    /// Why an earlier planned change may alter `path`, one of its ancestors
+    /// or anything below it, or `None` when none can.
+    pub(crate) fn affecting_subtree(&self, path: &str) -> Option<String> {
+        if let Some(why) = self.affecting(path) {
+            return Some(why);
+        }
+        self.paths
+            .iter()
+            .find(|(p, _)| {
+                path == "/"
+                    || p.strip_prefix(path)
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+            .map(|(p, id)| format!("{} changes {} earlier in this run", id, p))
+    }
+
+    /// Why an earlier planned change may alter `path` or one of its
+    /// ancestors, or `None` when none can.
+    pub(crate) fn affecting(&self, path: &str) -> Option<String> {
+        if let Some(id) = &self.opaque {
+            return Some(format!(
+                "{} runs earlier and plan cannot know which paths it changes",
+                id
+            ));
+        }
+        self.paths
+            .iter()
+            .find(|(p, _)| {
+                p == path
+                    || p == "/"
+                    || path
+                        .strip_prefix(p.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+            .map(|(p, id)| format!("{} changes {} earlier in this run", id, p))
+    }
+}
+
 pub struct Engine {
     pub(crate) model: Model,
     pub(crate) fs: TargetFs,
@@ -114,9 +198,35 @@ pub struct Engine {
     /// Observation-only progress sink (`NoopSink` unless the engine was built
     /// with `new_with_progress`). Nothing reads anything back from it.
     pub(crate) progress: Arc<dyn ProgressSink>,
+    /// Plan only: what the resources planned so far may change.
+    pub(crate) planned: PlannedEffects,
 }
 
 impl Engine {
+    /// Plan only. Apply creates the backup store chain before the first
+    /// resource (see `backup::perform`); plan creates nothing, so the first
+    /// directory of that chain that does not exist now counts as an earlier
+    /// planned change. Everything below it is covered by that one entry. A
+    /// directory that exists, or is not a directory, is not created by apply
+    /// and is left alone; one that cannot be observed is assumed created.
+    fn record_backup_store_change(&mut self) {
+        let chain = crate::backup::store_chain(self.fs.sudo(), &self.fs.home_env());
+        self.fs.set_stats_scope("backup");
+        for dir in chain {
+            let creates = match self.fs.inspect(&dir) {
+                Ok(st) if st.kind == ObjKind::Dir => continue,
+                Ok(st) => st.kind == ObjKind::Absent,
+                Err(_) => true,
+            };
+            if creates {
+                self.planned
+                    .paths
+                    .push((dir, "the backup stage".to_string()));
+            }
+            return;
+        }
+    }
+
     pub fn new(model: Model, opts: RunOptions) -> Result<Self> {
         Self::new_with_progress(model, opts, Arc::new(NoopSink))
     }
@@ -220,6 +330,7 @@ impl Engine {
             manager: crate::manager::ManagerState::default(),
             secrets: None,
             progress,
+            planned: PlannedEffects::default(),
         })
     }
 
@@ -290,8 +401,20 @@ impl Engine {
         let mut stop_outcome = StageOutcome::Failed;
 
         let mut stage = StageTracker::start(&*progress, Stage::Resources, Some(order.len()));
+        self.planned = PlannedEffects::default();
+        if self.opts.mode == Mode::Plan && !self.model.backups.is_empty() {
+            self.record_backup_store_change();
+        }
         for (pos, ridx) in order.iter().enumerate() {
             let res = self.model.resources[*ridx].clone();
+            // Every iteration pushes exactly one result: record what the
+            // previous resource is planned to do before this one is planned.
+            if self.opts.mode == Mode::Plan && pos > 0 {
+                if let Some(prev) = out_results.last() {
+                    let prev_res = &self.model.resources[order[pos - 1]];
+                    self.planned.record(prev_res, prev);
+                }
+            }
             if stopped {
                 // Fast-forwarded, never visited: not announced, not counted.
                 let mut r = blocked_fail_fast(&res);

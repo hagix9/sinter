@@ -532,6 +532,30 @@ impl FakeFs {
                     exited(1, String::new(), stderr)
                 }
             }
+            ("find", [p, "-mindepth", "1", "-maxdepth", "1", "-print", "-quit"]) => {
+                match self.nodes.get(*p) {
+                    Some(FakeNode {
+                        kind: FakeKind::Dir,
+                        ..
+                    }) => {
+                        let prefix = if *p == "/" {
+                            "/".to_string()
+                        } else {
+                            format!("{}/", p)
+                        };
+                        let first = self
+                            .nodes
+                            .keys()
+                            .find(|k| k.starts_with(&prefix) && k.as_str() != *p);
+                        exited(
+                            0,
+                            first.map(|k| format!("{}\n", k)).unwrap_or_default(),
+                            String::new(),
+                        )
+                    }
+                    _ => Self::fail(&format!("find: '{}': No such file or directory", p)),
+                }
+            }
             ("getfacl", ["-p", "-c", "--", p]) => {
                 if self.nodes.contains_key(*p) {
                     exited(

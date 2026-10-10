@@ -215,10 +215,20 @@ fn plan_reports_unsupported_metadata_without_mutating() {
             out.display()
         ),
     );
-    let r = run_recipe(&recipe, Mode::Plan, true);
-    // Plan must not mutate; the replacement is reported as changed (the refusal
-    // happens at apply time).
-    assert_eq!(mutation_command_count(&r), 0);
+    // Plan runs apply's security metadata check and reports the refusal apply
+    // would make (nothing earlier in the run can change the file), without
+    // mutating anything.
+    let Err(e) = try_run_recipe(&recipe, Mode::Plan, true) else {
+        panic!("plan must report the refusal");
+    };
+    assert!(
+        e.message.contains("refusing content replacement")
+            && e.message.contains("security.sinter_test2")
+            && e.message
+                .contains("security metadata check would refuse this change at apply"),
+        "{}",
+        e.message
+    );
     assert_eq!(read_file_sudo(&out), "old");
 }
 

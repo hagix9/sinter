@@ -1036,6 +1036,22 @@ impl TargetFs {
         Ok(())
     }
 
+    /// Whether the directory `path` has any entry, observed read-only with
+    /// `find <path> -mindepth 1 -maxdepth 1 -print -quit`, which prints at
+    /// most one name. `None` when the answer is not a clean one (a non-zero
+    /// exit, a diagnostic): the caller must not guess.
+    pub fn dir_has_entries(&mut self, path: &str) -> Result<Option<bool>> {
+        let args: Vec<String> = [path, "-mindepth", "1", "-maxdepth", "1", "-print", "-quit"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let out = self.run_argv("/usr/bin/find", &args)?;
+        Ok(match out.completion {
+            Completion::Exited(0) if out.stderr.is_empty() => Some(!out.stdout.is_empty()),
+            _ => None,
+        })
+    }
+
     /// Remove a file only if it is the exact object we created (regular file).
     pub fn remove_file(&mut self, _permit: &MutationPermit, path: &str) -> Result<()> {
         self.identity_memo.clear();
@@ -1489,13 +1505,15 @@ impl TargetFs {
         match st.kind {
             ObjKind::Absent => {
                 return Err(SinterError::apply(format!(
-                    "required parent path {} does not exist",
+                    "required parent path {} does not exist; create it first, for example with \
+                     a directory resource that this resource depends on",
                     dir
                 )))
             }
             ObjKind::Symlink => {
                 return Err(SinterError::apply(format!(
-                    "parent path {} is a symlink; refusing to follow it",
+                    "parent path {} is a symlink; refusing to follow it (use the path the \
+                     symlink resolves to)",
                     dir
                 )))
             }
@@ -1511,13 +1529,22 @@ impl TargetFs {
         let trusted_owner = st.uid == 0 || (!self.sudo && st.uid == self.target_uid);
         if !trusted_owner {
             return Err(SinterError::apply(format!(
-                "parent path {} is owned by uid {}, outside the trusted set",
-                dir, st.uid
+                "parent path {} is owned by uid {}, outside the trusted set{}",
+                dir,
+                st.uid,
+                if self.sudo {
+                    " (with --sudo only root-owned parents are trusted: connect as that user \
+                     without --sudo, or use a root-owned location such as /opt or /srv)"
+                } else {
+                    " (only directories owned by root or the connecting user are trusted)"
+                }
             )));
         }
         if st.mode & 0o022 != 0 {
             return Err(SinterError::apply(format!(
-                "parent path {} grants group or other write access; refusing unsafe path ({})",
+                "parent path {} grants group or other write access; refusing unsafe path ({}); \
+                 another user could replace entries below it: remove that write access \
+                 (for example mode 0755) or use another location",
                 dir,
                 mode_to_string(st.mode)
             )));
@@ -1536,7 +1563,9 @@ impl TargetFs {
         }
         if x.unsafe_attr().is_some() {
             return Err(SinterError::apply(format!(
-                "parent path {} carries extended access metadata; cannot prove it is non-writable",
+                "parent path {} carries extended access metadata; cannot prove it is non-writable \
+                 (an ACL can grant write access that the mode does not show: remove it, \
+                 for example with setfacl -b, or use another location)",
                 dir
             )));
         }

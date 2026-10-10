@@ -133,6 +133,10 @@ fn directory_create_absent_and_idempotency() {
             out.display()
         ),
     );
+    // Plan observes (`find -quit`) that the directory is empty.
+    let p3 = run_recipe(&recipe2, Mode::Plan, false);
+    assert_eq!(find(&p3, "d").change, Change::Changed);
+    assert!(out.exists());
     let r3 = run_recipe(&recipe2, Mode::Apply, false);
     assert_success(&r3);
     assert!(!out.exists());
@@ -152,6 +156,11 @@ fn directory_non_empty_absent_fails() {
             out.display()
         ),
     );
+    // Plan observes the entry and reports what apply would fail on.
+    let Err(e) = try_run_recipe(&recipe, Mode::Plan, false) else {
+        panic!("plan must report the non-empty directory");
+    };
+    assert!(e.message.contains("is not empty"), "{}", e.message);
     let r = run_recipe(&recipe, Mode::Apply, false);
     let d = find(&r, "d");
     assert_eq!(d.execution, Execution::Failed);

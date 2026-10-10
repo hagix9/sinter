@@ -1635,6 +1635,18 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                         ))
                     }
                 })?;
+                if let Some(tag) = crate::expressions::unsupported_template_tag(&body) {
+                    return Err(SinterError::schema(if template_sensitive {
+                        format!("{}: template: {}", resource_ctx, tag.describe())
+                    } else {
+                        format!(
+                            "{}: template {}: {}",
+                            resource_ctx,
+                            src.display(),
+                            tag.describe()
+                        )
+                    }));
+                }
                 let mut body_regs: BTreeSet<String> = BTreeSet::new();
                 for tok in extract_interpolation_exprs(&body) {
                     let expr = parse_expr(&tok).map_err(|e| {

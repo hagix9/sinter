@@ -1531,6 +1531,8 @@ Template-local values do not shadow global namespaces.
 Rendering happens on the controller.
 
 Template functions are limited to interpolation and the small expression/value access model documented by Sinter.
+
+Only {{ expression }} interpolation is rendered; \{{ is a literal {{. A Jinja statement tag ({% ... %}) or comment tag ({# ... #}) is not supported: an opener outside an interpolation that is followed by the closer of its own kind (%} for {%, #} for {#, outside any interpolation) before another opener of that kind is a validation error naming the resource, the source file and the line and column, and is never published verbatim. An opener with no such closer is plain text and is published as written; so is a {# directly after $ (a shell ${#var}). A literal {% is written {{ "{%" }}.
 No arbitrary function execution exists.
 
 Published output uses the file replacement contract.
@@ -1746,6 +1748,10 @@ This exception applies only when the service directly depends on a package resou
 Otherwise a missing service unit is a plan error for a requested service state.
 
 Apply re-observes the service after package application. A changed package dependency that leaves the unit not found causes exactly one discovery reload (§28.5).
+
+29.1 Refusals plan can predict
+
+For a file, directory, link or template change it plans, plan runs the same read-only checks apply runs before the mutation, with the same predicates: the parent path trust check (§23), for a content replacement the security metadata check of the replaced file (§24), and for directory state absent whether the directory has an entry (apply removes only an empty directory; observed with find <dir> -mindepth 1 -maxdepth 1 -print -quit). A refusal is a plan error (exit 4) carrying apply's reason when no earlier resource planned in the run can change what plan observed: no earlier file, directory, link or template planned to change or unknown whose path is this path or an ancestor of it (for the emptiness check, also a path below it), and no earlier package, command, service or user planned to change or unknown, whose effect on paths plan cannot know. A command skipped now because its creates or removes guard holds counts as one when an earlier planned change can alter the guard path, since apply may then run it. A guard path with a symlinked ancestor counts as alterable by any earlier planned change, because the guard is observed through the symlink while the change may name the resolved path. A group changes no path and no input of these checks, so it defers nothing. When the recipe declares backup paths, apply creates the backup store (/var/lib/sinter and /var/lib/sinter/backups with --sudo; $HOME/.sinter and $HOME/.sinter/backups otherwise) before the first resource: plan treats the first of those directories that does not exist as an earlier planned change, and the directories that exist, the other privilege mode's store and every other path as unaffected. Otherwise the change is reported with a note and apply decides. Apply still runs every check itself.
 
 30. Verification requirements
 

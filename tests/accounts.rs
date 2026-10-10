@@ -596,7 +596,9 @@ fn user_does_not_infer_a_group_dependency() {
 #[test]
 fn file_owner_naming_a_created_user_is_deferred_only_with_explicit_depends_on() {
     let dir = trusted_root("owner-defer");
-    let target = dir.join("conf");
+    // A directory that exists on the scripted target: plan runs apply's
+    // parent path check for the planned file.
+    let target = std::path::Path::new("/etc/app/conf");
     let owned = |deps: &str| {
         format!(
             "{}  - id: f\n    type: file\n{}    with:\n      path: {}\n      content: x\n      owner: svcacct\n",

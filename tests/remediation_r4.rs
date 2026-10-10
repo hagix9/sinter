@@ -663,6 +663,64 @@ fn r4_a02_epoch_identity_accepted() {
     assert_snapshot_cleaned(&r);
 }
 
+/// rpm's `~` (pre-release) and `^` (post-release snapshot) are ordinary
+/// version characters: such a package is prefetched, identity-checked and
+/// installed like any other, with the characters kept in the NEVRA operand
+/// and the payload file name.
+#[test]
+fn tilde_and_caret_versions_install() {
+    let dir = trusted_root("r4-tilde-caret");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.dnf_dry_run_output = Some(override_output(
+        Completion::Exited(1),
+        &dnf_transaction_table("nano", "baseos").replacen(
+            "1.0-1.el9    ",
+            "8.2~rc1^20240901-1.el9",
+            1,
+        ),
+        DNF_ABORT_STDERR,
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_full_install(&r);
+    let dl = commands_with(&r, "/usr/bin/dnf")
+        .into_iter()
+        .find(|c| c.args.iter().any(|a| a == "--downloadonly"))
+        .expect("a payload transport call");
+    assert!(
+        dl.args
+            .iter()
+            .any(|a| a == "nano-8.2~rc1^20240901-1.el9.x86_64"),
+        "{:?}",
+        dl.args
+    );
+    assert_snapshot_cleaned(&r);
+}
+
+/// A version that is not rpm version text still fails closed before any
+/// download or mutation.
+#[test]
+fn a_version_outside_the_rpm_grammar_is_still_rejected() {
+    for bad in ["~1.0-1.el9", "1.0/x-1.el9", "1.0;x-1.el9"] {
+        let dir = trusted_root("r4-bad-version");
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        let padded = format!("{bad:<23}");
+        t.dnf_dry_run_output = Some(override_output(
+            Completion::Exited(1),
+            &dnf_transaction_table("nano", "baseos").replacen(
+                "1.0-1.el9              ",
+                &padded,
+                1,
+            ),
+            DNF_ABORT_STDERR,
+        ));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_blocked_no_mutation(&r);
+        assert_snapshot_cleaned(&r);
+    }
+}
+
 // R3-A03 — repository/cache directory identity. A repo id and its DNF cache
 // directory are related by proof, never by a name prefix.
 // ===========================================================================

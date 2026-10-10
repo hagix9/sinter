@@ -4,7 +4,7 @@ use crate::executor::{Completion, ExecRequest, Output};
 use crate::expressions::{eval_boolean, eval_value_interpolated, parse_expr, EvalVal, Scope};
 use crate::manager::ManagerInput;
 use crate::model::FrozenResource;
-use crate::paths::{mode_to_string, parent_and_name, parse_mode};
+use crate::paths::{ancestor_dirs, mode_to_string, parent_and_name, parse_mode};
 use crate::platform::PackageBackend;
 use crate::result::Diff;
 use crate::result::*;
@@ -173,6 +173,28 @@ fn redact_msg(id: &str, what: &str, detail: &str) -> SinterError {
 }
 
 impl Engine {
+    /// Plan only: a command skipped because its `creates`/`removes` guard
+    /// holds may still run at apply when an earlier planned change flips the
+    /// guard. Besides the lexical comparison of `PlannedEffects`, a guard
+    /// path with a symlinked ancestor is observed by `stat` through that
+    /// symlink, so an earlier change to the same object under its resolved
+    /// spelling flips it without sharing a prefix with the guard string. Such
+    /// a guard is therefore treated as flippable by any earlier planned
+    /// change. The ancestors are read (one `stat` each) only when there is an
+    /// earlier planned change to compare with.
+    fn guard_may_flip(&mut self, command_id: &str, guard_path: &str) {
+        self.planned.guarded_command_may_run(command_id, guard_path);
+        if self.planned.opaque.is_some() || self.planned.paths.is_empty() {
+            return;
+        }
+        let alias = ancestor_dirs(guard_path)
+            .iter()
+            .any(|d| !matches!(self.fs.inspect(d), Ok(st) if st.kind != ObjKind::Symlink));
+        if alias {
+            self.planned.opaque = Some(command_id.to_string());
+        }
+    }
+
     // -----------------------------------------------------------------------
     // file
     // -----------------------------------------------------------------------
@@ -229,6 +251,7 @@ impl Engine {
             ObjKind::Absent => Ok(unchanged_result(res, "path is already absent")),
             ObjKind::File => {
                 if self.opts.mode == Mode::Plan {
+                    let note = self.plan_parent_check(res, path)?;
                     self.record_manager_change(res, input);
                     let mut r = changed_result(res);
                     r.diff = Some(Diff {
@@ -237,6 +260,7 @@ impl Engine {
                             desired: "absent".into(),
                         },
                     });
+                    r.notes.extend(note);
                     return Ok(r);
                 }
                 self.fs.check_trusted_parents(path)?;
@@ -390,6 +414,39 @@ impl Engine {
         }
     }
 
+    /// The parent path check that apply runs before every file, directory and
+    /// link mutation (DESIGN §23), run by plan for a planned change, so that a
+    /// refusal apply would make is reported by plan instead of a change.
+    ///
+    /// The check only observes (`stat`, `getfattr`/`getfacl`). Its refusal is
+    /// certain only when no earlier planned change can alter what plan
+    /// observed (`PlannedEffects`): then it is this resource's error and the
+    /// plan fails (exit 4) with the reason apply would give. Otherwise the
+    /// change stands, and the returned note says that apply decides.
+    /// `Ok(None)`: the check passed.
+    fn plan_parent_check(&mut self, res: &FrozenResource, path: &str) -> Result<Option<String>> {
+        let refusal = match self.fs.check_trusted_parents(path) {
+            Ok(_) => return Ok(None),
+            Err(e) if e.kind == crate::error::ErrorKind::Indeterminate => return Err(e),
+            Err(e) => e,
+        };
+        match self.planned.affecting(path) {
+            None if res.sensitive || res.derived_sensitive => Err(redact_msg(
+                &res.id,
+                "Sinter's parent path check would refuse this change at apply",
+                "see the apply result",
+            )),
+            None => Err(SinterError::apply(format!(
+                "{}: {} (plan: Sinter's parent path check would refuse this change at apply)",
+                res.id, refusal.message
+            ))),
+            Some(why) => Ok(Some(format!(
+                "parent path check deferred to apply: {} ({})",
+                refusal.message, why
+            ))),
+        }
+    }
+
     /// Resolve a file `owner` name to a uid. In plan, an account that an
     /// explicit direct dependency creates is deferred (Unknown) instead of
     /// being an error; everywhere else an unknown account stays an error.
@@ -521,6 +578,117 @@ impl Engine {
         })
     }
 
+    /// Security metadata of the file a content replacement replaces, refused
+    /// when it cannot be preserved or cannot be inspected. Shared by plan and
+    /// apply, so both judge a replacement the same way.
+    fn replacement_xattrs(
+        &mut self,
+        res: &FrozenResource,
+        path: &str,
+        stat: &Stat,
+    ) -> Result<Xattrs> {
+        let xattrs: Xattrs = if stat.kind == ObjKind::File {
+            if self.fs.fault() == Some("uninspectable_metadata") {
+                Xattrs {
+                    attrs: BTreeMap::new(),
+                    inspected: false,
+                }
+            } else {
+                self.fs.xattrs(path)?
+            }
+        } else {
+            Xattrs {
+                attrs: BTreeMap::new(),
+                inspected: true,
+            }
+        };
+        if let Some(bad) = xattrs.unsafe_attr() {
+            return Err(SinterError::apply(format!(
+                "{}: refusing content replacement of {} because it carries {} that cannot be safely preserved",
+                res.id, path, bad
+            )));
+        }
+        if !xattrs.inspected {
+            return Err(SinterError::apply(format!(
+                "{}: cannot inspect security metadata of {}; refusing content replacement{}",
+                res.id,
+                path,
+                self.fs.xattr_inspection_unavailable().unwrap_or_default()
+            )));
+        }
+        Ok(xattrs)
+    }
+
+    /// Apply removes only an empty directory (`rmdir`). Plan observes whether
+    /// the directory has entries now; a non-empty one is this resource's error
+    /// unless an earlier planned change can touch the directory or anything
+    /// below it (`PlannedEffects`), in which case the returned note says apply
+    /// decides. Run only for a directory whose parent path check passed.
+    fn plan_rmdir_check(&mut self, res: &FrozenResource, path: &str) -> Result<Option<String>> {
+        let has_entries = match self.fs.dir_has_entries(path)? {
+            Some(h) => h,
+            None => {
+                return Ok(Some(format!(
+                    "could not list {}; apply decides whether it is empty",
+                    path
+                )))
+            }
+        };
+        if !has_entries {
+            return Ok(None);
+        }
+        match self.planned.affecting_subtree(path) {
+            Some(why) => Ok(Some(format!(
+                "directory {} is not empty now; apply removes it only if it is empty by then ({})",
+                path, why
+            ))),
+            None if res.sensitive || res.derived_sensitive => Err(redact_msg(
+                &res.id,
+                "apply would fail to remove a directory that is not empty",
+                "Sinter removes only empty directories",
+            )),
+            None => Err(SinterError::apply(format!(
+                "{}: directory {} is not empty; Sinter removes only empty directories \
+                 (remove its entries first) (plan: apply would fail to remove it)",
+                res.id, path
+            ))),
+        }
+    }
+
+    /// Plan counterpart of the replacement refusal of
+    /// [`Self::replacement_xattrs`], shaped like [`Self::plan_parent_check`]:
+    /// a refusal is certain only when no earlier planned change can touch the
+    /// file (`PlannedEffects`), and is then this resource's error with apply's
+    /// reason; otherwise the returned note says apply decides. Run only for a
+    /// file whose parent path check passed.
+    fn plan_replacement_check(
+        &mut self,
+        res: &FrozenResource,
+        path: &str,
+        stat: &Stat,
+    ) -> Result<Option<String>> {
+        let refusal = match self.replacement_xattrs(res, path, stat) {
+            Ok(_) => return Ok(None),
+            Err(e) if e.kind == crate::error::ErrorKind::Indeterminate => return Err(e),
+            Err(e) => e,
+        };
+        match self.planned.affecting(path) {
+            None if res.sensitive || res.derived_sensitive => Err(redact_msg(
+                &res.id,
+                "Sinter's security metadata check would refuse this replacement at apply",
+                "see the apply result",
+            )),
+            None => Err(SinterError::apply(format!(
+                "{} (plan: Sinter's security metadata check would refuse this change at apply)",
+                refusal.message
+            ))),
+            Some(why) => Ok(Some(format!(
+                "security metadata check deferred to apply: {} ({})",
+                refusal.message, why
+            ))),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn file_present(
         &mut self,
@@ -601,6 +769,14 @@ impl Engine {
             if !need_mutation {
                 return Ok(unchanged_result(res, "file already matches desired state"));
             }
+            let parent_note = self.plan_parent_check(res, path)?;
+            let parents_trusted = parent_note.is_none();
+            let note = match parent_note {
+                None if content_changed && stat.kind == ObjKind::File => {
+                    self.plan_replacement_check(res, path, &stat)?
+                }
+                note => note,
+            };
             let mut r = changed_result_sensitive(res, sensitive);
             if content_changed {
                 // Content/existence change of recognized manager input;
@@ -611,11 +787,14 @@ impl Engine {
                 // possible: non-sensitive and within the diff size bound.
                 let within = desired.len() <= crate::diff::MAX_DIFF_LINE_BYTES
                     && stat.size as usize <= crate::diff::MAX_DIFF_LINE_BYTES;
-                let cur_bytes = if stat.kind == ObjKind::File && !sensitive && within {
-                    Some(self.fs.read_file(path)?)
-                } else {
-                    None
-                };
+                // Current bytes are read only through a parent path the
+                // check accepted.
+                let cur_bytes =
+                    if stat.kind == ObjKind::File && !sensitive && within && parents_trusted {
+                        Some(self.fs.read_file(path)?)
+                    } else {
+                        None
+                    };
                 if sensitive {
                     r.diff = Some(Diff {
                         body: DiffBody::Redacted,
@@ -659,6 +838,7 @@ impl Engine {
                 });
             }
             let _ = &desired_sha;
+            r.notes.extend(note);
             return Ok(r);
         }
 
@@ -683,36 +863,7 @@ impl Engine {
         let enforce_mode = meta.mode.unwrap_or(existing_mode);
 
         if content_changed || stat.kind == ObjKind::Absent {
-            // Capture security metadata from the existing file.
-            let xattrs: Xattrs = if stat.kind == ObjKind::File {
-                if self.fs.fault() == Some("uninspectable_metadata") {
-                    Xattrs {
-                        attrs: BTreeMap::new(),
-                        inspected: false,
-                    }
-                } else {
-                    self.fs.xattrs(path)?
-                }
-            } else {
-                Xattrs {
-                    attrs: BTreeMap::new(),
-                    inspected: true,
-                }
-            };
-            if let Some(bad) = xattrs.unsafe_attr() {
-                return Err(SinterError::apply(format!(
-                    "{}: refusing content replacement of {} because it carries {} that cannot be safely preserved",
-                    res.id, path, bad
-                )));
-            }
-            if !xattrs.inspected {
-                return Err(SinterError::apply(format!(
-                    "{}: cannot inspect security metadata of {}; refusing content replacement{}",
-                    res.id,
-                    path,
-                    self.fs.xattr_inspection_unavailable().unwrap_or_default()
-                )));
-            }
+            let xattrs = self.replacement_xattrs(res, path, &stat)?;
             let bytes = effective.clone().unwrap_or_default();
             let outcome = self.publish_file(
                 res,
@@ -1145,6 +1296,10 @@ impl Engine {
                 ObjKind::Absent => Ok(unchanged_result(res, "directory is already absent")),
                 ObjKind::Dir => {
                     if self.opts.mode == Mode::Plan {
+                        let note = match self.plan_parent_check(res, &path)? {
+                            None => self.plan_rmdir_check(res, &path)?,
+                            note => note,
+                        };
                         let mut r = changed_result(res);
                         r.diff = Some(Diff {
                             body: DiffBody::Summary {
@@ -1152,6 +1307,7 @@ impl Engine {
                                 desired: "absent".into(),
                             },
                         });
+                        r.notes.extend(note);
                         return Ok(r);
                     }
                     self.fs.check_trusted_parents(&path)?;
@@ -1200,6 +1356,7 @@ impl Engine {
             ObjKind::Absent => {
                 let meta = self.dir_meta(res, &vals, ObjKind::Absent)?;
                 if self.opts.mode == Mode::Plan {
+                    let note = self.plan_parent_check(res, &path)?;
                     let mut r = changed_result(res);
                     r.diff = Some(Diff {
                         body: DiffBody::Summary {
@@ -1207,6 +1364,7 @@ impl Engine {
                             desired: "directory".into(),
                         },
                     });
+                    r.notes.extend(note);
                     return Ok(r);
                 }
                 self.fs.check_trusted_parents(&path)?;
@@ -1270,6 +1428,7 @@ impl Engine {
                     ));
                 }
                 if self.opts.mode == Mode::Plan {
+                    let note = self.plan_parent_check(res, &path)?;
                     let mut r = changed_result(res);
                     r.diff = Some(Diff {
                         body: DiffBody::Summary {
@@ -1287,6 +1446,7 @@ impl Engine {
                             ),
                         },
                     });
+                    r.notes.extend(note);
                     return Ok(r);
                 }
                 self.fs.check_trusted_parents(&path)?;
@@ -1464,6 +1624,7 @@ impl Engine {
                 ObjKind::Absent => Ok(unchanged_result(res, "link is already absent")),
                 ObjKind::Symlink => {
                     if self.opts.mode == Mode::Plan {
+                        let note = self.plan_parent_check(res, &path)?;
                         let cur = self.fs.readlink(&path)?;
                         self.record_manager_change(res, &input);
                         let mut r = changed_result(res);
@@ -1473,6 +1634,7 @@ impl Engine {
                                 desired: "absent".to_string(),
                             },
                         });
+                        r.notes.extend(note);
                         return Ok(r);
                     }
                     self.fs.check_trusted_parents(&path)?;
@@ -1505,8 +1667,10 @@ impl Engine {
         match stat.kind {
             ObjKind::Absent => {
                 if self.opts.mode == Mode::Plan {
+                    let note = self.plan_parent_check(res, &path)?;
                     self.record_manager_change(res, &input);
                     let mut r = changed_result_sensitive(res, link_sensitive);
+                    r.notes.extend(note);
                     let desired = if link_sensitive {
                         "symlink -> [redacted]".to_string()
                     } else {
@@ -1548,8 +1712,10 @@ impl Engine {
                     ));
                 }
                 if self.opts.mode == Mode::Plan {
+                    let note = self.plan_parent_check(res, &path)?;
                     self.record_manager_change(res, &input);
                     let mut r = changed_result_sensitive(res, link_sensitive);
+                    r.notes.extend(note);
                     let desired = if link_sensitive {
                         "symlink -> [redacted]".to_string()
                     } else {
@@ -1695,6 +1861,14 @@ impl Engine {
                 tvals.insert(k.clone(), EvalVal::known(v.clone()));
             }
         }
+        // Checked again at render: validation read the same file earlier.
+        if let Some(tag) = crate::expressions::unsupported_template_tag(&template_text) {
+            return Err(SinterError::apply(format!(
+                "{}: template rendering error: {}",
+                res.id,
+                tag.describe()
+            )));
+        }
         let rendered = {
             let scope = self.scope(item, None, Some(&tvals));
             match crate::expressions::eval_interpolated(&template_text, &scope) {
@@ -1816,12 +1990,18 @@ impl Engine {
             match st.kind {
                 ObjKind::Absent => {}
                 _ => {
+                    if self.opts.mode == Mode::Plan {
+                        self.guard_may_flip(&res.id, creates);
+                    }
                     return self.guard_satisfied(res, "creates guard path is present");
                 }
             }
         } else if let Some(removes) = &res.removes {
             let st = self.fs.inspect(removes)?;
             if st.kind == ObjKind::Absent {
+                if self.opts.mode == Mode::Plan {
+                    self.guard_may_flip(&res.id, removes);
+                }
                 return self.guard_satisfied(res, "removes guard path is absent");
             }
         }
@@ -4838,13 +5018,17 @@ fn valid_package_arch(t: &str) -> bool {
 }
 
 /// Whether a transaction-derived version-release string is safe to embed in a
-/// payload file name: rpm version-release text over `[A-Za-z0-9._+-]`, never
-/// starting with `-` and never containing a path separator or control byte.
+/// payload file name: rpm version-release text over `[A-Za-z0-9._+~^-]`, never
+/// starting with `-`, `~` or `^` and never containing a path separator,
+/// whitespace or control byte. `~` (sorts before: `1.0~rc1`) and `^` (sorts
+/// after: `1.0^20230101git`) are the characters rpm allows in a version or
+/// release besides `._+`; rpm writes them unchanged into the payload file name.
 fn valid_version_release(t: &str) -> bool {
     !t.is_empty()
-        && !t.starts_with('-')
-        && t.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-'))
+        && !t.starts_with(['-', '~', '^'])
+        && t.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-' | b'~' | b'^')
+        })
 }
 
 /// Whether a transaction-derived repository id is a value libdnf accepts as a
@@ -5033,7 +5217,7 @@ fn is_dnf_replacing_line(t: &str) -> bool {
         && valid_package_arch(a)
         && !f[1].is_empty()
         && f[1].bytes().all(|b| {
-            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-' | b':' | b'~')
+            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'+' | b'-' | b':' | b'~' | b'^')
         })
 }
 
@@ -6363,6 +6547,32 @@ mod package_tests {
         assert!(valid_version_release("2.4.62-13.el9_8.6"));
         assert!(!valid_version_release("-1.el9"));
         assert!(!valid_version_release("a/b"));
+        // rpm's tilde (pre-release) and caret (post-release snapshot).
+        assert!(valid_version_release("1.0~rc1-1.el9"));
+        assert!(valid_version_release("2.0^20230101git3c2f1e-1.fc39"));
+        assert!(valid_version_release("1.0~beta2^post1-3.el10"));
+        for bad in [
+            "~1-1", "^1-1", "", "1.0 -1", "1.0\t-1", "1.0-1\n", "1.0/2-1", "1.0-1;x", "1.0-$(x)",
+            "1.0-1'x", "1.0-1:2", "1.0-1*",
+        ] {
+            assert!(!valid_version_release(bad), "{bad:?}");
+        }
+        // A transaction row with them keeps its exact payload name and NEVRA.
+        let row =
+            parse_dnf_row("postgresql17-server x86_64 17.0~rc1^20240901-1PGDG.rhel9 pgdg17 6.9 M")
+                .expect("tilde and caret are rpm version characters");
+        assert_eq!(
+            row.payload_basename(),
+            "postgresql17-server-17.0~rc1^20240901-1PGDG.rhel9.x86_64.rpm"
+        );
+        assert_eq!(
+            row.nevra(),
+            "postgresql17-server-17.0~rc1^20240901-1PGDG.rhel9.x86_64"
+        );
+        let row = parse_dnf_row("foo noarch 2:1.0~b1-1.el10 appstream 12 k").unwrap();
+        assert_eq!(row.nevra(), "foo-2:1.0~b1-1.el10.noarch");
+        assert!(parse_dnf_row("foo noarch ~1-1.el10 appstream 12 k").is_none());
+        assert!(parse_dnf_row("foo noarch 1.0~a/b-1 appstream 12 k").is_none());
         // Repository ids: the libdnf REPOID_CHARS domain, minus the dot
         // entries, so a repo id is always a safe path component.
         assert!(valid_repo_id("baseos"));

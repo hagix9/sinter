@@ -5,9 +5,10 @@ All notable changes to Sinter are documented in this file.
 ## [Unreleased]
 
 Progress output for `plan`, `apply` and `audit`, on standard error only.
-Recipes, command lines, `--format json` documents, standard output, exit codes
-and the output of non-interactive runs are unchanged unless `SINTER_PROGRESS` is
-set.
+Progress changes no recipe, command line, `--format json` document, standard
+output, exit code or output of a non-interactive run unless `SINTER_PROGRESS` is
+set. Separately, `plan` now reports refusals that `apply` would make, and
+validation refuses Jinja template tags (see Changed).
 
 ### Added
 
@@ -35,6 +36,47 @@ set.
   diff, secret reference or error text. Progress text is informational and, like
   other stderr text, not part of the stable 1.x interface. See
   [Progress output](https://sinter.fulltrust.co.jp/en/reference/cli/#progress-output).
+
+### Changed
+
+- **`plan` reports what `apply` would refuse.** For a `file`, `directory`,
+  `link` or `template` change, `plan` now runs the same read-only checks as
+  `apply`: the parent path check (an ancestor owned by another user, writable by
+  group or other, a symlink, an ACL, or missing), the security metadata check of
+  a file whose content is replaced, and, for `directory` with `state: absent`,
+  whether the directory is empty. When no earlier change in the run can affect
+  the path, a refusal is a plan error (exit 4) with `apply`'s reason; previously
+  `plan` showed a change and `apply` failed. When an earlier change can (a
+  directory this run creates, a package, a command), the change is shown with a
+  note (`--verbose`, JSON `notes`) and `apply` decides. `plan` still changes
+  nothing. Plans of a `directory` with `state: absent` run one more read-only
+  command (`find <dir> -mindepth 1 -maxdepth 1 -print -quit`).
+  A recipe with `backup:` paths also counts the backup store directory that
+  `apply` creates first (`/var/lib/sinter[/backups]` with `--sudo`,
+  `~/.sinter[/backups]` otherwise) as such an earlier change, and `plan` reads
+  that directory (one `stat`) to see whether it exists.
+  A `command` skipped because its `creates`/`removes` guard holds is treated the
+  same way when an earlier change can flip the guard, including a guard whose
+  path has a symlinked ancestor (observed through the symlink, so a lexical
+  comparison cannot tell).
+- **Parent path refusals say what to do**, for example: with `--sudo` only
+  root-owned parents are trusted, so connect as that user without `--sudo` or
+  use a root-owned location such as `/opt` or `/srv`.
+- **Jinja tags in a template are an error.** Templates render only
+  `{{ expression }}`. A `{% ... %}` statement or `{# ... #}` comment tag used to
+  be written to the target unchanged; `validate`, `plan` and `apply` now refuse
+  it (exit 2) and name the resource, the source file, and the line and column.
+  Write `{{ "{%" }}` for a literal `{%`. Only an opener followed by its own
+  closer is a tag; an opener with no closer (such as an Elixir `{%{...}`), a
+  closer written inside `{{ ... }}`, and a `{#` right after `$` (shell
+  `${#var}`) are plain text and are published as written.
+
+### Fixed
+
+- **dnf packages whose version or release contains `~` or `^`** (rpm pre-release
+  and snapshot versions, such as `1.0~rc1`) can be installed. The transaction
+  used to be refused as uninterpretable. Other characters outside rpm version
+  text are still refused.
 
 ### Notes
 
