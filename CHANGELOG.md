@@ -2,13 +2,14 @@
 
 All notable changes to Sinter are documented in this file.
 
-## [Unreleased]
+## [1.3.0] - 2026-10-11
 
 Progress output for `plan`, `apply` and `audit`, on standard error only.
 Progress changes no recipe, command line, `--format json` document, standard
 output, exit code or output of a non-interactive run unless `SINTER_PROGRESS` is
 set. Separately, `plan` now reports refusals that `apply` would make, and
-validation refuses Jinja template tags (see Changed).
+validation refuses Jinja template tags (see Changed), and dnf packages whose
+version contains `~` or `^` can be installed (see Fixed).
 
 ### Added
 

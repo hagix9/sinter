@@ -143,7 +143,7 @@ accepted on every command and ignored by `validate`, so one command line works
 for every phase. Status words are colored on a terminal only (never in pipes,
 with `NO_COLOR`, or in `--format json`).
 
-*Available in releases after v1.2.0 (implemented on `main`; not part of v1.2.0).*
+*Available since v1.3.0.*
 
 While `plan`, `apply` and `audit` run, an interactive terminal shows a transient
 progress line on stderr that disappears when the run ends. `SINTER_PROGRESS=plain`
