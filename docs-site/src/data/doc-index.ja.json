@@ -15,7 +15,7 @@
     { "title": "Red Hat Enterprise Linux ガイド", "path": "guides/rhel", "description": "RHEL 9/10 x86_64 ターゲットガイド（dnf バックエンド）。", "keywords": "rhel red hat dnf 9 10 x86_64" },
     { "title": "AlmaLinux ガイド", "path": "guides/almalinux", "description": "AlmaLinux 9/10 x86_64 ターゲットガイド（dnf バックエンド）。", "keywords": "almalinux rhel dnf 9 10 x86_64" },
     { "title": "ChatGPT Plugin", "path": "guides/chatgpt-plugin", "description": "一時停止中：公開 Gateway とご自身の sinter-bridge を経由する ChatGPT Plugin の経路（read-only）。CLI・sinter mcp・WebMCP には影響しません。", "keywords": "chatgpt plugin mcp gateway bridge oauth read-only" },
-    { "title": "レシピ概要", "path": "recipes/overview", "description": "v1.2.0 の機能に基づくレシピ例。", "keywords": "レシピ 例 baseline" },
+    { "title": "レシピ概要", "path": "recipes/overview", "description": "v1.3.0 の機能に基づくレシピ例。", "keywords": "レシピ 例 baseline" },
     { "title": "CLI リファレンス", "path": "reference/cli", "description": "sinter validate/plan/apply/audit/mcp/secrets のフラグと終了コード。", "keywords": "cli フラグ 終了コード host port user sudo identity known_hosts format 進捗 progress SINTER_PROGRESS stderr" },
     { "title": "sinter secrets", "path": "reference/secrets", "description": "sinter secrets encrypt/decrypt/list（list --recipe: 使用元・missing・未参照）と、暗号化シークレットから取る file の content: age 形式のシークレットファイル。", "keywords": "secrets encrypt decrypt age identity recipient passphrase file content secret reference recipe used by missing" },
     { "title": "レシピフォーマット", "path": "reference/recipe-format", "description": "トップレベルフィールド、式、補間のリファレンス。", "keywords": "version vars include resources handlers 式 補間" },

@@ -3,7 +3,7 @@ title: リソース
 description: リソースモデル — 共通フィールド、順序、依存関係、通知。
 ---
 
-リソースは目的の状態の単位です。v1.2.0 では 9 つのタイプが実装されて
+リソースは目的の状態の単位です。v1.3.0 では 9 つのタイプが実装されて
 います: `file`、`directory`、`link`、`template`、`command`、`package`、
 `service`、そしてローカル Linux アカウントを扱う
 [`group`](/ja/reference/resources/group/) と

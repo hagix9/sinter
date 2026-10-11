@@ -9,14 +9,14 @@ support policy covers both version lines; both are acceptance-tested.
 
 ## Unified Linux x86_64 distribution
 
-Sinter v1.2.0 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for all
+Sinter v1.3.0 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for all
 supported x86_64 version lines. The executable is unified; runtime platform
 detection still selects APT on Ubuntu and DNF on RHEL-family targets. This
 is not a claim of support for arbitrary Linux systems or architectures.
 
-The Sinter v1.2.0 release artifact passed eight-real-host acceptance on
+The Sinter v1.3.0 release artifact passed eight-real-host acceptance on
 Ubuntu 24.04.5 LTS, Ubuntu 26.04.1 LTS, Rocky Linux 9.8, Rocky Linux 10.2,
-RHEL 9.8, RHEL 10.2, AlmaLinux 9.8, and AlmaLinux 10.2 — all x86_64, 1240 checks
+RHEL 9.8, RHEL 10.2, AlmaLinux 9.8, and AlmaLinux 10.2 — all x86_64, 3,980 checks
 passed, 0 failed.
 Other and future point releases have not each been independently validated.
 Historical v0.2.1 retains its distro-specific assets; see

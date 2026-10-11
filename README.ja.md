@@ -10,7 +10,7 @@
 
 [![GitHub Codespaces で開く](https://github.com/codespaces/badge.svg)](https://codespaces.new/hagix9/sinter?quickstart=1)
 
-ブラウザ上の使い捨て Ubuntu コンテナで Sinter v1.2.0 を試せます。ローカルへの
+ブラウザ上の使い捨て Ubuntu コンテナで Sinter v1.3.0 を試せます。ローカルへの
 インストール、SSH、サーバーは不要です。[スタートガイド](examples/start/README.ja.md)を参照してください。
 
 Sinterは、Itamaeに着想を得た軽量なエージェントレス構成管理ツールです。
@@ -84,16 +84,16 @@ embedded scriptingは依然として実装対象に含めません。複数ホ�
 
 ## インストール
 
-Sinter **v1.2.0** は、対応するすべての Linux x86_64 プラットフォーム
+Sinter **v1.3.0** は、対応するすべての Linux x86_64 プラットフォーム
 ライン（Ubuntu、Rocky Linux、RHEL 9 / 10、AlmaLinux 9 / 10）を1つの
-`sinter-v1.2.0-linux-x86_64.tar.gz` アーティファクトで配布します。
+`sinter-v1.3.0-linux-x86_64.tar.gz` アーティファクトで配布します。
 
 ```sh
 curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
 $HOME/.local/bin/sinter --version
 ```
 
-受入検証したpoint release（v1.2.0 リリース成果物）は Ubuntu 24.04.5 LTS、
+受入検証したpoint release（v1.3.0 リリース成果物）は Ubuntu 24.04.5 LTS、
 Ubuntu 26.04.1 LTS、Rocky Linux 9.8、Rocky Linux 10.2、RHEL 9.8、
 RHEL 10.2、AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64）です。
 他の各point releaseを個別に受入検証したという意味ではありません。
@@ -321,14 +321,17 @@ Sinterの実ホスト受入マトリクスには含まれていません。
 
 v1.0.0 以降の各リリースは、公開前にリリース成果物そのものを8つの対応
 ターゲットで受入検証し、その受入証跡（manifest、raw log、チェックサム）を
-リリースと一緒に公開します。現行リリースの Sinter v1.2.0 は、Linux x86_64
+リリースと一緒に公開します。現行リリースの Sinter v1.3.0 は、Linux x86_64
 検証ゲートを通過した後、リリース成果物そのもの
-（`sinter-v1.2.0-linux-x86_64.tar.gz`）を8台の実x86_64 Linuxホストで
+（`sinter-v1.3.0-linux-x86_64.tar.gz`）を8台の実x86_64 Linuxホストで
 受入検証しました — [インストール](#インストール)に記載のpoint releaseです。
 各ホストでtarballと展開したバイナリがバイト単位で同一（SHA-256）であることを
-確認し、従来の受入シナリオと成果物同一性・MCPのチェック、および実ホストでの
-`group` → `user` → `directory` → `file` のライフサイクルを実行して、
-**1240チェックが通過、失敗0**でした（[v1.2.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.2.0)参照）。
+確認し、従来の受入シナリオと成果物同一性・MCPのチェック、実ホストでの
+`group` → `user` → `directory` → `file` のライフサイクル、および v1.3.0 の機能
+（進捗表示、`plan` と `apply` の一致、テンプレートタグのエラー、rpm の `~`/`^` バージョン）
+の実ホスト検証を実行して、
+**3,980チェックが通過、失敗0**でした（[v1.3.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.3.0)参照）。
+Sinter v1.2.0 も以前の同じ8台での受入検証（1240チェック、失敗0。[v1.2.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.2.0)）を通過しています。
 Sinter v1.1.3、v1.1.2、v1.1.1、v1.1.0、v1.0.0 も以前の同じ8台での受入検証（408/408）を、v0.5.1 と v0.4.1 も
 それぞれ以前の8台での受入検証（344/344）を通過しています。その記録と以前のVM検証・リリース証跡は履歴として保持します。
 

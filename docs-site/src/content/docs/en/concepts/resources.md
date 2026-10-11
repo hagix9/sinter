@@ -3,7 +3,7 @@ title: Resources
 description: The resource model — common fields, ordering, dependencies, notifications.
 ---
 
-Resources are the unit of desired state. v1.2.0 implements nine types:
+Resources are the unit of desired state. v1.3.0 implements nine types:
 `file`, `directory`, `link`, `template`, `command`, `package`, `service`,
 and, for local Linux accounts, [`group`](/en/reference/resources/group/) and
 [`user`](/en/reference/resources/user/).

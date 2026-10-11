@@ -19,7 +19,7 @@ See [Core MCP](/en/reference/mcp/) for the `mcp` subcommand and `--targets-file`
 and [sinter secrets](/en/reference/secrets/) for the `secrets`
 subcommand.
 
-`sinter --version` prints the version (e.g. `sinter 1.2.0`).
+`sinter --version` prints the version (e.g. `sinter 1.3.0`).
 
 ## validate
 
@@ -316,7 +316,7 @@ color off. `--format json` output never contains color codes.
 
 ## Progress output
 
-*Available in releases after v1.2.0.*
+*Available since v1.3.0.*
 
 While `plan`, `apply` and `audit` run, Sinter can show where it is. Progress is
 written to **standard error** only: it never touches standard output, the report,

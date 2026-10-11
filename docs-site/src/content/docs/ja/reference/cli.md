@@ -19,7 +19,7 @@ Commands:
 `secrets`サブコマンドについては[sinter secrets](/ja/reference/secrets/)を
 参照してください。
 
-`sinter --version` はバージョンを表示します（例: `sinter 1.2.0`）。
+`sinter --version` はバージョンを表示します（例: `sinter 1.3.0`）。
 
 ## validate
 
@@ -322,7 +322,7 @@ resources:
 
 ## 進捗表示
 
-*v1.2.0 より後のリリースで利用できます。*
+*v1.3.0 以降で利用できます。*
 
 `plan`、`apply`、`audit` の実行中、Sinter は現在どこまで進んでいるかを表示できます。
 進捗は **stderr** にだけ書かれます。stdout、レポート、JSON ドキュメント、終了コードには

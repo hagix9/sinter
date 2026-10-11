@@ -1,6 +1,6 @@
 # ADR 0001: Progress output for plan, apply and audit
 
-- Status: Accepted (implemented on `main` after v1.2.0, unreleased)
+- Status: Accepted (implemented; released in v1.3.0)
 - Date: 2026-10-07
 - Scope: the CLI commands `plan`, `apply` and `audit`
 - User-facing description:
