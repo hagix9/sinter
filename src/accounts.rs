@@ -986,6 +986,23 @@ pub(crate) fn usermod_args(d: &UserDesired, o: &UserObservation, current: &UserR
 // engine integration
 // ---------------------------------------------------------------------------
 
+/// How sure plan has to be that a producer resource will have run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProducerReach {
+    /// Only producers whose `when` is true (a refusal may rest on them).
+    Certain,
+    /// Also producers whose `when` plan cannot decide (a deferral may).
+    Possible,
+}
+
+/// A resource that creates an account and runs before its consumer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AccountProducer {
+    pub(crate) name: String,
+    /// Listed directly in the consumer's `depends_on`.
+    pub(crate) direct: bool,
+}
+
 impl Engine {
     fn account_err(&self, msg: String) -> SinterError {
         if self.opts.mode == Mode::Plan {
@@ -1020,14 +1037,26 @@ impl Engine {
         }
     }
 
-    /// Names of the direct `depends_on` resources of type `type_` that
-    /// evaluate to `present` and declare an account name. Only explicit,
-    /// direct dependencies count: nothing is inferred.
+    /// The resources of type `type_` that evaluate to `present`, declare an
+    /// account name and will have been applied before `res` is (F-3):
+    ///
+    /// * the direct `depends_on` resources, as always;
+    /// * every other resource that runs earlier in the execution order
+    ///   (dependencies first, ties by declaration order). Apply looks an
+    ///   account up for real after those resources ran, so plan must not
+    ///   report as an error what apply will find. No dependency is added by
+    ///   this: order, blocking and failure handling are unchanged.
+    ///
+    /// An earlier resource that is not a direct dependency counts only if its
+    /// `when` is true, or (for [`ProducerReach::Possible`]) cannot be decided
+    /// in plan, and it is not certainly blocked by a dependency of its own. A condition or state that cannot be evaluated leaves it out:
+    /// that resource reports its own error.
     pub(crate) fn account_producers(
         &self,
         res: &FrozenResource,
         type_: &str,
-    ) -> Result<Vec<String>> {
+        reach: ProducerReach,
+    ) -> Result<Vec<AccountProducer>> {
         let mut found = Vec::new();
         for dep in &res.depends_on {
             let Some(d) = self.model.resources.iter().find(|r| &r.id == dep) else {
@@ -1039,37 +1068,104 @@ impl Engine {
             let Some(name) = &d.account_name else {
                 continue;
             };
-            let present = match d.with.get("state") {
-                None | Some(crate::value::Value::Null) => true,
-                Some(v) => {
-                    let item = d.loop_item.as_ref().map(|v| EvalVal::known(v.clone()));
-                    let dep_sensitive = d.sensitive || res.sensitive || res.derived_sensitive;
-                    let ev = crate::expressions::eval_value_interpolated(
-                        v,
-                        &self.scope(item.as_ref(), None, None),
-                    )
-                    .map_err(|e| {
-                        if dep_sensitive {
-                            SinterError::plan(format!(
-                                "{}: could not evaluate account dependency state (value redacted): {}",
-                                res.id,
-                                e.category()
-                            ))
-                        } else {
-                            SinterError::plan(format!(
-                                "{}: could not evaluate account dependency state: {}",
-                                res.id, e
-                            ))
-                        }
-                    })?;
-                    matches!(ev.val, Some(crate::value::Value::Str(s)) if s == "present")
-                }
-            };
-            if present {
-                found.push(name.clone());
+            if self.producer_is_present(d, res)? {
+                found.push(AccountProducer {
+                    name: name.clone(),
+                    direct: true,
+                });
             }
         }
+        let Some(pos) = self.model.resources.iter().position(|r| r.id == res.id) else {
+            return Ok(found);
+        };
+        // A cycle or an unknown dependency is a validation error reported
+        // elsewhere; without an order only the direct producers count.
+        let Ok(order) = crate::engine::execution_order(&self.model) else {
+            return Ok(found);
+        };
+        let Some(at) = order.iter().position(|i| *i == pos) else {
+            return Ok(found);
+        };
+        for &i in &order[..at] {
+            let d = &self.model.resources[i];
+            if d.type_ != type_ || res.depends_on.contains(&d.id) {
+                continue;
+            }
+            let Some(name) = &d.account_name else {
+                continue;
+            };
+            let item = d.loop_item.as_ref().map(|v| EvalVal::known(v.clone()));
+            match self.eval_condition(d, item.as_ref()) {
+                Ok(Some(true)) => {}
+                Ok(None) if reach == ProducerReach::Possible => {}
+                _ => continue,
+            }
+            if !self.producer_is_present(d, res).unwrap_or(false) || self.certainly_blocked(d) {
+                continue;
+            }
+            found.push(AccountProducer {
+                name: name.clone(),
+                direct: false,
+            });
+        }
         Ok(found)
+    }
+
+    /// Whether `d` can never run: a resource it depends on, directly or
+    /// through a chain, is skipped by a `when` that is false, so `d` is
+    /// `blocked_by_dependency` (DESIGN §14) and creates nothing. Only what is
+    /// certain counts: a dependency plan cannot decide, or that fails later,
+    /// leaves `d` possible.
+    fn certainly_blocked(&self, d: &FrozenResource) -> bool {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut stack = vec![d];
+        while let Some(cur) = stack.pop() {
+            for dep in &cur.depends_on {
+                if !seen.insert(dep.as_str()) {
+                    continue;
+                }
+                let Some(r) = self.model.resources.iter().find(|x| &x.id == dep) else {
+                    continue;
+                };
+                let item = r.loop_item.as_ref().map(|v| EvalVal::known(v.clone()));
+                if matches!(self.eval_condition(r, item.as_ref()), Ok(Some(false))) {
+                    return true;
+                }
+                stack.push(r);
+            }
+        }
+        false
+    }
+
+    /// Whether the account resource `d` evaluates to `state: present` (the
+    /// default), for the consumer `res`.
+    fn producer_is_present(&self, d: &FrozenResource, res: &FrozenResource) -> Result<bool> {
+        Ok(match d.with.get("state") {
+            None | Some(crate::value::Value::Null) => true,
+            Some(v) => {
+                let item = d.loop_item.as_ref().map(|v| EvalVal::known(v.clone()));
+                let dep_sensitive = d.sensitive || res.sensitive || res.derived_sensitive;
+                let ev = crate::expressions::eval_value_interpolated(
+                    v,
+                    &self.scope(item.as_ref(), None, None),
+                )
+                .map_err(|e| {
+                    if dep_sensitive {
+                        SinterError::plan(format!(
+                            "{}: could not evaluate account dependency state (value redacted): {}",
+                            res.id,
+                            e.category()
+                        ))
+                    } else {
+                        SinterError::plan(format!(
+                            "{}: could not evaluate account dependency state: {}",
+                            res.id, e
+                        ))
+                    }
+                })?;
+                matches!(ev.val, Some(crate::value::Value::Str(s)) if s == "present")
+            }
+        })
     }
 
     /// Plan only: a file-like resource whose `owner`/`group` names an account
@@ -1085,11 +1181,9 @@ impl Engine {
         if self.opts.mode != Mode::Plan || failed.kind == ErrorKind::Indeterminate {
             return Ok(None);
         }
-        if self
-            .account_producers(res, type_)?
-            .iter()
-            .any(|n| n == spec)
-        {
+        let producers = self.account_producers(res, type_, ProducerReach::Possible)?;
+        if producers.iter().any(|p| p.name == spec) {
+            let direct = producers.iter().any(|p| p.direct && p.name == spec);
             let sensitive = res.sensitive || res.derived_sensitive;
             // Defer only on a confirmed absence: any other lookup problem
             // stays the plan error it is.
@@ -1101,11 +1195,19 @@ impl Engine {
             if !matches!(absent, Ok(true)) {
                 return Ok(None);
             }
-            return Ok(Some(SinterError::unknown(format!(
-                "{} {} is created by a dependency; deferred until dependency apply",
-                type_,
-                shown(spec, sensitive)
-            ))));
+            return Ok(Some(SinterError::unknown(if direct {
+                format!(
+                    "{} {} is created by a dependency; deferred until dependency apply",
+                    type_,
+                    shown(spec, sensitive)
+                )
+            } else {
+                format!(
+                    "{} {} is created by a resource that runs earlier; deferred until it applies",
+                    type_,
+                    shown(spec, sensitive)
+                )
+            })));
         }
         Ok(None)
     }
@@ -1407,17 +1509,26 @@ impl Engine {
             )));
         }
         if !c.missing_groups.is_empty() {
-            let producers = self.account_producers(res, "group")?;
+            let producers = self.account_producers(res, "group", ProducerReach::Possible)?;
             let uncovered: Vec<&String> = c
                 .missing_groups
                 .iter()
-                .filter(|g| !producers.contains(g))
+                .filter(|g| !producers.iter().any(|p| &p.name == *g))
                 .collect();
             if self.opts.mode == Mode::Plan && uncovered.is_empty() {
-                // Every missing group is created by an explicit dependency:
-                // the outcome cannot be known before that dependency applies.
+                // Every missing group is created by a resource that applies
+                // first: the outcome cannot be known before that resource
+                // applies.
+                let all_direct = c
+                    .missing_groups
+                    .iter()
+                    .all(|g| producers.iter().any(|p| p.direct && &p.name == g));
                 let mut r = unknown_result(res);
-                r.reason = Some("deferred/unknown until dependency apply: a declared group is created by a dependency".into());
+                r.reason = Some(if all_direct {
+                    "deferred/unknown until dependency apply: a declared group is created by a dependency".into()
+                } else {
+                    "deferred/unknown until apply: a declared group is created by a resource that runs earlier".into()
+                });
                 r.verification = Verification::NotPerformed;
                 return Ok(r);
             }
@@ -1447,7 +1558,15 @@ impl Engine {
             // Without `group`, useradd creates a same-named private group and
             // fails when one already exists. Say so before anything runs,
             // for a group that exists now or that a dependency creates.
-            let same_name_dependency = self.account_producers(res, "group")?.contains(&d.name);
+            // Apply looks the group up for real (`exists` below): only a
+            // direct dependency is asserted here, as before F-3. Plan also
+            // counts a producer that certainly runs earlier. (In apply the
+            // extra gate is defence in depth: a counted producer has run, as
+            // `certainly_blocked` is exact there. Keep it exact.)
+            let same_name_dependency = self
+                .account_producers(res, "group", ProducerReach::Certain)?
+                .iter()
+                .any(|p| p.name == d.name && (p.direct || self.opts.mode == Mode::Plan));
             let exists = lookup_group(&mut self.fs, &d.name, sensitive)? != Lookup::Absent;
             if exists || same_name_dependency {
                 return Err(self.account_err(format!(

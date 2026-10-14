@@ -580,17 +580,59 @@ fn group_then_user_with_depends_on_plans_deferred_and_applies_in_order() {
 }
 
 #[test]
-fn user_does_not_infer_a_group_dependency() {
-    // The group resource exists in the recipe but the user does not list it
-    // in depends_on: no magic, the user's plan is the ordinary error.
+fn a_group_that_runs_earlier_is_known_to_plan_without_depends_on() {
+    // F-3. The group is declared before the user and the user does not list
+    // it: apply finds the group (it ran first), so plan defers instead of
+    // reporting an error apply would never give. No dependency is added.
     let body = format!(
         "{}{}",
         group("g", "app", ""),
         user("u", "app", "      group: app\n", "")
     );
-    let r = recipe("u-nodep", &body);
-    let e = try_plan(&r, fake()).err().expect("must fail");
+    let r = recipe("u-earlier", &body);
+    let p = plan(&r, fake());
+    assert_eq!(find(&p, "g").change, Change::Changed);
+    let pu = find(&p, "u");
+    assert!(pu.unknown, "the user is deferred, not an error");
+    assert!(
+        pu.reason.as_deref().unwrap().contains("runs earlier"),
+        "{:?}",
+        pu.reason
+    );
+    assert_eq!(mutation_command_count(&p), 0);
+    // Apply does exactly what the plan expected: the group, then the user.
+    let a = apply(&r, fake());
+    assert_success(&a);
+    assert_eq!(
+        account_cmds(&a),
+        ["/usr/sbin/groupadd app", "/usr/sbin/useradd -g app -M app"]
+    );
+}
+
+#[test]
+fn a_group_that_runs_later_is_still_a_plan_error_as_it_is_an_apply_error() {
+    // The user is declared before the group and does not list it: Sinter
+    // neither reorders nor infers. Plan and apply both refuse.
+    let body = format!(
+        "{}{}",
+        user("u", "app", "      group: app\n", ""),
+        group("g", "app", "")
+    );
+    let r = recipe("u-later", &body);
+    let e = try_plan(&r, fake()).err().expect("plan must refuse");
     assert!(e.message.contains("does not exist"), "{}", e.message);
+    assert!(e.message.contains("depends_on"), "{}", e.message);
+    let m = refused_apply(&r, fake());
+    assert!(m.contains("does not exist"), "{}", m);
+    // Listing the group moves it first: plan defers and apply succeeds.
+    let body = format!(
+        "{}{}",
+        user("u", "app", "      group: app\n", "    depends_on: [g]\n"),
+        group("g", "app", "")
+    );
+    let r = recipe("u-later-listed", &body);
+    assert!(find(&plan(&r, fake()), "u").unknown);
+    assert_success(&apply(&r, fake()));
 }
 
 #[test]
@@ -607,15 +649,33 @@ fn file_owner_naming_a_created_user_is_deferred_only_with_explicit_depends_on() 
             target.display()
         )
     };
-    // Without depends_on: the existing plan error stays (the account is
-    // simply unknown); nothing is inferred.
+    // Without depends_on, the user declared first: it runs first, so plan
+    // defers the file as apply will find the account (F-3).
     let r = write_recipe(
         &dir,
         "no.yaml",
         &format!("version: 1\nresources:\n{}", owned("")),
     );
+    let p = try_plan(&r, fake()).expect("an earlier producer is known to plan");
+    let f = find(&p, "f");
+    assert!(f.unknown);
+    assert!(f.reason.as_deref().unwrap().contains("runs earlier"));
+    // Without depends_on, the file declared first: nothing is inferred or
+    // reordered, the plan error stays (and apply fails the same way).
+    let later = format!(
+        "  - id: f\n    type: file\n    with:\n      path: {}\n      content: x\n      owner: svcacct\n{}",
+        target.display(),
+        user("u", "svcacct", "", "")
+    );
+    let r = write_recipe(
+        &dir,
+        "later.yaml",
+        &format!("version: 1\nresources:\n{}", later),
+    );
     let e = try_plan(&r, fake()).err().expect("must fail");
     assert!(e.message.contains("unknown user"), "{}", e.message);
+    let m = refused_apply(&r, fake());
+    assert!(m.contains("unknown user"), "{}", m);
 
     // With depends_on: the user is planned, the file is deferred.
     let r = write_recipe(
@@ -1183,4 +1243,276 @@ fn truncated_or_multi_record_getent_output_fails_closed() {
         let m = refused_apply(&r, t);
         assert!(m.contains("account lookup"), "{:?}: {}", bad, m);
     }
+}
+
+// ---------------------------------------------------------------------------
+// F-3: plan knows what runs earlier, apply is unchanged
+// ---------------------------------------------------------------------------
+
+fn file_owned_by(id: &str, path: &Path, owner: &str, group: &str, top: &str) -> String {
+    format!(
+        "  - id: {id}\n    type: file\n{top}    with:\n      path: {path}\n      content: x\n      owner: {owner}\n      group: {group}\n",
+        path = path.display()
+    )
+}
+
+#[test]
+fn group_user_file_in_declaration_order_without_depends_on_plans_and_applies_alike() {
+    // The D2b / D3b recipes of the real-Linux report: plan used to be rc 4,
+    // apply succeeded. Now plan defers each consumer and apply is as before.
+    let dir = trusted_root("f3-chain");
+    // A directory that exists on the scripted target.
+    let conf = Path::new("/etc/app/conf").to_path_buf();
+    let body = format!(
+        "{}{}{}",
+        group("g", "svcgrp", ""),
+        user("u", "svcacct", "      group: svcgrp\n", ""),
+        file_owned_by("f", &conf, "svcacct", "svcgrp", "")
+    );
+    let r = write_recipe(&dir, "r.yaml", &format!("version: 1\nresources:\n{}", body));
+    let p = try_plan(&r, fake()).expect("the plan no longer contradicts apply");
+    assert_eq!(find(&p, "g").change, Change::Changed);
+    assert!(find(&p, "u").unknown, "user deferred to the group");
+    assert!(find(&p, "f").unknown, "file deferred to the user and group");
+    assert_eq!(mutation_command_count(&p), 0);
+    // The same recipe with explicit depends_on gives the same plan outcome.
+    let body2 = format!(
+        "{}{}{}",
+        group("g", "svcgrp", ""),
+        user(
+            "u",
+            "svcacct",
+            "      group: svcgrp\n",
+            "    depends_on: [g]\n"
+        ),
+        file_owned_by("f", &conf, "svcacct", "svcgrp", "    depends_on: [u, g]\n")
+    );
+    let r2 = write_recipe(
+        &dir,
+        "r2.yaml",
+        &format!("version: 1\nresources:\n{}", body2),
+    );
+    let p2 = try_plan(&r2, fake()).expect("plan");
+    for id in ["g", "u", "f"] {
+        let (a, b) = (find(&p, id), find(&p2, id));
+        assert_eq!((a.change, a.unknown), (b.change, b.unknown), "{id}");
+    }
+    // Apply: the order and the commands are exactly those of the explicit form.
+    let a = apply(&r, fake());
+    assert_eq!(a.status, AggregateStatus::Success, "{:?}", a.resources);
+    assert_eq!(
+        account_cmds(&a),
+        [
+            "/usr/sbin/groupadd svcgrp",
+            "/usr/sbin/useradd -g svcgrp -M svcacct"
+        ]
+    );
+    // ... and the file got the new account's owner and group.
+    assert_eq!(find(&a, "f").change, Change::Changed);
+}
+
+#[test]
+fn several_earlier_producers_cover_user_groups_and_file_owner_and_group() {
+    let dir = trusted_root("f3-several");
+    let body = format!(
+        "{}{}{}{}",
+        group("g1", "alpha", ""),
+        group("g2", "beta", ""),
+        user(
+            "u",
+            "svcacct",
+            "      group: alpha\n      groups: [beta]\n",
+            ""
+        ),
+        file_owned_by("f", &dir.join("conf"), "svcacct", "beta", "")
+    );
+    let r = write_recipe(&dir, "r.yaml", &format!("version: 1\nresources:\n{}", body));
+    let p = try_plan(&r, fake()).expect("plan");
+    assert!(find(&p, "u").unknown && find(&p, "f").unknown);
+    // One group missing from the producers: still the error, with the advice.
+    let body = format!(
+        "{}{}",
+        group("g1", "alpha", ""),
+        user(
+            "u",
+            "svcacct",
+            "      group: alpha\n      groups: [ghost]\n",
+            ""
+        )
+    );
+    let r = write_recipe(
+        &dir,
+        "r2.yaml",
+        &format!("version: 1\nresources:\n{}", body),
+    );
+    let e = try_plan(&r, fake())
+        .err()
+        .expect("an uncovered group is an error");
+    assert!(e.message.contains("ghost"), "{}", e.message);
+    assert!(e.message.contains("depends_on"), "{}", e.message);
+}
+
+#[test]
+fn an_earlier_producer_that_is_skipped_or_absent_does_not_cover_the_consumer() {
+    // when: false -> the group is never created; apply fails, so plan fails.
+    let body = format!(
+        "{}{}",
+        group("g", "app", "").replace(
+            "    type: group\n",
+            "    type: group\n    when: \"false\"\n"
+        ),
+        user("u", "app", "      group: app\n", "")
+    );
+    let r = recipe("f3-skipped", &body);
+    let e = try_plan(&r, fake()).err().expect("plan must refuse");
+    assert!(e.message.contains("does not exist"), "{}", e.message);
+    let rep = apply(&r, fake());
+    assert_eq!(rep.status, AggregateStatus::ApplyFailed);
+    assert_eq!(find(&rep, "u").execution, Execution::Failed);
+    assert!(account_cmds(&rep).is_empty(), "{:?}", account_cmds(&rep));
+    // state: absent -> nothing is created, nothing covers.
+    let body = format!(
+        "{}{}",
+        group("g", "app", "      state: absent\n"),
+        user("u", "app", "      group: app\n", "")
+    );
+    let r = recipe("f3-absent", &body);
+    let e = try_plan(&r, fake()).err().expect("plan must refuse");
+    assert!(e.message.contains("does not exist"), "{}", e.message);
+}
+
+#[test]
+fn an_earlier_producer_whose_condition_plan_cannot_decide_defers_instead_of_failing() {
+    let body = format!(
+        "  - id: probe\n    type: command\n    with:\n      program: /bin/echo\n      args: [\"x\"]\n      register: p\n{}{}",
+        group("g", "app", "").replace(
+            "    type: group\n",
+            "    type: group\n    depends_on: [probe]\n    when: \"registers.p.stdout == \\\"x\\\\n\\\"\"\n"
+        ),
+        user("u", "app", "      group: app\n", "")
+    );
+    let r = recipe("f3-unknown-when", &body);
+    let p = try_plan(&r, fake()).expect("an undecidable producer defers");
+    assert!(find(&p, "u").unknown);
+}
+
+#[test]
+fn a_same_named_group_that_certainly_runs_earlier_is_refused_in_plan_as_in_apply() {
+    // useradd without `group` fails when the private group already exists:
+    // apply refuses once the earlier group is there, so plan says so now.
+    let body = format!("{}{}", group("g", "app", ""), user("u", "app", "", ""));
+    let r = recipe("f3-private", &body);
+    let e = try_plan(&r, fake()).err().expect("plan must refuse");
+    assert!(e.message.contains("same name"), "{}", e.message);
+    let a = try_apply(&r, fake());
+    match a {
+        Err(e) => assert!(e.message.contains("same name"), "{}", e.message),
+        Ok(rep) => assert_ne!(rep.status, AggregateStatus::Success),
+    }
+    // A producer plan cannot decide never makes plan fail on this rule.
+    let body = format!(
+        "  - id: probe\n    type: command\n    with:\n      program: /bin/echo\n      args: [\"x\"]\n      register: p\n{}{}",
+        group("g", "app", "").replace(
+            "    type: group\n",
+            "    type: group\n    depends_on: [probe]\n    when: \"registers.p.stdout == \\\"x\\\\n\\\"\"\n"
+        ),
+        user("u", "app", "", "")
+    );
+    let r = recipe("f3-private-unknown", &body);
+    assert!(try_plan(&r, fake()).is_ok());
+}
+
+#[test]
+fn a_sensitive_consumer_deferred_to_an_earlier_producer_names_no_account() {
+    let dir = trusted_root("f3-sensitive");
+    let body = format!(
+        "{}  - id: f\n    type: file\n    sensitive: true\n    with:\n      path: {}\n      content: x\n      owner: topsecretacct\n",
+        user("u", "topsecretacct", "", ""),
+        dir.join("conf").display()
+    );
+    let r = write_recipe(&dir, "r.yaml", &format!("version: 1\nresources:\n{}", body));
+    let p = try_plan(&r, fake()).expect("plan");
+    let f = find(&p, "f");
+    assert!(f.unknown);
+    assert!(
+        !f.reason
+            .clone()
+            .unwrap_or_default()
+            .contains("topsecretacct"),
+        "{:?}",
+        f.reason
+    );
+}
+
+#[test]
+fn audit_of_accounts_declared_in_order_without_depends_on_is_not_deferred_or_compliant() {
+    // Deferral exists only in plan. Audit reports what the host has: accounts
+    // that do not exist are drift, never a pass.
+    let dir = trusted_root("f3-audit");
+    let body = format!(
+        "{}{}",
+        group("g", "svcgrp", ""),
+        user("u", "svcacct", "      group: svcgrp\n", "")
+    );
+    let r = write_recipe(&dir, "r.yaml", &format!("version: 1\nresources:\n{}", body));
+    let rep = audit(&r, fake());
+    assert_ne!(afind(&rep, "g").status, AuditResourceStatus::Compliant);
+    assert_ne!(afind(&rep, "u").status, AuditResourceStatus::Compliant);
+}
+
+fn skipped_command(id: &str) -> String {
+    format!(
+        "  - id: {id}\n    type: command\n    when: \"false\"\n    with:\n      program: /bin/true\n"
+    )
+}
+
+#[test]
+fn an_earlier_producer_blocked_by_its_own_dependency_does_not_cover_the_consumer() {
+    // A resource whose dependency is skipped is blocked and creates nothing;
+    // the run goes on, so the consumer fails in apply: plan must say so too.
+    for (label, middle, dep) in [
+        ("f3-blocked-direct", "", "skip"),
+        (
+            "f3-blocked-chain",
+            "  - id: mid\n    type: command\n    depends_on: [skip]\n    with:\n      program: /bin/true\n",
+            "mid",
+        ),
+    ] {
+        let body = format!(
+            "{}{}{}{}",
+            skipped_command("skip"),
+            middle,
+            group("g", "app", "").replace(
+                "    type: group\n",
+                &format!("    type: group\n    depends_on: [{dep}]\n")
+            ),
+            user("u", "app", "      group: app\n", "")
+        );
+        let r = recipe(label, &body);
+        let e = try_plan(&r, fake()).err().expect("plan must refuse");
+        assert!(e.message.contains("does not exist"), "{label}: {}", e.message);
+        let rep = apply(&r, fake());
+        assert_eq!(find(&rep, "g").disposition.label(), "blocked_by_dependency");
+        assert_eq!(find(&rep, "u").execution, Execution::Failed, "{label}");
+        assert!(account_cmds(&rep).is_empty(), "{label}: {:?}", account_cmds(&rep));
+    }
+}
+
+#[test]
+fn a_blocked_same_named_group_neither_refuses_the_user_in_plan_nor_in_apply() {
+    // The group never exists (blocked), so useradd's private group is fine.
+    let body = format!(
+        "{}{}{}",
+        skipped_command("skip"),
+        group("g", "app", "").replace(
+            "    type: group\n",
+            "    type: group\n    depends_on: [skip]\n"
+        ),
+        user("u", "app", "", "")
+    );
+    let r = recipe("f3-blocked-private", &body);
+    assert!(try_plan(&r, fake()).is_ok());
+    let rep = apply(&r, fake());
+    assert_eq!(find(&rep, "u").execution, Execution::Succeeded);
+    assert_eq!(account_cmds(&rep), ["/usr/sbin/useradd -M app"]);
 }
