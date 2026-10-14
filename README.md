@@ -225,7 +225,7 @@ Top-level fields: `version`, `vars`, `include`, `resources`, `handlers`.
 Resource types in v0.2: `file`, `directory`, `template`, `link`, `command`,
 `package`, `service`. Handlers are delayed `restart`/`reload` service actions.
 Since v1.2.0 Sinter also has two local
-account types, `group` and `user`: explicit `depends_on`, local database only,
+account types, `group` and `user`: order by declaration and `depends_on`, local database only,
 no renumbering, additive supplementary groups, `absent` without `-r`/`-f`. See
 the resource reference.
 

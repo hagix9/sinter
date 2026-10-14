@@ -2,6 +2,183 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Root can manage files and directories inside an unprivileged user's
+  directory, without `--sudo`.** When Sinter runs as root (a root login, or
+  `--sudo`), a path such as `/home/alice/page` is accepted when the first
+  untrusted ancestor is a plain directory of an unprivileged account (not
+  group- or other-writable, no ACL, nothing below it owned by a third account,
+  no symlink). Sinter's file operations on that path then run as that account
+  (`setpriv`; capabilities dropped), so the account's tree cannot be used to
+  make root write elsewhere. A new entry without `owner` belongs to the
+  account (except directly in `/tmp`, see the shared-directory entry below); an `owner` other than the account, an account without an
+  account-database entry, a backup of such a path, and a non-root login stay
+  refused. `setpriv` (util-linux) is required on the target for this case.
+
+- **Shared directories (`/tmp`, `/var/tmp`) work without any option.** A
+  directory that others can write is now accepted as a parent when it is owned
+  by root (without `--sudo` also by the connecting user) and has the sticky bit.
+  In such a directory Sinter manages only entries owned by root: an entry of
+  another account is not read, changed or removed (plan refuses it, apply fails
+  without touching it, audit reports an observation error), a regular file with
+  more than one hard link is refused, and an `owner` other than root is
+  refused. A new file or template is created exclusively — the content, owner,
+  mode and extended attributes are fixed on a private staging file, which is
+  then hard-linked at the final path (`ln -T`) — so a name another account took
+  first is never replaced; the resource fails and a rerun converges. An existing
+  file of root is still replaced by a rename. A converged file in `/tmp` plans
+  as unchanged and audits as compliant again. Directories that others can write
+  without the sticky bit, shared directories owned by another account, and
+  shared directories inside another account's tree stay refused. Below a
+  directory of another account in `/tmp` (for example `/tmp/alice/file`) the
+  operations still run as that account, but only when the recipe sets `owner`
+  (to that account): any local account can make `/tmp/app` before the recipe's
+  author does, and a `file`, `template` or `directory` there that would be
+  created, replaced or changed without an `owner` is refused in `plan` and
+  `apply` (before anything is written, even when the entry exists), because
+  what Sinter wrote would belong to that account, which could read it and
+  replace it. An `owner` of anyone else is refused too. A directory made by a
+  `directory` resource (root's), a root-owned directory such as `/opt/app`, and
+  `/home/<user>` are not affected; neither are links and `state: absent`
+  (no content, no owner). A refusal for a `sensitive` resource names no path and
+  no uid. What plan and audit report about such
+  an entry is the metadata the check itself saw (no second look that another
+  account could have changed), and apply confirms the entry is the observed
+  object before it changes or removes it. A `backup` of a directory directly in
+  a shared directory is refused (the recursive copy would read what other
+  accounts put there); files and links there, and directories elsewhere, are
+  backed up as before.
+
+### Fixed
+
+- **Packages signed with a key that is not installed no longer fail the
+  payload check.** The `rpm -qp` query that identifies a downloaded package
+  (name, version, architecture) now runs with `--nosignature`. Before, rpm's
+  `NOKEY` warning on stderr (a payload from a CentOS SIG, RDO or another
+  third-party repository whose key is not in the rpm database) made the stderr
+  guard refuse the whole transaction. Only the identity query changed:
+  whether a signature is trusted is still decided by dnf (`gpgcheck`) and the
+  payload digest.
+
+- **dnf install tables with a wrapped long package name are parsed.** dnf puts
+  a name that is wider than its column on a line of its own and the remaining
+  columns, indented, on the next. Sinter now joins a lone name token with the
+  following indented line of 4 or 5 columns into one row, which goes through
+  the same validation as any other row; anything else still fails closed.
+  Before, such a transaction (for example `openstack-neutron-periodic-workers`)
+  stopped with `cannot establish the install transaction set`.
+
+- **`plan` no longer fails a recipe that `apply` accepts when an account is
+  created by a resource that simply runs earlier (F-3).** A `file`, `directory`
+  or `template` whose `owner`/`group`, and a `user` whose `group`/`groups`, name
+  an account created by a `user`/`group` resource that comes earlier in the
+  execution order was a plan error (rc 4) unless the creator was listed in
+  `depends_on`, while `apply` succeeded. `plan` now defers such a resource
+  (unknown until apply), as it does for a listed dependency. Nothing else
+  changes: no dependency is added, the execution order and the blocking and
+  fail-fast rules are as before, and a creator that runs later, is `absent`,
+  is skipped by a false `when` or is blocked by a skipped dependency still
+  leaves the plan error (and `apply` fails
+  the same way). A `user` without `group` whose same-named group certainly runs
+  earlier is now refused in `plan`, as `apply` refuses it.
+- **A new link is created with `ln -sT`.** A directory symlink that someone had
+  put at the link path no longer makes the link appear inside the directory it
+  points to; an existing name is an error.
+- **A root login needs no `sudo`.** When the target user is already root
+  (effective UID 0 on the target), Sinter runs target operations directly, with
+  or without `--sudo`: no `sudo` executable is needed, and the environment and
+  working directory contract is the same as under `--sudo`. `--sudo` stays
+  accepted and changes nothing else; the backup store location still follows
+  the flag.
+- **`password_hash` follows the effective privilege.** A `user` resource with
+  `password_hash` is accepted for a root login as well as with `--sudo`, and
+  refused for a non-root user without `--sudo`, as before.
+- **A failing `sudo -n` is no longer reported as a non-Linux target.** The
+  connect error now says which it is: sudo not installed, a password required,
+  sudoers refusing the user, or a cause that was not identified. A cause is
+  named only when sudo's own sentence names it; otherwise one read check runs
+  without sudo, only on that failure path, to tell a sudo failure from an
+  unreadable `/etc/os-release`. What a command printed is never copied into the
+  message. A target whose `/etc/os-release` is unreadable is still reported as
+  a non-Linux target.
+
+### Changed
+
+- **A managed path is observed only through a parent path the trust check
+  accepted (`plan`, `apply` and `audit`).** The parent walk now comes first and
+  `stat`, link target and content digest of the path are read only after it;
+  inside another account's directory they are read as that account. A planted
+  symlink in a directory another account controls can no longer make root look
+  at a file only root can read, and nothing of such a file (mode, owner, size,
+  link text, whether a digest matched) can reach the output. `audit` reports
+  an observation error, never drift, for a path whose parent is refused. A path
+  below a parent that does not exist yet still plans as a creation. A refused
+  parent is now reported even for a resource that would have been unchanged.
+  Cost: one walk (a batched `stat` and `getfattr`) per directory of managed
+  paths in `plan` and `audit`, and one more walk per changed path in `apply`.
+- `plan` adds a `needs root: …` note (in the existing `notes`) to a package,
+  user or group change, and to creating, replacing or removing an entry in a
+  directory the target user cannot write, when the target user is not root and
+  `--sudo` was not given. Information only: no new status, field, exit code or
+  command.
+- With `--sudo` over SSH, connecting costs one more command (`id -u`, run
+  without sudo) to learn whether the user is root.
+
+- **Staging, publication and cleanup of a file or link are steps of one fixed
+  script (FS-2, I4/I5).** The private staging directory beside a file or link
+  was reached by separate commands (`mktemp`, `chown`, `chmod`, `dd`, `mv`,
+  `rm`, `rmdir`) that each named it again, so an account that can rename
+  entries in the parent could redirect a later command (measured on a real
+  host: 114 of 1500 runs with separate commands). They are now two calls of one
+  constant shell script that is part of the Sinter binary (`stage`, then
+  `publish`; `discard` when nothing is published), which opens the directory
+  once and keeps working on it. This is a limited exception to the argv-only
+  rule: the script is a constant, never built at run time, every value is an
+  argument, and its SHA-256 is pinned by a test (DESIGN §20, §23.5). Staging
+  and publishing a new file take two target commands instead of seven
+  (`mktemp`, `chown`, `chmod` twice, `dd`, `mv`, `rmdir` before; on the
+  scripted target, creating a file three directories deep costs 21 commands in
+  all, 25 before, including the observation walk described below). As root the
+  staging directory is identified by a
+  random group it was created with (`setpriv --regid`), so `setpriv` (util-linux)
+  is required on the target for a file or link that goes through staging; a
+  plain user needs a parent directory nobody else can rename entries in. The
+  script needs a POSIX `sh` and GNU-style `stat -c`, `mktemp -d -p`, `mv -T`,
+  `ln -T`, `find -P` and `readlink`, and a mounted `/proc` (run against dash and bash with GNU
+  coreutils; busybox and uutils coreutils are not tested). The
+  empty staging directory is removed by name only in such a directory;
+  elsewhere it is left and its path is reported. What is published and what
+  became of the staging directory are reported separately: an empty directory
+  left behind is a note and the publication stands, a second name of the file
+  left behind (or an unknown state) is a failed resource with `change:
+  changed` that names the path.
+  A publication step that ends with an exit code the script does not define is
+  reported as indeterminate (the file may have been published), never as "not
+  published"; a failed resource that blocks later ones through fail-fast, or a
+  failed dependency, no longer copies its reason into them when it is
+  sensitive.
+- **A directory with the setgid bit refuses the staging of a file or link.** A
+  directory made in it would inherit its group, so Sinter could not prove it is
+  its own. The resource fails before anything is written (`change: none`) and
+  names the reason. Nothing else changes for setgid directories: directories,
+  links that are new, metadata-only changes and removals there are managed as
+  before. Remove the setgid bit, or manage the file below another directory.
+
+### Known limitations
+
+- **A failed apply drops pending handler notifications.** Handlers run only
+  after every resource has succeeded; if an apply fails after a resource already
+  changed a file that notifies a handler, the handler does not run and the next
+  apply, finding the file correct, notifies nobody. Restart or reload the
+  affected services by hand after a failed apply.
+- **`package` cannot install from a `file://` repository.** dnf uses such a
+  repository in place and its payloads are not in the download snapshot, so the
+  install fails with `expected payload missing from snapshot`. Serve the
+  repository over HTTP(S).
+
 ## [1.3.0] - 2026-10-11
 
 Progress output for `plan`, `apply` and `audit`, on standard error only.

@@ -226,7 +226,7 @@ v0.2のresource typeは`file`、`directory`、`template`、`link`、
 `command`、`package`、`service`です。
 handlerは遅延実行されるserviceの`restart` / `reload`アクションです。
 v1.2.0以降、ローカルアカウント用の`group`と`user`の2種類があります。
-明示的な`depends_on`、ローカルデータベースのみ、番号の振り直しなし、補助グループは
+宣言順と`depends_on`による順序、ローカルデータベースのみ、番号の振り直しなし、補助グループは
 追加のみ、`absent`は`-r` / `-f`なし、という契約です。リソースリファレンスを参照して
 ください。
 
