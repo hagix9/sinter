@@ -2190,9 +2190,17 @@ pub fn build_remote_command_with(
 pub enum SudoFailure {
     /// The sudo binary is not there.
     Missing,
-    /// `sudo -n` reported that authentication would need a password (or, for
-    /// sudo-rs, interactive authentication). Under `-n` sudo reports this
-    /// both for a rule that needs a password and for a user with no rule.
+    /// `sudo -n` reported that authentication would need a password (sudo-rs:
+    /// interactive authentication). Seen on sudo 1.9.15p5 and 1.9.17p2: under
+    /// `-n` sudo 1.9 says this for a rule that needs a password, and also for
+    /// a user without a rule, for a rule that allows only another user or
+    /// other commands, and for a rule without Runas_Spec under a non-root
+    /// `runas_default`. Seen on sudo-rs 0.2.13: it said this for a rule that
+    /// needs a password, and worded no rule, a rule for another user only and
+    /// a rule for other commands only as a refusal (`NotAuthorized`). The
+    /// sentences "a terminal is required to read the password" and "no tty
+    /// present" are matched too but were not seen on the tested hosts. Other
+    /// sudo versions were not checked.
     PasswordRequired,
     /// sudoers (or sudo-rs) refused the user.
     NotAuthorized,
