@@ -709,8 +709,9 @@ fn closed_ports_are_refused_and_no_two_live_reservations_overlap() {
         }
     }
 
-    // The old fixture's failure: while one test still had to connect to its
-    // port, a sibling's `bind(0)` was handed the same number. Here many threads
+    // The old fixtures' failures (a sibling's `bind(0)` handed the same number;
+    // a forked child holding the closed listener, see `ClosedPorts`): the ports
+    // are probed, never bound, and a lease keeps reservations apart. Here many threads
     // reserve and "connect later" (a pause stands for the child's spawn) and a
     // registry of live reservations must never see a port twice, nor see any
     // port that another reservation could have taken.
@@ -744,4 +745,64 @@ fn closed_ports_are_refused_and_no_two_live_reservations_overlap() {
     for h in handles {
         h.join().unwrap();
     }
+}
+
+#[test]
+fn closed_ports_stay_refused_while_other_threads_fork_children() {
+    // The flake this guards: a child forked by another thread while a listener is
+    // open holds an inherited copy of the *listening* socket, keeps the "closed" port
+    // open after the parent closed it, and a connect to it succeeds. Every test here
+    // spawns children, so a fixture that binds sockets to find ports fails about once
+    // in some thousand connects; this makes the window large on purpose (it failed
+    // 17 of 17 runs against the bind(0) fixture). The fixture must never bind (see
+    // `ClosedPorts`).
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    // The spawners stop even if an assertion below panics.
+    struct Stop(Arc<AtomicBool>);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let _guard = Stop(stop.clone());
+    let spawners: Vec<_> = (0..3)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if let Ok(mut c) = Command::new("sleep")
+                        .arg("0.02")
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                    {
+                        let _ = c.wait();
+                    }
+                }
+            })
+        })
+        .collect();
+    let mut accepted = Vec::new();
+    for _ in 0..12_000 {
+        let held = ClosedPorts::reserve(4);
+        for &port in held.ports() {
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                accepted.push(port);
+            }
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    for s in spawners {
+        s.join().unwrap();
+    }
+    assert!(
+        accepted.is_empty(),
+        "a connection to a reserved closed port was accepted ({} times, ports {:?})",
+        accepted.len(),
+        &accepted[..accepted.len().min(8)]
+    );
 }

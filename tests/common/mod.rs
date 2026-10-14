@@ -1143,23 +1143,33 @@ pub fn require_synchronized_manager(unit: &str) -> bool {
     }
 }
 
-/// Loopback TCP ports with nothing listening, and no sibling test able to take
-/// them while the value lives.
+/// Loopback TCP ports with nothing listening, so that a connection is refused.
 ///
-/// "Pick a free port, close it, connect later" loses a race whenever another
-/// `bind(0)` runs in between: the kernel may hand the port to a sibling test of
-/// the same binary, which then listens or connects on it, and the "refused"
-/// connection succeeds. Holding the sockets is no answer: a `TcpListener` accepts
-/// the connection, and on BSD/macOS a bound socket that is not listening drops
-/// the SYN instead of refusing it (the connect times out), so no held socket can
-/// make a port both reserved and refused on every OS.
+/// The ports are taken from the privileged block (1..=64), which the kernel
+/// never hands out for `bind(0)`, and each one is probed: it is used only if a
+/// connection to it is refused right now. **No socket is bound**, and that is
+/// the point.
 ///
-/// So the window is closed by exclusion instead: a process-wide lease is taken
-/// before the ports are chosen and released when the value drops, so while any
-/// test connects to its closed ports no other test of the binary can bind (or
-/// choose) an ephemeral port. Keep the value alive until the process that
-/// connects has exited. What this cannot exclude is an unrelated *process*
-/// binding the same port in that window.
+/// The earlier fixture picked ephemeral ports with `bind(0)`, closed the
+/// listeners and connected later. On macOS that failed about once in a few dozen
+/// runs of `progress_tty`/`progress_plain_output`, and not because a sibling took
+/// the port: every test here spawns `sinter` under a pseudo-terminal, and a child
+/// forked by *another thread* while the listeners are open holds an inherited
+/// copy of a **listening** socket (during fork→exec; on macOS also between
+/// `socket()` and the second step that sets close-on-exec, as it has no
+/// `SOCK_CLOEXEC`). If the parent closes its copy in that interval, the "closed"
+/// port still listens in the child, a connect is accepted into its backlog and
+/// reset when the child goes away, and a test that expects "Connection refused"
+/// sees `Ok(TcpStream)` (or an SSH banner failure). A process-wide lease (the
+/// previous fix) cannot exclude it: the forking threads do not take the lease.
+/// The effect was reproduced in isolation (a few accepts per 100,000 connects
+/// with concurrent spawns, none without) and is removed by never binding; see
+/// `SINTER_V140_PROGRESS_TEST_STABILIZATION` and the regression test
+/// `closed_ports_stay_refused_while_other_threads_fork_children`.
+///
+/// The lease is kept: one holder at a time, released when the value drops, so
+/// two live reservations never share a port. Keep the value alive until the
+/// process that connects has exited.
 pub struct ClosedPorts {
     ports: Vec<u16>,
     _lease: std::sync::MutexGuard<'static, ()>,
@@ -1169,18 +1179,31 @@ static PORT_LEASE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl ClosedPorts {
     /// Takes the lease, so a thread may hold one `ClosedPorts` at a time.
+    ///
+    /// Panics (naming the ports it tried) when fewer than `n` of the first 64
+    /// ports refuse a connection: a machine that listens on all of them has
+    /// something the test cannot share the loopback with.
     pub fn reserve(n: usize) -> Self {
         // A panicking test must not poison the lease for the others.
         let lease = PORT_LEASE.lock().unwrap_or_else(|e| e.into_inner());
-        // All listeners stay open until every port is chosen, so the ports are
-        // distinct; they are closed before returning, so nothing listens.
-        let listeners: Vec<_> = (0..n)
-            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
-            .collect();
-        let ports = listeners
-            .iter()
-            .map(|l| l.local_addr().unwrap().port())
-            .collect();
+        let mut ports = Vec::with_capacity(n);
+        let mut busy = Vec::new();
+        for port in 1u16..=64 {
+            if ports.len() == n {
+                break;
+            }
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500))
+            {
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => ports.push(port),
+                other => busy.push((port, format!("{other:?}"))),
+            }
+        }
+        assert_eq!(
+            ports.len(),
+            n,
+            "fewer than {n} closed loopback ports among 1..=64; not refused: {busy:?}"
+        );
         ClosedPorts {
             ports,
             _lease: lease,
