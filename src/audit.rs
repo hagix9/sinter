@@ -266,7 +266,7 @@ impl AuditReport {
 use crate::expressions::EvalVal;
 use crate::progress::{ItemRef, Stage, StageOutcome, StageTracker};
 use crate::resources::{ev_bool, ev_str, sha256_hex, PackageState};
-use crate::targetfs::ObjKind;
+use crate::targetfs::{absent_stat, ObjKind, Observed};
 use crate::value::Value;
 
 /// Run a read-only Configuration Audit over the model held by `engine`.
@@ -476,6 +476,53 @@ fn obs_or_error<T>(
     }
 }
 
+/// L-2. Observe a managed path only through a parent path the walk of
+/// DESIGN §23 accepted, as the account inside another account's tree. A parent
+/// chain that does not exist means the path is absent. A refused parent is an
+/// observation failure (never drift, never guessed at): nothing behind it is
+/// read, so root does not follow a path component another account controls.
+/// The walk and the observation are read-only.
+fn gated_obs<T>(
+    engine: &mut Engine,
+    path: &str,
+    absent: Option<T>,
+    observe: impl FnOnce(&mut crate::targetfs::TargetFs) -> Result<T>,
+) -> Result<T> {
+    match engine.fs.observed(path, observe)? {
+        Observed::Value(v) => Ok(v),
+        Observed::ParentAbsent => absent.ok_or_else(|| {
+            SinterError::apply(format!(
+                "a parent of {} disappeared during observation",
+                path
+            ))
+        }),
+        // Directly in a shared directory: the entry was not there when the
+        // gate looked, so nothing of what appeared since is read.
+        Observed::Gone => Err(SinterError::apply(format!(
+            "{} changed during observation (it was not there when it was checked)",
+            path
+        ))),
+        Observed::Refused(e) => Err(SinterError::apply(format!(
+            "{} was not observed: Sinter's parent path check refuses it ({})",
+            path, e.message
+        ))),
+    }
+}
+
+/// L-2 for the `lstat` of the path itself. Directly in a shared directory the
+/// observation is the entry gate's own `lstat` (FS2-A1): the metadata reported
+/// is that of the entry the gate judged, never of one that appeared after it.
+fn gated_stat(engine: &mut Engine, path: &str) -> Result<crate::targetfs::Stat> {
+    match engine.fs.observed_stat(path)? {
+        Observed::Value(st) => Ok(st),
+        Observed::ParentAbsent | Observed::Gone => Ok(absent_stat()),
+        Observed::Refused(e) => Err(SinterError::apply(format!(
+            "{} was not observed: Sinter's parent path check refuses it ({})",
+            path, e.message
+        ))),
+    }
+}
+
 /// Audit a `file` resource (and, via `audit_template`, the desired-state side
 /// of a `template`). `desired` is the resolved desired content: `Some(bytes)`
 /// when the recipe pins content, `None` when existing content is preserved.
@@ -507,7 +554,7 @@ fn audit_file_impl(
         r.reason = Some("file state must be present or absent".to_string());
         return r;
     }
-    let stat = match obs_or_error(res, sensitive, engine.fs.inspect(&path)) {
+    let stat = match obs_or_error(res, sensitive, gated_stat(engine, &path)) {
         Ok(s) => s,
         Err(r) => return *r,
     };
@@ -589,7 +636,11 @@ fn audit_file_impl(
         // "observed hash differs" (Drift). TargetFs::sha256 collapses a
         // non-zero exit into None; treat that as an observation failure here,
         // not as a mismatch.
-        match obs_or_error(res, sensitive, engine.fs.sha256(&path)) {
+        match obs_or_error(
+            res,
+            sensitive,
+            gated_obs(engine, &path, None, |fs| fs.sha256(&path)),
+        ) {
             Ok(Some(remote)) => {
                 if remote != desired_sha {
                     details.push(AuditDriftDetail::new(
@@ -768,7 +819,7 @@ fn audit_directory(
         r.reason = Some("directory state must be present or absent".to_string());
         return r;
     }
-    let stat = match obs_or_error(res, sensitive, engine.fs.inspect(&path)) {
+    let stat = match obs_or_error(res, sensitive, gated_stat(engine, &path)) {
         Ok(s) => s,
         Err(r) => return *r,
     };
@@ -858,7 +909,7 @@ fn audit_link(
         Ok(t) => t,
         Err(r) => return *r,
     };
-    let stat = match obs_or_error(res, sensitive, engine.fs.inspect(&path)) {
+    let stat = match obs_or_error(res, sensitive, gated_stat(engine, &path)) {
         Ok(s) => s,
         Err(r) => return *r,
     };
@@ -909,7 +960,11 @@ fn audit_link(
             // Read the link's target string only. A dangling link whose target
             // string matches is compliant with the link resource itself; the
             // target object's existence is not implicitly audited (§5).
-            let cur = match obs_or_error(res, link_sensitive, engine.fs.readlink(&path)) {
+            let cur = match obs_or_error(
+                res,
+                link_sensitive,
+                gated_obs(engine, &path, None, |fs| fs.readlink(&path)),
+            ) {
                 Ok(c) => c,
                 Err(r) => return *r,
             };

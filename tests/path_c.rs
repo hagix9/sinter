@@ -9,7 +9,9 @@
 //!
 //! * the exact command order and counts (WP-P0 accounting);
 //! * that a walk is fresh each time and that staging and publication stay
-//!   behind their own complete walk (Walk 1 / Walk 2 / Walk 3);
+//!   behind their own complete walk (Walk 1 / Walk 2 / Walk 3), after the walk
+//!   that gates the observation of the path itself (Walk 0, L-1: nothing of
+//!   the path is observed through a parent the walk has not accepted);
 //! * that nothing past a failed `stat` gate is queried and that a dispatched
 //!   batch is never retried through the sequential walk;
 //! * that the branch follows the target's actual `getfacl` capability only,
@@ -76,6 +78,10 @@ struct Cmd {
 }
 
 impl Cmd {
+    /// One step of the fixed staging script (FS-2): `sh -c <script> sh <op> ...`.
+    fn is_fsstage(&self, op: &str) -> bool {
+        self.program == "sh" && self.args.get(3).map(String::as_str) == Some(op)
+    }
     fn is_stat_batch(&self) -> bool {
         self.program == "stat"
             && self
@@ -196,7 +202,9 @@ struct Case {
     body: String,
     dirs: Vec<&'static str>,
     seed_file: Option<(&'static str, &'static str)>,
-    /// (getfacl absent, getfacl present) resource commands.
+    /// (getfacl absent, getfacl present) resource commands. Each resource
+    /// spends one more walk than before L-1 (2 commands batched, 3 per
+    /// ancestor sequential): the walk that gates the observation of its path.
     expected: (usize, usize),
 }
 
@@ -207,14 +215,14 @@ fn cases() -> Vec<Case> {
             body: file_res("f", NEW_FILE, "x"),
             dirs: vec!["/etc/perf"],
             seed_file: None,
-            expected: (25, 46),
+            expected: (21, 49),
         },
         Case {
             name: "existing replacement",
             body: file_res("f", "/etc/perf/old.conf", "new"),
             dirs: vec!["/etc/perf"],
             seed_file: Some(("/etc/perf/old.conf", "old\n")),
-            expected: (26, 48),
+            expected: (22, 51),
         },
         Case {
             name: "100 new files",
@@ -223,21 +231,21 @@ fn cases() -> Vec<Case> {
                 .collect(),
             dirs: vec!["/etc/perf"],
             seed_file: None,
-            expected: (2500, 4600),
+            expected: (2100, 4900),
         },
         Case {
             name: "new file, 6 ancestors",
             body: file_res("f", "/etc/a/b/c/d/new.conf", "x"),
             dirs: vec!["/etc/a", "/etc/a/b", "/etc/a/b/c", "/etc/a/b/c/d"],
             seed_file: None,
-            expected: (25, 73),
+            expected: (21, 85),
         },
         Case {
             name: "new directory",
             body: dir_res("/etc/perf/newdir"),
             dirs: vec!["/etc/perf"],
             seed_file: None,
-            expected: (9, 16),
+            expected: (11, 25),
         },
     ]
 }
@@ -252,7 +260,12 @@ fn case_target(c: &Case, getfacl: bool) -> FakeTarget {
 
 #[test]
 fn command_counts_without_getfacl_drop_to_the_path_c_targets() {
-    // Before Path C: 37, 38, 3700, 55, 13 (WP-P0 / WP-P2 baselines).
+    // Before Path C: 37, 38, 3700, 55, 13 (WP-P0 / WP-P2 baselines). Path C:
+    // 25, 26, 2500, 25, 9; Walk 0 (L-1) adds one batched walk (2) to each.
+    // FS-2 (I4/I5): staging, publication and cleanup of a file are two calls of
+    // the fixed staging script (`stage`, `publish`) instead of eight commands,
+    // so every file costs six fewer: 21, 22, 2100, 21, 11 (a directory is not
+    // staged).
     for c in cases() {
         let dir = tempfile::tempdir().unwrap();
         let p = recipe(&dir, &c.body);
@@ -265,7 +278,9 @@ fn command_counts_without_getfacl_drop_to_the_path_c_targets() {
 
 #[test]
 fn command_counts_with_getfacl_are_exactly_unchanged() {
-    // The sequential walk is untouched: 46, 48, 4600, 73, 16.
+    // The sequential walk is untouched: 46, 48, 4600, 73, 16 before Walk 0
+    // (L-1), which adds one such walk (3 commands per ancestor) to each.
+    // FS-2 (I4/I5) saves six commands per staged file: 49, 51, 4900, 85, 25.
     for c in cases() {
         let dir = tempfile::tempdir().unwrap();
         let p = recipe(&dir, &c.body);
@@ -291,7 +306,7 @@ fn statistics_agree_with_the_log_for_batched_walks() {
         "every command under sudo"
     );
     let batches = r.trace.iter().filter(|c| c.is_stat_batch()).count();
-    assert_eq!(batches, 3, "one stat batch per walk");
+    assert_eq!(batches, 4, "one stat batch per walk");
     let stat_total = r.stats.count_program("stat");
     let single = r
         .trace
@@ -314,8 +329,8 @@ fn each_walk_is_a_fresh_stat_batch_then_getfattr_batch_in_that_order() {
 
     let stat_at = position(&r.trace, Cmd::is_stat_batch);
     let getfattr_at = position(&r.trace, is_walk_getfattr);
-    assert_eq!(stat_at.len(), 3, "three walks");
-    assert_eq!(getfattr_at.len(), 3, "three getfattr batches");
+    assert_eq!(stat_at.len(), 4, "Walk 0 (observation) and Walks 1 to 3");
+    assert_eq!(getfattr_at.len(), 4, "four getfattr batches");
     for (s, g) in stat_at.iter().zip(&getfattr_at) {
         assert_eq!(*g, *s + 1, "getfattr directly follows its own stat batch");
         assert_eq!(
@@ -326,25 +341,33 @@ fn each_walk_is_a_fresh_stat_batch_then_getfattr_batch_in_that_order() {
     }
     // No walk observation survives to the next walk: every walk dispatches its
     // own pair (the pairs above are all distinct requests in the log).
-    let stage = position(&r.trace, |c| c.program == "mktemp");
-    let publish = position(&r.trace, |c| c.program == "mv");
+    let stage = position(&r.trace, |c| c.is_fsstage("stage"));
+    let publish = position(&r.trace, |c| c.is_fsstage("publish"));
     assert_eq!(stage.len(), 1);
     assert_eq!(publish.len(), 1);
-    // Walk 2 is complete (its getfattr batch is the second) before staging.
-    assert!(getfattr_at[1] < stage[0], "Walk 2 completes before staging");
+    // Walk 0 gates the observation of the file: it precedes the file's stat.
+    let file_stat = position(&r.trace, |c| {
+        c.program == "stat" && c.args.last().map(String::as_str) == Some(NEW_FILE)
+    });
     assert!(
-        getfattr_at[0] < getfattr_at[1] && stage[0] < stat_at[2],
+        getfattr_at[0] < file_stat[0],
+        "Walk 0 completes before the file is observed"
+    );
+    // Walk 2 is complete (its getfattr batch is the third) before staging.
+    assert!(getfattr_at[2] < stage[0], "Walk 2 completes before staging");
+    assert!(
+        getfattr_at[1] < getfattr_at[2] && stage[0] < stat_at[3],
         "Walk 3 is a new walk after staging"
     );
     // Walk 3 is complete before publication.
     assert!(
-        getfattr_at[2] < publish[0],
+        getfattr_at[3] < publish[0],
         "Walk 3 completes before publication"
     );
     // Nothing is written before Walk 2 and nothing is published before Walk 3.
-    for mutation in ["mktemp", "dd", "chown", "chmod", "mv"] {
+    for mutation in ["sh", "mktemp", "dd", "chown", "chmod", "mv"] {
         for at in position(&r.trace, |c| c.program == mutation) {
-            assert!(at > getfattr_at[1], "{mutation} runs after Walk 2");
+            assert!(at > getfattr_at[2], "{mutation} runs after Walk 2");
         }
     }
 }
@@ -353,19 +376,26 @@ fn each_walk_is_a_fresh_stat_batch_then_getfattr_batch_in_that_order() {
 fn a_failing_walk_1_stops_everything_before_any_mutation() {
     let dir = tempfile::tempdir().unwrap();
     let p = new_file_recipe(&dir);
-    // First stat is the file's own inspection; the second is Walk 1's batch.
-    let t = target(false, &["/etc/perf"])
-        .with_observations("stat", vec![absent(NEW_FILE), exited(1, "", "boom\n")]);
+    // The first stat is Walk 0's batch, the second the file's own inspection
+    // and the third Walk 1's batch (it fails).
+    let t = target(false, &["/etc/perf"]).with_observations(
+        "stat",
+        vec![
+            stat_batch_ok(&NEW_FILE_ANCESTORS),
+            absent(NEW_FILE),
+            exited(1, "", "boom\n"),
+        ],
+    );
     let r = run(&p, Mode::Apply, false, t);
     assert!(r.failed);
     assert!(r
         .trace
         .iter()
-        .all(|c| !matches!(c.program.as_str(), "mktemp" | "dd" | "mv" | "chown")));
+        .all(|c| !matches!(c.program.as_str(), "sh" | "mktemp" | "dd" | "mv" | "chown")));
     assert_eq!(
         position(&r.trace, is_walk_getfattr).len(),
-        0,
-        "no getfattr after a failed stat batch"
+        1,
+        "only Walk 0's getfattr: none after a failed stat batch"
     );
 }
 
@@ -373,10 +403,12 @@ fn a_failing_walk_1_stops_everything_before_any_mutation() {
 fn a_failing_walk_2_stat_batch_blocks_staging() {
     let dir = tempfile::tempdir().unwrap();
     let p = new_file_recipe(&dir);
-    // stat #1 file, #2 Walk 1 batch, #3 file, #4 Walk 2 batch (fails).
+    // stat #1 Walk 0 batch, #2 file, #3 Walk 1 batch, #4 file, #5 Walk 2
+    // batch (fails).
     let t = target(false, &["/etc/perf"]).with_observations(
         "stat",
         vec![
+            stat_batch_ok(&NEW_FILE_ANCESTORS),
             absent(NEW_FILE),
             stat_batch_ok(&NEW_FILE_ANCESTORS),
             absent(NEW_FILE),
@@ -387,15 +419,15 @@ fn a_failing_walk_2_stat_batch_blocks_staging() {
     assert!(r.failed);
     assert_eq!(
         position(&r.trace, Cmd::is_stat_batch).len(),
-        2,
-        "Walk 1 and the failed Walk 2"
+        3,
+        "Walks 0 and 1 and the failed Walk 2"
     );
     assert_eq!(
         position(&r.trace, is_walk_getfattr).len(),
-        1,
+        2,
         "no getfattr after the failed Walk 2 stat"
     );
-    for mutation in ["mktemp", "dd", "mv", "chown"] {
+    for mutation in ["sh", "mktemp", "dd", "mv", "chown"] {
         assert!(
             position(&r.trace, |c| c.program == mutation).is_empty(),
             "{mutation}"
@@ -427,22 +459,24 @@ fn walk_2_getfattr_failure_or_unsafe_attribute_blocks_staging() {
     ] {
         let dir = tempfile::tempdir().unwrap();
         let p = new_file_recipe(&dir);
-        let t = target(false, &["/etc/perf"])
-            .with_observations("getfattr", vec![exited(0, "", ""), second]);
+        let t = target(false, &["/etc/perf"]).with_observations(
+            "getfattr",
+            vec![exited(0, "", ""), exited(0, "", ""), second],
+        );
         let r = run(&p, Mode::Apply, false, t);
         assert!(r.failed, "{what}");
         assert!(
-            position(&r.trace, |c| c.program == "mktemp").is_empty(),
+            position(&r.trace, |c| c.is_fsstage("stage")).is_empty(),
             "{what}: staging must not begin"
         );
         assert!(
-            position(&r.trace, |c| c.program == "mv").is_empty(),
+            position(&r.trace, |c| c.is_fsstage("publish")).is_empty(),
             "{what}"
         );
         assert_eq!(
             position(&r.trace, is_walk_getfattr).len(),
-            2,
-            "{what}: no third walk, no retry"
+            3,
+            "{what}: no fourth walk, no retry"
         );
     }
 }
@@ -464,18 +498,23 @@ fn walk_3_is_live_and_blocks_publication() {
         let p = new_file_recipe(&dir);
         let t = target(false, &["/etc/perf"]).with_observations(
             "getfattr",
-            vec![exited(0, "", ""), exited(0, "", ""), third],
+            vec![
+                exited(0, "", ""),
+                exited(0, "", ""),
+                exited(0, "", ""),
+                third,
+            ],
         );
         let r = run(&p, Mode::Apply, false, t);
         assert!(r.failed);
-        assert_eq!(position(&r.trace, is_walk_getfattr).len(), 3);
+        assert_eq!(position(&r.trace, is_walk_getfattr).len(), 4);
         assert_eq!(
-            position(&r.trace, |c| c.program == "mktemp").len(),
+            position(&r.trace, |c| c.is_fsstage("stage")).len(),
             1,
             "staging happened after Walk 2"
         );
         assert!(
-            position(&r.trace, |c| c.program == "mv").is_empty(),
+            position(&r.trace, |c| c.is_fsstage("publish")).is_empty(),
             "nothing published"
         );
     }
@@ -488,7 +527,7 @@ fn walk_3_stat_gate_failure_also_blocks_publication() {
     let dir = tempfile::tempdir().unwrap();
     let p = new_file_recipe(&dir);
     let healthy = run(&p, Mode::Apply, false, target(false, &["/etc/perf"]));
-    let third_batch = position(&healthy.trace, Cmd::is_stat_batch)[2];
+    let third_batch = position(&healthy.trace, Cmd::is_stat_batch)[3];
     // Replace every earlier stat with the default behaviour by re-serving the
     // scripted filesystem's own answers is not possible through the queue, so
     // script the whole prefix of single-operand stats explicitly.
@@ -522,17 +561,17 @@ fn walk_3_stat_gate_failure_also_blocks_publication() {
     let r = run(&p, Mode::Apply, false, t);
     assert!(r.failed);
     assert_eq!(
-        position(&r.trace, |c| c.program == "mktemp").len(),
+        position(&r.trace, |c| c.is_fsstage("stage")).len(),
         1,
         "staged after Walk 2"
     );
     assert!(
-        position(&r.trace, |c| c.program == "mv").is_empty(),
+        position(&r.trace, |c| c.is_fsstage("publish")).is_empty(),
         "never published"
     );
     assert_eq!(
         position(&r.trace, is_walk_getfattr).len(),
-        2,
+        3,
         "no getfattr after the failed Walk 3 stat"
     );
 }
@@ -558,8 +597,8 @@ fn the_getfacl_capability_alone_selects_the_branch() {
         };
         let without = run(&p, Mode::Apply, false, build(false));
         let with = run(&p, Mode::Apply, false, build(true));
-        assert_eq!(without.commands, 25, "{name}: batched");
-        assert_eq!(with.commands, 46, "{name}: sequential");
+        assert_eq!(without.commands, 21, "{name}: batched");
+        assert_eq!(with.commands, 49, "{name}: sequential");
     }
 }
 
@@ -643,7 +682,7 @@ fn an_unsafe_ancestor_refuses_in_every_position_and_kind_like_the_sequential_wal
                 let p = recipe(&dir, &file_res("f", file, "x"));
                 let r = run(&p, Mode::Apply, false, t);
                 assert!(r.failed, "getfacl={getfacl} {kind} at {ai}");
-                for mutation in ["mktemp", "dd", "mv", "chown"] {
+                for mutation in ["sh", "mktemp", "dd", "mv", "chown"] {
                     assert!(
                         position(&r.trace, |c| c.program == mutation).is_empty(),
                         "{mutation} must not run: getfacl={getfacl} {kind} at {ai}"
@@ -667,9 +706,11 @@ fn an_unsafe_ancestor_refuses_in_every_position_and_kind_like_the_sequential_wal
 }
 
 #[test]
-fn plan_runs_the_apply_walk_only_for_a_planned_change() {
+fn plan_walks_once_per_resource_and_a_planned_change_reuses_that_walk() {
     // WP-2: plan runs apply's parent path check for a change it plans, through
-    // the same walk (batched without getfacl, sequential with it).
+    // the same walk (batched without getfacl, sequential with it). L-1: that
+    // walk also gates the observation of the path, so it runs first and a
+    // change does not walk a second time.
     let dir = tempfile::tempdir().unwrap();
     let p = new_file_recipe(&dir);
     for (getfacl, walk) in [(false, 2), (true, 9)] {
@@ -685,17 +726,24 @@ fn plan_runs_the_apply_walk_only_for_a_planned_change() {
             r.debug
         );
     }
-    // Nothing to change: no walk.
+    // Nothing to change: still the one walk, because nothing of the file is
+    // observed through a parent the walk has not accepted.
     let mut t = target(false, &["/etc/perf"]);
     t.fs.as_mut()
         .unwrap()
         .put_file(NEW_FILE, b"x\n", 0o644, 0, 0);
     let r = run(&p, Mode::Plan, false, t);
     assert_eq!(r.status, AggregateStatus::Success);
-    assert!(r
-        .trace
-        .iter()
-        .all(|c| !c.is_stat_batch() && c.getfattr_operands().is_none()));
+    assert_eq!(position(&r.trace, Cmd::is_stat_batch).len(), 1);
+    assert_eq!(position(&r.trace, is_walk_getfattr).len(), 1);
+    let walk_at = position(&r.trace, Cmd::is_stat_batch)[0];
+    let file_at = position(&r.trace, |c| {
+        c.program == "stat" && c.args.last().map(String::as_str) == Some(NEW_FILE)
+    })[0];
+    assert!(
+        walk_at < file_at,
+        "the walk precedes the file's observation"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -779,7 +827,7 @@ fn the_batched_walk_does_not_change_ownership_or_mutation_behaviour_of_the_resou
             .commands
             .iter()
             .filter(|c| {
-                ["mktemp", "dd", "chown", "chmod", "mv", "rmdir"]
+                ["sh", "mktemp", "dd", "chown", "chmod", "mv", "rmdir"]
                     .contains(&c.program.rsplit('/').next().unwrap())
             })
             .map(|c| format!("{} {}", c.program, c.args.join(" ")))

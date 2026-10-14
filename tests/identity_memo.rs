@@ -106,10 +106,14 @@ fn apply(path: &Path, target: FakeTarget) -> RunReport {
 
 /// The `chown` operands of an apply: what the engine resolved the identity to.
 fn chowns(r: &RunReport) -> Vec<String> {
+    // FS-2: the owner is applied inside the staging script's `stage` step, whose
+    // arguments are `stage <dir> <dir-id> <mode> <uid> <gid> ...`.
     r.commands
         .iter()
-        .filter(|c| c.program.ends_with("chown"))
-        .map(|c| c.args.join(" "))
+        .filter(|c| {
+            c.program.ends_with("/sh") && c.args.get(3).map(String::as_str) == Some("stage")
+        })
+        .map(|c| format!("{}:{}", c.args[7], c.args[8]))
         .collect()
 }
 

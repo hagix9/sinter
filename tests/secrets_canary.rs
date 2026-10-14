@@ -298,7 +298,7 @@ fn wrote_file(rep: &RunReport) -> bool {
     rep.commands.iter().any(|c| {
         matches!(
             c.program.rsplit('/').next().unwrap_or(""),
-            "dd" | "mv" | "tee" | "rm"
+            "sh" | "dd" | "mv" | "tee" | "rm"
         )
     })
 }

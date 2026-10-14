@@ -275,8 +275,10 @@ fn sensitive_requests_are_redacted_in_the_statistics() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn baseline_compliant_owned_file_costs_four_commands_in_plan_and_audit() {
-    // stat, getent passwd, getent group, sha256sum.
+fn baseline_compliant_owned_file_costs_six_commands_in_plan_and_audit() {
+    // The parent walk that gates the observation of the file (L-1/L-2: one
+    // batched `stat` and one batched `getfattr`), then stat, getent passwd,
+    // getent group, sha256sum. Before the gate: four.
     let (body, t) = shared_owner_files(1);
     let dir = tempfile::tempdir().unwrap();
     let path = recipe(&dir, &body);
@@ -285,11 +287,12 @@ fn baseline_compliant_owned_file_costs_four_commands_in_plan_and_audit() {
     let audit = run_audit_of(&path, false, t);
     for (what, o) in [("plan", &plan), ("audit", &audit)] {
         assert_eq!(o.setup, SETUP_COMMANDS, "{what}");
-        assert_eq!(o.stats.total(), SETUP_COMMANDS + 4, "{what}");
-        assert_eq!(o.stats.count_program("stat"), 1, "{what}");
+        assert_eq!(o.stats.total(), SETUP_COMMANDS + 6, "{what}");
+        assert_eq!(o.stats.count_program("stat"), 2, "{what}: walk + file");
+        assert_eq!(o.stats.count_program("getfattr"), 1, "{what}: walk");
         assert_eq!(o.stats.count_program("getent"), 2, "{what}");
         assert_eq!(o.stats.count_program("sha256sum"), 1, "{what}");
-        assert_eq!(o.stats.count_scope("file"), 4, "{what}");
+        assert_eq!(o.stats.count_scope("file"), 6, "{what}");
         assert_stats_agree_with_log(o);
     }
 }
@@ -306,6 +309,11 @@ fn baseline_shared_owner_and_group_are_looked_up_once_per_run() {
     //   getent: 2n -> 2      per-resource commands: 4n -> 2n + 2
     //
     // (`stat` and `sha256sum` are unchanged: one each per file.)
+    //
+    // L-1/L-2: the parent walk that gates the observation of each path is
+    // shared by the paths of one directory until something is mutated (plan
+    // and audit never mutate), so the files here cost one walk (a batched
+    // `stat` and `getfattr`) in all: per-resource commands 2n + 2 -> 2n + 4.
     for n in [1usize, 5, 20] {
         let (body, t) = shared_owner_files(n);
         let dir = tempfile::tempdir().unwrap();
@@ -314,9 +322,10 @@ fn baseline_shared_owner_and_group_are_looked_up_once_per_run() {
         let audit = run_audit_of(&path, false, t);
         for (what, o) in [("plan", &plan), ("audit", &audit)] {
             let per_resource = o.stats.total() - SETUP_COMMANDS;
-            assert_eq!(per_resource, 2 * n + 2, "{what} n={n}");
+            assert_eq!(per_resource, 2 * n + 4, "{what} n={n}");
             assert_eq!(o.stats.count_program("getent"), 2, "{what} n={n}");
-            assert_eq!(o.stats.count_program("stat"), n, "{what} n={n}");
+            assert_eq!(o.stats.count_program("stat"), n + 1, "{what} n={n}: + walk");
+            assert_eq!(o.stats.count_program("getfattr"), 1, "{what} n={n}: walk");
             assert_eq!(o.stats.count_program("sha256sum"), n, "{what} n={n}");
         }
     }
@@ -328,7 +337,8 @@ fn baseline_shared_owner_and_group_are_looked_up_once_per_run() {
 
 #[test]
 fn budget_plan_and_audit_of_compliant_owned_files() {
-    // Ceiling: setup plus four commands per resource (today's exact cost).
+    // Ceiling: setup plus two commands per resource and the shared walk
+    // (today's exact cost).
     for n in [1usize, 10, 40] {
         let (body, t) = shared_owner_files(n);
         let dir = tempfile::tempdir().unwrap();
@@ -338,10 +348,10 @@ fn budget_plan_and_audit_of_compliant_owned_files() {
         let noop_apply = run_plan_or_apply(&path, Mode::Apply, false, t);
         for (what, o) in [("plan", &plan), ("audit", &audit)] {
             assert!(
-                o.stats.total() <= SETUP_COMMANDS + 4 * n,
+                o.stats.total() <= SETUP_COMMANDS + 2 * n + 4,
                 "{what} n={n}: {} commands exceed the budget {}",
                 o.stats.total(),
-                SETUP_COMMANDS + 4 * n
+                SETUP_COMMANDS + 2 * n + 4
             );
         }
         // A converged apply must not cost more than the plan that preceded it.
@@ -355,7 +365,7 @@ fn budget_plan_and_audit_of_compliant_owned_files() {
             .stats
             .commands
             .iter()
-            .any(|c| matches!(c.program.as_str(), "mv" | "dd" | "chmod" | "chown"));
+            .any(|c| matches!(c.program.as_str(), "sh" | "mv" | "dd" | "chmod" | "chown"));
         assert!(!first_change, "a converged apply must not mutate");
     }
 }
@@ -411,13 +421,14 @@ fn budget_mixed_resources_plan() {
 
 #[test]
 fn budget_file_creation_apply() {
-    // Creating a file three directories deep. Today: 25 commands (37 before
-    // Path C, performance WP-P2), of which only the staged write is productive;
-    // the rest is observation, chiefly the trusted-parent walk that runs three
-    // times. This scripted target has no `getfacl`, so each walk is one batched
-    // `stat` plus one batched `getfattr` (12 `stat` in all, 3 `getfattr`; it was
-    // one `stat` and one `getfattr` per ancestor: 18 and 9). A target that has
-    // `getfacl` keeps the sequential walk (`tests/path_c.rs` pins 46 for it).
+    // Creating a file three directories deep. Today: 27 commands (37 before
+    // Path C, performance WP-P2; 25 before the walk that gates the observation
+    // of the path, L-1), of which only the staged write is productive; the rest
+    // is observation, chiefly the trusted-parent walk that runs four times. This
+    // scripted target has no `getfacl`, so each walk is one batched `stat` plus
+    // one batched `getfattr` (13 `stat` in all, 4 `getfattr`; it was one `stat`
+    // and one `getfattr` per ancestor). A target that has `getfacl` keeps the
+    // sequential walk (`tests/path_c.rs` pins 55 for it).
     // The productive operations are exact; the totals are ceilings so that a
     // reduction passes.
     let dir = tempfile::tempdir().unwrap();
@@ -426,25 +437,30 @@ fn budget_file_creation_apply() {
         "  - id: f\n    type: file\n    with:\n      path: /etc/perf/new.conf\n      content: \"x\\n\"\n      owner: root\n      group: root\n      mode: \"0644\"\n",
     );
     let o = run_plan_or_apply(&path, Mode::Apply, false, target());
+    // FS-2: staging, publication and cleanup are two calls of the fixed
+    // staging script (`stage`, then `publish`), which replace the former
+    // mktemp / chmod / dd / chown / mv / rmdir sequence; nothing else mutates.
     for (program, n) in [
-        ("mktemp", 1),
-        ("dd", 1),
-        ("mv", 1),
-        ("rmdir", 1),
-        ("chown", 1),
+        ("sh", 2),
+        ("mktemp", 0),
+        ("dd", 0),
+        ("mv", 0),
+        ("rmdir", 0),
+        ("chown", 0),
+        ("chmod", 0),
     ] {
         assert_eq!(o.stats.count_program(program), n, "{program}");
     }
     let resource_commands = o.stats.total() - o.setup;
     assert!(
-        resource_commands <= 25,
-        "file creation: {resource_commands} commands exceed 25: {:?}",
+        resource_commands <= 27,
+        "file creation: {resource_commands} commands exceed 27: {:?}",
         o.stats.by_program()
     );
     let walk = o.stats.count_program("stat") + o.stats.count_program("getfattr");
     assert!(
-        walk <= 15,
-        "trusted-parent observation grew to {walk} (today 15)"
+        walk <= 17,
+        "trusted-parent observation grew to {walk} (today 17)"
     );
     assert_stats_agree_with_log(&o);
 
@@ -453,7 +469,7 @@ fn budget_file_creation_apply() {
     let again = run_plan_or_apply(&path, Mode::Apply, false, t.clone());
     let plan = run_plan_or_apply(&path, Mode::Plan, false, t);
     assert!(again.stats.total() <= plan.stats.total());
-    assert_eq!(again.stats.count_program("dd"), 0);
+    assert_eq!(again.stats.count_program("sh"), 0);
 }
 
 #[test]

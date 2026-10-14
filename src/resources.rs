@@ -8,7 +8,9 @@ use crate::paths::{ancestor_dirs, mode_to_string, parent_and_name, parse_mode};
 use crate::platform::PackageBackend;
 use crate::result::Diff;
 use crate::result::*;
-use crate::targetfs::{ObjKind, Stat, Xattrs};
+use crate::targetfs::{
+    absent_stat, Cleanup, ObjKind, Observed, PublishKind, PublishStep, StageStep, Stat, Xattrs,
+};
 use crate::value::Value;
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
@@ -220,7 +222,7 @@ impl Engine {
         // Recognize system-manager input BEFORE any mutation: an unusable
         // UnitPath query stops the resource instead of being guessed around.
         let input = self.classify_manager_input(res, &path, false)?;
-        let stat = self.fs.inspect(&path)?;
+        let stat = self.observe_stat(res, &path)?;
         if state == "absent" {
             return self.file_absent(res, &path, stat, &input);
         }
@@ -261,10 +263,12 @@ impl Engine {
                         },
                     });
                     r.notes.extend(note);
+                    r.notes.extend(self.plan_privilege_note(res, path));
                     return Ok(r);
                 }
                 self.fs.check_trusted_parents(path)?;
                 self.fs.reject_final_symlink(path)?;
+                self.confirm_same_entry(res, path, &stat)?;
                 let re = self.fs.inspect(path)?;
                 if re.kind != ObjKind::File {
                     return Err(SinterError::apply(format!(
@@ -425,7 +429,7 @@ impl Engine {
     /// change stands, and the returned note says that apply decides.
     /// `Ok(None)`: the check passed.
     fn plan_parent_check(&mut self, res: &FrozenResource, path: &str) -> Result<Option<String>> {
-        let refusal = match self.fs.check_trusted_parents(path) {
+        let refusal = match self.fs.check_trusted_parents_observed(path) {
             Ok(_) => return Ok(None),
             Err(e) if e.kind == crate::error::ErrorKind::Indeterminate => return Err(e),
             Err(e) => e,
@@ -444,6 +448,146 @@ impl Engine {
                 "parent path check deferred to apply: {} ({})",
                 refusal.message, why
             ))),
+        }
+    }
+
+    /// L-1. The refusal an observation gets when the parent walk does not
+    /// accept the path: nothing of the path was observed. Like
+    /// [`Self::plan_parent_check`], plan reports the refusal apply would give
+    /// unless an earlier planned change can alter what the walk saw, in which
+    /// case the resource is Unknown (nothing is guessed about it).
+    fn observation_refusal(
+        &self,
+        res: &FrozenResource,
+        path: &str,
+        refusal: SinterError,
+    ) -> SinterError {
+        if self.opts.mode != Mode::Plan {
+            return refusal;
+        }
+        match self.planned.affecting(path) {
+            None if res.sensitive || res.derived_sensitive => redact_msg(
+                &res.id,
+                "Sinter's parent path check would refuse this change at apply",
+                "see the apply result",
+            ),
+            None => SinterError::apply(format!(
+                "{}: {} (plan: Sinter's parent path check would refuse this change at apply)",
+                res.id, refusal.message
+            )),
+            Some(why) => SinterError::unknown(format!(
+                "parent path check deferred to apply: {} ({}); nothing at the path was observed",
+                refusal.message, why
+            )),
+        }
+    }
+
+    /// The entry directly in a shared directory was not there when the gate
+    /// looked, although it had just been observed: it changed, and whatever
+    /// appeared since was not vetted. Nothing is read; a sensitive resource
+    /// names no path.
+    fn vanished(&self, res: &FrozenResource) -> SinterError {
+        if res.sensitive || res.derived_sensitive {
+            redact_msg(
+                &res.id,
+                "the entry changed during observation",
+                "see the apply result",
+            )
+        } else {
+            SinterError::apply(format!(
+                "{}: the entry changed during observation (it was not there when it was \
+                 checked); run again",
+                res.id
+            ))
+        }
+    }
+
+    /// Apply, directly in a shared directory (FS2-A1): the entry about to be
+    /// changed or removed is the one that was observed. The walk's gate has
+    /// just judged the entry, and a trusted principal's entry cannot be
+    /// replaced by anyone else; this second look makes the check explicit and
+    /// fails closed if the entry is not the observed object (a different inode,
+    /// owner or type). Elsewhere it does nothing.
+    fn confirm_same_entry(
+        &mut self,
+        res: &FrozenResource,
+        path: &str,
+        observed: &Stat,
+    ) -> Result<()> {
+        if !self.fs.shared_parent() {
+            return Ok(());
+        }
+        let cur = self.fs.inspect(path)?;
+        let same = cur.kind == observed.kind
+            && cur.dev == observed.dev
+            && cur.ino == observed.ino
+            && cur.uid == observed.uid;
+        if same {
+            return Ok(());
+        }
+        if res.sensitive || res.derived_sensitive {
+            Err(redact_msg(
+                &res.id,
+                "the entry is not the one that was observed",
+                "see the apply result",
+            ))
+        } else {
+            Err(SinterError::apply(format!(
+                "{}: target drift detected at {} before the change; refusing",
+                res.id, path
+            )))
+        }
+    }
+
+    /// `stat` of a managed path, observed only through a parent path the walk
+    /// accepted (as the account inside another account's tree). A parent that
+    /// does not exist yet means the path is absent; a refused parent means
+    /// nothing is observed.
+    pub(crate) fn observe_stat(&mut self, res: &FrozenResource, path: &str) -> Result<Stat> {
+        match self.fs.observed_stat(path)? {
+            Observed::Value(st) => Ok(st),
+            Observed::ParentAbsent => Ok(absent_stat()),
+            Observed::Refused(e) => Err(self.observation_refusal(res, path, e)),
+            // `observed_stat` reports an absent entry as its own `Stat`.
+            Observed::Gone => Ok(absent_stat()),
+        }
+    }
+
+    /// Content digest of a regular file seen by [`Self::observe_stat`].
+    fn observe_sha256(&mut self, res: &FrozenResource, path: &str) -> Result<Option<String>> {
+        match self.fs.observed(path, |fs| fs.sha256(path))? {
+            Observed::Value(sha) => Ok(sha),
+            Observed::ParentAbsent => Err(SinterError::apply(format!(
+                "{}: a parent of {} disappeared during observation",
+                res.id, path
+            ))),
+            Observed::Gone => Err(self.vanished(res)),
+            Observed::Refused(e) => Err(self.observation_refusal(res, path, e)),
+        }
+    }
+
+    /// Target text of a symlink seen by [`Self::observe_stat`].
+    fn observe_readlink(&mut self, res: &FrozenResource, path: &str) -> Result<String> {
+        match self.fs.observed(path, |fs| fs.readlink(path))? {
+            Observed::Value(t) => Ok(t),
+            Observed::ParentAbsent => Err(SinterError::apply(format!(
+                "{}: a parent of {} disappeared during observation",
+                res.id, path
+            ))),
+            Observed::Gone => Err(self.vanished(res)),
+            Observed::Refused(e) => Err(self.observation_refusal(res, path, e)),
+        }
+    }
+
+    /// Plan-time privilege note (FS-0d) for a change that creates, replaces
+    /// or removes `path`: see [`TargetFs::plan_write_note`]. Only a note, never
+    /// an error and never a new status; a sensitive resource names no path.
+    fn plan_privilege_note(&self, res: &FrozenResource, path: &str) -> Option<String> {
+        let note = self.fs.plan_write_note(path)?;
+        if res.sensitive || res.derived_sensitive {
+            Some("needs root: the target user cannot write to the parent directory".to_string())
+        } else {
+            Some(note)
         }
     }
 
@@ -700,6 +844,12 @@ impl Engine {
         meta: MetaSpec,
         input: &Option<ManagerInput>,
     ) -> Result<ResourceResult> {
+        // The content may be sensitive only at run time (it comes from a
+        // register or a secret): what the filesystem layer refuses from here on
+        // must then name no path or uid either (the dispatcher resets this).
+        if sensitive {
+            self.fs.set_redact(true);
+        }
         // Determine whether the object type is acceptable.
         match stat.kind {
             ObjKind::Absent | ObjKind::File => {}
@@ -738,7 +888,7 @@ impl Engine {
         let content_changed = match (&effective, stat.kind) {
             (Some(_), ObjKind::Absent) => true,
             (Some(_), ObjKind::File) => {
-                let remote = self.fs.sha256(path)?;
+                let remote = self.observe_sha256(res, path)?;
                 remote.as_deref() != desired_sha.as_deref()
             }
             (None, _) => false,
@@ -770,6 +920,17 @@ impl Engine {
                 return Ok(unchanged_result(res, "file already matches desired state"));
             }
             let parent_note = self.plan_parent_check(res, path)?;
+            let existing_owner = (stat.kind == ObjKind::File).then_some(stat.uid);
+            let explicit_owner = meta.manage_owner.then_some(meta.owner_uid).flatten();
+            if let Some(e) = self
+                .fs
+                .tree_owner_conflict(path, explicit_owner, existing_owner)
+            {
+                return Err(e);
+            }
+            if let Some(e) = self.fs.shared_owner_conflict(path, explicit_owner) {
+                return Err(e);
+            }
             let parents_trusted = parent_note.is_none();
             let note = match parent_note {
                 None if content_changed && stat.kind == ObjKind::File => {
@@ -839,6 +1000,11 @@ impl Engine {
             }
             let _ = &desired_sha;
             r.notes.extend(note);
+            if stat.kind == ObjKind::Absent || content_changed {
+                // Creating or replacing a file writes its parent directory;
+                // a metadata-only change does not.
+                r.notes.extend(self.plan_privilege_note(res, path));
+            }
             return Ok(r);
         }
 
@@ -849,12 +1015,41 @@ impl Engine {
 
         self.fs.check_trusted_parents(path)?;
         self.fs.reject_final_symlink(path)?;
+        if stat.kind != ObjKind::Absent {
+            self.confirm_same_entry(res, path, &stat)?;
+        }
+        let existing_owner = (stat.kind == ObjKind::File).then_some(stat.uid);
+        let explicit_owner = meta.manage_owner.then_some(meta.owner_uid).flatten();
+        if let Some(e) = self
+            .fs
+            .tree_owner_conflict(path, explicit_owner, existing_owner)
+        {
+            return Err(e);
+        }
+        if let Some(e) = self.fs.shared_owner_conflict(path, explicit_owner) {
+            return Err(e);
+        }
+        // Defaults for a new entry were fixed before the walk knew whose tree
+        // this is: inside another account's tree they are that account's.
+        let mut meta = meta;
+        if stat.kind == ObjKind::Absent {
+            let (default_uid, default_gid) = self.fs.default_owner();
+            if !meta.manage_owner {
+                meta.owner_uid = Some(default_uid);
+            }
+            if !meta.manage_group && !meta.manage_owner {
+                meta.group_gid = Some(default_gid);
+            }
+        }
 
         // Capture current object for metadata preservation and xattr checks.
         let (existing_uid, existing_gid, existing_mode) = if stat.kind == ObjKind::File {
             (stat.uid, stat.gid, stat.mode)
         } else {
-            (self.fs.target_uid, self.fs.target_gid, 0o644)
+            // A new file belongs to the invocation, or inside another
+            // account's tree to that account.
+            let (uid, gid) = self.fs.default_owner();
+            (uid, gid, 0o644)
         };
 
         // Determine which metadata to enforce.
@@ -902,13 +1097,18 @@ impl Engine {
                     r.reason = Some(reason);
                     Ok(r)
                 }
-                PublishOutcome::Published => {
+                done @ (PublishOutcome::Published | PublishOutcome::PublishedLeft(_)) => {
                     self.record_manager_change(res, input);
                     // Re-observe and verify. Publication already happened, so a
                     // failure to re-observe must NOT be reported as change:none:
                     // the mutation is known to have occurred.
                     let mut r = changed_result_sensitive(res, sensitive);
                     r.change = Change::Changed;
+                    // A harmless empty staging directory left in place does not
+                    // undo the publication; it is reported beside it.
+                    if let PublishOutcome::PublishedLeft(note) = done {
+                        r.notes.push(note);
+                    }
                     match self.verify_file(
                         res,
                         path,
@@ -1050,6 +1250,12 @@ impl Engine {
         // staging bytes, and confirm the final object still matches what was
         // observed so that publication identity is established.
         self.fs.check_trusted_parents(path)?;
+        // FS-2. A new entry in a shared directory is published exclusively
+        // (`ln -T`): another account may create the name at any moment, and
+        // a rename would replace what it created. Everything else is
+        // published by a rename, which is safe because what is replaced is an
+        // entry of a trusted principal that nobody else can replace.
+        let exclusive = self.fs.shared_parent() && observed.kind == ObjKind::Absent;
         let cur = self.fs.inspect(path)?;
         if cur.kind == ObjKind::Symlink {
             return Ok(PublishOutcome::FailedBeforePublish(format!(
@@ -1070,48 +1276,52 @@ impl Engine {
             )));
         }
 
-        // Staging lives in a fresh, private 0700 directory with a
-        // non-predictable name, so it can never be pre-created or replaced by a
-        // non-privileged user between creation and publication.
+        // Staging lives in a fresh private directory beside the final path
+        // (FS-2): one call of the fixed staging script makes it, proves it is
+        // Sinter's own, and writes the content, owner, mode and extended
+        // attributes into it. It is never reached again by a name that
+        // another account could have swapped (DESIGN §23.4).
         let permit = self.fs.mutation_permit()?;
-        let stage_dir = self.fs.make_staging_dir(&dir)?;
-        let staging = format!("{}/payload", stage_dir);
-
-        let prepare: Result<()> = (|| -> Result<()> {
-            self.fs.write_bytes(&permit, &staging, bytes)?;
-            self.fs.set_metadata(&staging, mode, uid, gid)?;
-            for (name, value) in xattrs.preserved_attrs() {
-                self.fs.set_xattr(&permit, name, value, &staging)?;
+        let stage_identity = self.fs.tree_identity().cloned();
+        let pairs: Vec<(String, String)> = xattrs
+            .preserved_attrs()
+            .map(|(n, v)| (n.clone(), v.clone()))
+            .collect();
+        let staged = match self
+            .fs
+            .stage_file(&permit, &dir, path, bytes, mode, uid, gid, &pairs)
+        {
+            Ok(StageStep::Staged(s)) => s,
+            Ok(StageStep::Rejected(reason)) => {
+                return Ok(PublishOutcome::FailedBeforePublish(format!(
+                    "{}: {} cannot be written through a staging directory here: {}",
+                    res.id, path, reason
+                )));
             }
-            Ok(())
-        })();
-
-        if let Err(e) = prepare {
-            // Destination was never published. Staging cleanup is permitted for
-            // unpublished staging, but typed uncertainty must be preserved:
-            // Indeterminate preparation is not a definite ordinary failure.
-            if e.kind == crate::error::ErrorKind::Indeterminate {
-                return Ok(PublishOutcome::Indeterminate(format!(
-                    "{}: staging preparation completion is unknown: {}",
+            Err(e) => {
+                // Destination was never published. Typed uncertainty is
+                // preserved: Indeterminate preparation is not a definite
+                // ordinary failure.
+                if e.kind == crate::error::ErrorKind::Indeterminate {
+                    return Ok(PublishOutcome::Indeterminate(format!(
+                        "{}: staging preparation completion is unknown: {}",
+                        res.id, e.message
+                    )));
+                }
+                return Ok(PublishOutcome::FailedBeforePublish(format!(
+                    "{}: staging preparation failed: {}",
                     res.id, e.message
                 )));
             }
-            let cleanup_ok = self.cleanup_stage_dir(&stage_dir);
-            return Ok(PublishOutcome::FailedBeforePublish(format!(
-                "{}: staging preparation failed: {} (staging cleanup {})",
-                res.id,
-                e.message,
-                if cleanup_ok { "succeeded" } else { "failed" }
-            )));
-        }
+        };
 
         // Controlled failure-injection point (required by DESIGN §34.5).
         if self.fs.fault() == Some("before_publish") {
-            let cleanup_ok = self.cleanup_stage_dir(&stage_dir);
+            let cleanup = self.fs.discard_staged(&permit, &staged);
             return Ok(PublishOutcome::FailedBeforePublish(format!(
-                "{}: injected failure before publication (staging cleanup {})",
+                "{}: injected failure before publication ({})",
                 res.id,
-                if cleanup_ok { "succeeded" } else { "failed" }
+                cleanup_phrase(&cleanup)
             )));
         }
 
@@ -1125,26 +1335,61 @@ impl Engine {
             )));
         }
 
-        // Revalidate once more immediately before the atomic rename.
-        self.fs.check_trusted_parents(path)?;
-        let pre = self.fs.inspect(path)?;
+        // Revalidate once more immediately before the publication. The
+        // staging directory exists from here on (FS2-L1): whatever this
+        // revalidation says, nothing has been published yet, so the staging
+        // Sinter made is removed before the outcome is returned. The original
+        // reason is kept as it was; a cleanup that fails is added to it.
+        let revalidated = match self.fs.check_trusted_parents(path) {
+            Ok(()) => self.fs.inspect(path),
+            Err(e) => Err(e),
+        };
+        let pre = match revalidated {
+            Ok(pre) => pre,
+            Err(mut e) => {
+                // A failed walk dropped the tree identity: take the staging
+                // down as the account that made it. The script proves, by the
+                // identity it recorded, that the directory is still the one
+                // Sinter made, and removes it by name only where nobody else
+                // can rename entries.
+                self.fs.resume_identity(stage_identity);
+                let cleanup = self.fs.discard_staged(&permit, &staged);
+                if !cleanup.is_clean() {
+                    e.message = format!(
+                        "{} (staging cleanup failed: {} may remain; {})",
+                        e.message,
+                        staged.path(),
+                        cleanup.describe()
+                    );
+                }
+                return Err(e);
+            }
+        };
         if pre.kind == ObjKind::Symlink || !same_object_identity(&observed, &pre) {
-            let _ = self.cleanup_stage_dir(&stage_dir);
+            let cleanup = self.fs.discard_staged(&permit, &staged);
             return Ok(PublishOutcome::FailedBeforePublish(format!(
-                "{}: target drift detected at {} immediately before publication; refusing",
-                res.id, path
+                "{}: target drift detected at {} immediately before publication; refusing ({})",
+                res.id,
+                path,
+                cleanup_phrase(&cleanup)
             )));
         }
 
-        match self.fs.rename(&permit, &staging, path) {
-            Ok(()) => {}
+        let (_, name) = parent_and_name(path);
+        let kind = if exclusive {
+            PublishKind::New
+        } else {
+            PublishKind::Replace
+        };
+        let step = match self.fs.publish_staged(&permit, &staged, kind, &name) {
+            Ok(step) => step,
             Err(e) => {
                 // Classify publication completion BEFORE any cleanup. An
-                // indeterminate rename must not trigger cleanup that could
-                // destroy evidence or rewrite the publication fact.
+                // indeterminate publication must not trigger cleanup that
+                // could destroy evidence or rewrite the publication fact.
                 if e.kind == crate::error::ErrorKind::Indeterminate {
-                    // If the rename is already known to have mutated (typed
-                    // mutation state), publication occurred: report after-publish.
+                    // If the publication is already known to have mutated
+                    // (typed mutation state), it occurred: report after-publish.
                     if e.mutation == MutationState::Changed {
                         return Ok(PublishOutcome::FailedAfterPublish(format!(
                             "{}: publication completed but completion was abnormal: {}",
@@ -1156,60 +1401,77 @@ impl Engine {
                         res.id, e.message
                     )));
                 }
-                let cleanup_ok = self.cleanup_stage_dir(&stage_dir);
+                return Err(e);
+            }
+        };
+        match step {
+            PublishStep::NotPublished { cleanup, why } => {
+                // Nothing was published and nothing was replaced. Say why,
+                // without reading what is there.
+                if exclusive {
+                    let taken =
+                        matches!(self.fs.inspect(path), Ok(st) if st.kind != ObjKind::Absent);
+                    let why = if taken {
+                        "was created by another process after Sinter looked; Sinter did not \
+                         replace it (run again)"
+                            .to_string()
+                    } else {
+                        format!("could not be created exclusively: {}", why)
+                    };
+                    return Ok(PublishOutcome::FailedBeforePublish(format!(
+                        "{}: {} {} ({})",
+                        res.id,
+                        path,
+                        why,
+                        cleanup_phrase(&cleanup)
+                    )));
+                }
                 // A definite rename failure left the destination unchanged
                 // (the atomic replace did not take effect).
-                return Ok(PublishOutcome::FailedBeforePublish(format!(
-                    "{}: publication rename failed before publication: {} (staging cleanup {})",
+                Ok(PublishOutcome::FailedBeforePublish(format!(
+                    "{}: publication rename failed before publication: {} ({})",
                     res.id,
-                    e.message,
-                    if cleanup_ok { "succeeded" } else { "failed" }
-                )));
+                    why,
+                    cleanup_phrase(&cleanup)
+                )))
             }
-        }
-
-        // The staging directory is now empty; remove it. Failure to clean the
-        // empty directory is reported but must not change the published result.
-        let cleanup_ok = self.cleanup_stage_dir(&stage_dir);
-        if !cleanup_ok {
-            return Ok(PublishOutcome::FailedAfterPublish(format!(
-                "{}: published successfully but staging directory {} could not be removed",
-                res.id, stage_dir
-            )));
-        }
-
-        if self.fs.fault() == Some("after_publish") {
-            return Ok(PublishOutcome::FailedAfterPublish(
-                "injected verification failure after publication".into(),
-            ));
-        }
-
-        Ok(PublishOutcome::Published)
-    }
-
-    fn cleanup_stage_dir(&mut self, stage_dir: &str) -> bool {
-        if self.fs.fault() == Some("cleanup_stage") {
-            return false;
-        }
-        // Remove the staging payload if present, then the directory.
-        let payload = format!("{}/payload", stage_dir);
-        let permit = self.fs.mutation_permit().ok();
-        match self.fs.inspect(&payload) {
-            Ok(stat) if stat.kind == ObjKind::Absent => {}
-            Ok(_) => {
-                let permit = match &permit {
-                    Some(p) => p,
-                    None => return false,
-                };
-                if self.fs.remove_file(permit, &payload).is_err() {
-                    return false;
+            PublishStep::Rejected(reason) => Ok(PublishOutcome::FailedBeforePublish(format!(
+                "{}: the staging directory {} was not proven to be Sinter's own and nothing was \
+                 published: {} (it is left as it is)",
+                res.id,
+                staged.path(),
+                reason
+            ))),
+            PublishStep::Published(cleanup) => {
+                // The name exists. What became of the staging directory is a
+                // separate fact: it never undoes the publication, and only a
+                // second name left behind (or an unknown state) is a failure
+                // that needs a person.
+                if cleanup.needs_attention() {
+                    return Ok(PublishOutcome::FailedAfterPublish(format!(
+                        "{}: published successfully but staging directory {} could not be \
+                         removed ({}){}",
+                        res.id,
+                        staged.path(),
+                        cleanup.describe(),
+                        if exclusive {
+                            "; it holds a second name for the new file, which Sinter refuses \
+                             until that name is removed"
+                        } else {
+                            ""
+                        }
+                    )));
+                }
+                if self.fs.fault() == Some("after_publish") {
+                    return Ok(PublishOutcome::FailedAfterPublish(
+                        "injected verification failure after publication".into(),
+                    ));
+                }
+                match cleanup {
+                    Cleanup::Left(_) => Ok(PublishOutcome::PublishedLeft(cleanup.describe())),
+                    _ => Ok(PublishOutcome::Published),
                 }
             }
-            Err(_) => return false,
-        }
-        match &permit {
-            Some(p) => self.fs.rmdir(p, stage_dir).is_ok(),
-            None => false,
         }
     }
 
@@ -1289,7 +1551,7 @@ impl Engine {
                 res.id
             )));
         }
-        let stat = self.fs.inspect(&path)?;
+        let stat = self.observe_stat(res, &path)?;
 
         if state == "absent" {
             return match stat.kind {
@@ -1308,9 +1570,11 @@ impl Engine {
                             },
                         });
                         r.notes.extend(note);
+                        r.notes.extend(self.plan_privilege_note(res, &path));
                         return Ok(r);
                     }
                     self.fs.check_trusted_parents(&path)?;
+                    self.confirm_same_entry(res, &path, &stat)?;
                     let re = self.fs.inspect(&path)?;
                     if re.kind != ObjKind::Dir {
                         return Err(SinterError::apply(format!(
@@ -1357,6 +1621,13 @@ impl Engine {
                 let meta = self.dir_meta(res, &vals, ObjKind::Absent)?;
                 if self.opts.mode == Mode::Plan {
                     let note = self.plan_parent_check(res, &path)?;
+                    let explicit = meta.manage_owner.then_some(meta.owner_uid).flatten();
+                    if let Some(e) = self.fs.tree_owner_conflict(&path, explicit, None) {
+                        return Err(e);
+                    }
+                    if let Some(e) = self.fs.shared_owner_conflict(&path, explicit) {
+                        return Err(e);
+                    }
                     let mut r = changed_result(res);
                     r.diff = Some(Diff {
                         body: DiffBody::Summary {
@@ -1365,9 +1636,17 @@ impl Engine {
                         },
                     });
                     r.notes.extend(note);
+                    r.notes.extend(self.plan_privilege_note(res, &path));
                     return Ok(r);
                 }
                 self.fs.check_trusted_parents(&path)?;
+                let explicit = meta.manage_owner.then_some(meta.owner_uid).flatten();
+                if let Some(e) = self.fs.tree_owner_conflict(&path, explicit, None) {
+                    return Err(e);
+                }
+                if let Some(e) = self.fs.shared_owner_conflict(&path, explicit) {
+                    return Err(e);
+                }
                 let permit = self.fs.mutation_permit()?;
                 if let Err(e) = self.fs.mkdir(&permit, &path) {
                     let mut r = changed_result(res);
@@ -1390,8 +1669,20 @@ impl Engine {
                     return Ok(r);
                 }
                 let mode = meta.mode.unwrap_or(0o755);
-                let uid = meta.owner_uid.unwrap_or(self.fs.target_uid);
-                let gid = meta.group_gid.unwrap_or(self.fs.target_gid);
+                // What the recipe leaves open is the invocation's owner, or
+                // inside another account's tree that account (the defaults in
+                // `meta` were fixed before the walk knew whose tree this is).
+                let (default_uid, default_gid) = self.fs.default_owner();
+                let uid = if meta.manage_owner {
+                    meta.owner_uid.unwrap_or(default_uid)
+                } else {
+                    default_uid
+                };
+                let gid = if meta.manage_group || meta.manage_owner {
+                    meta.group_gid.unwrap_or(default_gid)
+                } else {
+                    default_gid
+                };
                 if let Err(e) = self.fs.set_metadata(&path, mode, uid, gid) {
                     // mkdir already succeeded. Later metadata uncertainty must
                     // not erase the known directory creation.
@@ -1429,6 +1720,13 @@ impl Engine {
                 }
                 if self.opts.mode == Mode::Plan {
                     let note = self.plan_parent_check(res, &path)?;
+                    let explicit = meta.manage_owner.then_some(meta.owner_uid).flatten();
+                    if let Some(e) = self.fs.tree_owner_conflict(&path, explicit, Some(stat.uid)) {
+                        return Err(e);
+                    }
+                    if let Some(e) = self.fs.shared_owner_conflict(&path, explicit) {
+                        return Err(e);
+                    }
                     let mut r = changed_result(res);
                     r.diff = Some(Diff {
                         body: DiffBody::Summary {
@@ -1450,6 +1748,14 @@ impl Engine {
                     return Ok(r);
                 }
                 self.fs.check_trusted_parents(&path)?;
+                self.confirm_same_entry(res, &path, &stat)?;
+                let explicit = meta.manage_owner.then_some(meta.owner_uid).flatten();
+                if let Some(e) = self.fs.tree_owner_conflict(&path, explicit, Some(stat.uid)) {
+                    return Err(e);
+                }
+                if let Some(e) = self.fs.shared_owner_conflict(&path, explicit) {
+                    return Err(e);
+                }
                 let mut mutated = false;
                 let permit = self.fs.mutation_permit()?;
                 if let Err(e) = self.fs.chown(&permit, &path, uid, gid) {
@@ -1617,7 +1923,7 @@ impl Engine {
         }
         let target = ev_str(&vals, "target")?;
         let input = self.classify_manager_input(res, &path, true)?;
-        let stat = self.fs.inspect(&path)?;
+        let stat = self.observe_stat(res, &path)?;
 
         if state == "absent" {
             return match stat.kind {
@@ -1625,7 +1931,7 @@ impl Engine {
                 ObjKind::Symlink => {
                     if self.opts.mode == Mode::Plan {
                         let note = self.plan_parent_check(res, &path)?;
-                        let cur = self.fs.readlink(&path)?;
+                        let cur = self.observe_readlink(res, &path)?;
                         self.record_manager_change(res, &input);
                         let mut r = changed_result(res);
                         r.diff = Some(Diff {
@@ -1635,9 +1941,11 @@ impl Engine {
                             },
                         });
                         r.notes.extend(note);
+                        r.notes.extend(self.plan_privilege_note(res, &path));
                         return Ok(r);
                     }
                     self.fs.check_trusted_parents(&path)?;
+                    self.confirm_same_entry(res, &path, &stat)?;
                     let permit = self.fs.mutation_permit()?;
                     self.fs.remove_symlink(&permit, &path)?;
                     self.record_manager_change(res, &input);
@@ -1671,6 +1979,7 @@ impl Engine {
                     self.record_manager_change(res, &input);
                     let mut r = changed_result_sensitive(res, link_sensitive);
                     r.notes.extend(note);
+                    r.notes.extend(self.plan_privilege_note(res, &path));
                     let desired = if link_sensitive {
                         "symlink -> [redacted]".to_string()
                     } else {
@@ -1704,7 +2013,7 @@ impl Engine {
                 }
             }
             ObjKind::Symlink => {
-                let cur = self.fs.readlink(&path)?;
+                let cur = self.observe_readlink(res, &path)?;
                 if cur == target_val {
                     return Ok(unchanged_result(
                         res,
@@ -1716,6 +2025,7 @@ impl Engine {
                     self.record_manager_change(res, &input);
                     let mut r = changed_result_sensitive(res, link_sensitive);
                     r.notes.extend(note);
+                    r.notes.extend(self.plan_privilege_note(res, &path));
                     let desired = if link_sensitive {
                         "symlink -> [redacted]".to_string()
                     } else {
@@ -1735,15 +2045,21 @@ impl Engine {
                 }
                 self.fs.check_trusted_parents(&path)?;
                 let permit = self.fs.mutation_permit()?;
-                if let Err(e) = self.fs.symlink_replace(&permit, &target_val, &path, &stat) {
-                    if e.mutation == MutationState::Changed {
-                        self.record_manager_change(res, &input);
+                let left_note = match self.fs.symlink_replace(&permit, &target_val, &path, &stat) {
+                    Ok(note) => note,
+                    Err(e) => {
+                        if e.mutation == MutationState::Changed {
+                            self.record_manager_change(res, &input);
+                        }
+                        return Err(e);
                     }
-                    return Err(e);
-                }
+                };
                 self.record_manager_change(res, &input);
                 match self.verify_link(res, &path, &target_val, link_sensitive) {
-                    Ok(v) => {
+                    Ok(mut v) => {
+                        // A harmless empty staging directory left in place does
+                        // not undo the publication; it is reported beside it.
+                        v.notes.extend(left_note);
                         // Required verification mismatch is a failed resource
                         // (DESIGN §17/§30). Mutation already occurred.
                         if v.verification == Verification::Failed {
@@ -1830,7 +2146,7 @@ impl Engine {
         let input = self.classify_manager_input(res, &path, false)?;
         if state == "absent" {
             // Delegate to file_absent semantics.
-            let stat = self.fs.inspect(&path)?;
+            let stat = self.observe_stat(res, &path)?;
             return self.file_absent(res, &path, stat, &input);
         }
 
@@ -1903,7 +2219,7 @@ impl Engine {
             }
         };
 
-        let stat = self.fs.inspect(&path)?;
+        let stat = self.observe_stat(res, &path)?;
         let sensitive = res.sensitive || rendered.1;
         let meta = self.file_meta(res, &vals, stat.kind, sensitive)?;
         self.file_present(
@@ -5643,7 +5959,9 @@ impl std::fmt::Debug for ContentSpec {
 enum PublishOutcome {
     /// The destination was atomically replaced and verified prerequisites held.
     Published,
-    /// Published successfully, but a non-fatal cleanup/note condition applies.
+    /// The destination was published, and an empty staging directory was left
+    /// in place (harmless; the note says where). The publication stands.
+    PublishedLeft(String),
     /// Nothing was published; the destination is unchanged.
     FailedBeforePublish(String),
     /// Publication was attempted/dispatched but failed afterwards; the
@@ -5651,6 +5969,15 @@ enum PublishOutcome {
     FailedAfterPublish(String),
     /// Completion of the mutation cannot be established.
     Indeterminate(String),
+}
+
+/// How a result's reason words what became of a staging directory.
+fn cleanup_phrase(c: &Cleanup) -> String {
+    match c {
+        Cleanup::Clean => "staging cleanup succeeded".to_string(),
+        Cleanup::Left(_) => format!("staging cleanup left an empty directory: {}", c.describe()),
+        _ => format!("staging cleanup failed: {}", c.describe()),
+    }
 }
 
 /// Whether the currently observed object is the same object as previously

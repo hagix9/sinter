@@ -494,6 +494,7 @@ fn run_status_and_exit_mapping() {
 
 fn audit_json(recipe: &std::path::Path, fake: FakeTarget) -> (Value, u8) {
     let model = load_model(recipe).unwrap();
+    let fake = with_walkable_parents(&model, fake);
     let engine = Engine::new(model, fake_options(Mode::Plan, fake)).unwrap();
     let report = run_audit(engine).unwrap();
     let mut buf = Vec::new();

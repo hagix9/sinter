@@ -161,6 +161,9 @@ pub struct CommandRecord {
     /// Environment passed to the target process. Sensitive requests retain
     /// only a redacted marker, just like program and argv.
     pub env: BTreeMap<String, String>,
+    /// True when this invocation was sent through the `sudo -n` wrapper. A
+    /// target user that is already root runs everything directly, so the
+    /// field is false there even when `--sudo` was given (FS-0).
     pub sudo: bool,
     /// True when the recorded invocation may carry sensitive values. The stored
     /// program/args are then a redacted placeholder, never the raw command line.
@@ -424,6 +427,17 @@ impl Executor {
         self.is_sudo()
     }
 
+    /// Whether commands are really sent through `sudo -n`: `--sudo` was
+    /// requested and the target user is not already root. `is_sudo` keeps its
+    /// meaning (the invocation asked for root); this is only the transport.
+    pub fn wraps_sudo(&self) -> bool {
+        match self {
+            Executor::Local(l) => l.wraps_sudo(),
+            Executor::Ssh(s) => s.wraps_sudo(),
+            Executor::Fake(f) => f.wraps_sudo(),
+        }
+    }
+
     pub fn run(&mut self, req: &ExecRequest) -> Result<Output> {
         self.record(req);
         match self {
@@ -453,8 +467,35 @@ impl Executor {
         }
     }
 
+    /// The scripted filesystem as it is now (test support): `None` for a real
+    /// target or a scripted target without a modeled filesystem.
+    pub fn fake_fs(&self) -> Option<crate::fakesys::FakeFs> {
+        match self {
+            Executor::Fake(f) => f.target.fs.clone(),
+            _ => None,
+        }
+    }
+
+    /// Run a diagnostic command as the connected target user, never through
+    /// `sudo`, even when `--sudo` was requested. Used only to settle why the
+    /// first command through the wrapper failed (see
+    /// [`diagnose_sudo_probe_failure`]); the log and statistics say it was not
+    /// a sudo command.
+    pub fn run_without_sudo(&mut self, req: &ExecRequest) -> Result<Output> {
+        self.record_with(req, false);
+        match self {
+            Executor::Local(l) => l.run_with(req, false),
+            Executor::Ssh(s) => s.run_with(req, false),
+            Executor::Fake(f) => Ok(f.run_with(req, false)),
+        }
+    }
+
     fn record(&mut self, req: &ExecRequest) {
-        let sudo = self.is_sudo();
+        let sudo = self.wraps_sudo();
+        self.record_with(req, sudo);
+    }
+
+    fn record_with(&mut self, req: &ExecRequest, sudo: bool) {
         // DESIGN §31.4: no logger may receive raw sensitive values. When the
         // request is sensitive, store only a non-reconstructable placeholder.
         let rec = if req.sensitive {
@@ -468,7 +509,8 @@ impl Executor {
         } else {
             CommandRecord {
                 program: req.program.clone(),
-                args: req.args.clone(),
+                // The constant staging script is named by its digest (FS-2).
+                args: crate::fsstage::loggable_args(&req.args),
                 env: req.env.clone(),
                 sudo,
                 sensitive: false,
@@ -583,6 +625,8 @@ fn run_simple(s: &mut SshExecutor, program: &str, args: &[&str]) -> Result<Strin
 
 pub struct LocalExecutor {
     pub sudo: bool,
+    /// The controller process is root, so `--sudo` needs no wrapper.
+    pub root_direct: bool,
     pub home: String,
     pub log: Vec<CommandRecord>,
     stats: ExecStatsHandle,
@@ -599,25 +643,36 @@ impl LocalExecutor {
         };
         Ok(LocalExecutor {
             sudo,
+            // Effective uid of this very process, from the operating system.
+            root_direct: sudo && unsafe { libc::geteuid() } == 0,
             home,
             log: Vec::new(),
             stats: ExecStatsHandle::default(),
         })
     }
 
+    fn wraps_sudo(&self) -> bool {
+        self.sudo && !self.root_direct
+    }
+
     fn run(&mut self, req: &ExecRequest) -> Result<Output> {
+        let wrap = self.wraps_sudo();
+        self.run_with(req, wrap)
+    }
+
+    fn run_with(&mut self, req: &ExecRequest, wrap: bool) -> Result<Output> {
         let started = Instant::now();
-        let result = self.exec_local(req);
+        let result = self.exec_local(req, wrap);
         self.stats
-            .note(req, self.sudo, started.elapsed(), result.as_ref().ok());
+            .note(req, wrap, started.elapsed(), result.as_ref().ok());
         result
     }
 
-    fn exec_local(&mut self, req: &ExecRequest) -> Result<Output> {
+    fn exec_local(&mut self, req: &ExecRequest, wrap: bool) -> Result<Output> {
         let deadline = Instant::now() + Duration::from_secs(req.timeout_secs.max(1));
         use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
-        let (program, args) = self.wrap(req);
+        let (program, args) = self.wrap(req, wrap);
         let mut cmd = Command::new(&program);
         cmd.args(&args);
         cmd.env_clear();
@@ -635,7 +690,7 @@ impl LocalExecutor {
         // (e.g. /root) that it cannot access; the target-side `env -i -C`
         // establishes the child working directory. When a recipe supplies an
         // explicit cwd the controller runs from a root directory it can access.
-        if self.sudo {
+        if wrap {
             cmd.current_dir("/");
         } else {
             // An explicit cwd is part of the command contract. Do not silently
@@ -653,9 +708,14 @@ impl LocalExecutor {
         // entire descendant tree, not only the direct child.
         cmd.process_group(0);
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| SinterError::apply(format!("failed to start {}: {}", req.program, e)))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            if wrap && e.kind() == std::io::ErrorKind::NotFound {
+                // The program that could not be started is the wrapper itself.
+                SinterError::connect(SUDO_MISSING_MESSAGE)
+            } else {
+                SinterError::apply(format!("failed to start {}: {}", req.program, e))
+            }
+        })?;
         let pgid = child.id() as i32;
 
         if let Some(input) = &req.stdin {
@@ -771,8 +831,8 @@ impl LocalExecutor {
     /// Build the argv actually invoked. When sudo is enabled the program is run
     /// through non-interactive sudo and a clean `env -i` baseline so the
     /// effective UID is 0 and the environment contract is identical to SSH.
-    fn wrap(&self, req: &ExecRequest) -> (String, Vec<String>) {
-        if self.sudo {
+    fn wrap(&self, req: &ExecRequest, wrap: bool) -> (String, Vec<String>) {
+        if wrap {
             let cwd = req.cwd.clone().unwrap_or_else(|| "/root".to_string());
             let mut args = vec!["-n".to_string(), "--".to_string()];
             args.push("/usr/bin/env".to_string());
@@ -837,6 +897,9 @@ const DETECT_HOME_MAX: usize = 4096;
 
 pub struct SshExecutor {
     pub sudo: bool,
+    /// The connected user is root (learned from the target at connect), so
+    /// `--sudo` needs no wrapper.
+    pub root_direct: bool,
     session: ssh2::Session,
     pub home: String,
     pub log: Vec<CommandRecord>,
@@ -921,8 +984,22 @@ impl SshExecutor {
             looked_up?
         };
 
+        // `--sudo`: ask the target who the connected user is, without sudo. A
+        // root login needs no wrapper (and no sudo binary). Learned from the
+        // target, never from the controller; costs one connect-phase command,
+        // as the HOME lookup does for a login without `--sudo`.
+        let root_direct = if sudo {
+            let started = Instant::now();
+            let uid = detect_uid(&session, setup_deadline);
+            stats.note_connect("id", started.elapsed(), uid.is_ok());
+            uid? == 0
+        } else {
+            false
+        };
+
         Ok(SshExecutor {
             sudo,
+            root_direct,
             session,
             home,
             log: Vec::new(),
@@ -930,17 +1007,26 @@ impl SshExecutor {
         })
     }
 
+    fn wraps_sudo(&self) -> bool {
+        self.sudo && !self.root_direct
+    }
+
     fn run(&mut self, req: &ExecRequest) -> Result<Output> {
+        let wrap = self.wraps_sudo();
+        self.run_with(req, wrap)
+    }
+
+    fn run_with(&mut self, req: &ExecRequest, wrap: bool) -> Result<Output> {
         let started = Instant::now();
-        let result = self.exec_ssh(req);
+        let result = self.exec_ssh(req, wrap);
         self.stats
-            .note(req, self.sudo, started.elapsed(), result.as_ref().ok());
+            .note(req, wrap, started.elapsed(), result.as_ref().ok());
         result
     }
 
-    fn exec_ssh(&mut self, req: &ExecRequest) -> Result<Output> {
+    fn exec_ssh(&mut self, req: &ExecRequest, wrap: bool) -> Result<Output> {
         let deadline = Instant::now() + Duration::from_secs(req.timeout_secs.max(1));
-        let line = build_remote_command(req, self.sudo, &self.home);
+        let line = build_remote_command_with(req, self.sudo, wrap, &self.home);
         self.session.set_blocking(false);
         let mut channel = match channel_session_until(&mut self.session, deadline) {
             Ok(ch) => ch,
@@ -1353,6 +1439,68 @@ fn detect_home(session: &ssh2::Session, user: &str, setup_deadline: Instant) -> 
             user
         )))
     }
+}
+
+/// The effective uid of the connected SSH user, asked of the target with
+/// `id -u` and no sudo, bounded by the setup budget like the HOME lookup.
+fn detect_uid(session: &ssh2::Session, setup_deadline: Instant) -> Result<u32> {
+    let remaining = setup_remaining(setup_deadline)?;
+    session.set_timeout(remaining.as_millis().clamp(1, u32::MAX as u128) as u32);
+    let mut ch = session
+        .channel_session()
+        .map_err(|e| SinterError::connect(format!("cannot open SSH channel: {}", e)))?;
+    ch.exec("/usr/bin/id -u")
+        .map_err(|e| SinterError::connect(format!("cannot determine the target user id: {}", e)))?;
+    let mut s = Vec::new();
+    let mut tmp = [0u8; 64];
+    loop {
+        if Instant::now() >= setup_deadline {
+            let _ = ch.close();
+            return Err(SinterError::connect(
+                "SSH setup budget exceeded while determining the target user id",
+            ));
+        }
+        match ch.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => {
+                if s.len() + n > 64 {
+                    let _ = ch.close();
+                    return Err(SinterError::connect(
+                        "user id detection output exceeded the capture bound",
+                    ));
+                }
+                s.extend_from_slice(&tmp[..n]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                wait_readable_until(session.as_raw_fd(), setup_deadline);
+            }
+            Err(e) => {
+                let _ = ch.close();
+                return Err(SinterError::connect(format!(
+                    "user id detection read failed: {}",
+                    e
+                )));
+            }
+        }
+    }
+    ch.wait_close().map_err(|e| {
+        SinterError::connect(format!("user id detection channel close failed: {}", e))
+    })?;
+    let code = ch.exit_status().map_err(|e| {
+        SinterError::connect(format!("user id detection exit status unavailable: {}", e))
+    })?;
+    if code != 0 {
+        return Err(SinterError::connect(format!(
+            "could not determine the target user id (id -u exit {})",
+            code
+        )));
+    }
+    String::from_utf8_lossy(&s)
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| {
+            SinterError::connect("could not determine the target user id (id -u printed no number)")
+        })
 }
 
 enum StreamErr {
@@ -1981,9 +2129,22 @@ fn try_agent_auth(
 }
 
 pub fn build_remote_command(req: &ExecRequest, sudo: bool, home: &str) -> String {
+    build_remote_command_with(req, sudo, sudo, home)
+}
+
+/// `root_defaults`: `--sudo` was requested, so the default working directory
+/// is root's. `wrap`: the command really goes through `sudo -n`; a target
+/// user that is already root needs no wrapper, with the same environment and
+/// working directory contract.
+pub fn build_remote_command_with(
+    req: &ExecRequest,
+    root_defaults: bool,
+    wrap: bool,
+    home: &str,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
     let cwd = req.cwd.clone().unwrap_or_else(|| {
-        if sudo {
+        if root_defaults {
             "/root".to_string()
         } else {
             home.to_string()
@@ -2001,11 +2162,153 @@ pub fn build_remote_command(req: &ExecRequest, sudo: bool, home: &str) -> String
         parts.push(shell_quote(a));
     }
     let env_cmd = parts.join(" ");
-    if sudo {
+    if wrap {
         format!("/usr/bin/sudo -n -- {}", env_cmd)
     } else {
         env_cmd
     }
+}
+
+/// What `sudo -n` was seen to do when it did not run the wrapped command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SudoFailure {
+    /// The sudo binary is not there.
+    Missing,
+    /// `sudo -n` reported that authentication would need a password (or, for
+    /// sudo-rs, interactive authentication). Under `-n` sudo reports this
+    /// both for a rule that needs a password and for a user with no rule.
+    PasswordRequired,
+    /// sudoers (or sudo-rs) refused the user.
+    NotAuthorized,
+    /// Any other failure, including output Sinter has no pattern for.
+    Unrecognized,
+}
+
+/// Message of a missing sudo binary when it is learned from a failed start.
+pub const SUDO_MISSING_MESSAGE: &str = "--sudo was requested, but sudo is not installed on the target (/usr/bin/sudo was not found): install sudo, or connect as root, which needs no sudo";
+
+/// Classify the output of a command that ran through `sudo -n` and failed,
+/// by sudo's own English sentences. Only a sentence that names the cause
+/// counts: a message in general, an unknown sentence, a locale Sinter has no
+/// pattern for, or an empty stderr is `Unrecognized` and is never guessed at.
+pub fn classify_sudo_failure(out: &Output) -> SudoFailure {
+    let code = match out.completion {
+        Completion::Exited(c) => c,
+        _ => return SudoFailure::Unrecognized,
+    };
+    let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
+    if (code == 127 || code == 126)
+        && stderr.contains("/usr/bin/sudo")
+        && (stderr.contains("not found") || stderr.contains("no such file"))
+    {
+        return SudoFailure::Missing;
+    }
+    const PASSWORD: [&str; 4] = [
+        "a password is required",
+        "interactive authentication is required",
+        "a terminal is required to read the password",
+        "no tty present and no askpass program specified",
+    ];
+    const REFUSED: [&str; 5] = [
+        "is not in the sudoers file",
+        "is not allowed to run sudo",
+        "is not allowed to execute",
+        "may not run sudo",
+        "i'm afraid i can't do that",
+    ];
+    if PASSWORD.iter().any(|p| stderr.contains(p)) {
+        return SudoFailure::PasswordRequired;
+    }
+    if REFUSED.iter().any(|p| stderr.contains(p)) {
+        return SudoFailure::NotAuthorized;
+    }
+    SudoFailure::Unrecognized
+}
+
+/// The error for a failure that [`classify_sudo_failure`] names, or `None`.
+/// Fixed texts only; nothing sudo printed is copied into them.
+pub fn recognized_sudo_failure(out: &Output) -> Option<SinterError> {
+    let text = match classify_sudo_failure(out) {
+        SudoFailure::Missing => SUDO_MISSING_MESSAGE,
+        SudoFailure::PasswordRequired => "--sudo was requested, but `sudo -n` reported that a password is required. Sinter runs sudo non-interactively and never asks for a password. sudo prints this both when the user's sudo rule needs a password and when the user has no sudo rule at all: allow this user to run commands as root without a password (NOPASSWD in sudoers), or connect as root",
+        SudoFailure::NotAuthorized => "--sudo was requested, but sudoers does not allow this user to run commands as root: grant it in sudoers, or connect as root",
+        SudoFailure::Unrecognized => return None,
+    };
+    Some(SinterError::connect(text))
+}
+
+/// A safe description of how a command ended: the exit status or signal only.
+/// What the command wrote is never part of it.
+fn describe_completion(out: &Output) -> String {
+    match &out.completion {
+        Completion::Exited(c) => format!("exit {}", c),
+        Completion::Signaled(s) => format!("terminated by signal {}", s),
+        Completion::Indeterminate { .. } => "did not complete".to_string(),
+    }
+}
+
+/// The message of a real Linux-probe failure. It carries the exit status only
+/// (an unreadable `/etc/os-release` makes `test` fail silently); the failing
+/// command's stderr is deliberately not copied.
+pub const LINUX_PROBE_MESSAGE: &str = "target does not appear to be a supported Linux system";
+
+/// Why did the first command through `sudo -n` (the Linux probe, `test -r
+/// /etc/os-release`) fail? It failed; that alone does not say whether sudo or
+/// the command did, and `test`'s own failure looks exactly like a silent sudo
+/// failure. This settles what can be settled and says "not identified" for the
+/// rest.
+///
+/// 1. A sentence sudo is known to print (see [`classify_sudo_failure`]) names
+///    the cause: sudo missing, a password needed, sudoers refusing.
+/// 2. A command that did not complete (timeout, signal) is reported as that.
+/// 3. Otherwise one diagnostic runs **without sudo**: the same `test -r` as
+///    the plain target user, from `/`. It is not a retry through sudo, uses no
+///    privilege and asks for no password. `/etc/os-release` is world-readable
+///    on a Linux system, so:
+///    * it succeeds: the user can read the file, so the first command failed
+///      for a reason that lies in running through sudo (or as root). The
+///      reason is not identified, and nothing is said about the operating
+///      system;
+///    * it fails with exit 1: the file is not readable by the user either, and
+///      the Linux verdict stands (sudo is not blamed);
+///    * anything else: not settled; reported as such.
+///
+/// The diagnostic runs only on this failure path, so a working `--sudo` run
+/// costs nothing extra. `Err` is a transport error of the diagnostic itself.
+pub fn diagnose_sudo_probe_failure(
+    ex: &mut Executor,
+    probe: &ExecRequest,
+    failed: &Output,
+) -> Result<SinterError> {
+    if let Some(e) = recognized_sudo_failure(failed) {
+        return Ok(e);
+    }
+    if !matches!(failed.completion, Completion::Exited(_)) {
+        return Ok(SinterError::connect(format!(
+            "--sudo was requested, but the first command run through sudo did not finish normally ({}). The cause was not identified",
+            describe_completion(failed)
+        )));
+    }
+    let mut diag = ExecRequest::new(&probe.program);
+    diag.args = probe.args.clone();
+    diag.env = probe.env.clone();
+    diag.cwd = Some("/".to_string());
+    let plain = ex.run_without_sudo(&diag)?;
+    Ok(SinterError::connect(match plain.completion {
+        Completion::Exited(0) => format!(
+            "--sudo was requested, but the first command run through sudo failed ({}) although /etc/os-release is readable without sudo. The cause was not identified; this is not a statement that the target is not Linux",
+            describe_completion(failed)
+        ),
+        Completion::Exited(1) => format!(
+            "{} (/etc/os-release is not readable by the target user, checked with and without sudo)",
+            LINUX_PROBE_MESSAGE
+        ),
+        _ => format!(
+            "--sudo was requested, but the first command run through sudo failed ({}), and the check without sudo could not settle why ({}). The cause was not identified",
+            describe_completion(failed),
+            describe_completion(&plain)
+        ),
+    }))
 }
 
 /// POSIX single-quote escaping: exact argv preservation, no shell evaluation.
@@ -2135,6 +2438,12 @@ pub struct FakeTarget {
     /// observation contract (IA-01 false-PASS regression suite).
     pub observation_overrides:
         std::collections::BTreeMap<String, std::collections::VecDeque<Output>>,
+    /// The same, keyed by program basename and the path operand (the last
+    /// argument): it answers only the observation of that very path, so the
+    /// parent walk of an observed path (which asks about its ancestors) is
+    /// served by the modeled filesystem and never consumes the queue.
+    pub path_observation_overrides:
+        std::collections::BTreeMap<(String, String), std::collections::VecDeque<Output>>,
     /// Scripted systemd manager state (disk / loaded / NeedDaemonReload /
     /// reload behavior). Inert unless a test drives it.
     pub manager: crate::fakesys::FakeManager,
@@ -2144,6 +2453,108 @@ pub struct FakeTarget {
     /// Opt-in scripted filesystem. `None` keeps the historical behavior:
     /// filesystem helpers are not modeled and fail honestly.
     pub fs: Option<crate::fakesys::FakeFs>,
+    /// When set, every command sent through the `sudo -n` wrapper fails the
+    /// way the named real failure does (see [`FakeSudoFailure`]). A target
+    /// whose user is root never reaches the wrapper.
+    pub sudo_failure: Option<FakeSudoFailure>,
+    /// `/usr/bin/setpriv` is missing: a tree-identity operation fails with 127.
+    pub setpriv_missing: bool,
+    /// Scripted changes of the modeled filesystem that happen *between* two
+    /// commands (another account acting concurrently), see [`FsEvent`].
+    pub fs_events: Vec<FsEvent>,
+}
+
+/// One change of the scripted filesystem, applied by [`FsEvent`].
+#[derive(Debug, Clone)]
+pub enum FsEventAction {
+    PutFile {
+        path: String,
+        data: Vec<u8>,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    },
+    PutSymlink {
+        path: String,
+        target: String,
+        uid: u32,
+        gid: u32,
+    },
+    MkDir {
+        path: String,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    },
+    Remove {
+        path: String,
+    },
+    PutHardlink {
+        src: String,
+        dst: String,
+    },
+    /// The owner of the object at `path` changes (the object stays the same).
+    Chown {
+        path: String,
+        uid: u32,
+        gid: u32,
+    },
+    /// The command this event fires before does not run: it exits with `code`
+    /// and prints `stderr` (a read that fails for a reason the target cannot
+    /// be asked about, such as an I/O error).
+    FailCommand {
+        code: i32,
+        stderr: String,
+    },
+}
+
+/// A concurrent actor of the scripted target: the `actions` happen immediately
+/// before the `nth` (0-based) command whose program is `program` (basename)
+/// and whose arguments contain `arg` as an element. It fires once.
+#[derive(Debug, Clone)]
+pub struct FsEvent {
+    pub program: String,
+    pub arg: String,
+    pub nth: usize,
+    pub seen: usize,
+    pub fired: bool,
+    pub actions: Vec<FsEventAction>,
+}
+
+/// How a scripted `sudo -n` wrapper fails. The texts are those of sudo 1.9 and
+/// sudo-rs; what only a real host can prove is that a given sudo prints them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FakeSudoFailure {
+    /// `/usr/bin/sudo` does not exist (the remote shell says so, exit 127).
+    Missing,
+    /// `sudo -n` needs a password (also what it prints for a user without a
+    /// sudo rule at all).
+    PasswordRequired,
+    /// sudoers says the user may not run the command.
+    NotAuthorized,
+    /// A failure Sinter has no pattern for.
+    Unrecognized,
+}
+
+impl FakeSudoFailure {
+    fn output(self) -> Output {
+        let (code, text) = match self {
+            FakeSudoFailure::Missing => (127, "sh: 1: /usr/bin/sudo: not found"),
+            FakeSudoFailure::PasswordRequired => (1, "sudo: a password is required"),
+            FakeSudoFailure::NotAuthorized => (
+                1,
+                "Sorry, user fake is not allowed to execute '/usr/bin/env -i -C /root /usr/bin/id -u' as root on fake.test.",
+            ),
+            FakeSudoFailure::Unrecognized => (1, "sudo: unable to initialize policy plugin"),
+        };
+        Output {
+            completion: Completion::Exited(code),
+            stdout: Vec::new(),
+            stderr: text.as_bytes().to_vec(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }
+    }
 }
 
 /// One enabled dnf repository in the fake model.
@@ -2205,9 +2616,13 @@ impl FakeTarget {
             snapshot_stat_fails: false,
             snapshot_rm_fails: false,
             observation_overrides: Default::default(),
+            path_observation_overrides: Default::default(),
             manager: Default::default(),
             accounts: Default::default(),
             fs: None,
+            sudo_failure: None,
+            setpriv_missing: false,
+            fs_events: Vec::new(),
         }
     }
 
@@ -2260,9 +2675,13 @@ impl FakeTarget {
             snapshot_stat_fails: false,
             snapshot_rm_fails: false,
             observation_overrides: Default::default(),
+            path_observation_overrides: Default::default(),
             manager: Default::default(),
             accounts: Default::default(),
             fs: None,
+            sudo_failure: None,
+            setpriv_missing: false,
+            fs_events: Vec::new(),
         }
     }
 
@@ -2301,9 +2720,13 @@ impl FakeTarget {
             snapshot_stat_fails: false,
             snapshot_rm_fails: false,
             observation_overrides: Default::default(),
+            path_observation_overrides: Default::default(),
             manager: Default::default(),
             accounts: Default::default(),
             fs: None,
+            sudo_failure: None,
+            setpriv_missing: false,
+            fs_events: Vec::new(),
         }
     }
 
@@ -2345,9 +2768,13 @@ impl FakeTarget {
             snapshot_stat_fails: false,
             snapshot_rm_fails: false,
             observation_overrides: Default::default(),
+            path_observation_overrides: Default::default(),
             manager: Default::default(),
             accounts: Default::default(),
             fs: None,
+            sudo_failure: None,
+            setpriv_missing: false,
+            fs_events: Vec::new(),
         }
     }
 
@@ -2383,10 +2810,55 @@ impl FakeTarget {
             snapshot_stat_fails: false,
             snapshot_rm_fails: false,
             observation_overrides: Default::default(),
+            path_observation_overrides: Default::default(),
             manager: Default::default(),
             accounts: Default::default(),
             fs: None,
+            sudo_failure: None,
+            setpriv_missing: false,
+            fs_events: Vec::new(),
         }
+    }
+
+    /// Script a failing `sudo -n` wrapper (FS-0 tests).
+    pub fn with_sudo_failure(mut self, failure: FakeSudoFailure) -> Self {
+        self.sudo_failure = Some(failure);
+        self
+    }
+
+    /// Script another account acting between two commands: before the `nth`
+    /// (0-based) `program` command that has `arg` among its arguments, apply
+    /// `actions` to the scripted filesystem.
+    pub fn with_fs_event(
+        mut self,
+        program: &str,
+        arg: &str,
+        nth: usize,
+        actions: Vec<FsEventAction>,
+    ) -> Self {
+        self.fs_events.push(FsEvent {
+            program: program.to_string(),
+            arg: arg.to_string(),
+            nth,
+            seen: 0,
+            fired: false,
+            actions,
+        });
+        self
+    }
+
+    /// Make `setpriv` unavailable on the scripted target.
+    pub fn without_setpriv(mut self) -> Self {
+        self.setpriv_missing = true;
+        self
+    }
+
+    /// Make the scripted user root (uid/gid 0, home `/root`).
+    pub fn as_root(mut self) -> Self {
+        self.uid = 0;
+        self.gid = 0;
+        self.home = "/root".to_string();
+        self
     }
 
     pub fn with_package(mut self, name: &str) -> Self {
@@ -2520,6 +2992,14 @@ impl FakeTarget {
             .insert(program.to_string(), results.into());
         self
     }
+
+    /// Like [`Self::with_observations`], but only for the observation whose
+    /// path operand is `path`.
+    pub fn with_observations_at(mut self, program: &str, path: &str, results: Vec<Output>) -> Self {
+        self.path_observation_overrides
+            .insert((program.to_string(), path.to_string()), results.into());
+        self
+    }
 }
 
 /// The private snapshot root the scripted target hands out via `mktemp`.
@@ -2557,6 +3037,10 @@ const LIVE_CACHE_ROOT: &str = "/var/cache/dnf";
 pub struct FakeExecutor {
     pub log: Vec<CommandRecord>,
     pub sudo: bool,
+    /// The scripted target user is root, so `--sudo` needs no wrapper.
+    pub root_direct: bool,
+    /// uid/gid of a `setpriv` wrapper being served (FS-3 tree identity).
+    identity_override: Option<(u32, u32)>,
     pub home: String,
     target: FakeTarget,
     /// Whether the metadata cache copy into the private snapshot root has
@@ -2575,6 +3059,8 @@ impl FakeExecutor {
         FakeExecutor {
             log: Vec::new(),
             sudo,
+            root_direct: sudo && target.uid == 0,
+            identity_override: None,
             home,
             target,
             snap_copied: false,
@@ -2593,15 +3079,62 @@ impl FakeExecutor {
         }
     }
 
+    fn wraps_sudo(&self) -> bool {
+        self.sudo && !self.root_direct
+    }
+
     fn run(&mut self, req: &ExecRequest) -> Output {
+        self.run_with(req, true)
+    }
+
+    /// `allow_wrapper` false: run as the plain target user (diagnostics).
+    fn run_with(&mut self, req: &ExecRequest, allow_wrapper: bool) -> Output {
         let started = Instant::now();
-        let out = self.exec_fake(req);
-        self.stats
-            .note(req, self.sudo, started.elapsed(), Some(&out));
+        let wrapped = self.wraps_sudo() && allow_wrapper;
+        // A scripted sudo failure answers exactly what the wrapper would have
+        // printed, before the wrapped program is reached.
+        let out = match (wrapped, self.target.sudo_failure) {
+            (true, Some(f)) => f.output(),
+            _ => self.exec_fake(req),
+        };
+        self.stats.note(req, wrapped, started.elapsed(), Some(&out));
         out
     }
 
     fn exec_fake(&mut self, req: &ExecRequest) -> Output {
+        // `setpriv --reuid U --regid G ... -- prog args`: serve `prog` as U:G.
+        if req.program.rsplit('/').next() == Some("setpriv") {
+            let a = &req.args;
+            let val = |flag: &str| {
+                a.iter()
+                    .position(|x| x == flag)
+                    .and_then(|i| a.get(i + 1))
+                    .and_then(|v| v.parse::<u32>().ok())
+            };
+            let (Some(uid), Some(gid), Some(sep)) = (
+                val("--reuid"),
+                val("--regid"),
+                a.iter().position(|x| x == "--"),
+            ) else {
+                return Self::exited(1, String::new(), "setpriv: bad arguments".to_string());
+            };
+            let Some(program) = a.get(sep + 1) else {
+                return Self::exited(1, String::new(), "setpriv: missing program".to_string());
+            };
+            if self.target.setpriv_missing {
+                return Self::exited(127, String::new(), "setpriv: not found".to_string());
+            }
+            let mut inner = ExecRequest::new(program);
+            inner.args = a[sep + 2..].to_vec();
+            inner.env = req.env.clone();
+            inner.stdin = req.stdin.clone();
+            inner.cwd = req.cwd.clone();
+            inner.sensitive = req.sensitive;
+            let saved = self.identity_override.replace((uid, gid));
+            let out = self.exec_fake(&inner);
+            self.identity_override = saved;
+            return out;
+        }
         let prog = req
             .program
             .rsplit('/')
@@ -2610,6 +3143,17 @@ impl FakeExecutor {
             .to_string();
         // An adversarial override for an observation program wins over the
         // modeled behavior; the queued capture is served verbatim.
+        if let Some(path) = req.args.last() {
+            if let Some(o) = self
+                .target
+                .path_observation_overrides
+                .get_mut(&(prog.clone(), path.clone()))
+            {
+                if let Some(o) = o.pop_front() {
+                    return o;
+                }
+            }
+        }
         if let Some(o) = self.target.observation_overrides.get_mut(&prog) {
             if let Some(o) = o.pop_front() {
                 return o;
@@ -2628,7 +3172,7 @@ impl FakeExecutor {
             "useradd" | "usermod" | "userdel" | "groupadd" | "groupdel" | "chpasswd" => {
                 let target = (self.target.uid, self.target.gid, self.target.home.clone());
                 let t = (target.0, target.1, target.2.as_str());
-                let root = self.sudo;
+                let root = self.sudo || self.target.uid == 0;
                 match self
                     .target
                     .accounts
@@ -2769,7 +3313,7 @@ impl FakeExecutor {
             if args[2] == "shadow" {
                 return self.target.accounts.shadow_getent(
                     args.get(3).map(|s| s.as_str()),
-                    self.sudo,
+                    self.sudo || self.target.uid == 0,
                     target,
                 );
             }
@@ -3225,12 +3769,64 @@ impl FakeExecutor {
         if prog == "cat" && req.args.iter().any(|a| a == "/etc/os-release") {
             return None;
         }
-        let (uid, gid) = if self.sudo {
+        let (uid, gid) = if let Some(ids) = self.identity_override {
+            ids
+        } else if self.sudo {
             (0, 0)
         } else {
             (self.target.uid, self.target.gid)
         };
         let fs = self.target.fs.as_mut()?;
+        let mut failed: Option<Output> = None;
+        for ev in self.target.fs_events.iter_mut() {
+            if ev.fired || ev.program != prog || !req.args.contains(&ev.arg) {
+                continue;
+            }
+            if ev.seen < ev.nth {
+                ev.seen += 1;
+                continue;
+            }
+            ev.fired = true;
+            for action in &ev.actions {
+                match action {
+                    FsEventAction::PutFile {
+                        path,
+                        data,
+                        mode,
+                        uid,
+                        gid,
+                    } => fs.put_file(path, data, *mode, *uid, *gid),
+                    FsEventAction::PutSymlink {
+                        path,
+                        target,
+                        uid,
+                        gid,
+                    } => fs.put_symlink(path, target, *uid, *gid),
+                    FsEventAction::MkDir {
+                        path,
+                        mode,
+                        uid,
+                        gid,
+                    } => fs.mkdir_node(path, *mode, *uid, *gid),
+                    FsEventAction::Remove { path } => {
+                        fs.nodes.remove(path);
+                    }
+                    FsEventAction::PutHardlink { src, dst } => fs.put_hardlink(src, dst),
+                    FsEventAction::Chown { path, uid, gid } => {
+                        if let Some(n) = fs.nodes.get_mut(path) {
+                            n.uid = *uid;
+                            n.gid = *gid;
+                        }
+                    }
+                    FsEventAction::FailCommand { code, stderr } => {
+                        failed = Some(Self::exited(*code, String::new(), stderr.clone()));
+                    }
+                }
+            }
+        }
+        if failed.is_some() {
+            return failed;
+        }
         let (out, touched) = fs.run(prog, &req.args, req.stdin.as_deref(), uid, gid)?;
         if out.completion == Completion::Exited(0) {
             for (path, link, present) in touched {
@@ -3670,6 +4266,237 @@ mod tests {
         assert!(line.contains("'/usr/bin/printf'"));
         assert!(line.contains("'a b'"));
         assert!(line.contains("'$(x)'"));
+    }
+
+    // ----- FS-0: root needs no sudo wrapper; a failing wrapper is named -----
+
+    fn failed(code: i32, stderr: &str) -> Output {
+        Output {
+            completion: Completion::Exited(code),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }
+    }
+
+    #[test]
+    fn a_root_target_gets_the_sudo_contract_without_the_wrapper() {
+        let req = ExecRequest::new("/usr/bin/id").arg("-u");
+        let wrapped = build_remote_command_with(&req, true, true, "/home/u");
+        let direct = build_remote_command_with(&req, true, false, "/home/u");
+        assert!(wrapped.starts_with("/usr/bin/sudo -n -- '/usr/bin/env' -i -C '/root'"));
+        // Same environment and working directory contract, minus the wrapper.
+        assert_eq!(wrapped, format!("/usr/bin/sudo -n -- {}", direct));
+        assert!(!direct.contains("sudo"), "{}", direct);
+        assert!(direct.starts_with("'/usr/bin/env' -i -C '/root'"));
+        // Without --sudo nothing changes: the user's home, no wrapper.
+        let plain = build_remote_command_with(&req, false, false, "/home/u");
+        assert_eq!(plain, build_remote_command(&req, false, "/home/u"));
+        assert!(plain.contains("-C '/home/u'") && !plain.contains("sudo"));
+        // The two-argument form is exactly "wrap iff --sudo".
+        assert_eq!(
+            build_remote_command(&req, true, "/home/u"),
+            build_remote_command_with(&req, true, true, "/home/u")
+        );
+    }
+
+    fn local(sudo: bool, root_direct: bool) -> LocalExecutor {
+        LocalExecutor {
+            sudo,
+            root_direct,
+            home: "/".to_string(),
+            log: Vec::new(),
+            stats: ExecStatsHandle::default(),
+        }
+    }
+
+    #[test]
+    fn a_local_root_runs_with_sudo_requested_but_never_starts_sudo() {
+        let mut ex = local(true, true);
+        assert!(!ex.wraps_sudo());
+        let mut req = ExecRequest::new("/bin/echo").arg("direct");
+        req.cwd = Some("/".to_string());
+        // The sudo binary is not involved: `sudo -n` on this machine could not
+        // run this without credentials. A direct start can.
+        let out = ex.run(&req).unwrap();
+        assert_eq!(out.completion, Completion::Exited(0));
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "direct");
+        assert_eq!(ex.stats.snapshot().sudo_commands(), 0);
+        // A non-root target user with --sudo does wrap.
+        assert!(local(true, false).wraps_sudo());
+        assert!(!local(false, false).wraps_sudo());
+        let (program, args) = local(true, false).wrap(&req, true);
+        assert_eq!(program, "/usr/bin/sudo");
+        assert_eq!(args[..2], ["-n".to_string(), "--".to_string()]);
+        let (program, args) = local(true, true).wrap(&req, false);
+        assert_eq!((program.as_str(), args), ("/bin/echo", req.args.clone()));
+    }
+
+    #[test]
+    fn sudo_refusals_are_told_apart_by_what_sudo_printed() {
+        use SudoFailure::*;
+        let cases: [(i32, &str, SudoFailure); 12] = [
+            // sudo 1.9 (the text is what `sudo -n true` prints on a host
+            // where the user has no passwordless rule)
+            (1, "sudo: a password is required\n", PasswordRequired),
+            (
+                1,
+                "sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper\n",
+                PasswordRequired,
+            ),
+            (1, "sudo: no tty present and no askpass program specified\n", PasswordRequired),
+            // sudo-rs
+            (1, "sudo: interactive authentication is required\n", PasswordRequired),
+            (1, "sudo: I'm sorry fake. I'm afraid I can't do that\n", NotAuthorized),
+            (1, "fake is not in the sudoers file.\n", NotAuthorized),
+            (1, "Sorry, user fake is not allowed to execute '/usr/bin/id -u' as root on h.\n", NotAuthorized),
+            (1, "Sorry, user fake may not run sudo on h.\n", NotAuthorized),
+            // the remote shell of a target without sudo
+            (127, "sh: 1: /usr/bin/sudo: not found\n", Missing),
+            (127, "bash: line 1: /usr/bin/sudo: No such file or directory\n", Missing),
+            // not the wrapper's own words: never guessed
+            (127, "env: '/usr/bin/test': No such file or directory\n", Unrecognized),
+            (1, "sudo: unable to resolve host x: Name or service not known\n", Unrecognized),
+        ];
+        for (code, text, want) in cases {
+            assert_eq!(
+                classify_sudo_failure(&failed(code, text)),
+                want,
+                "{} / {:?}",
+                code,
+                text
+            );
+        }
+        assert_eq!(
+            classify_sudo_failure(&Output {
+                completion: Completion::Signaled(9),
+                ..failed(0, "")
+            }),
+            Unrecognized
+        );
+    }
+
+    #[test]
+    fn only_a_sentence_that_names_the_cause_is_recognized() {
+        for (code, text) in [
+            (1, "sudo: a password is required"),
+            (1, "fake is not in the sudoers file."),
+            (127, "sh: 1: /usr/bin/sudo: not found"),
+        ] {
+            let e = recognized_sudo_failure(&failed(code, text)).expect("named");
+            assert_eq!(e.kind, crate::error::ErrorKind::Connect, "{}", e.message);
+            assert!(
+                e.message.starts_with("--sudo was requested"),
+                "{}",
+                e.message
+            );
+            // Fixed text: nothing sudo printed is copied, and no password is
+            // ever requested.
+            assert!(!e.message.to_lowercase().contains("enter"), "{}", e.message);
+        }
+        // A message in general is not a cause: unknown wording, sudo-rs text
+        // Sinter has no pattern for, a stderr from the command itself, a
+        // generic "not allowed to run".
+        for (code, text) in [
+            (1, "sudo: something nobody has seen"),
+            (1, "test: not allowed to run here"),
+            (1, "sudo-rs: nouveau message"),
+            (255, "weird"),
+            (1, ""),
+            (1, "  \n"),
+        ] {
+            assert!(
+                recognized_sudo_failure(&failed(code, text)).is_none(),
+                "{} / {:?}",
+                code,
+                text
+            );
+        }
+        assert!(recognized_sudo_failure(&Output {
+            completion: Completion::Signaled(9),
+            ..failed(0, "sudo: a password is required")
+        })
+        .is_none());
+    }
+
+    #[test]
+    fn the_password_message_does_not_claim_more_than_sudo_said() {
+        let e = recognized_sudo_failure(&failed(1, "sudo: a password is required")).unwrap();
+        // Under -n sudo prints this both for a rule that needs a password and
+        // for a user without any rule; the message says so instead of choosing.
+        assert!(e.message.contains("both"), "{}", e.message);
+        assert!(
+            e.message.contains("never asks for a password"),
+            "{}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn the_diagnostic_is_one_command_without_sudo_and_only_when_needed() {
+        let mut probe = ExecRequest::new("/usr/bin/test");
+        probe.args = vec!["-r".to_string(), "/etc/os-release".to_string()];
+        probe.cwd = Some("/root".to_string());
+        let mut ex = Executor::Fake(Box::new(FakeExecutor::new(FakeTarget::ubuntu2404(), true)));
+        assert!(ex.wraps_sudo());
+
+        // A sentence that names the cause settles it: nothing is run.
+        let e = diagnose_sudo_probe_failure(
+            &mut ex,
+            &probe,
+            &failed(1, "sudo: a password is required"),
+        )
+        .unwrap();
+        assert!(e.message.contains("password is required"));
+        // A command that did not finish: nothing is run either.
+        let e = diagnose_sudo_probe_failure(
+            &mut ex,
+            &probe,
+            &Output {
+                completion: Completion::Signaled(15),
+                ..failed(0, "")
+            },
+        )
+        .unwrap();
+        assert!(e.message.contains("did not finish normally"));
+        assert!(ex.log().is_empty());
+        assert_eq!(ex.stats_handle().snapshot().total(), 0);
+
+        // Otherwise exactly one command, as the plain user, from "/".
+        let e = diagnose_sudo_probe_failure(&mut ex, &probe, &failed(1, "")).unwrap();
+        assert!(e.message.contains("readable without sudo"), "{}", e.message);
+        let log = ex.log();
+        assert_eq!(log.len(), 1);
+        assert!(!log[0].sudo, "a diagnostic is never a sudo command");
+        assert_eq!(
+            (log[0].program.as_str(), log[0].args.clone()),
+            ("/usr/bin/test", probe.args.clone())
+        );
+        let stats = ex.stats_handle().snapshot();
+        assert_eq!((stats.total(), stats.sudo_commands()), (1, 0));
+        // The probe itself still goes through the wrapper afterwards.
+        assert!(ex.wraps_sudo());
+    }
+
+    #[test]
+    fn a_completion_is_described_by_status_only() {
+        assert_eq!(describe_completion(&failed(7, "SECRET stderr")), "exit 7");
+        assert_eq!(
+            describe_completion(&Output {
+                completion: Completion::Signaled(9),
+                ..failed(0, "SECRET")
+            }),
+            "terminated by signal 9"
+        );
+        let indeterminate = Output {
+            completion: Completion::Indeterminate {
+                started: true,
+                reason: "SECRET reason text".to_string(),
+            },
+            ..failed(0, "")
+        };
+        assert_eq!(describe_completion(&indeterminate), "did not complete");
     }
 }
 

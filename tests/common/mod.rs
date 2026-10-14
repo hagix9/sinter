@@ -1218,3 +1218,43 @@ impl ClosedPorts {
         self.ports[i]
     }
 }
+
+/// An audit/plan harness target whose parent walks are served by a modeled
+/// filesystem, so that scripted captures keep describing the observed path
+/// itself (L-1/L-2: every observation of a path is preceded by the walk of its
+/// parents). Every ancestor of every managed path exists (root-owned 0755).
+/// A scripted `stat` queue (`with_observations("stat", ..)`) is handed to the
+/// paths of the file-like resources in order, one capture each.
+pub fn with_walkable_parents(
+    model: &sinter::model::Model,
+    mut fake: sinter::executor::FakeTarget,
+) -> sinter::executor::FakeTarget {
+    fake = fake.with_fake_fs();
+    let mut leaves: Vec<String> = Vec::new();
+    for res in &model.resources {
+        if let Some(path) = &res.path {
+            for dir in sinter::paths::ancestor_dirs(path) {
+                if dir != "/" {
+                    fake = fake.with_fs_dir(&dir);
+                }
+            }
+            if matches!(
+                res.type_.as_str(),
+                "file" | "template" | "directory" | "link"
+            ) {
+                leaves.push(path.clone());
+            }
+        }
+    }
+    if let Some(mut queue) = fake.observation_overrides.remove("stat") {
+        for path in leaves {
+            if let Some(capture) = queue.pop_front() {
+                fake.path_observation_overrides
+                    .entry(("stat".to_string(), path))
+                    .or_default()
+                    .push_back(capture);
+            }
+        }
+    }
+    fake
+}

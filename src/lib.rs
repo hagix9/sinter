@@ -10,6 +10,7 @@ pub mod executor;
 pub mod expressions;
 pub mod facts;
 pub mod fakesys;
+pub mod fsstage;
 pub mod inventory;
 pub mod ir;
 pub mod manager;

@@ -247,7 +247,7 @@ fn audit(r: &Path, src: Option<SharedSecrets>, t: FakeTarget) -> AuditReport {
 fn wrote_anything(rep: &RunReport) -> bool {
     rep.commands.iter().any(|c| {
         let prog = c.program.rsplit('/').next().unwrap_or("");
-        matches!(prog, "dd" | "mv" | "tee" | "rm")
+        matches!(prog, "sh" | "dd" | "mv" | "tee" | "rm")
     })
 }
 

@@ -234,7 +234,7 @@ fn fail(p: &Progress<'_>, e: SinterError) -> SinterError {
 
 /// Ensure `dir` exists as a trusted directory, creating it 0700 if absent.
 fn ensure_dir(fs: &mut TargetFs, dir: &str) -> Result<()> {
-    fs.check_trusted_parents(dir)?;
+    fs.check_trusted_parents_strict(dir)?;
     let permit = fs.mutation_permit()?;
     let st = fs.inspect(dir)?;
     match st.kind {
@@ -310,7 +310,7 @@ pub(crate) fn perform(
         ensure_dir(fs, d).map_err(|e| fail(&before_store, e))?;
     }
     let run_dir = format!("{}/{}", root, run_id);
-    fs.check_trusted_parents(&run_dir)
+    fs.check_trusted_parents_strict(&run_dir)
         .map_err(|e| fail(&before_store, e))?;
     let permit = fs.mutation_permit()?;
     // Plain mkdir: an existing run directory is a collision and fails. It is
@@ -362,8 +362,23 @@ fn copy_one(
     path: &str,
     run_dir: &str,
 ) -> Result<BackupEntry> {
-    fs.check_trusted_parents(path)?;
+    // A path inside another account's tree is not backed up: the copy would
+    // have to run as that account into a store only root can write.
+    fs.check_trusted_parents_strict(path)?;
     let st = fs.inspect(path)?;
+    // FS2-A3. A directory directly in a shared directory is not copied: the
+    // entry gate judged only the directory itself, and `cp -a` would read
+    // everything below it as root, including what other accounts put there.
+    // Refused before anything is read or created for it. A file or a symlink
+    // there passed the gate (owned by a trusted principal, one hard link) and
+    // is copied as before; a directory elsewhere is copied as before.
+    if st.kind == ObjKind::Dir && fs.shared_parent() {
+        return Err(SinterError::apply(
+            "a directory directly in a shared directory (sticky and writable by other \
+             accounts, such as /tmp) is not backed up: its contents can be placed there by \
+             other accounts; list the files to back up instead",
+        ));
+    }
     let kind = match st.kind {
         ObjKind::Absent => {
             return Ok(BackupEntry {
@@ -400,6 +415,132 @@ fn copy_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::{Executor, FakeExecutor, FakeTarget};
+
+    // -----------------------------------------------------------------
+    // FS2-A3: a directory directly in a shared directory is not copied.
+    // -----------------------------------------------------------------
+
+    const RUN_DIR: &str = "/root/.sinter-test-run";
+
+    fn shared_fs() -> TargetFs {
+        let mut t = FakeTarget::ubuntu2404().with_fake_fs().as_root();
+        {
+            let fs = t.fs.as_mut().unwrap();
+            fs.mkdir_node("/tmp", 0o1777, 0, 0);
+            // A nested shared directory with a file of another account in it.
+            fs.mkdir_node("/tmp/pub", 0o1777, 0, 0);
+            fs.put_file("/tmp/pub/theirs", b"alice\n", 0o644, 1001, 1001);
+            // A root-only directory directly in /tmp, and a root file and link.
+            fs.mkdir_node("/tmp/rootdir", 0o755, 0, 0);
+            fs.put_file("/tmp/rootdir/f", b"y\n", 0o644, 0, 0);
+            fs.put_file("/tmp/one", b"mine\n", 0o644, 0, 0);
+            fs.put_symlink("/tmp/lnk", "/etc/x", 0, 0);
+            fs.put_file("/tmp/theirs.conf", b"alice\n", 0o644, 1001, 1001);
+            // Not in a shared directory.
+            fs.mkdir_node("/etc/app2", 0o755, 0, 0);
+            fs.put_file("/etc/app2/a", b"z\n", 0o644, 0, 0);
+            fs.mkdir_node("/root", 0o700, 0, 0);
+            fs.mkdir_node(RUN_DIR, 0o700, 0, 0);
+        }
+        TargetFs::new_for(
+            Executor::Fake(Box::new(FakeExecutor::new(t, false))),
+            false,
+            0,
+            0,
+            "/root".to_string(),
+            Some(crate::platform::PackageBackend::Apt),
+            true,
+            false,
+            true,
+            None,
+        )
+    }
+
+    fn copies(fs: &TargetFs) -> usize {
+        fs.log()
+            .iter()
+            .filter(|c| c.program.ends_with("/cp"))
+            .count()
+    }
+
+    fn made_dirs(fs: &TargetFs) -> usize {
+        fs.log()
+            .iter()
+            .filter(|c| c.program.ends_with("/mkdir"))
+            .count()
+    }
+
+    fn below_run_dir(fs: &TargetFs) -> Vec<String> {
+        fs.fake_fs()
+            .unwrap()
+            .nodes
+            .keys()
+            .filter(|k| k.starts_with(&format!("{}/", RUN_DIR)))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_directory_directly_in_a_shared_directory_is_refused_before_anything_is_read_or_made() {
+        // Both the nested shared directory (other accounts' files inside) and a
+        // root-only directory: the rule is about where the directory is.
+        for dir in ["/tmp/pub", "/tmp/rootdir"] {
+            let mut fs = shared_fs();
+            let permit = fs.mutation_permit().unwrap();
+            let e = copy_one(&mut fs, &permit, dir, RUN_DIR).unwrap_err();
+            assert!(
+                e.message.contains("directly in a shared directory"),
+                "{dir}: {}",
+                e.message
+            );
+            assert!(!e.message.contains("1001"), "{dir}: no uid: {}", e.message);
+            assert_eq!(copies(&fs), 0, "{dir}: cp -a is never run");
+            assert_eq!(made_dirs(&fs), 0, "{dir}: nothing is made for it");
+            assert!(
+                below_run_dir(&fs).is_empty(),
+                "{dir}: {:?}",
+                below_run_dir(&fs)
+            );
+            // Nothing below the directory was read either: only `lstat`s of
+            // the directory and of its ancestors were issued.
+            for c in fs.log() {
+                let reads_below = c.args.iter().any(|a| a.starts_with(&format!("{}/", dir)));
+                assert!(!reads_below, "{dir}: {:?}", c);
+            }
+        }
+    }
+
+    #[test]
+    fn files_and_links_in_a_shared_directory_and_directories_elsewhere_are_still_copied() {
+        for (path, kind) in [
+            ("/tmp/one", "file"),
+            ("/tmp/lnk", "symlink"),
+            ("/etc/app2", "directory"),
+        ] {
+            let mut fs = shared_fs();
+            let permit = fs.mutation_permit().unwrap();
+            let entry = copy_one(&mut fs, &permit, path, RUN_DIR)
+                .unwrap_or_else(|e| panic!("{path}: {}", e.message));
+            assert_eq!(entry.status, BackupStatus::BackedUp, "{path}");
+            assert_eq!(entry.kind, Some(kind), "{path}");
+            assert_eq!(copies(&fs), 1, "{path}");
+            assert!(
+                below_run_dir(&fs).contains(&format!("{}{}", RUN_DIR, path)),
+                "{path}: {:?}",
+                below_run_dir(&fs)
+            );
+        }
+    }
+
+    #[test]
+    fn an_entry_of_another_account_in_a_shared_directory_is_still_refused_by_the_gate() {
+        let mut fs = shared_fs();
+        let permit = fs.mutation_permit().unwrap();
+        let e = copy_one(&mut fs, &permit, "/tmp/theirs.conf", RUN_DIR).unwrap_err();
+        assert!(e.message.contains("belongs to uid 1001"), "{}", e.message);
+        assert_eq!(copies(&fs), 0);
+    }
 
     #[test]
     fn utc_stamp_known_values() {

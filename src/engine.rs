@@ -86,6 +86,9 @@ pub struct RunReport {
     /// systemd manager maintenance operations (`daemon-reload`): neither
     /// resources nor handlers. Apply: what ran. Plan: what apply would do.
     pub manager_reloads: Vec<crate::manager::ManagerReloadResult>,
+    /// The scripted filesystem at the end of the run (test support). `None`
+    /// on a real target.
+    pub fake_fs: Option<crate::fakesys::FakeFs>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -396,6 +399,9 @@ impl Engine {
         let mut notified: BTreeMap<String, bool> = BTreeMap::new();
         let mut stopped = false;
         let mut stop_reason: Option<String> = None;
+        // The resource that stopped the run was sensitive: its reason is never
+        // copied into the (possibly non-sensitive) resources it blocks.
+        let mut stop_sensitive = false;
         // How the resource stage ends if `stopped` (a plan error leaves
         // through `return Err`, where the tracker ends the stage as `Failed`).
         let mut stop_outcome = StageOutcome::Failed;
@@ -418,7 +424,11 @@ impl Engine {
             if stopped {
                 // Fast-forwarded, never visited: not announced, not counted.
                 let mut r = blocked_fail_fast(&res);
-                r.reason = stop_reason.clone();
+                r.reason = if stop_sensitive {
+                    Some(WITHHELD_SENSITIVE_STOP.to_string())
+                } else {
+                    stop_reason.clone()
+                };
                 results.insert(res.id.clone(), out_results.len());
                 out_results.push(r);
                 continue;
@@ -440,6 +450,7 @@ impl Engine {
                     }
                     let r = failed_result_from_error(&res, &e);
                     stopped = true;
+                    stop_sensitive = res.sensitive || res.derived_sensitive;
                     stop_reason = Some(r.reason.clone().unwrap_or_default());
                     results.insert(res.id.clone(), out_results.len());
                     out_results.push(r);
@@ -467,6 +478,7 @@ impl Engine {
                             res.id
                         ));
                         stopped = true;
+                        stop_sensitive = res.sensitive || res.derived_sensitive;
                         stop_reason = r.reason.clone();
                         results.insert(res.id.clone(), out_results.len());
                         out_results.push(r);
@@ -492,7 +504,7 @@ impl Engine {
                         dep_failure = Some(format!(
                             "dependency {} is unknown ({})",
                             dep,
-                            dr.reason.clone().unwrap_or_default()
+                            dep_reason_text(dr)
                         ));
                         break;
                     }
@@ -501,7 +513,7 @@ impl Engine {
                             "dependency {} is {} ({})",
                             dep,
                             dr.disposition.label(),
-                            dr.reason.clone().unwrap_or_default()
+                            dep_reason_text(dr)
                         ));
                         break;
                     }
@@ -541,6 +553,7 @@ impl Engine {
                 if rr.is_indeterminate() {
                     stop_outcome = StageOutcome::Indeterminate;
                 }
+                stop_sensitive = rr.sensitive || res.sensitive || res.derived_sensitive;
                 stop_reason = Some(rr.reason.clone().unwrap_or_else(|| {
                     if rr.is_indeterminate() {
                         "resource became indeterminate".into()
@@ -711,6 +724,7 @@ impl Engine {
         };
 
         let commands = self.fs.log();
+        let fake_fs = self.fs.fake_fs();
         let manager_reloads = std::mem::take(&mut self.manager.reloads);
         Ok(RunReport {
             resources: out_results,
@@ -721,6 +735,7 @@ impl Engine {
             commands,
             backup,
             manager_reloads,
+            fake_fs,
         })
     }
 
@@ -786,6 +801,10 @@ impl Engine {
         res: &FrozenResource,
         item: Option<&EvalVal>,
     ) -> Result<ResourceResult> {
+        // FS-3: a resource starts as the invocation's own identity; a path in
+        // another account's tree makes its walk switch (and only its walk).
+        self.fs.clear_identity();
+        self.fs.set_redact(res.sensitive || res.derived_sensitive);
         let outcome = match res.type_.as_str() {
             "file" => self.run_file(res, item),
             "directory" => self.run_directory(res, item),
@@ -801,8 +820,27 @@ impl Engine {
                 res.id, other
             ))),
         };
+        self.fs.clear_identity();
+        self.fs.set_redact(false);
         match outcome {
-            Ok(r) => Ok(r),
+            Ok(mut r) => {
+                // FS-0d: packages, users and groups can only be changed by
+                // root. Say so in plan when the target user is not root and
+                // `--sudo` was not given. A note only: plan neither runs sudo
+                // nor probes for it, and no status or exit code changes.
+                if self.opts.mode == Mode::Plan
+                    && r.change == Change::Changed
+                    && matches!(res.type_.as_str(), "package" | "user" | "group")
+                    && !self.fs.runs_as_root()
+                {
+                    r.notes.push(format!(
+                        "needs root: changing a {} requires root privilege; the target user is uid {} and --sudo was not given, so apply will fail unless the connection is root or --sudo is used",
+                        res.type_,
+                        self.fs.target_uid()
+                    ));
+                }
+                Ok(r)
+            }
             Err(e) if e.kind == crate::error::ErrorKind::Unknown => {
                 if self.opts.mode == Mode::Plan {
                     let mut r = unknown_result(res);
@@ -915,6 +953,21 @@ pub(crate) fn scope_label(type_: &str) -> &'static str {
     }
 }
 
+/// Fixed text for a resource blocked by a failed sensitive resource: the
+/// failing resource's own reason can name paths or values and is not copied.
+const WITHHELD_SENSITIVE_STOP: &str =
+    "an earlier sensitive resource failed (details withheld because they could name sensitive values)";
+
+/// A dependency's reason as it may appear in a dependent's reason: withheld
+/// when the dependency is sensitive.
+fn dep_reason_text(dr: &ResourceResult) -> String {
+    if dr.sensitive {
+        "details withheld: the dependency is sensitive".to_string()
+    } else {
+        dr.reason.clone().unwrap_or_default()
+    }
+}
+
 pub(crate) fn blocked_fail_fast(res: &FrozenResource) -> ResourceResult {
     ResourceResult {
         id: res.id.clone(),
@@ -1000,6 +1053,15 @@ fn connect_and_prepare(mut ex: Executor, _sudo: bool) -> Result<Executor> {
     req.env = crate::resources::baseline_env(home);
     let out = ex.run(&req)?;
     if !out.is_success() {
+        // A failure of the `sudo -n` wrapper is not a statement about the
+        // target's operating system, and a silent `test` failure looks like a
+        // silent wrapper failure: settle which it was before saying anything
+        // (see `diagnose_sudo_probe_failure`).
+        if ex.wraps_sudo() {
+            return Err(crate::executor::diagnose_sudo_probe_failure(
+                &mut ex, &req, &out,
+            )?);
+        }
         return Err(SinterError::connect(format!(
             "target does not appear to be a supported Linux system (/etc/os-release unreadable; exit={:?}, stderr={})",
             out.exit_code(),
@@ -1202,5 +1264,25 @@ fn changefield(c: Option<bool>) -> Value {
     match c {
         Some(b) => Value::Bool(b),
         None => Value::Null,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dependency_reason_is_withheld_when_the_dependency_is_sensitive() {
+        let mut dep = ResourceResult::skipped("d", "file", "r.yaml");
+        dep.reason = Some("cannot read /etc/topsecret-name.conf".to_string());
+        assert_eq!(
+            dep_reason_text(&dep),
+            "cannot read /etc/topsecret-name.conf",
+            "an ordinary dependency explains itself"
+        );
+        dep.sensitive = true;
+        let shown = dep_reason_text(&dep);
+        assert!(!shown.contains("topsecret-name"), "{shown}");
+        assert!(shown.contains("withheld"), "{shown}");
     }
 }

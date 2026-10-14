@@ -257,6 +257,21 @@ pub struct FakeFs {
     /// same/backward-mtime case `NeedDaemonReload` cannot detect).
     pub freeze_mtime: bool,
     staging_counter: u64,
+    /// Inodes whose names cannot be removed (an immutable file): the staging
+    /// script then reports `link-remains` (test knob).
+    pub undeletable: BTreeSet<u64>,
+    /// The staging script cannot tell whether the staging directory is gone
+    /// (test knob).
+    pub cleanup_unknown: bool,
+    /// No payload name can be removed (an immutable file, a read-only mount):
+    /// the staging script then reports `link-remains` (test knob).
+    pub payload_undeletable: bool,
+    /// The file system refuses hard links: `publish new` fails with the
+    /// diagnostic of `ln` and the staging is cleaned up (test knob).
+    pub no_hard_links: bool,
+    /// `setpriv` (util-linux) is not installed: staging as root is refused
+    /// (test knob).
+    pub setpriv_missing: bool,
 }
 
 impl Default for FakeFs {
@@ -267,6 +282,11 @@ impl Default for FakeFs {
             clock: 1,
             freeze_mtime: false,
             staging_counter: 0,
+            undeletable: BTreeSet::new(),
+            cleanup_unknown: false,
+            payload_undeletable: false,
+            no_hard_links: false,
+            setpriv_missing: false,
         };
         for d in [
             "/",
@@ -315,6 +335,290 @@ fn parent_of(path: &str) -> String {
     }
 }
 
+/// The device number the model reports (see `stat_record`).
+const FAKE_DEV: u64 = 2049;
+
+impl FakeFs {
+    fn reject(msg: &str) -> Output {
+        exited(3, String::new(), format!("REJECT: {}\n", msg))
+    }
+
+    /// The script's `trusted_dir`: nobody but root and the invoking account can
+    /// rename or unlink entries in `dir`.
+    fn trusted_node(&self, dir: &str, me: u32) -> bool {
+        let Some(n) = self.nodes.get(dir) else {
+            return false;
+        };
+        if n.uid != 0 && n.uid != me {
+            return false;
+        }
+        let m = n.mode & 0o7777;
+        m & 0o1000 != 0 || m & 0o022 == 0
+    }
+
+    fn has_children(&self, dir: &str) -> bool {
+        let prefix = format!("{}/", dir);
+        self.nodes.keys().any(|k| k.starts_with(&prefix))
+    }
+
+    /// The model of the fixed staging script (`crate::fsstage`): the same
+    /// steps, the same answers, the same exit codes.
+    fn fsstage(
+        &mut self,
+        op: &str,
+        a: &[&str],
+        stdin: Option<&[u8]>,
+        me: u32,
+        mygid: u32,
+        touched: &mut Vec<TouchedPath>,
+    ) -> Output {
+        match (op, a) {
+            ("stage", [dir, _did, mode, uid, gid, _xattrs @ ..]) => {
+                self.fs_stage(dir, Some((mode, uid, gid)), "", stdin, me, mygid)
+            }
+            ("stagelink", [dir, _did, target]) => self.fs_stage(dir, None, target, None, me, mygid),
+            ("publish", [kind, what, dir, _did, s, g, sid, pid, base]) => {
+                self.fs_publish(kind, what, dir, s, g, sid, pid, base, me, touched)
+            }
+            ("discard", [dir, _did, s, g, sid]) => self.fs_discard(dir, s, g, sid, me),
+            _ => Self::reject("unknown operation"),
+        }
+    }
+
+    fn fs_stage(
+        &mut self,
+        dir: &str,
+        file: Option<(&str, &str, &str)>,
+        link_target: &str,
+        stdin: Option<&[u8]>,
+        me: u32,
+        mygid: u32,
+    ) -> Output {
+        let Some(FakeNode {
+            kind: FakeKind::Dir,
+            mode: dir_mode,
+            ..
+        }) = self.nodes.get(dir).cloned()
+        else {
+            return Self::reject("cannot enter the directory");
+        };
+        if dir_mode & 0o2000 != 0 {
+            return Self::reject(
+                "the directory has the setgid bit: a directory made in it inherits its group, so \
+                 Sinter cannot prove the staging directory is its own",
+            );
+        }
+        if me == 0 && self.setpriv_missing {
+            return Self::reject("setpriv (util-linux) is required to stage as root");
+        }
+        if me != 0 && !self.trusted_node(dir, me) {
+            return Self::reject(
+                "the parent directory could be changed by others: the staging directory cannot \
+                 be proven to be Sinter's own",
+            );
+        }
+        let owner = match file {
+            Some((_, uid, gid)) => match (uid.parse::<u32>(), gid.parse::<u32>()) {
+                (Ok(u), Ok(g)) => Some((u, g)),
+                _ => return Self::reject("bad owner"),
+            },
+            None => None,
+        };
+        self.staging_counter += 1;
+        let group = if me == 0 {
+            3_000_000_000u32 + self.staging_counter as u32
+        } else {
+            mygid
+        };
+        let name = format!(".sinter-stage.fk{}", self.staging_counter);
+        let s_path = format!("{}/{}", dir, name);
+        self.mkdir_node(&s_path, 0o700, me, group);
+        let s_ino = self.nodes[&s_path].ino;
+        let payload = format!("{}/payload", s_path);
+        match (file, owner) {
+            (Some((mode, _, _)), Some((u, g))) => {
+                let m = u32::from_str_radix(mode, 8).unwrap_or(0o600);
+                self.put_file(&payload, stdin.unwrap_or(&[]), m, u, g);
+            }
+            _ => self.put_symlink(&payload, link_target, me, mygid),
+        }
+        let p_ino = self.nodes[&payload].ino;
+        exited(
+            0,
+            format!(
+                "{} {} {}:{} {}:{}\n",
+                name,
+                if me == 0 {
+                    group.to_string()
+                } else {
+                    "-".to_string()
+                },
+                FAKE_DEV,
+                s_ino,
+                FAKE_DEV,
+                p_ino
+            ),
+            String::new(),
+        )
+    }
+
+    /// The script's `enter_s`: the staging directory must still be the one the
+    /// earlier step made (owner, creation-time group, device:inode).
+    fn fs_enter(
+        &self,
+        dir: &str,
+        s: &str,
+        g: &str,
+        sid: &str,
+        me: u32,
+    ) -> Result<(String, u64), Output> {
+        if !matches!(
+            self.nodes.get(dir),
+            Some(FakeNode {
+                kind: FakeKind::Dir,
+                ..
+            })
+        ) {
+            return Err(Self::reject("cannot enter the directory"));
+        }
+        let s_path = format!("{}/{}", dir, s);
+        let n =
+            match self.nodes.get(&s_path) {
+                Some(n) if matches!(n.kind, FakeKind::Dir) => n,
+                _ => return Err(Self::reject(
+                    "the staging directory is gone or was replaced; a stray .sinter-stage.* may \
+                     remain",
+                )),
+            };
+        let group_ok = g == "-" || g.parse::<u32>().ok() == Some(n.gid);
+        if n.uid != me || !group_ok || sid != format!("{}:{}", FAKE_DEV, n.ino) {
+            return Err(Self::reject(
+                "the staging directory is not the one made by stage",
+            ));
+        }
+        Ok((s_path, n.ino))
+    }
+
+    /// The script's `discard_here`: remove the payload name, remove the staging
+    /// directory by name only in a directory nobody else can change, and read
+    /// the result from the directory itself (its inode), not from a name.
+    /// Returns the cleanup line and whether it needs attention (exit code 5).
+    fn fs_cleanup(&mut self, dir: &str, s_path: &str, s_ino: u64, me: u32) -> (String, bool) {
+        let payload = format!("{}/payload", s_path);
+        if let Some(n) = self.nodes.get(&payload) {
+            if self.payload_undeletable || self.undeletable.contains(&n.ino) {
+                return (format!("CLEANUP:link-remains:{}\n", s_path), true);
+            }
+            self.nodes.remove(&payload);
+        }
+        if self.cleanup_unknown {
+            return ("CLEANUP:unknown\n".to_string(), true);
+        }
+        if self.trusted_node(dir, me) {
+            let ours = matches!(
+                self.nodes.get(s_path),
+                Some(n) if n.ino == s_ino && matches!(n.kind, FakeKind::Dir) && n.uid == me
+            );
+            if ours && !self.has_children(s_path) {
+                self.nodes.remove(s_path);
+            }
+        }
+        // Where is our directory now?
+        let at = self
+            .nodes
+            .iter()
+            .find(|(_, n)| n.ino == s_ino && matches!(n.kind, FakeKind::Dir))
+            .map(|(k, _)| k.clone());
+        match at {
+            None => ("CLEANUP:clean\n".to_string(), false),
+            Some(p) => (format!("CLEANUP:left:{}\n", p), false),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fs_publish(
+        &mut self,
+        kind: &str,
+        what: &str,
+        dir: &str,
+        s: &str,
+        g: &str,
+        sid: &str,
+        pid: &str,
+        base: &str,
+        me: u32,
+        touched: &mut Vec<TouchedPath>,
+    ) -> Output {
+        let (s_path, s_ino) = match self.fs_enter(dir, s, g, sid, me) {
+            Ok(v) => v,
+            Err(o) => return o,
+        };
+        let payload = format!("{}/payload", s_path);
+        let Some(p) = self.nodes.get(&payload).cloned() else {
+            return Self::reject("the staged object is not the one made by stage");
+        };
+        if pid != format!("{}:{}", FAKE_DEV, p.ino) {
+            return Self::reject("the staged object is not the one made by stage");
+        }
+        let is_link = matches!(p.kind, FakeKind::Symlink(_));
+        if (what == "link") != is_link {
+            return Self::reject("the staged object changed kind");
+        }
+        let dst = format!("{}/{}", dir, base);
+        let failure = match kind {
+            "new" => {
+                if self.no_hard_links {
+                    Some("ln: failed to create hard link: Operation not permitted")
+                } else if self.nodes.contains_key(&dst) {
+                    Some("ln: failed to create hard link: File exists")
+                } else {
+                    None
+                }
+            }
+            _ => {
+                if self.sticky_denies(me, &dst) {
+                    Some("mv: cannot move: Operation not permitted")
+                } else if matches!(
+                    self.nodes.get(&dst),
+                    Some(FakeNode {
+                        kind: FakeKind::Dir,
+                        ..
+                    })
+                ) {
+                    Some("mv: cannot overwrite directory with non-directory")
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(why) = failure {
+            let (line, _) = self.fs_cleanup(dir, &s_path, s_ino, me);
+            return exited(4, line, format!("{}\n", why));
+        }
+        if kind == "new" {
+            self.nodes.insert(dst.clone(), p);
+        } else {
+            let mut n = self.nodes.remove(&payload).expect("checked above");
+            self.clock += 1;
+            n.mtime = self.clock;
+            n.ctime = self.clock;
+            self.nodes.insert(dst.clone(), n);
+        }
+        touched.push((dst, is_link, true));
+        let (line, attention) = self.fs_cleanup(dir, &s_path, s_ino, me);
+        exited(if attention { 5 } else { 0 }, line, String::new())
+    }
+
+    fn fs_discard(&mut self, dir: &str, s: &str, g: &str, sid: &str, me: u32) -> Output {
+        let (s_path, s_ino) = match self.fs_enter(dir, s, g, sid, me) {
+            Ok(v) => v,
+            Err(o) => return o,
+        };
+        let (line, attention) = self.fs_cleanup(dir, &s_path, s_ino, me);
+        exited(if attention { 5 } else { 0 }, line, String::new())
+    }
+}
+
 impl FakeFs {
     fn tick(&mut self) -> u64 {
         self.clock += 1;
@@ -356,6 +660,28 @@ impl FakeFs {
                 ctime: t,
             },
         );
+    }
+
+    pub fn put_symlink(&mut self, path: &str, target: &str, uid: u32, gid: u32) {
+        let (t, i) = (self.tick(), self.ino());
+        self.nodes.insert(
+            path.to_string(),
+            FakeNode {
+                kind: FakeKind::Symlink(target.to_string()),
+                mode: 0o777,
+                uid,
+                gid,
+                ino: i,
+                mtime: t,
+                ctime: t,
+            },
+        );
+    }
+
+    /// Hard-link `src` as `dst` (same inode), as `ln src dst` by root would.
+    pub fn put_hardlink(&mut self, src: &str, dst: &str) {
+        let n = self.nodes.get(src).cloned().expect("hard link source");
+        self.nodes.insert(dst.to_string(), n);
     }
 
     pub fn file_bytes(&self, path: &str) -> Option<Vec<u8>> {
@@ -455,10 +781,63 @@ impl FakeFs {
         exited(1, String::new(), format!("{}\n", msg))
     }
 
+    /// Hard link count (`%h`): the names a regular file has in the model (the
+    /// nodes sharing its inode); a directory has two.
+    fn nlink(&self, path: &str) -> Option<usize> {
+        let n = self.nodes.get(path)?;
+        Some(match n.kind {
+            FakeKind::File(_) => self
+                .nodes
+                .values()
+                .filter(|m| m.ino == n.ino && matches!(m.kind, FakeKind::File(_)))
+                .count(),
+            _ => 2,
+        })
+    }
+
+    /// The sticky-directory rule (Linux `may_delete`): in a directory with the
+    /// sticky bit, an account that is neither root nor the owner of the
+    /// directory nor the owner of the entry cannot remove or rename the entry.
+    fn sticky_denies(&self, uid: u32, path: &str) -> bool {
+        let (Some(n), Some(d)) = (self.nodes.get(path), self.nodes.get(&parent_of(path))) else {
+            return false;
+        };
+        d.mode & 0o1000 != 0 && uid != 0 && uid != d.uid && uid != n.uid
+    }
+
+    /// The path with every symlink among its *parents* (not the last
+    /// component) replaced by its absolute target, as the kernel resolves the
+    /// directory part of an operand. Relative targets are left alone.
+    fn through_symlinked_parents(&self, path: &str) -> String {
+        let mut resolved = String::new();
+        let comps: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+        for (i, c) in comps.iter().enumerate() {
+            resolved.push('/');
+            resolved.push_str(c);
+            if i + 1 == comps.len() {
+                break;
+            }
+            if let Some(FakeNode {
+                kind: FakeKind::Symlink(t),
+                ..
+            }) = self.nodes.get(&resolved)
+            {
+                if t.starts_with('/') {
+                    resolved = t.trim_end_matches('/').to_string();
+                }
+            }
+        }
+        if resolved.is_empty() {
+            "/".to_string()
+        } else {
+            resolved
+        }
+    }
+
     /// Serve one filesystem command, mutating the model. Returns the output
     /// and the paths whose *recognizable manager input* changed
     /// (`(path, is_link, present_after)`).
-    pub(crate) fn run(
+    pub fn run(
         &mut self,
         prog: &str,
         args: &[String],
@@ -475,6 +854,10 @@ impl FakeFs {
             {
                 self.stat_batch(paths)
             }
+            ("stat", ["-c", "%h", "--", p]) => match self.nlink(p) {
+                Some(n) => exited(0, format!("{}\n", n), String::new()),
+                None => exited(1, String::new(), Self::stat_missing(p)),
+            },
             ("sha256sum", ["--", p]) => match self.nodes.get(*p) {
                 Some(FakeNode {
                     kind: FakeKind::File(b),
@@ -567,14 +950,9 @@ impl FakeFs {
                     Self::fail(&format!("getfacl: {}: No such file or directory", p))
                 }
             }
-            ("mktemp", ["-d", "-p", dir, tmpl]) if tmpl.starts_with(".sinter-stage.") => {
-                if !self.nodes.contains_key(*dir) {
-                    return Some((Self::fail("mktemp: parent missing"), touched));
-                }
-                self.staging_counter += 1;
-                let p = format!("{}/.sinter-stage.fk{}", dir, self.staging_counter);
-                self.mkdir_node(&p, 0o700, uid, gid);
-                exited(0, format!("{}\n", p), String::new())
+            ("sh", ["-c", script, "sh", op, rest @ ..]) if *script == crate::fsstage::SCRIPT => {
+                let out = self.fsstage(op, rest, stdin, uid, gid, &mut touched);
+                return Some((out, touched));
             }
             ("chmod", [mode, "--", p]) => match self.nodes.get_mut(*p) {
                 Some(n) => {
@@ -597,6 +975,19 @@ impl FakeFs {
                 }
                 None => Self::fail("chown: no such file"),
             },
+            // `mkdir -p -- path`: every missing component, root-owned 0755 for
+            // the invoking account.
+            ("mkdir", ["-p", "--", p]) => {
+                let mut cur = String::new();
+                for part in p.split('/').filter(|x| !x.is_empty()) {
+                    cur.push('/');
+                    cur.push_str(part);
+                    if !self.nodes.contains_key(&cur) {
+                        self.mkdir_node(&cur, 0o755, uid, gid);
+                    }
+                }
+                ok()
+            }
             ("mkdir", ["--", p]) => {
                 if self.nodes.contains_key(*p) || !self.nodes.contains_key(&parent_of(p)) {
                     Self::fail("mkdir: cannot create directory")
@@ -606,6 +997,9 @@ impl FakeFs {
                 }
             }
             ("rmdir", [p]) | ("rmdir", ["--", p]) => match self.nodes.get(*p) {
+                Some(_) if self.sticky_denies(uid, p) => {
+                    Self::fail("rmdir: Operation not permitted")
+                }
                 Some(FakeNode {
                     kind: FakeKind::Dir,
                     ..
@@ -621,58 +1015,93 @@ impl FakeFs {
                 _ => Self::fail("rmdir: failed"),
             },
             ("rm", ["-f", "--", p]) => {
-                if let Some(n) = self.nodes.get(*p) {
-                    let link = matches!(n.kind, FakeKind::Symlink(_));
-                    if !matches!(n.kind, FakeKind::Dir) {
-                        self.nodes.remove(*p);
-                        touched.push((p.to_string(), link, false));
+                // Like the real `rm`, the directory part of the operand is
+                // resolved: a symlink among the parents leads elsewhere.
+                let q = self.through_symlinked_parents(p);
+                let p = q.as_str();
+                if self.sticky_denies(uid, p) {
+                    Self::fail("rm: cannot remove: Operation not permitted")
+                } else {
+                    if let Some(n) = self.nodes.get(p) {
+                        let link = matches!(n.kind, FakeKind::Symlink(_));
+                        if !matches!(n.kind, FakeKind::Dir) {
+                            self.nodes.remove(p);
+                            touched.push((p.to_string(), link, false));
+                        }
                     }
-                }
-                ok()
-            }
-            ("dd", ["status=none", of]) if of.starts_with("of=") => {
-                let p = &of[3..];
-                if !self.nodes.contains_key(&parent_of(p)) {
-                    Self::fail("dd: failed to open")
-                } else {
-                    let data = stdin.unwrap_or(&[]).to_vec();
-                    self.put_file(p, &data, 0o644, uid, gid);
                     ok()
                 }
             }
-            ("mv", ["-T", "-f", "--", from, to]) => match self.nodes.remove(*from) {
-                None => Self::fail("mv: cannot stat source"),
-                Some(mut n) => {
-                    let link = matches!(n.kind, FakeKind::Symlink(_));
-                    self.clock += 1;
-                    n.mtime = self.clock;
-                    n.ctime = self.clock;
-                    self.nodes.insert(to.to_string(), n);
-                    touched.push((to.to_string(), link, true));
-                    ok()
-                }
-            },
-            ("ln", ["-s", "--", target, link]) => {
+            // `ln -sT -- target link`: `link` is a name, never a directory to
+            // create the link in. An existing `link` (of any kind) fails.
+            ("ln", ["-sT", "--", target, link]) => {
                 if self.nodes.contains_key(*link) || !self.nodes.contains_key(&parent_of(link)) {
-                    Self::fail("ln: failed to create symbolic link")
+                    Self::fail("ln: failed to create symbolic link: File exists")
                 } else {
-                    let (t, i) = (self.tick(), self.ino());
-                    self.nodes.insert(
-                        link.to_string(),
-                        FakeNode {
-                            kind: FakeKind::Symlink(target.to_string()),
-                            mode: 0o777,
-                            uid,
-                            gid,
-                            ino: i,
-                            mtime: t,
-                            ctime: t,
-                        },
-                    );
+                    self.put_symlink(link, target, uid, gid);
                     touched.push((link.to_string(), true, true));
                     ok()
                 }
             }
+            // `ln -s -- target link` WITHOUT `-T`, modeled as the real tool
+            // behaves: when `link` is a directory, or a symlink to one, the
+            // link is created *inside* it, named after the target. Sinter no
+            // longer issues this form; the model stays so that a regression to
+            // it is visible as a link in the wrong directory.
+            ("ln", ["-s", "--", target, link]) => {
+                let dest = match self.nodes.get(*link) {
+                    Some(FakeNode {
+                        kind: FakeKind::Dir,
+                        ..
+                    }) => Some(link.to_string()),
+                    Some(FakeNode {
+                        kind: FakeKind::Symlink(t),
+                        ..
+                    }) if matches!(
+                        self.nodes.get(t.as_str()),
+                        Some(FakeNode {
+                            kind: FakeKind::Dir,
+                            ..
+                        })
+                    ) =>
+                    {
+                        Some(t.clone())
+                    }
+                    _ => None,
+                };
+                let name = match &dest {
+                    Some(d) => format!(
+                        "{}/{}",
+                        d.trim_end_matches('/'),
+                        target.rsplit('/').next().unwrap_or(target)
+                    ),
+                    None => link.to_string(),
+                };
+                if self.nodes.contains_key(&name) || !self.nodes.contains_key(&parent_of(&name)) {
+                    Self::fail("ln: failed to create symbolic link")
+                } else {
+                    self.put_symlink(&name, target, uid, gid);
+                    touched.push((name, true, true));
+                    ok()
+                }
+            }
+            // `cp -a --preserve=… --no-target-directory -- src dest` (the
+            // backup copy): a new object with the same content and metadata.
+            (
+                "cp",
+                ["-a", "--preserve=mode,ownership,timestamps", "--no-target-directory", "--", src, dst],
+            ) => match self.nodes.get(*src).cloned() {
+                None => Self::fail("cp: cannot stat: No such file or directory"),
+                Some(mut n) => {
+                    if !self.nodes.contains_key(&parent_of(dst)) {
+                        Self::fail("cp: cannot create: No such file or directory")
+                    } else {
+                        n.ino = self.ino();
+                        self.nodes.insert(dst.to_string(), n);
+                        ok()
+                    }
+                }
+            },
             _ => return None,
         };
         Some((out, touched))

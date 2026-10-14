@@ -165,7 +165,8 @@ struct ExecOpts {
     /// Do not consult the OpenSSH client configuration (`ssh -G`).
     #[arg(long)]
     no_ssh_config: bool,
-    /// Enable passwordless sudo (non-interactive `sudo -n`).
+    /// Enable passwordless sudo (non-interactive `sudo -n`). A target user that
+    /// is already root runs directly, without sudo.
     #[arg(long)]
     sudo: bool,
 }

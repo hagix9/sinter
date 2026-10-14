@@ -140,7 +140,16 @@ fn refused_parents() -> Vec<(&'static str, bool, FakeTarget, &'static str)> {
     symlink(&mut via_symlink, "/srv/via", "/opt");
 
     vec![
-        ("user-owned parent under --sudo", true, owned, "/home/moge"),
+        // FS-3: root (a root login or --sudo) now operates inside another
+        // account's directory *as that account* (tests/fs3_user_tree.rs), so
+        // the parent owned by another user stays refused for a connection
+        // that is not root.
+        (
+            "user-owned parent for a non-root login",
+            false,
+            owned,
+            "/home/moge",
+        ),
         ("world-writable parent", true, writable, "/srv/drop"),
         ("symlink parent", true, via_symlink, "/srv/via"),
         ("missing parent", true, target(), "/srv/missing"),
@@ -183,8 +192,8 @@ fn plan_reports_each_parent_refusal_that_apply_makes_with_the_same_reason() {
 fn refusals_name_the_cause_and_what_to_do() {
     let expect = [
         (
-            "user-owned parent under --sudo",
-            "connect as that user without --sudo",
+            "user-owned parent for a non-root login",
+            "only directories owned by root or the connecting user are trusted",
         ),
         ("world-writable parent", "remove that write access"),
         ("symlink parent", "use the path the symlink resolves to"),
@@ -219,13 +228,13 @@ fn removal_and_replacement_are_checked_like_creation() {
     for body in cases {
         let dir = tempfile::tempdir().unwrap();
         let p = recipe(&dir, body);
-        let r = apply(&p, true, t.clone());
+        let r = apply(&p, false, t.clone());
         let reason = res(&r, "r").reason.clone().unwrap();
         assert!(
             reason.contains("/home/moge is owned by uid 1001"),
             "{body}: {reason}"
         );
-        let e = plan(&p, true, t.clone()).err().unwrap();
+        let e = plan(&p, false, t.clone()).err().unwrap();
         assert_eq!(e.message, format!("r: {reason} {PLAN_SUFFIX}"), "{body}");
     }
 }
@@ -574,8 +583,18 @@ fn dir_res_at(id: &str, path: &str) -> String {
 fn plan_of_later(earlier: &str, t: FakeTarget) -> Result<Vec<String>, String> {
     let dir = tempfile::tempdir().unwrap();
     let p = recipe(&dir, &format!("{earlier}{LATER}"));
-    match plan(&p, true, t) {
-        Ok(r) => Ok(res(&r, "later").notes.clone()),
+    match plan(&p, false, t) {
+        Ok(r) => {
+            // A parent the walk refuses now is not observed through (L-1): when
+            // an earlier change could alter it, the resource is Unknown and
+            // says so in its reason instead of carrying a note.
+            let x = res(&r, "later");
+            let mut notes = x.notes.clone();
+            if x.unknown {
+                notes.extend(x.reason.clone());
+            }
+            Ok(notes)
+        }
         Err(e) => Err(e.message),
     }
 }
@@ -652,7 +671,7 @@ fn only_an_earlier_change_that_can_affect_the_path_defers() {
             // Soundness: apply refuses the same resource for the same reason.
             let dir = tempfile::tempdir().unwrap();
             let p = recipe(&dir, &format!("{earlier}{LATER}"));
-            let a = engine(&p, Mode::Apply, true, refused_home_target())
+            let a = engine(&p, Mode::Apply, false, refused_home_target())
                 .run()
                 .unwrap();
             let x = res(&a, "later");

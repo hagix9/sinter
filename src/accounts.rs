@@ -17,7 +17,7 @@
 //!   and every mutation goes through the engine's mutation permit;
 //! * `password_hash` (a secret reference, never a literal) is set with
 //!   `chpasswd -e` reading `name:hash` on standard input, compared in memory
-//!   against `getent -s files shadow`, requires `--sudo`, and is never shown.
+//!   against `getent -s files shadow`, requires root (a root login or `--sudo`), and is never shown.
 
 use crate::engine::{unknown_result, Engine, Mode};
 use crate::error::{ErrorKind, Result, SinterError};
@@ -1263,7 +1263,7 @@ impl Engine {
 
     /// The desired user, with its password hash opened from the secret named
     /// by `password_hash` (if any). Everything that can fail does so before
-    /// anything is observed or changed: no `--sudo`, an absent user, an
+    /// anything is observed or changed: no root privilege, an absent user, an
     /// unavailable key, a secret that is not an accepted hash, or yescrypt on
     /// an EL9 target.
     pub(crate) fn desired_user(
@@ -1282,10 +1282,12 @@ impl Engine {
                 res.id
             )));
         }
-        if !self.opts.sudo {
+        // Root is a fact about the target, not about a flag: a root login
+        // needs no --sudo, and --sudo was proved to yield uid 0 at connect.
+        if !self.fs.runs_as_root() {
             return Err(self.account_err(format!(
-                "{}: password_hash needs --sudo: the password database is readable and writable \
-                 only by root",
+                "{}: password_hash needs root: connect as root or use --sudo (the password \
+                 database is readable and writable only by root)",
                 res.id
             )));
         }

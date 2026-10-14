@@ -698,6 +698,58 @@ fn password_hash_needs_sudo_in_plan_apply_and_audit_never_no_change() {
     assert!(shared_notes.borrow().is_empty());
 }
 
+// FS-0b: whether `password_hash` may run is a fact about the target (root, or
+// `--sudo` proved to reach root), not about the flag alone.
+#[test]
+fn password_hash_follows_the_effective_privilege_not_the_flag() {
+    // (target user is root, --sudo given, allowed)
+    for (root, sudo, allowed) in [
+        (true, false, true),
+        (true, true, true),
+        (false, true, true),
+        (false, false, false),
+    ] {
+        let f = fx(&format!("pw-fs0-{}-{}", root, sudo));
+        let want = sha(1);
+        f.put("pw.age", format!("{}\n", want).as_bytes());
+        let r = f.user("");
+        let t = if root { target().as_root() } else { target() };
+        for mode in [Mode::Plan, Mode::Apply] {
+            let (src, _notes) = f.src(true);
+            let t = t.clone();
+            let got = run(&r, mode, sudo, Some(src), &t);
+            if allowed {
+                let rep = got.unwrap_or_else(|e| {
+                    panic!("root={root} sudo={sudo} {:?}: {}", mode, e.message)
+                });
+                assert_eq!(rep.resources[0].change, Change::Changed, "{:?}", mode);
+                if mode == Mode::Apply {
+                    assert_eq!(rep.resources[0].execution, Execution::Succeeded);
+                    assert_eq!(calls(&t), vec!["chpasswd -e".to_string()]);
+                } else {
+                    assert!(calls(&t).is_empty(), "plan runs no account command");
+                }
+            } else {
+                let text = err_text(got);
+                assert!(
+                    text.contains("password_hash needs root") && text.contains("--sudo"),
+                    "{}",
+                    text
+                );
+                assert!(calls(&t).is_empty());
+            }
+        }
+        // audit reads the same fact
+        let (src, _n) = f.src(true);
+        let a = audit(&r, sudo, Some(src), &t.with_shadow("app", &sha(1)));
+        if allowed {
+            assert_ne!(a.resources[0].status, AuditResourceStatus::Error);
+        } else {
+            assert_eq!(a.resources[0].status, AuditResourceStatus::Error);
+        }
+    }
+}
+
 #[test]
 fn an_unreadable_shadow_record_is_an_error_not_a_no_change() {
     let f = fx("pw-shadow-read");

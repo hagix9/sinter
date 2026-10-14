@@ -98,14 +98,6 @@ enum AclClass {
     Malformed,
 }
 
-/// Typed cleanup outcome. Cleanup must never overwrite publication truth.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CleanupState {
-    Ok,
-    Failed,
-    Indeterminate,
-}
-
 fn is_valid_acl_perm(p: &str) -> bool {
     // POSIX ACL permission string is exactly three positional slots:
     //   position 1: r or -
@@ -330,6 +322,100 @@ impl MutationPermit {
     }
 }
 
+/// The program that drops privileges for file operations inside another
+/// account's tree.
+const SETPRIV: &str = "/usr/bin/setpriv";
+
+/// FS-3: the identity file operations run under inside a directory tree that
+/// belongs to another, unprivileged account (see
+/// [`TargetFs::check_trusted_parents`]). Everything Sinter does below `root`
+/// (observing, creating, writing, renaming, `chown`, `chmod`) is done by a
+/// process that is that account, so an attacker who controls the tree can
+/// redirect it only within what the account itself can already write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeIdentity {
+    pub uid: u32,
+    pub gid: u32,
+    /// The first ancestor owned by `uid` (its outermost directory).
+    pub root: String,
+    /// `root` is a direct entry of a shared directory (sticky, trusted owner,
+    /// group- or other-writable: `/tmp`, `/var/tmp`). Any local account can
+    /// have created such a directory first, so nothing says it is the one the
+    /// recipe's author meant: Sinter then manages an entry in it only when the
+    /// recipe names the owner (FS-3 C-1, DESIGN §23.2).
+    pub in_shared: bool,
+}
+
+/// Outcome of [`TargetFs::observed`].
+#[derive(Debug)]
+pub enum Observed<T> {
+    /// The parent walk accepted the path; this is what the observation saw.
+    Value(T),
+    /// The parent chain does not exist (yet), so nothing exists at the path.
+    ParentAbsent,
+    /// The parent walk refused the path; nothing was observed.
+    Refused(SinterError),
+    /// Directly in a shared directory (FS-2): the entry was not there when the
+    /// entry gate looked, so a read of its content or link text is not made
+    /// (whatever appeared since is not vetted). Only [`TargetFs::observed`]
+    /// returns it; [`TargetFs::observed_stat`] reports the absence itself.
+    Gone,
+}
+
+/// How a staged object takes its final name (FS-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublishKind {
+    /// Only if nothing is at the name: a hard link (`ln -T`) that fails with
+    /// `EEXIST` and never replaces or follows.
+    New,
+    /// Replace what is at the name by a rename (`mv -T -f`).
+    Replace,
+}
+
+/// A staging directory made by [`TargetFs::stage_file`] or
+/// [`TargetFs::stage_link`] and left in place until it is published or
+/// discarded.
+#[derive(Debug, Clone)]
+pub(crate) struct StagedObject {
+    dir: String,
+    staged: crate::fsstage::Staged,
+    link: bool,
+    sensitive: bool,
+}
+
+impl StagedObject {
+    /// The path of the staging directory, for messages.
+    pub(crate) fn path(&self) -> String {
+        format!("{}/{}", self.dir, self.staged.name)
+    }
+}
+
+/// What a staging step did.
+#[derive(Debug)]
+pub(crate) enum StageStep {
+    Staged(StagedObject),
+    /// The script refused before writing anything: the staging directory could
+    /// not be proven to be Sinter's own (for example the directory has the
+    /// setgid bit, or others could rename entries in it).
+    Rejected(String),
+}
+
+/// What a publication step did. Whether the name was published and what became
+/// of the staging directory are separate facts.
+#[derive(Debug)]
+pub(crate) enum PublishStep {
+    /// The final name exists. The cleanup may still need attention.
+    Published(Cleanup),
+    /// Nothing was published (the exclusive link found the name taken, or the
+    /// rename failed).
+    NotPublished { cleanup: Cleanup, why: String },
+    /// The script refused: the staging directory was not proven to be Sinter's
+    /// own. Nothing was published; the directory is left as it is.
+    Rejected(String),
+}
+
+pub use crate::fsstage::Cleanup;
+
 pub struct TargetFs {
     // The raw executor is private: command execution reaches the target only
     // through the observation methods or the permit-gated `exec` below, so a
@@ -347,6 +433,22 @@ pub struct TargetFs {
     has_getfacl: bool,
     allow_mutation: bool,
     fault: Option<String>,
+    /// Owner and mode of each ancestor directory the last successful parent
+    /// walk accepted, for the plan-time privilege note (FS-0d). Filled by the
+    /// walk itself: it costs no command.
+    parents_seen: BTreeMap<String, (u32, u32)>,
+    /// Set by a successful parent walk whose path lies in another account's
+    /// tree; cleared at the start of every walk and of every resource.
+    identity: Option<TreeIdentity>,
+    /// Set by a successful parent walk whose *direct* parent is a shared
+    /// (sticky, trusted-owner, group- or other-writable) directory; cleared at
+    /// the start of every walk and of every resource (FS-2). It is never set
+    /// together with `identity`: a shared directory is accepted only before a
+    /// walk enters another account's tree.
+    shared_parent: bool,
+    /// The resource being handled is sensitive: refusals of the shared
+    /// directory rules name neither the path nor the uid (FS-2).
+    redact: bool,
     /// Successful, non-sensitive account lookups already made by this
     /// `TargetFs` (performance WP-P1). See [`IdentityMemo`].
     identity_memo: IdentityMemo,
@@ -380,6 +482,27 @@ pub struct TargetFs {
 #[derive(Debug, Default)]
 struct IdentityMemo {
     entries: BTreeMap<(&'static str, String, usize), u32>,
+    /// The verdicts of the parent walks that gated observations (see
+    /// [`TargetFs::observed`]), by the directory that holds the observed path.
+    /// Observations never change the target, so a verdict stays valid until
+    /// the first mutation, which drops it with the account lookups. Safety does
+    /// not rest on the verdict staying true: inside another account's tree
+    /// the observation runs as that account, and any other accepted chain is
+    /// one nobody else can write to.
+    walks: BTreeMap<String, GateOutcome>,
+}
+
+/// What the parent walk concluded about one path (L-1/L-2).
+#[derive(Debug, Clone)]
+enum GateOutcome {
+    /// The walk accepted the path: the tree account it settled (if any), what
+    /// it saw of the ancestors (for the plan's privilege note) and whether the
+    /// direct parent is a shared directory (FS-2: the entry gate applies).
+    Open(Option<TreeIdentity>, BTreeMap<String, (u32, u32)>, bool),
+    /// The first ancestor the walk could not accept does not exist.
+    ParentAbsent(SinterError),
+    /// The walk refused the path.
+    Refused(SinterError),
 }
 
 impl IdentityMemo {
@@ -396,6 +519,7 @@ impl IdentityMemo {
 
     fn clear(&mut self) {
         self.entries.clear();
+        self.walks.clear();
     }
 }
 
@@ -435,6 +559,10 @@ impl TargetFs {
             has_getfacl,
             allow_mutation,
             fault,
+            parents_seen: BTreeMap::new(),
+            identity: None,
+            shared_parent: false,
+            redact: false,
             identity_memo: IdentityMemo::default(),
         }
     }
@@ -484,6 +612,12 @@ impl TargetFs {
         self.ex.log()
     }
 
+    /// The scripted filesystem as it is now (test support; `None` on a real
+    /// target).
+    pub fn fake_fs(&self) -> Option<crate::fakesys::FakeFs> {
+        self.ex.fake_fs()
+    }
+
     pub fn target_uid(&self) -> u32 {
         self.target_uid
     }
@@ -494,6 +628,354 @@ impl TargetFs {
 
     pub fn sudo(&self) -> bool {
         self.sudo
+    }
+
+    /// Whether target commands run with effective uid 0: `--sudo` (whose
+    /// `sudo -n` was proved at connect) or a target user that is root itself.
+    /// This is the privilege fact; `sudo()` is only whether `--sudo` was given.
+    pub fn runs_as_root(&self) -> bool {
+        self.sudo || self.target_uid == 0
+    }
+
+    /// Forget the tree identity (the next resource starts as the invocation's
+    /// own identity).
+    pub fn clear_identity(&mut self) {
+        self.identity = None;
+        self.shared_parent = false;
+    }
+
+    /// Mark the resource being handled as sensitive (or not): the refusals of
+    /// the shared directory rules then withhold the path and the uid.
+    pub fn set_redact(&mut self, redact: bool) {
+        self.redact = redact;
+    }
+
+    /// Whether the direct parent of the path the last walk accepted is a
+    /// shared directory (FS-2).
+    pub fn shared_parent(&self) -> bool {
+        self.shared_parent
+    }
+
+    /// The trusted principals of this invocation (DESIGN §23): root always;
+    /// the connecting user too unless `--sudo` is in use.
+    pub(crate) fn is_trusted_owner(&self, uid: u32) -> bool {
+        uid == 0 || (!self.sudo && uid == self.target_uid)
+    }
+
+    fn trusted_owner_words(&self) -> &'static str {
+        if self.sudo || self.target_uid == 0 {
+            "root"
+        } else {
+            "root or the connecting user"
+        }
+    }
+
+    /// Observe `path` only through a parent path that the walk of DESIGN §23
+    /// accepted (L-1/L-2). `observe` runs as the identity the walk settled:
+    /// the account's own inside its tree, the invocation's otherwise. The
+    /// identity is dropped again afterwards, so nothing after the observation
+    /// inherits it. A path whose parent chain does not exist yet is
+    /// [`Observed::ParentAbsent`] (nothing exists to observe, and nothing was
+    /// followed); any other refusal of the walk is [`Observed::Refused`], and
+    /// then nothing at all is observed: the invocation never follows a path
+    /// component another account controls.
+    ///
+    /// Paths in one directory share one walk until something is mutated.
+    pub fn observed<T>(
+        &mut self,
+        path: &str,
+        observe: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<Observed<T>> {
+        match self.gate(path)? {
+            GateOutcome::Open(identity, _, shared) => {
+                if shared {
+                    // FS-2: the parent is a shared directory, so the entry
+                    // itself is judged (by `lstat`, never followed) before
+                    // anything about it is read. `observe` reads content or a
+                    // link text, which only an entry that is there and passed
+                    // the gate may be read for: an entry that was absent at the
+                    // gate and appears later was not vetted.
+                    match self.entry_gate(path) {
+                        Ok(st) if st.kind == ObjKind::Absent => return Ok(Observed::Gone),
+                        Ok(_) => {}
+                        Err(e) if e.kind == crate::error::ErrorKind::Indeterminate => {
+                            return Err(e)
+                        }
+                        Err(e) => return Ok(Observed::Refused(e)),
+                    }
+                }
+                self.identity = identity;
+                let r = observe(self);
+                self.identity = None;
+                r.map(Observed::Value)
+            }
+            GateOutcome::ParentAbsent(_) => Ok(Observed::ParentAbsent),
+            GateOutcome::Refused(e) => Ok(Observed::Refused(e)),
+        }
+    }
+
+    /// [`Self::observed`] for the `lstat` of the path itself (type, owner,
+    /// mode, size). Directly in a shared directory the observation **is** the
+    /// entry gate's own `lstat`: the metadata returned is that of the entry the
+    /// gate judged (absent, or owned by a trusted principal), never that of an
+    /// entry which appeared between the gate and a second `lstat` (FS2-A1).
+    /// Elsewhere it is the `lstat` as the identity the walk settled.
+    pub fn observed_stat(&mut self, path: &str) -> Result<Observed<Stat>> {
+        match self.gate(path)? {
+            GateOutcome::Open(identity, _, shared) => {
+                if shared {
+                    return match self.entry_gate(path) {
+                        Ok(st) => Ok(Observed::Value(st)),
+                        Err(e) if e.kind == crate::error::ErrorKind::Indeterminate => Err(e),
+                        Err(e) => Ok(Observed::Refused(e)),
+                    };
+                }
+                self.identity = identity;
+                let r = self.inspect(path);
+                self.identity = None;
+                r.map(Observed::Value)
+            }
+            GateOutcome::ParentAbsent(_) => Ok(Observed::ParentAbsent),
+            GateOutcome::Refused(e) => Ok(Observed::Refused(e)),
+        }
+    }
+
+    /// The walk for [`Self::observed`], or the verdict it reached for the
+    /// directory of this path since the last mutation.
+    fn gate(&mut self, path: &str) -> Result<GateOutcome> {
+        let (dir, _) = parent_and_name(path);
+        if let Some(outcome) = self.identity_memo.walks.get(&dir) {
+            return Ok(outcome.clone());
+        }
+        let outcome = match self.walk_ancestors(path, true) {
+            Ok(()) => GateOutcome::Open(
+                self.identity.take(),
+                self.parents_seen.clone(),
+                self.shared_parent,
+            ),
+            Err(e) if e.kind == crate::error::ErrorKind::Indeterminate => return Err(e),
+            Err(e) => {
+                if self.parent_chain_ends_absent(path) {
+                    GateOutcome::ParentAbsent(e)
+                } else {
+                    GateOutcome::Refused(e)
+                }
+            }
+        };
+        self.identity_memo.walks.insert(dir, outcome.clone());
+        Ok(outcome)
+    }
+
+    /// [`Self::check_trusted_parents`] for plan, answering with the verdict the
+    /// walk that gated the observation of this path reached when there is one
+    /// (plan only decides; apply always walks afresh).
+    pub fn check_trusted_parents_observed(&mut self, path: &str) -> Result<()> {
+        let (dir, _) = parent_and_name(path);
+        match self.identity_memo.walks.get(&dir).cloned() {
+            Some(GateOutcome::Open(identity, seen, shared)) => {
+                self.identity = identity;
+                self.parents_seen = seen;
+                self.shared_parent = shared;
+                if shared {
+                    // The same entry gate as at apply: plan does not rely on
+                    // the observation having passed it.
+                    self.entry_gate(path)?;
+                }
+                Ok(())
+            }
+            Some(GateOutcome::ParentAbsent(e)) | Some(GateOutcome::Refused(e)) => {
+                self.identity = None;
+                self.shared_parent = false;
+                self.parents_seen.clear();
+                Err(e)
+            }
+            None => self.check_trusted_parents(path),
+        }
+    }
+
+    /// Whether the first ancestor of `path` the walk cannot accept simply does
+    /// not exist, every ancestor above it being acceptable. Only decides
+    /// between "nothing there" and "refused": it reads ancestors with the
+    /// invocation's own identity, never the path itself.
+    fn parent_chain_ends_absent(&mut self, path: &str) -> bool {
+        let mut tree: Option<(String, u32)> = None;
+        for dir in ancestor_dirs(path) {
+            let Ok(st) = self.inspect(&dir) else {
+                return false;
+            };
+            if st.kind == ObjKind::Absent {
+                return true;
+            }
+            if self.check_parent_stat(&dir, &st, &mut tree, true).is_err() {
+                return false;
+            }
+        }
+        false
+    }
+
+    /// The account file operations currently run as, if not the invocation.
+    pub fn tree_identity(&self) -> Option<&TreeIdentity> {
+        self.identity.as_ref()
+    }
+
+    /// Take `identity` up again for the file operations that follow. A walk
+    /// that fails drops the identity of the tree it was walking; a caller that
+    /// has staged something in that tree (and nothing else) uses this to take
+    /// its staging down as the account that made it, never as root.
+    pub(crate) fn resume_identity(&mut self, identity: Option<TreeIdentity>) {
+        self.identity = identity;
+    }
+
+    /// Owner and group a new entry gets when the recipe does not say: the
+    /// account of the tree when operating inside one, else the invocation's.
+    pub fn default_owner(&self) -> (u32, u32) {
+        match &self.identity {
+            Some(t) => (t.uid, t.gid),
+            None => (self.target_uid, self.target_gid),
+        }
+    }
+
+    /// Inside another account's tree only that account can own what is
+    /// created: the operations run as it and cannot hand anything to a third
+    /// uid. `None` when `desired_uid` is fine.
+    ///
+    /// `explicit` is the owner the recipe asks for (none when it does not
+    /// say); `existing` is the owner of the entry already there, which an
+    /// unspecified owner would preserve.
+    pub fn tree_owner_conflict(
+        &self,
+        path: &str,
+        explicit: Option<u32>,
+        existing: Option<u32>,
+    ) -> Option<SinterError> {
+        let t = self.identity.as_ref()?;
+        if explicit.is_none() && t.in_shared {
+            // FS-3 C-1. A directory directly inside `/tmp` may have been made
+            // by any local account before the recipe's author did: without an
+            // `owner` there is nothing to compare it with, and what Sinter
+            // wrote there would belong to, and be readable and replaceable
+            // by, that account. An `owner` of anyone else is refused below.
+            // Checked before `existing`: an entry that is already there says
+            // nothing either (the account may have made it too).
+            return Some(SinterError::apply(if self.redact {
+                "an owner must be set for an entry inside another account's directory in a \
+                 shared directory (details withheld: sensitive resource)"
+                    .to_string()
+            } else {
+                format!(
+                    "{} lies in {}, a directory of uid {} directly inside a shared directory: \
+                     any local account may have created it first, so Sinter manages an entry in it \
+                     only when the recipe sets `owner` (to that account, if the directory is really \
+                     its own); to write as root create the directory with a directory resource \
+                     owned by root, or use a root-owned location such as /opt or /srv",
+                    path, t.root, t.uid
+                )
+            }));
+        }
+        let uid = match (explicit, existing) {
+            (Some(u), _) => u,
+            (None, Some(u)) => u,
+            (None, None) => return None,
+        };
+        if uid == t.uid {
+            return None;
+        }
+        if self.redact {
+            return Some(SinterError::apply(
+                "the owner asked for is not supported inside another account's directory (details \
+                 withheld: sensitive resource)",
+            ));
+        }
+        Some(SinterError::apply(format!(
+            "cannot give {} to uid {}: it lies in {}, which belongs to uid {}, and Sinter operates \
+             there as that account; only entries owned by uid {} are supported in it (set owner to \
+             that account, or use a location that is not inside its directory)",
+            path, uid, t.root, t.uid, t.uid
+        )))
+    }
+
+    /// Run `req` as the tree account (when one is set) through `setpriv`:
+    /// real, effective and saved uid and gid become the account's, its
+    /// supplementary groups are initialized, capabilities are gone and
+    /// `no_new_privs` is set. The working directory is `/` (the account may
+    /// not be able to enter the invocation's).
+    fn apply_identity(&self, req: &mut ExecRequest) {
+        let Some(t) = &self.identity else {
+            return;
+        };
+        let mut args = vec![
+            "--reuid".to_string(),
+            t.uid.to_string(),
+            "--regid".to_string(),
+            t.gid.to_string(),
+            "--init-groups".to_string(),
+            "--no-new-privs".to_string(),
+            "--".to_string(),
+            req.program.clone(),
+        ];
+        args.extend(req.args.iter().cloned());
+        req.program = SETPRIV.to_string();
+        req.args = args;
+        req.cwd = Some("/".to_string());
+    }
+
+    /// The primary gid of the account `uid`, from the account database. The
+    /// directory's group is not it, and borrowing that group would give the
+    /// operations a group the account may not have.
+    fn account_primary_gid(&mut self, uid: u32) -> Result<u32> {
+        let out = self.run_argv("/usr/bin/getent", &["passwd".to_string(), uid.to_string()])?;
+        let refuse = || {
+            SinterError::apply(format!(
+                "cannot operate inside a directory owned by uid {}: that uid has no entry in the \
+                 account database, so its groups cannot be determined",
+                uid
+            ))
+        };
+        if out.completion != Completion::Exited(0) {
+            return Err(refuse());
+        }
+        let line = String::from_utf8_lossy(&out.stdout);
+        let f: Vec<&str> = line.trim().split(':').collect();
+        if f.len() < 4 || f[2].parse::<u32>().ok() != Some(uid) {
+            return Err(refuse());
+        }
+        f[3].parse::<u32>().map_err(|_| refuse())
+    }
+
+    /// Plan-time note (FS-0d): the target user cannot write to the directory
+    /// that holds `path`, so a change that creates, replaces or removes the
+    /// entry would be refused by the operating system at apply.
+    ///
+    /// It states a fact only when the walk that just accepted the ancestors
+    /// proves it from what that walk already saw: the parent is root's (or the
+    /// user's own without the owner write bit) and, having been accepted, no
+    /// group or other write bit and no ACL. Anything else, including a path
+    /// the walk did not see, gives no note. Never runs a command.
+    pub fn plan_write_note(&self, path: &str) -> Option<String> {
+        if self.runs_as_root() {
+            return None;
+        }
+        let (dir, _) = parent_and_name(path);
+        let (uid, mode) = *self.parents_seen.get(&dir)?;
+        if mode & 0o022 != 0 {
+            // A shared directory: the target user can create entries in it.
+            return None;
+        }
+        if uid == 0 && self.target_uid != 0 {
+            Some(format!(
+                "needs root: {} belongs to root and is not writable by group or others, so uid {} cannot create, replace or remove entries in it; apply will fail unless the connection is root or --sudo is used",
+                dir, self.target_uid
+            ))
+        } else if uid == self.target_uid && mode & 0o200 == 0 {
+            Some(format!(
+                "{} has no owner write permission ({}), so uid {} cannot create, replace or remove entries in it",
+                dir,
+                mode_to_string(mode),
+                self.target_uid
+            ))
+        } else {
+            None
+        }
     }
 }
 
@@ -523,7 +1005,22 @@ impl TargetFs {
         sensitive: bool,
     ) -> Result<Output> {
         let req = self.argv_request(program, args, sensitive);
-        self.ex.run(&req)
+        let out = self.ex.run(&req)?;
+        // An observation as the tree account needs `setpriv` just like a
+        // change does: say so instead of leaving an unrecognized diagnostic.
+        if self.identity.is_some()
+            && matches!(out.completion, Completion::Exited(126 | 127))
+            && String::from_utf8_lossy(&out.stderr).contains("setpriv")
+        {
+            return Err(SinterError::apply(format!(
+                "target operation {} could not run as the account that owns the directory: {} \
+                 (setpriv from util-linux is required to operate inside another account's \
+                 directory; install it, or use a location outside that directory)",
+                if sensitive { "[redacted]" } else { program },
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(out)
     }
 
     /// The exact request `run_argv_sensitivity` dispatches for this program and
@@ -536,6 +1033,7 @@ impl TargetFs {
         req.env = base_env();
         req.env.insert("HOME".to_string(), self.home_env());
         req.sensitive = sensitive;
+        self.apply_identity(&mut req);
         req
     }
 
@@ -682,12 +1180,21 @@ impl TargetFs {
         match out.completion {
             Completion::Exited(0) => Ok(out),
             Completion::Exited(c) => {
-                let msg = format!(
+                let mut msg = format!(
                     "target operation {} failed (exit {}): {}",
                     if sensitive { "[redacted]" } else { program },
                     c,
                     String::from_utf8_lossy(&out.stderr).trim()
                 );
+                if self.identity.is_some()
+                    && (c == 126 || c == 127)
+                    && String::from_utf8_lossy(&out.stderr).contains("setpriv")
+                {
+                    msg.push_str(
+                        " (setpriv from util-linux is required to operate inside another \
+                         account's directory; install it, or use a location outside that directory)",
+                    );
+                }
                 // Nonzero exit is a definite command failure. Mutating helpers
                 // that need extra conservatism use `.changed()` at the call site
                 // after a prior successful step.
@@ -705,33 +1212,6 @@ impl TargetFs {
             }
             Completion::Indeterminate { reason, .. } => Err(SinterError::indeterminate(reason)),
         }
-    }
-
-    /// Create a private staging directory beneath the destination parent, using
-    /// a non-predictable name. No recipe-controlled text is used in the name, so
-    /// no shell syntax can leak. The directory is created mode 0700.
-    pub fn make_staging_dir(&mut self, dir: &str) -> Result<String> {
-        let _permit = self.mutation_permit()?;
-        self.identity_memo.clear();
-        let out = self.run_argv_ok(
-            "/usr/bin/mktemp",
-            &[
-                "-d".to_string(),
-                "-p".to_string(),
-                dir.to_string(),
-                ".sinter-stage.XXXXXXXX".to_string(),
-            ],
-        )?;
-        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if p.is_empty() {
-            return Err(SinterError::apply("could not create staging directory"));
-        }
-        // mktemp -d creates 0700; enforce it defensively.
-        self.run_argv_ok(
-            "/bin/chmod",
-            &["700".to_string(), "--".to_string(), p.clone()],
-        )?;
-        Ok(p)
     }
 
     /// Inspect an object without following a final symlink. See
@@ -952,6 +1432,12 @@ impl TargetFs {
         gid: u32,
     ) -> Result<()> {
         self.identity_memo.clear();
+        if let Some(e) = self.tree_owner_conflict(path, Some(uid), None) {
+            return Err(e);
+        }
+        if let Some(e) = self.shared_owner_conflict(path, Some(uid)) {
+            return Err(e);
+        }
         self.run_argv_ok_mutating(
             "/bin/chown",
             &[
@@ -1085,10 +1571,14 @@ impl TargetFs {
             ));
         }
         // Target may be derived from sensitive values; never log raw argv.
+        // `-T`: the link path is a name, never a directory to create the link
+        // in. Without it, a symlink to a directory that someone put at
+        // `link_path` in a shared directory would make the link appear inside
+        // that directory. An existing `link_path` is an error (`EEXIST`).
         self.run_argv_ok_mutating_sensitive(
             "/bin/ln",
             &[
-                "-s".to_string(),
+                "-sT".to_string(),
                 "--".to_string(),
                 target.to_string(),
                 link_path.to_string(),
@@ -1098,33 +1588,327 @@ impl TargetFs {
         Ok(())
     }
 
-    /// Atomically replace a symlink using a private staging directory so the
-    /// staging name cannot be predicted or pre-created by another user.
+    // -----------------------------------------------------------------------
+    // FS-2: staging, publication and discard by the fixed staging script
+    // -----------------------------------------------------------------------
+
+    /// Run one step of the fixed staging script (`crate::fsstage`) as the
+    /// identity the current walk settled (the invocation's own, or the tree
+    /// account's). One process per step: the script opens the directory and the
+    /// staging directory once and keeps working on them.
+    fn fsstage_run(
+        &mut self,
+        op_args: Vec<String>,
+        stdin: Option<Vec<u8>>,
+        sensitive: bool,
+    ) -> Result<Output> {
+        self.identity_memo.clear();
+        let args = crate::fsstage::argv(&op_args);
+        let mut req = self.argv_request(crate::fsstage::PROGRAM, &args, sensitive);
+        req.stdin = stdin;
+        let out = self.ex.run(&req)?;
+        if self.identity.is_some()
+            && matches!(out.completion, Completion::Exited(126 | 127))
+            && String::from_utf8_lossy(&out.stderr).contains("setpriv")
+        {
+            return Err(SinterError::apply(format!(
+                "target operation {} could not run as the account that owns the directory: {} \
+                 (setpriv from util-linux is required to operate inside another account's \
+                 directory; install it, or use a location outside that directory)",
+                if sensitive { "[redacted]" } else { "staging" },
+                Self::fsstage_diagnostic(&out, sensitive || self.redact)
+            )));
+        }
+        Ok(out)
+    }
+
+    /// The first line of a diagnostic, for a message. A sensitive step names
+    /// nothing the target said.
+    fn fsstage_diagnostic(out: &Output, sensitive: bool) -> String {
+        if sensitive {
+            return "details withheld: sensitive resource".to_string();
+        }
+        let text = String::from_utf8_lossy(&out.stderr);
+        let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+        crate::diff::sanitize_line(line.trim())
+    }
+
+    /// Stage a regular file: a private directory beside the final path holding
+    /// the content, with owner, mode and extended attributes already applied
+    /// (one script call, content on its standard input). `for_path` is the final
+    /// path, for the messages of the owner rules.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn stage_file(
+        &mut self,
+        _permit: &MutationPermit,
+        dir: &str,
+        for_path: &str,
+        bytes: &[u8],
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        xattrs: &[(String, String)],
+    ) -> Result<StageStep> {
+        if dir.contains('\0') || for_path.contains('\0') {
+            return Err(SinterError::schema("path may not contain NUL bytes"));
+        }
+        if let Some(e) = self.tree_owner_conflict(for_path, Some(uid), None) {
+            return Err(e);
+        }
+        if let Some(e) = self.shared_owner_conflict(for_path, Some(uid)) {
+            return Err(e);
+        }
+        let mut a = vec![
+            "stage".to_string(),
+            dir.to_string(),
+            "-".to_string(),
+            mode_to_string(mode),
+            uid.to_string(),
+            gid.to_string(),
+        ];
+        for (name, value) in xattrs {
+            a.push(name.clone());
+            a.push(value.clone());
+        }
+        let out = self.fsstage_run(a, Some(bytes.to_vec()), false)?;
+        self.staged_answer(dir, &out, false)
+    }
+
+    /// Stage a symlink (`ln -s` inside the private directory). The target may be
+    /// derived from a sensitive value, so the step is recorded redacted.
+    pub(crate) fn stage_link(
+        &mut self,
+        _permit: &MutationPermit,
+        dir: &str,
+        target: &str,
+    ) -> Result<StageStep> {
+        if dir.contains('\0') || target.contains('\0') {
+            return Err(SinterError::schema(
+                "symlink target may not contain NUL bytes",
+            ));
+        }
+        let a = vec![
+            "stagelink".to_string(),
+            dir.to_string(),
+            "-".to_string(),
+            target.to_string(),
+        ];
+        let out = self.fsstage_run(a, None, true)?;
+        self.staged_answer(dir, &out, true)
+    }
+
+    fn staged_answer(&mut self, dir: &str, out: &Output, sensitive: bool) -> Result<StageStep> {
+        match out.completion {
+            Completion::Exited(0) => match crate::fsstage::parse_staged(out) {
+                Some(staged) => Ok(StageStep::Staged(StagedObject {
+                    dir: dir.to_string(),
+                    staged,
+                    link: sensitive,
+                    sensitive,
+                })),
+                None => Err(SinterError::apply(
+                    "staging gave an answer that was not understood; a stray .sinter-stage.* \
+                     directory may remain beside the file",
+                )),
+            },
+            Completion::Exited(c) if c == crate::fsstage::EXIT_REJECT => Ok(StageStep::Rejected(
+                crate::fsstage::reject_reason(out)
+                    .unwrap_or_else(|| "the staging directory could not be proven".to_string()),
+            )),
+            Completion::Exited(c) => {
+                let cleanup = crate::fsstage::parse_cleanup(out);
+                Err(SinterError::apply(format!(
+                    "staging failed (exit {}): {} ({})",
+                    c,
+                    Self::fsstage_diagnostic(out, sensitive || self.redact),
+                    if cleanup.is_clean() {
+                        "staging cleanup succeeded".to_string()
+                    } else {
+                        format!("staging cleanup failed: {}", cleanup.describe())
+                    }
+                )))
+            }
+            Completion::Signaled(s) => Err(SinterError::indeterminate(format!(
+                "staging was terminated by signal {}; a stray .sinter-stage.* directory may remain",
+                s
+            ))),
+            Completion::Indeterminate { ref reason, .. } => {
+                Err(SinterError::indeterminate(reason.clone()))
+            }
+        }
+    }
+
+    /// Give the staged object its final name `base` in the directory it was
+    /// staged in: `New` only if nothing is there (`ln -T`), `Replace` by a
+    /// rename (`mv -T -f`), then remove the staging directory. Whether the name
+    /// was published and what became of the staging directory are reported
+    /// separately (see [`PublishStep`]); a cleanup that fails never changes the
+    /// first.
+    pub(crate) fn publish_staged(
+        &mut self,
+        permit: &MutationPermit,
+        staged: &StagedObject,
+        kind: PublishKind,
+        base: &str,
+    ) -> Result<PublishStep> {
+        if base.contains('\0') {
+            return Err(SinterError::schema("path may not contain NUL bytes"));
+        }
+        // Controlled failure injection in the publication step (replace only,
+        // as the rename was the only step they ever covered).
+        if kind == PublishKind::Replace {
+            if self.fault() == Some("rename_fail") {
+                let cleanup = self.discard_staged(permit, staged);
+                return Ok(PublishStep::NotPublished {
+                    cleanup,
+                    why: "injected rename failure".to_string(),
+                });
+            }
+            if self.fault() == Some("rename_indeterminate") {
+                return Err(SinterError::indeterminate("injected rename indeterminate"));
+            }
+        }
+        let a = vec![
+            "publish".to_string(),
+            match kind {
+                PublishKind::New => "new".to_string(),
+                PublishKind::Replace => "replace".to_string(),
+            },
+            if staged.link { "link" } else { "file" }.to_string(),
+            staged.dir.clone(),
+            "-".to_string(),
+            staged.staged.name.clone(),
+            staged.staged.group.clone(),
+            staged.staged.dir_id.clone(),
+            staged.staged.payload_id.clone(),
+            base.to_string(),
+        ];
+        let out = self.fsstage_run(a, None, staged.sensitive)?;
+        match out.completion {
+            Completion::Exited(c @ (0 | 5)) => {
+                let mut cleanup = crate::fsstage::parse_cleanup(&out);
+                // The two answers must agree: 5 means a second name remains or
+                // the state is unknown; 0 means neither. Anything else is not
+                // trusted.
+                if (c == 5) != cleanup.needs_attention() {
+                    cleanup = Cleanup::Unknown;
+                }
+                // Controlled injection: the staging could not be removed.
+                if self.fault() == Some("cleanup_stage") {
+                    cleanup = Cleanup::LinkRemains(staged.path());
+                }
+                if kind == PublishKind::Replace
+                    && self.fault() == Some("rename_success_then_abnormal")
+                {
+                    return Err(SinterError::indeterminate(
+                        "injected abnormal completion after successful rename",
+                    )
+                    .changed());
+                }
+                Ok(PublishStep::Published(cleanup))
+            }
+            Completion::Exited(c) if c == crate::fsstage::EXIT_REJECT => Ok(PublishStep::Rejected(
+                crate::fsstage::reject_reason(&out)
+                    .unwrap_or_else(|| "the staging directory could not be proven".to_string()),
+            )),
+            // Only the script's own "publication failed" code proves that the
+            // name was not published (it is returned right after the failed
+            // `ln -T` / `mv -T`, before anything else can have happened).
+            Completion::Exited(c) if c == crate::fsstage::EXIT_PUBLISH_FAILED => {
+                Ok(PublishStep::NotPublished {
+                    cleanup: crate::fsstage::parse_cleanup(&out),
+                    why: format!(
+                        "exit {}: {}",
+                        c,
+                        Self::fsstage_diagnostic(&out, staged.sensitive || self.redact)
+                    ),
+                })
+            }
+            // Any other exit may follow a successful `ln` / `mv` (the script
+            // failed afterwards), so the name may exist: not a failure before
+            // publication, and not something to clean up by guessing.
+            Completion::Exited(c) => {
+                let said = Self::fsstage_diagnostic(&out, staged.sensitive || self.redact);
+                Err(SinterError::indeterminate(format!(
+                    "publication ended with an unexpected exit {}; the file may have been \
+                     published and a stray .sinter-stage.* directory may remain{}",
+                    c,
+                    if said.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", said)
+                    }
+                )))
+            }
+            // Dispatched, then lost: whether the name exists is unknown, and a
+            // cleanup now could destroy the evidence.
+            Completion::Signaled(s) => Err(SinterError::indeterminate(format!(
+                "publication was terminated by signal {}",
+                s
+            ))),
+            Completion::Indeterminate { reason, .. } => Err(SinterError::indeterminate(reason)),
+        }
+    }
+
+    /// Remove a staging directory that was never published: its payload, then
+    /// the directory, by name only where the directory it lives in cannot be
+    /// changed by others (otherwise it is left and reported). Never reports a
+    /// success it did not prove.
+    pub(crate) fn discard_staged(
+        &mut self,
+        _permit: &MutationPermit,
+        staged: &StagedObject,
+    ) -> Cleanup {
+        if matches!(
+            self.fault(),
+            Some("cleanup_stage") | Some("symlink_drift_cleanup_fail")
+        ) {
+            return Cleanup::LinkRemains(staged.path());
+        }
+        let a = vec![
+            "discard".to_string(),
+            staged.dir.clone(),
+            "-".to_string(),
+            staged.staged.name.clone(),
+            staged.staged.group.clone(),
+            staged.staged.dir_id.clone(),
+        ];
+        match self.fsstage_run(a, None, staged.sensitive) {
+            Ok(out) => match out.completion {
+                Completion::Exited(0) | Completion::Exited(5) => {
+                    crate::fsstage::parse_cleanup(&out)
+                }
+                _ => Cleanup::Unknown,
+            },
+            Err(_) => Cleanup::Unknown,
+        }
+    }
+
+    /// Atomically replace a symlink: the new link is staged privately, then
+    /// renamed over the old one, then the staging directory is removed.
     ///
     /// Publication state and cleanup state are separate facts. Cleanup must
-    /// never rewrite whether the destination was published.
+    /// never rewrite whether the destination was published. `Ok(Some(note))`
+    /// is a published link with a harmless empty staging directory left.
     pub fn symlink_replace(
         &mut self,
         permit: &MutationPermit,
         target: &str,
         link_path: &str,
         observed: &Stat,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         self.identity_memo.clear();
         let (dir, name) = parent_and_name(link_path);
-        let stage_dir = self.make_staging_dir(&dir)?;
-        let tmp = format!("{}/{}", stage_dir, name);
-        let result = (|| -> Result<()> {
-            self.run_argv_ok_mutating_sensitive(
-                "/bin/ln",
-                &[
-                    "-s".to_string(),
-                    "--".to_string(),
-                    target.to_string(),
-                    tmp.clone(),
-                ],
-                true,
-            )?;
+        let staged = match self.stage_link(permit, &dir, target)? {
+            StageStep::Staged(s) => s,
+            StageStep::Rejected(reason) => {
+                return Err(SinterError::apply(format!(
+                    "cannot replace the link: staged publication was refused: {}",
+                    reason
+                )))
+            }
+        };
+        let checked = (|| -> Result<()> {
             if self.fault() == Some("symlink_drift_before_publish")
                 || self.fault() == Some("symlink_drift_cleanup_fail")
             {
@@ -1138,189 +1922,59 @@ impl TargetFs {
                     link_path
                 )));
             }
-            self.run_argv_ok_mutating(
-                "/bin/mv",
-                &[
-                    "-T".to_string(),
-                    "-f".to_string(),
-                    "--".to_string(),
-                    tmp.clone(),
-                    link_path.to_string(),
-                ],
-            )?;
             Ok(())
         })();
-
-        // Publication completion unknown: do not clean staging (could destroy
-        // evidence) and preserve indeterminate semantics exactly.
-        if matches!(result, Err(ref e) if e.kind == crate::error::ErrorKind::Indeterminate) {
-            return result;
-        }
-
-        // Cleanup is a separate fact. Classify rm BEFORE attempting rmdir.
-        let cleanup = if self.fault() == Some("symlink_cleanup_fail")
-            || self.fault() == Some("symlink_drift_cleanup_fail")
-        {
-            CleanupState::Failed
-        } else if self.fault() == Some("symlink_cleanup_rm_indeterminate") {
-            // Simulate rm completion unknown: do not rmdir.
-            CleanupState::Indeterminate
-        } else {
-            let cleanup_payload = self.run_argv(
-                "/bin/rm",
-                &["-f".to_string(), "--".to_string(), tmp.clone()],
-            );
-            match cleanup_payload {
-                Ok(ref out) if out.is_success() => {
-                    // rm succeeded; only then may rmdir run.
-                    let cleanup_dir = self.run_argv("/bin/rmdir", std::slice::from_ref(&stage_dir));
-                    match cleanup_dir {
-                        Ok(ref out) if out.is_success() => CleanupState::Ok,
-                        Ok(ref out)
-                            if matches!(out.completion, Completion::Indeterminate { .. }) =>
-                        {
-                            CleanupState::Indeterminate
-                        }
-                        _ => CleanupState::Failed,
-                    }
+        if let Err(mut e) = checked {
+            // Nothing was published: take the staging down, and keep the
+            // original failure as it was.
+            if e.kind != crate::error::ErrorKind::Indeterminate {
+                let cleanup = self.discard_staged(permit, &staged);
+                if !cleanup.is_clean() {
+                    e.message = format!("{} (staging cleanup: {})", e.message, cleanup.describe());
                 }
-                Ok(ref out) if matches!(out.completion, Completion::Indeterminate { .. }) => {
-                    // rm completion unknown: do not rmdir (additional mutation).
-                    CleanupState::Indeterminate
-                }
-                Err(ref e) if e.kind == crate::error::ErrorKind::Indeterminate => {
-                    CleanupState::Indeterminate
-                }
-                _ => CleanupState::Failed,
             }
-        };
-
-        match result {
-            Ok(()) => {
-                // Destination was published. Cleanup failure is reported after
-                // the known mutation, never as a pre-publication failure.
+            return Err(e);
+        }
+        match self.publish_staged(permit, &staged, PublishKind::Replace, &name)? {
+            PublishStep::Published(mut cleanup) => {
+                // Controlled injection of a cleanup that failed or is unknown.
+                if self.fault() == Some("symlink_cleanup_fail") {
+                    cleanup = Cleanup::LinkRemains(staged.path());
+                } else if self.fault() == Some("symlink_cleanup_rm_indeterminate") {
+                    cleanup = Cleanup::Unknown;
+                }
                 match cleanup {
-                    CleanupState::Ok => Ok(()),
-                    CleanupState::Indeterminate => Err(SinterError::indeterminate(
+                    Cleanup::Clean => Ok(None),
+                    Cleanup::Left(p) => Ok(Some(format!(
+                        "symlink published; {}",
+                        Cleanup::Left(p).describe()
+                    ))),
+                    Cleanup::LinkRemains(p) => Err(SinterError::apply(format!(
+                        "symlink published but staging cleanup failed: {}",
+                        Cleanup::LinkRemains(p).describe()
+                    ))
+                    .changed()),
+                    Cleanup::Unknown => Err(SinterError::indeterminate(
                         "symlink published but staging cleanup completion is unknown",
                     )
                     .changed()),
-                    CleanupState::Failed => Err(SinterError::apply(
-                        "symlink published but staging cleanup failed",
-                    )
-                    .changed()),
                 }
             }
-            Err(e) => {
-                // Pre-publication failure. Preserve the original error kind and
-                // mutation state; cleanup outcome must not rewrite it to changed.
-                Err(e)
-            }
-        }
-    }
-
-    pub fn rename(&mut self, _permit: &MutationPermit, from: &str, to: &str) -> Result<()> {
-        self.identity_memo.clear();
-        // Controlled failure-injection inside the real rename operation so the
-        // publish error path that classifies rename outcomes is exercised.
-        if self.fault() == Some("rename_fail") {
-            return Err(SinterError::apply("injected rename failure"));
-        }
-        if self.fault() == Some("rename_indeterminate") {
-            return Err(SinterError::indeterminate("injected rename indeterminate"));
-        }
-        self.run_argv_ok_mutating(
-            "/bin/mv",
-            &[
-                "-T".to_string(),
-                "-f".to_string(),
-                "--".to_string(),
-                from.to_string(),
-                to.to_string(),
-            ],
-        )?;
-        // Controlled injection: real rename already published, then completion
-        // is reported as abnormal. Publication is a known mutation.
-        if self.fault() == Some("rename_success_then_abnormal") {
-            return Err(SinterError::indeterminate(
-                "injected abnormal completion after successful rename",
-            )
-            .changed());
-        }
-        Ok(())
-    }
-
-    /// Write exact bytes to a path by streaming them over stdin to `dd`. The
-    /// destination path is passed as a single argv element, so no recipe-
-    /// controlled value can become shell syntax, and no shell is invoked.
-    pub fn write_bytes(&mut self, _permit: &MutationPermit, path: &str, data: &[u8]) -> Result<()> {
-        self.identity_memo.clear();
-        if path.contains('\0') {
-            return Err(SinterError::schema("path may not contain NUL bytes"));
-        }
-        let mut req = ExecRequest::new("/bin/dd");
-        req.args = vec!["status=none".to_string(), format!("of={}", path)];
-        req.env = base_env();
-        req.env.insert("HOME".to_string(), self.home_env());
-        req.stdin = Some(data.to_vec());
-        let out = self.ex.run(&req)?;
-        match out.completion {
-            Completion::Exited(0) => Ok(()),
-            Completion::Exited(c) => Err(SinterError::apply(format!(
-                "failed writing {}: exit {} ({})",
-                path,
-                c,
-                String::from_utf8_lossy(&out.stderr).trim()
+            PublishStep::NotPublished { cleanup, why } => Err(SinterError::apply(format!(
+                "the link could not be replaced: {} (staging cleanup {})",
+                why,
+                if cleanup.is_clean() {
+                    "succeeded".to_string()
+                } else {
+                    format!("failed: {}", cleanup.describe())
+                }
             ))),
-            Completion::Signaled(s) => Err(SinterError::apply(format!(
-                "failed writing {}: signal {}",
-                path, s
+            PublishStep::Rejected(reason) => Err(SinterError::apply(format!(
+                "the link could not be replaced: staged publication was refused: {} (a stray \
+                 .sinter-stage.* directory may remain)",
+                reason
             ))),
-            Completion::Indeterminate { reason, .. } => Err(SinterError::indeterminate(reason)),
         }
-    }
-
-    /// Set an extended attribute using exact argv; never a shell string.
-    pub fn set_xattr(
-        &mut self,
-        _permit: &MutationPermit,
-        name: &str,
-        value: &str,
-        path: &str,
-    ) -> Result<()> {
-        self.identity_memo.clear();
-        self.run_argv_ok(
-            "/usr/bin/setfattr",
-            &[
-                "-n".to_string(),
-                name.to_string(),
-                "-v".to_string(),
-                value.to_string(),
-                "--".to_string(),
-                path.to_string(),
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Copy preservable xattrs (`user.*` and `security.selinux`) from `from`
-    /// onto `to`. Other security/ACL attributes are deliberately not copied —
-    /// they are disqualifying via `unsafe_attr` instead.
-    pub fn copy_user_xattrs(
-        &mut self,
-        permit: &MutationPermit,
-        from: &str,
-        to: &str,
-    ) -> Result<()> {
-        self.identity_memo.clear();
-        if !self.has_getfattr {
-            return Ok(());
-        }
-        let x = self.xattrs(from)?;
-        for (name, value) in x.preserved_attrs() {
-            self.set_xattr(permit, name, value, to)?;
-        }
-        Ok(())
     }
 
     pub fn resolve_uid(&mut self, spec: &str) -> Result<u32> {
@@ -1476,13 +2130,62 @@ impl TargetFs {
     /// walk unchanged. The choice is made before the first command is sent and a
     /// dispatched batch is never retried through the sequential walk.
     pub fn check_trusted_parents(&mut self, path: &str) -> Result<()> {
+        self.check_trusted_parents_with(path, true)
+    }
+
+    /// The same walk, but a directory owned by another account is never
+    /// accepted (no file operations as that account). For operations that
+    /// cannot run inside another account's tree, such as the backup store.
+    pub fn check_trusted_parents_strict(&mut self, path: &str) -> Result<()> {
+        self.check_trusted_parents_with(path, false)
+    }
+
+    /// FS-3. The walk always runs as the invocation's own identity and clears
+    /// any identity left by an earlier resource. If every ancestor is trusted
+    /// (the rule of DESIGN §23) nothing else happens. If the invocation is
+    /// root (a root login or `--sudo`) and the *first* untrusted ancestor is
+    /// a plain directory of an unprivileged account (not group- or
+    /// other-writable, no ACL, every ancestor above it trusted, none below it
+    /// owned by a third account), the walk succeeds and the path is
+    /// *inside that account's tree*: [`TargetFs::tree_identity`] is set and
+    /// every later file operation runs as that account. Nothing in such a tree
+    /// can then be used to make root write somewhere only root could.
+    fn check_trusted_parents_with(&mut self, path: &str, allow_tree: bool) -> Result<()> {
+        self.walk_ancestors(path, allow_tree)?;
+        if self.shared_parent {
+            // FS-2. The direct parent is a shared directory: other accounts
+            // may create entries in it, so the entry itself is judged before
+            // anything is read, changed or removed.
+            self.entry_gate(path)?;
+        }
+        Ok(())
+    }
+
+    /// The walk over the ancestors only (DESIGN §23): it never looks at the
+    /// path itself. On success `identity` is settled and `shared_parent` tells
+    /// whether the direct parent is a shared directory.
+    fn walk_ancestors(&mut self, path: &str, allow_tree: bool) -> Result<()> {
+        let r = self.walk_ancestors_inner(path, allow_tree);
+        if r.is_err() {
+            self.shared_parent = false;
+        }
+        r
+    }
+
+    fn walk_ancestors_inner(&mut self, path: &str, allow_tree: bool) -> Result<()> {
+        self.identity = None;
+        self.shared_parent = false;
+        self.parents_seen.clear();
+        let mut tree: Option<(String, u32)> = None;
         let dirs = ancestor_dirs(path);
         if self.batched_parent_walk_applies(&dirs) {
-            return self.check_trusted_parents_batched(path, &dirs);
+            self.check_trusted_parents_batched(path, &dirs, &mut tree, allow_tree)?;
+            return self.enter_tree(tree);
         }
         for dir in dirs {
             let st = self.inspect(&dir)?;
-            self.check_parent_stat(&dir, &st)?;
+            self.shared_parent = self.check_parent_stat(&dir, &st, &mut tree, allow_tree)?;
+            self.parents_seen.insert(dir.clone(), (st.uid, st.mode));
             // Effective writability cannot be proven from mode bits alone when
             // extended access metadata (ACLs) is present. If inspection cannot
             // be completed, fail closed rather than assume safety.
@@ -1496,12 +2199,178 @@ impl TargetFs {
             };
             self.check_parent_xattrs(&dir, &x)?;
         }
+        self.enter_tree(tree)
+    }
+
+    /// FS-2. The entry gate for a path whose direct parent is a shared
+    /// directory. Other accounts can create entries there, and an entry they
+    /// own can be replaced by them at any moment, so the invocation never
+    /// reads, changes or removes one. `lstat` only (a final symlink is never
+    /// followed), run as the invocation (a shared directory is never inside
+    /// another account's tree, so no identity is set):
+    ///
+    /// * absent: passes (a new entry is created exclusively, see
+    ///   `link_noreplace`);
+    /// * owned by a principal that is not trusted: refused;
+    /// * a regular file with more than one hard link: refused (an account can
+    ///   link a file it cannot read into a shared directory when the kernel
+    ///   does not forbid it; reading or `chmod`-ing that name would reach the
+    ///   other file).
+    ///
+    /// The `Stat` it returns is that `lstat`: the metadata of the entry that was
+    /// judged. An entry owned by a trusted principal cannot be removed, renamed
+    /// or replaced by anyone else in a sticky directory, so what passes here
+    /// stays the same object until the invocation changes it.
+    pub(crate) fn entry_gate(&mut self, path: &str) -> Result<Stat> {
+        let st = self.inspect(path)?;
+        if st.kind == ObjKind::Absent {
+            return Ok(st);
+        }
+        let (dir, _) = parent_and_name(path);
+        if !self.is_trusted_owner(st.uid) {
+            return Err(SinterError::apply(if self.redact {
+                "an entry in a shared directory belongs to another account; Sinter reads, \
+                 changes and removes only entries owned by a trusted principal there \
+                 (details withheld: sensitive resource)"
+                    .to_string()
+            } else {
+                format!(
+                    "{} belongs to uid {}: in the shared directory {} Sinter reads, changes and \
+                     removes only entries owned by {} (paths below a directory of that account \
+                     can still be managed as that account when the recipe sets `owner`)",
+                    path,
+                    st.uid,
+                    dir,
+                    self.trusted_owner_words()
+                )
+            }));
+        }
+        if st.kind == ObjKind::File {
+            let links = self.stat_nlink(path)?;
+            if links != 1 {
+                return Err(SinterError::apply(if self.redact {
+                    "an entry in a shared directory has more than one hard link; Sinter does \
+                     not read or change it (details withheld: sensitive resource)"
+                        .to_string()
+                } else {
+                    format!(
+                        "{} has {} hard links: in the shared directory {} Sinter does not read \
+                         or change a file that is also reachable under another name (find the \
+                         other names with `find / -xdev -samefile {}`; remove the ones that are \
+                         not wanted)",
+                        path, links, dir, path
+                    )
+                }));
+            }
+        }
+        Ok(st)
+    }
+
+    /// Hard link count of a regular file (`stat -c %h`, strict record).
+    fn stat_nlink(&mut self, path: &str) -> Result<u64> {
+        let out = self.run_argv(
+            "/usr/bin/stat",
+            &[
+                "-c".to_string(),
+                "%h".to_string(),
+                "--".to_string(),
+                path.to_string(),
+            ],
+        )?;
+        let unclear = || {
+            SinterError::apply(format!(
+                "cannot determine the hard link count of {}; refusing in a shared directory",
+                if self.redact { "an entry" } else { path }
+            ))
+        };
+        match out.completion {
+            Completion::Exited(0) if out.stderr.is_empty() && !out.stdout_truncated => {
+                let text = std::str::from_utf8(&out.stdout).map_err(|_| unclear())?;
+                let n = text.strip_suffix('\n').ok_or_else(unclear)?;
+                if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(unclear());
+                }
+                n.parse::<u64>().map_err(|_| unclear())
+            }
+            Completion::Indeterminate { ref reason, .. } => Err(SinterError::indeterminate(
+                format!("hard link count of {} did not complete: {}", path, reason),
+            )),
+            _ => Err(unclear()),
+        }
+    }
+
+    /// FS-2 (Q1). In a shared directory only the trusted principals own what
+    /// Sinter manages: an `owner` of anyone else is refused in plan and in
+    /// apply, with the same reason, because the entry would be refused again
+    /// on the next run. Applies only when the direct parent is a shared
+    /// directory; inside another account's tree `tree_owner_conflict` decides.
+    pub fn shared_owner_conflict(&self, path: &str, explicit: Option<u32>) -> Option<SinterError> {
+        if !self.shared_parent {
+            return None;
+        }
+        let uid = explicit?;
+        if self.is_trusted_owner(uid) {
+            return None;
+        }
+        let (dir, _) = parent_and_name(path);
+        Some(SinterError::apply(if self.redact {
+            "the owner asked for is not supported in a shared directory (details withheld: \
+             sensitive resource)"
+                .to_string()
+        } else {
+            format!(
+                "cannot give {} to uid {}: it lies in the shared directory {}, where Sinter \
+                 manages only entries owned by {} (use a location outside the shared directory, \
+                 or a directory of that account)",
+                path,
+                uid,
+                dir,
+                self.trusted_owner_words()
+            )
+        }))
+    }
+
+    /// Settle the identity for a walk that found a foreign tree.
+    fn enter_tree(&mut self, tree: Option<(String, u32)>) -> Result<()> {
+        if let Some((root, uid)) = tree {
+            let gid = self.account_primary_gid(uid)?;
+            // The walk accepted the directory above the root as a shared
+            // directory exactly when it is sticky, owned by a trusted
+            // principal and writable by group or others (`check_parent_stat`).
+            let (parent, _) = parent_and_name(&root);
+            let in_shared = self
+                .parents_seen
+                .get(&parent)
+                .is_some_and(|&(owner, mode)| {
+                    self.is_trusted_owner(owner) && mode & 0o1000 != 0 && mode & 0o022 != 0
+                });
+            self.identity = Some(TreeIdentity {
+                uid,
+                gid,
+                root,
+                in_shared,
+            });
+        }
         Ok(())
     }
 
     /// Type, owner and mode verdict for one ancestor (shared by the sequential
     /// and the batched walk so both apply exactly the same predicate).
-    fn check_parent_stat(&self, dir: &str, st: &Stat) -> Result<()> {
+    ///
+    /// `Ok(true)` means the ancestor was accepted as a *shared directory*
+    /// (FS-2): owned by a trusted principal, sticky, and writable by group or
+    /// others. Such a directory is accepted only before the walk enters
+    /// another account's tree. Sticky means a non-owner cannot remove or
+    /// rename an entry it does not own, so an entry owned by a trusted
+    /// principal cannot be replaced by anyone else; it says nothing about
+    /// creation, content, or entries of other accounts (see `entry_gate`).
+    fn check_parent_stat(
+        &self,
+        dir: &str,
+        st: &Stat,
+        tree: &mut Option<(String, u32)>,
+        allow_tree: bool,
+    ) -> Result<bool> {
         match st.kind {
             ObjKind::Absent => {
                 return Err(SinterError::apply(format!(
@@ -1526,30 +2395,58 @@ impl TargetFs {
                 )))
             }
         }
-        let trusted_owner = st.uid == 0 || (!self.sudo && st.uid == self.target_uid);
+        let trusted_owner = self.is_trusted_owner(st.uid);
         if !trusted_owner {
-            return Err(SinterError::apply(format!(
-                "parent path {} is owned by uid {}, outside the trusted set{}",
-                dir,
-                st.uid,
-                if self.sudo {
-                    " (with --sudo only root-owned parents are trusted: connect as that user \
-                     without --sudo, or use a root-owned location such as /opt or /srv)"
-                } else {
-                    " (only directories owned by root or the connecting user are trusted)"
+            // FS-3: as root, a directory of an unprivileged account starts that
+            // account's tree; file operations below it run as the account.
+            if !(allow_tree && self.runs_as_root() && st.uid != 0) {
+                return Err(SinterError::apply(format!(
+                    "parent path {} is owned by uid {}, outside the trusted set{}",
+                    dir,
+                    st.uid,
+                    if self.sudo {
+                        " (with --sudo only root-owned parents are trusted: connect as that user \
+                         without --sudo, or use a root-owned location such as /opt or /srv)"
+                    } else {
+                        " (only directories owned by root or the connecting user are trusted)"
+                    }
+                )));
+            }
+            match tree {
+                None => *tree = Some((dir.to_string(), st.uid)),
+                Some((_, u)) if *u == st.uid => {}
+                Some((root, u)) => {
+                    return Err(SinterError::apply(format!(
+                        "parent path {} is owned by uid {}, but {} above it belongs to uid {}: \
+                         Sinter operates inside one other account's tree at a time; refusing",
+                        dir, st.uid, root, u
+                    )))
                 }
-            )));
+            }
         }
         if st.mode & 0o022 != 0 {
+            if trusted_owner && st.mode & 0o1000 != 0 && tree.is_none() {
+                return Ok(true);
+            }
+            let why = if st.mode & 0o1000 == 0 {
+                "it has no sticky bit, so another user could replace entries below it: remove \
+                 that write access (for example mode 0755), set the sticky bit on a directory \
+                 owned by root, or use another location"
+            } else if !trusted_owner {
+                "it is sticky but owned by another account, which could replace any entry below \
+                 it: use a directory owned by root, or another location"
+            } else {
+                "it lies inside another account's directory, where a shared directory is not \
+                 accepted: use another location"
+            };
             return Err(SinterError::apply(format!(
-                "parent path {} grants group or other write access; refusing unsafe path ({}); \
-                 another user could replace entries below it: remove that write access \
-                 (for example mode 0755) or use another location",
+                "parent path {} grants group or other write access; refusing unsafe path ({}); {}",
                 dir,
-                mode_to_string(st.mode)
+                mode_to_string(st.mode),
+                why
             )));
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Extended access metadata verdict for one ancestor (shared by both walks).
@@ -1615,12 +2512,19 @@ impl TargetFs {
     /// its records, then (only on success) one `getfattr` for every ancestor.
     /// Any failure, anomaly or unacceptable record refuses; nothing is retried
     /// and nothing falls back to the sequential walk after dispatch.
-    fn check_trusted_parents_batched(&mut self, path: &str, dirs: &[String]) -> Result<()> {
+    fn check_trusted_parents_batched(
+        &mut self,
+        path: &str,
+        dirs: &[String],
+        tree: &mut Option<(String, u32)>,
+        allow_tree: bool,
+    ) -> Result<()> {
         let out = self.run_argv("/usr/bin/stat", &batched_stat_args(dirs))?;
         let stats = interpret_stat_batch(&out, path, dirs)?;
         // Complete stat gate: every record is validated before getfattr exists.
         for (dir, st) in dirs.iter().zip(stats.iter()) {
-            self.check_parent_stat(dir, st)?;
+            self.shared_parent = self.check_parent_stat(dir, st, tree, allow_tree)?;
+            self.parents_seen.insert(dir.clone(), (st.uid, st.mode));
         }
         let out = self.run_argv("/usr/bin/getfattr", &batched_getfattr_args(dirs))?;
         let xs = interpret_getfattr_batch(&out, path, dirs)?;
@@ -3636,27 +4540,15 @@ mod tests {
                 }),
             ),
             (
-                "rename",
+                "stage_file",
                 Box::new(|f, p| {
-                    let _ = f.rename(p, "/d/x", "/d/y");
+                    let _ = f.stage_file(p, "/d", "/d/x", b"x", 0o600, 0, 0, &[]);
                 }),
             ),
             (
-                "write_bytes",
+                "stage_link",
                 Box::new(|f, p| {
-                    let _ = f.write_bytes(p, "/d/x", b"x");
-                }),
-            ),
-            (
-                "set_xattr",
-                Box::new(|f, p| {
-                    let _ = f.set_xattr(p, "user.a", "b", "/d/x");
-                }),
-            ),
-            (
-                "copy_user_xattrs",
-                Box::new(|f, p| {
-                    let _ = f.copy_user_xattrs(p, "/d/x", "/d/y");
+                    let _ = f.stage_link(p, "/d", "/t");
                 }),
             ),
             (
@@ -3666,8 +4558,8 @@ mod tests {
                 }),
             ),
             (
-                // Delegates to `make_staging_dir`, which clears as well, so
-                // this entry proves the outcome, not the direct call alone.
+                // Delegates to `stage_link`, which clears as well, so this
+                // entry proves the outcome, not the direct call alone.
                 "symlink_replace",
                 Box::new(|f, p| {
                     let observed = f.inspect("/d/l").unwrap();
@@ -3679,19 +4571,142 @@ mod tests {
             let mut fs = memo_fs(memo_target());
             let permit = fs.mutation_permit().unwrap();
             fs.resolve_uid("app").unwrap();
+            fs.identity_memo.walks.insert(
+                "/d".to_string(),
+                GateOutcome::Open(None, BTreeMap::new(), false),
+            );
             assert_eq!(fs.identity_memo.entries.len(), 1, "{name}: primed");
+            assert_eq!(fs.identity_memo.walks.len(), 1, "{name}: walk primed");
             op(&mut fs, &permit);
             assert!(fs.identity_memo.entries.is_empty(), "{name} must clear");
+            assert!(
+                fs.identity_memo.walks.is_empty(),
+                "{name} must drop the walk verdicts too"
+            );
         }
-        // The two helpers that obtain their own permit.
+        // The helper that obtains its own permit.
         let mut fs = memo_fs(memo_target());
         fs.resolve_uid("app").unwrap();
-        let _ = fs.make_staging_dir("/d");
-        assert!(fs.identity_memo.entries.is_empty(), "make_staging_dir");
-        let mut fs = memo_fs(memo_target());
-        fs.resolve_uid("app").unwrap();
+        fs.identity_memo.walks.insert(
+            "/d".to_string(),
+            GateOutcome::Open(None, BTreeMap::new(), false),
+        );
         let _ = fs.set_metadata("/d/x", 0o600, 0, 0);
         assert!(fs.identity_memo.entries.is_empty(), "set_metadata");
+        assert!(fs.identity_memo.walks.is_empty(), "set_metadata: walks");
+    }
+
+    fn answer(code: i32, stdout: &str, stderr: &str) -> Output {
+        Output {
+            completion: Completion::Exited(code),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }
+    }
+
+    #[test]
+    fn staging_refuses_an_owner_the_tree_or_the_shared_directory_does_not_allow() {
+        // The same rules as before the staging, asked again at the step itself.
+        let mut fs = memo_fs(memo_target());
+        let permit = fs.mutation_permit().unwrap();
+        fs.identity = Some(TreeIdentity {
+            uid: 1001,
+            gid: 1001,
+            root: "/home/alice".to_string(),
+            in_shared: false,
+        });
+        let e = fs
+            .stage_file(
+                &permit,
+                "/home/alice",
+                "/home/alice/f",
+                b"x",
+                0o644,
+                0,
+                0,
+                &[],
+            )
+            .expect_err("root's ownership inside alice's tree");
+        assert!(e.message.contains("cannot give"), "{}", e.message);
+        fs.identity = None;
+        fs.shared_parent = true;
+        let e = fs
+            .stage_file(&permit, "/d", "/d/f", b"x", 0o644, 1001, 1001, &[])
+            .expect_err("alice's ownership in a shared directory");
+        assert!(e.message.contains("shared directory"), "{}", e.message);
+        // Nothing reached the target.
+        assert!(fs.log().iter().all(|c| c.program != "/bin/sh"));
+    }
+
+    #[test]
+    fn a_sensitive_resource_gets_no_diagnostic_of_the_target_from_a_staging_step() {
+        let canary = "mktemp: cannot create /tmp/topsecret-name CANARYSTDERR";
+        // stage
+        let mut fs = memo_fs(memo_target());
+        fs.redact = true;
+        let e = fs
+            .staged_answer("/d", &answer(1, "", canary), false)
+            .expect_err("a failed step");
+        assert!(!e.message.contains("CANARYSTDERR"), "{}", e.message);
+        fs.redact = false;
+        let e = fs
+            .staged_answer("/d", &answer(1, "", canary), false)
+            .expect_err("a failed step");
+        assert!(
+            e.message.contains("CANARYSTDERR"),
+            "an ordinary resource keeps the detail"
+        );
+        // publish: an exit that does not prove "not published" is indeterminate, and the
+        // detail is withheld there as well
+        let target = memo_target().with_observations("sh", vec![answer(7, "", canary)]);
+        let mut fs = memo_fs(target);
+        fs.redact = true;
+        let permit = fs.mutation_permit().unwrap();
+        let staged0 = StagedObject {
+            dir: "/d".to_string(),
+            staged: crate::fsstage::Staged {
+                name: ".sinter-stage.AbCd1234".to_string(),
+                group: "-".to_string(),
+                dir_id: "2049:1".to_string(),
+                payload_id: "2049:2".to_string(),
+            },
+            link: false,
+            sensitive: false,
+        };
+        let e = fs
+            .publish_staged(&permit, &staged0, PublishKind::New, "f")
+            .unwrap_err();
+        assert_eq!(e.kind, crate::error::ErrorKind::Indeterminate);
+        assert!(!e.message.contains("CANARYSTDERR"), "{}", e.message);
+        assert!(e.message.contains("exit 7"), "{}", e.message);
+        // publish: the script's own "publication failed" exit
+        let target = memo_target().with_observations("sh", vec![answer(4, "", canary)]);
+        let mut fs = memo_fs(target);
+        fs.redact = true;
+        let permit = fs.mutation_permit().unwrap();
+        let staged = StagedObject {
+            dir: "/d".to_string(),
+            staged: crate::fsstage::Staged {
+                name: ".sinter-stage.AbCd1234".to_string(),
+                group: "-".to_string(),
+                dir_id: "2049:1".to_string(),
+                payload_id: "2049:2".to_string(),
+            },
+            link: false,
+            sensitive: false,
+        };
+        match fs
+            .publish_staged(&permit, &staged, PublishKind::New, "f")
+            .unwrap()
+        {
+            PublishStep::NotPublished { why, .. } => {
+                assert!(!why.contains("CANARYSTDERR"), "{why}");
+                assert!(why.contains("exit 4"), "{why}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -4686,6 +5701,61 @@ mod tests {
     }
 
     #[test]
+    fn fs2_a_shared_directory_is_accepted_only_when_sticky_and_trusted() {
+        // Decision space of one ancestor: owner x mode x privilege x position.
+        // A directory that others can write is accepted only if a trusted
+        // principal owns it and it is sticky; the direct parent being such a
+        // directory is reported by `shared_parent`. Both walks agree.
+        use crate::fakesys::FakeKind;
+        let modes = [
+            0o755u32, 0o777, 0o775, 0o757, 0o1777, 0o1775, 0o1757, 0o1755, 0o1700, 0o2777, 0o3777,
+        ];
+        let mut combos = 0;
+        for sudo in [false, true] {
+            for uid in [0u32, 1000, 4242] {
+                // With --sudo only root is trusted, and an untrusted owner would
+                // start another account's tree (needs an account entry: covered
+                // by tests/fs3_user_tree.rs and tests/fs2_shared_directory.rs).
+                let trusted = uid == 0 || (!sudo && uid == 1000);
+                if !trusted && sudo {
+                    continue;
+                }
+                for mode in modes {
+                    for last in [false, true] {
+                        let target = || {
+                            let mut t = pc_target(3);
+                            let fs = t.fs.as_mut().unwrap();
+                            let at = if last { "/d1/d2" } else { "/d1" };
+                            let node = fs.nodes.get_mut(at).unwrap();
+                            node.uid = uid;
+                            node.mode = mode;
+                            node.kind = FakeKind::Dir;
+                            t
+                        };
+                        let mut batched = pc_fs_with(target(), false, true, sudo);
+                        let mut sequential = pc_fs_with(target(), true, true, sudo);
+                        let b = batched.check_trusted_parents(&pc_path(3));
+                        let s = sequential.check_trusted_parents(&pc_path(3));
+                        let writable = mode & 0o022 != 0;
+                        let accepted = trusted && (!writable || mode & 0o1000 != 0);
+                        let ctx = format!("sudo={sudo} uid={uid} mode={mode:o} last={last}");
+                        assert_eq!(b.is_ok(), accepted, "{ctx}: {b:?}");
+                        assert_eq!(s.is_ok(), accepted, "{ctx}: {s:?}");
+                        if let (Err(b), Err(s)) = (&b, &s) {
+                            assert_eq!(b.message, s.message, "{ctx}");
+                        }
+                        let shared = accepted && writable && last;
+                        assert_eq!(batched.shared_parent(), shared, "{ctx}");
+                        assert_eq!(sequential.shared_parent(), shared, "{ctx}");
+                        combos += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(combos, (3 + 1) * 11 * 2);
+    }
+
+    #[test]
     fn path_c_missing_ancestor_is_a_refusal_with_one_command() {
         // /d1/d2 does not exist on the target.
         let mut t = FakeTarget::ubuntu2404().with_fake_fs().with_fs_dir("/d1");
@@ -4793,7 +5863,7 @@ mod tests {
         let stats = interpret_stat_batch(&pc_out(0, stat, ""), "/x/f", dirs)?;
         let fs = pc_capture_fs(stats[0].uid);
         for (d, st) in dirs.iter().zip(&stats) {
-            fs.check_parent_stat(d, st)?;
+            fs.check_parent_stat(d, st, &mut None, false)?;
         }
         let xs = interpret_getfattr_batch(&pc_out(0, getfattr, ""), "/x/f", dirs)?;
         for (d, x) in dirs.iter().zip(&xs) {

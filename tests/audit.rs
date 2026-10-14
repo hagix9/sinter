@@ -17,6 +17,7 @@ use std::path::Path;
 
 fn try_audit_fake(recipe: &Path, fake: FakeTarget) -> Result<AuditReport, SinterError> {
     let model = load_model(recipe)?;
+    let fake = with_walkable_parents(&model, fake);
     let opts = RunOptions {
         mode: Mode::Plan,
         sudo: false,
@@ -62,10 +63,19 @@ fn assert_observation_only(report: &AuditReport) {
             "/usr/bin/uname" => matches!(args.as_slice(), ["-m"]),
             // Fixed-argv filesystem inspection. Only the final argument is a
             // recipe-controlled path.
-            "/usr/bin/stat" => matches!(
-                args.as_slice(),
-                ["-c", "%F|%a|%u|%g|%s|%d|%i|%y|%z", "--", _] | ["-c", "%a %u", "--", _]
-            ),
+            "/usr/bin/stat" => {
+                matches!(
+                    args.as_slice(),
+                    ["-c", "%F|%a|%u|%g|%s|%d|%i|%y|%z", "--", _] | ["-c", "%a %u", "--", _]
+                ) || (
+                    // The parent walk that gates every observation of a path
+                    // (L-2): one batched stat over the ancestors, directories
+                    // only, in the fixed format.
+                    args.len() >= 3
+                        && args[0] == "--printf=%F|%a|%u|%g|%s|%d|%i|%y|%z|%n\\0"
+                        && args[1] == "--"
+                )
+            }
             "/usr/bin/readlink" => matches!(args.as_slice(), ["-n", "--", _]),
             "/usr/bin/sha256sum" => matches!(args.as_slice(), ["--", _]),
             // Account database lookup: database name then key.
@@ -78,10 +88,10 @@ fn assert_observation_only(report: &AuditReport) {
                     | ["-s", "files", "passwd"]
             ),
             // Extended-attribute/ACL inspection (fixed options, path operand).
-            "/usr/bin/getfattr" => matches!(
-                args.as_slice(),
-                ["-d", "-m", "-", "-e", "base64", "--absolute-names", "--", _]
-            ),
+            "/usr/bin/getfattr" => {
+                args.len() >= 8
+                    && args[..7] == ["-d", "-m", "-", "-e", "base64", "--absolute-names", "--"]
+            }
             "/usr/bin/getfacl" => matches!(args.as_slice(), ["-p", "-c", "--", _]),
             // Package observation is query-only: one fixed query shape whose
             // only recipe-controlled slot is the package name. rpm answers
@@ -207,6 +217,17 @@ resources:
     );
     let mut fake = FakeTarget::ubuntu2404();
     fake.packages.insert("nano".to_string());
+    // The stat of the file fails in a way that is neither presence nor
+    // absence.
+    let fake = fake.with_observations_at(
+        "stat",
+        "/nonexistent-parent/f",
+        vec![exited(
+            1,
+            "",
+            "stat: cannot statx '/nonexistent-parent/f': Permission denied\n",
+        )],
+    );
     let r = audit_fake(&recipe, fake);
     assert_eq!(
         afind(&r, "compliant").status,
@@ -221,8 +242,8 @@ resources:
         afind(&r, "notapplicable").status,
         AuditResourceStatus::NotApplicable
     );
-    // FakeTarget has no modeled filesystem: the stat observation fails, which
-    // must classify as Error, never Drift (RA-04).
+    // The stat observation fails, which must classify as Error, never Drift
+    // (RA-04).
     assert_eq!(afind(&r, "errored").status, AuditResourceStatus::Error);
     assert_eq!(r.summary.total, 5);
     assert_eq!(r.summary.compliant, 1);
@@ -605,6 +626,15 @@ resources:
     );
     let mut fake = FakeTarget::ubuntu2404();
     fake.packages.insert("nano".to_string());
+    let fake = fake.with_observations_at(
+        "stat",
+        "/nonexistent/f",
+        vec![exited(
+            1,
+            "",
+            "stat: cannot statx '/nonexistent/f': Permission denied\n",
+        )],
+    );
     let r = audit_fake(&recipe, fake);
     assert_eq!(afind(&r, "drifting_dep").status, AuditResourceStatus::Drift);
     // Drift of a dependency does not block the dependent's observation.
