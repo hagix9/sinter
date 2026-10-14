@@ -1385,7 +1385,8 @@ impl Engine {
             )));
         }
         // Root is a fact about the target, not about a flag: a root login
-        // needs no --sudo, and --sudo was proved to yield uid 0 at connect.
+        // needs no --sudo, and with --sudo every command is sent as `sudo -n -u root`
+        // (sudo runs it as root or refuses it; the uid is not measured).
         if !self.fs.runs_as_root() {
             return Err(self.account_err(format!(
                 "{}: password_hash needs root: connect as root or use --sudo (the password \

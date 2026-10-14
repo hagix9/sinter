@@ -699,7 +699,8 @@ fn password_hash_needs_sudo_in_plan_apply_and_audit_never_no_change() {
 }
 
 // FS-0b: whether `password_hash` may run is a fact about the target (root, or
-// `--sudo` proved to reach root), not about the flag alone.
+// `--sudo`, whose commands are sent as `sudo -n -u root`), not about the flag
+// alone.
 #[test]
 fn password_hash_follows_the_effective_privilege_not_the_flag() {
     // (target user is root, --sudo given, allowed)

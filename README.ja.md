@@ -274,9 +274,11 @@ handlers:
   自動登録は行いません。
 - リモートコマンドは意図しないshell展開を避け、argvを正確に保持します。
   NUL byteは拒否されます。
-- `--sudo`指定時は、target側のすべての操作をnon-interactiveな
-  `sudo -n`経由でeffective UID 0として実行します。指定しない場合は
-  target userとして実行します。権限エラー後に勝手にsudoで再試行しません。
+- `--sudo`指定時は、target側のすべての操作をrootとして実行するよう、
+  non-interactiveな`sudo -n -u root`でsudoに要求します。sudoはrootで実行するか、
+  拒否します。Sinterはsudo経由で実行したコマンドのeffective UIDを測定しません。
+  指定しない場合はtarget userとして実行します。権限エラー後に勝手にsudoで
+  再試行しません。
 - command resourceは固定のbaseline environment
   (`PATH`, `LANG`, `LC_ALL`, `HOME`)を使用します。
   controller、SSH session、sudo、login shellの環境変数を継承しません。

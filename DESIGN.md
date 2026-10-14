@@ -1259,6 +1259,8 @@ Without --sudo, every target-side resource observation, mutation, verification, 
 
 With --sudo, every target-side resource observation, mutation, verification, command, and handler runs with effective UID 0 through the root privilege boundary using non-interactive sudo -n.
 
+Sinter asks sudo for root explicitly: every wrapped command is sent as `sudo -n -u root -- …`, over SSH and locally alike. Without -u root, sudo runs a command as the sudoers `runas_default` user, which is root only by default; a site that sets another user would make every command run as that user while Sinter treats the run as root. With -u root, sudo either runs the command as root or refuses it. A refusal of the first command (the connect probe) is reported at connect (see below); a rule that allows root for some commands only makes a later command fail like any other command failure, and nothing is retried. The user's sudoers rule must therefore allow running commands as root: a rule with `(root)` or `(ALL)`, or a rule with no Runas_Spec when `runas_default` is root (its default); a rule that allows only another user, or a rule with no Runas_Spec when `runas_default` is another user, is refused. What Sinter guarantees is the request it makes (the argument vector); it does not measure the effective uid of a wrapped command, and the --sudo flag by itself is not a measurement of any uid. Only the connected user's uid is measured, without sudo, to learn whether there is anything for --sudo to add (next paragraphs).
+
 This rule applies even when a particular operation would not otherwise require root privilege. For example, a command resource executing /usr/bin/id -u under --sudo must observe effective UID 0.
 
 Controller-side work remains under the controller process identity. In particular, parsing, include loading, local source-file reading, template rendering, planning logic, and output rendering are not made root merely because the target invocation uses --sudo.
@@ -1271,7 +1273,7 @@ When the first command through the sudo -n wrapper fails, Sinter names a cause o
 
 plan may note, on a planned change, that it needs root when the target user is not root and --sudo was not given (a package, user or group change; creating, replacing or removing an entry in a directory the target user cannot write). The note is information only: it adds no status, field or exit code, runs no command beyond the observations plan already makes, and is omitted whenever the fact is not certain.
 
-Privileged target operations use non-interactive sudo -n.
+Privileged target operations use non-interactive sudo, asked for root explicitly (sudo -n -u root).
 
 No TTY-dependent password prompt is supported.
 

@@ -104,6 +104,20 @@ All notable changes to Sinter are documented in this file.
   unreadable `/etc/os-release`. What a command printed is never copied into the
   message. A target whose `/etc/os-release` is unreadable is still reported as
   a non-Linux target.
+- **`--sudo` asks sudo for root explicitly.** Commands are sent as
+  `sudo -n -u root -- …`, over SSH and locally. Before, they were sent as
+  `sudo -n -- …`, which sudo runs as the sudoers `runas_default` user: root
+  unless a site sets another user, while Sinter treated the run as root. Now
+  sudo runs the command as root or refuses it; a refusal of the first command
+  is reported at connect, and a rule that allows root for some commands only
+  makes a later command fail like any other command failure. Sinter still does
+  not measure the uid of a wrapped command; it relies on sudo honouring
+  `-u root`. No command is added, and a root login and a run without `--sudo`
+  are unchanged. The sudoers rule must allow running commands as root: `(root)`
+  or `(ALL)`, or no Runas_Spec when `runas_default` is root (its default).
+  **Compatibility:** a site that sets `runas_default` to another user, and used
+  to run `--sudo` as that user, now gets a refusal at connect; allow root in
+  its rule.
 
 ### Changed
 

@@ -273,9 +273,11 @@ handlers:
   fallback or automatic enrollment.
 - Remote commands preserve exact argv with no unintended shell evaluation.
   NUL bytes are rejected.
-- `--sudo` runs every target-side operation with effective UID 0 via
-  non-interactive `sudo -n`. Without it, everything runs as the target user.
-  Sinter never retries a permission failure with sudo.
+- `--sudo` asks non-interactive sudo to run every target-side operation as root
+  (`sudo -n -u root`): sudo runs the command as root or refuses it, and Sinter
+  does not measure the effective UID of a wrapped command. Without `--sudo`,
+  everything runs as the target user. Sinter never retries a permission failure
+  with sudo.
 - Command resources use a fixed baseline environment (`PATH`, `LANG`, `LC_ALL`,
   `HOME`); controller, SSH-session, sudo, and login-shell environment variables
   are not inherited. Reserved names cannot be overridden by recipes.

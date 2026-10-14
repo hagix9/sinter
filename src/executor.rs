@@ -544,8 +544,11 @@ impl Executor {
         }
     }
 
-    /// The effective target execution identity for the invocation.
-    /// With --sudo this is root. Otherwise it is the connected/local target user.
+    /// The target execution identity the invocation is treated as having.
+    /// With --sudo this is root: every command is sent as `sudo -n -u root`
+    /// (see [`SUDO_WRAPPER_ARGS`]), so sudo runs it as root or refuses it.
+    /// The uid of a wrapped command is not measured; it is whatever sudo was
+    /// asked for. Otherwise it is the connected/local target user (measured).
     pub fn target_identity(&mut self) -> Result<(u32, u32, String)> {
         if self.is_sudo() {
             return Ok((0, 0, "/root".to_string()));
@@ -829,12 +832,14 @@ fn classify_status(status: &std::process::ExitStatus) -> Completion {
 
 impl LocalExecutor {
     /// Build the argv actually invoked. When sudo is enabled the program is run
-    /// through non-interactive sudo and a clean `env -i` baseline so the
-    /// effective UID is 0 and the environment contract is identical to SSH.
+    /// through non-interactive sudo that is asked for root explicitly
+    /// ([`SUDO_WRAPPER_ARGS`]) and a clean `env -i` baseline, so the
+    /// environment contract is identical to SSH and sudo either runs the
+    /// command as root or refuses it.
     fn wrap(&self, req: &ExecRequest, wrap: bool) -> (String, Vec<String>) {
         if wrap {
             let cwd = req.cwd.clone().unwrap_or_else(|| "/root".to_string());
-            let mut args = vec!["-n".to_string(), "--".to_string()];
+            let mut args: Vec<String> = SUDO_WRAPPER_ARGS.iter().map(|a| a.to_string()).collect();
             args.push("/usr/bin/env".to_string());
             args.push("-i".to_string());
             args.push("-C".to_string());
@@ -2128,6 +2133,17 @@ fn try_agent_auth(
     authed
 }
 
+/// The arguments Sinter gives `/usr/bin/sudo` for every wrapped command, over
+/// SSH and locally alike: non-interactive (`-n`), the target user named
+/// explicitly (`-u root`) and an end of options (`--`). Without `-u root`,
+/// sudo runs the command as the sudoers `runas_default` user, which is root
+/// only by default; a site that sets another user would make `--sudo` run
+/// every command as that user while Sinter treats the run as root. With it,
+/// sudo runs the command as root or refuses (a refusal is named at connect,
+/// see [`classify_sudo_failure`]). Sinter does not measure the uid of a
+/// wrapped command: it relies on sudo honouring `-u root`.
+pub const SUDO_WRAPPER_ARGS: [&str; 4] = ["-n", "-u", "root", "--"];
+
 pub fn build_remote_command(req: &ExecRequest, sudo: bool, home: &str) -> String {
     build_remote_command_with(req, sudo, sudo, home)
 }
@@ -2163,7 +2179,7 @@ pub fn build_remote_command_with(
     }
     let env_cmd = parts.join(" ");
     if wrap {
-        format!("/usr/bin/sudo -n -- {}", env_cmd)
+        format!("/usr/bin/sudo {} {}", SUDO_WRAPPER_ARGS.join(" "), env_cmd)
     } else {
         env_cmd
     }
@@ -4285,9 +4301,9 @@ mod tests {
         let req = ExecRequest::new("/usr/bin/id").arg("-u");
         let wrapped = build_remote_command_with(&req, true, true, "/home/u");
         let direct = build_remote_command_with(&req, true, false, "/home/u");
-        assert!(wrapped.starts_with("/usr/bin/sudo -n -- '/usr/bin/env' -i -C '/root'"));
+        assert!(wrapped.starts_with("/usr/bin/sudo -n -u root -- '/usr/bin/env' -i -C '/root'"));
         // Same environment and working directory contract, minus the wrapper.
-        assert_eq!(wrapped, format!("/usr/bin/sudo -n -- {}", direct));
+        assert_eq!(wrapped, format!("/usr/bin/sudo -n -u root -- {}", direct));
         assert!(!direct.contains("sudo"), "{}", direct);
         assert!(direct.starts_with("'/usr/bin/env' -i -C '/root'"));
         // Without --sudo nothing changes: the user's home, no wrapper.
@@ -4328,15 +4344,136 @@ mod tests {
         assert!(!local(false, false).wraps_sudo());
         let (program, args) = local(true, false).wrap(&req, true);
         assert_eq!(program, "/usr/bin/sudo");
-        assert_eq!(args[..2], ["-n".to_string(), "--".to_string()]);
+        assert_eq!(args[..4], ["-n", "-u", "root", "--"].map(String::from));
         let (program, args) = local(true, true).wrap(&req, false);
         assert_eq!((program.as_str(), args), ("/bin/echo", req.args.clone()));
+    }
+
+    /// Split a command line made of POSIX single-quoted words (what
+    /// `shell_quote` produces) into its words.
+    fn posix_words(line: &str) -> Vec<String> {
+        let mut words = Vec::new();
+        let mut cur = String::new();
+        let mut in_word = false;
+        let mut quoted = false;
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            match (quoted, c) {
+                (true, '\'') => quoted = false,
+                (true, c) => cur.push(c),
+                (false, '\'') => {
+                    quoted = true;
+                    in_word = true;
+                }
+                (false, '\\') => {
+                    cur.push(chars.next().expect("a character after a backslash"));
+                    in_word = true;
+                }
+                (false, ' ') => {
+                    if in_word {
+                        words.push(std::mem::take(&mut cur));
+                        in_word = false;
+                    }
+                }
+                (false, c) => {
+                    cur.push(c);
+                    in_word = true;
+                }
+            }
+        }
+        assert!(!quoted, "unterminated quote in {:?}", line);
+        if in_word {
+            words.push(cur);
+        }
+        words
+    }
+
+    /// Requests whose words must survive the wrapper unchanged: spaces, quotes,
+    /// shell syntax, option-like words, an empty word, a newline, and a
+    /// secret-looking environment value.
+    fn wrapper_requests() -> Vec<ExecRequest> {
+        vec![
+            ExecRequest::new("/usr/bin/id").arg("-u"),
+            ExecRequest::new("/bin/sh")
+                .args([
+                    "a b",
+                    "it's",
+                    "$(touch /x)",
+                    ";rm -rf /",
+                    "-u",
+                    "--",
+                    "-n",
+                    "",
+                    "line\nbreak",
+                ])
+                .env("K", "v w'x")
+                .env("SECRET", "p@ss word; $(id)")
+                .cwd("/var/lib/my dir"),
+        ]
+    }
+
+    #[test]
+    fn the_wrapper_arguments_are_pinned() {
+        assert_eq!(SUDO_WRAPPER_ARGS, ["-n", "-u", "root", "--"]);
+    }
+
+    #[test]
+    fn the_ssh_wrapper_names_root_and_leaves_everything_else_alone() {
+        for req in wrapper_requests() {
+            let wrapped = build_remote_command_with(&req, true, true, "/home/u");
+            let direct = build_remote_command_with(&req, true, false, "/home/u");
+            // Only the prefix differs: the command, its quoting, its
+            // environment and its working directory are those of the direct
+            // form.
+            assert_eq!(wrapped, format!("/usr/bin/sudo -n -u root -- {}", direct));
+            let words = posix_words(&wrapped);
+            assert_eq!(
+                words[..6],
+                ["/usr/bin/sudo", "-n", "-u", "root", "--", "/usr/bin/env"].map(String::from)
+            );
+            assert_eq!(words[5..], posix_words(&direct)[..]);
+            // The program and its arguments come back word for word.
+            let tail = &words[words.len() - req.args.len() - 1..];
+            assert_eq!(tail[0], req.program);
+            assert_eq!(tail[1..], req.args[..]);
+            // No wrapper words in the direct form, and none of the request's
+            // values in the wrapper prefix.
+            assert!(!direct.starts_with("/usr/bin/sudo"), "{}", direct);
+            for v in req.env.values() {
+                assert!(!words[..5].contains(v), "{}", v);
+            }
+            // Without --sudo and for a root target nothing is wrapped.
+            for (sudo, wrap) in [(false, false), (true, false)] {
+                let line = build_remote_command_with(&req, sudo, wrap, "/home/u");
+                assert!(!line.contains("/usr/bin/sudo"), "{}", line);
+            }
+        }
+    }
+
+    #[test]
+    fn the_local_wrapper_names_root_and_matches_the_ssh_wrapper() {
+        for req in wrapper_requests() {
+            let (program, args) = local(true, false).wrap(&req, true);
+            assert_eq!(program, "/usr/bin/sudo");
+            assert_eq!(args[..4], ["-n", "-u", "root", "--"].map(String::from));
+            // Word for word the command the SSH wrapper sends.
+            let mut local_words = vec![program];
+            local_words.extend(args);
+            let ssh = build_remote_command_with(&req, true, true, "/home/u");
+            assert_eq!(local_words, posix_words(&ssh));
+            // Not wrapped: the request as it is, for a root target and for a
+            // run without --sudo.
+            for (sudo, root_direct) in [(true, true), (false, false)] {
+                let (program, args) = local(sudo, root_direct).wrap(&req, false);
+                assert_eq!((program, args), (req.program.clone(), req.args.clone()));
+            }
+        }
     }
 
     #[test]
     fn sudo_refusals_are_told_apart_by_what_sudo_printed() {
         use SudoFailure::*;
-        let cases: [(i32, &str, SudoFailure); 12] = [
+        let cases: [(i32, &str, SudoFailure); 13] = [
             // sudo 1.9 (the text is what `sudo -n true` prints on a host
             // where the user has no passwordless rule)
             (1, "sudo: a password is required\n", PasswordRequired),
@@ -4351,6 +4488,13 @@ mod tests {
             (1, "sudo: I'm sorry fake. I'm afraid I can't do that\n", NotAuthorized),
             (1, "fake is not in the sudoers file.\n", NotAuthorized),
             (1, "Sorry, user fake is not allowed to execute '/usr/bin/id -u' as root on h.\n", NotAuthorized),
+            // what sudo 1.9 prints when the rule allows another user only
+            // (`-u root` is then refused instead of run as that user)
+            (
+                1,
+                "Sorry, user fake is not allowed to execute '/usr/bin/env -i -C /root /usr/bin/test -r /etc/os-release' as root on h.\n",
+                NotAuthorized,
+            ),
             (1, "Sorry, user fake may not run sudo on h.\n", NotAuthorized),
             // the remote shell of a target without sudo
             (127, "sh: 1: /usr/bin/sudo: not found\n", Missing),

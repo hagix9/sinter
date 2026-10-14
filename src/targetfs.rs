@@ -630,9 +630,12 @@ impl TargetFs {
         self.sudo
     }
 
-    /// Whether target commands run with effective uid 0: `--sudo` (whose
-    /// `sudo -n` was proved at connect) or a target user that is root itself.
-    /// This is the privilege fact; `sudo()` is only whether `--sudo` was given.
+    /// Whether Sinter treats the target operations as running with effective
+    /// uid 0: `--sudo` (every command is sent as `sudo -n -u root`, so sudo
+    /// runs it as root or refuses it; the uid of a wrapped command is not
+    /// measured, and the `--sudo` flag itself is not a measurement) or a
+    /// target user that is root itself (measured at connect with `id -u`, no
+    /// sudo). `sudo()` is only whether `--sudo` was given.
     pub fn runs_as_root(&self) -> bool {
         self.sudo || self.target_uid == 0
     }
@@ -2663,7 +2666,7 @@ pub(crate) fn interpret_stat(out: &Output, path: &str) -> Result<Stat> {
 
 /// Largest completed remote command (as built by
 /// [`crate::executor::build_remote_command`], i.e. including the `env -i`
-/// baseline, the optional `sudo -n --` wrapper and all quoting) that the
+/// baseline, the optional `sudo -n -u root --` wrapper and all quoting) that the
 /// batched parent walk will send. A walk whose `stat` or `getfattr` command
 /// would be larger runs the sequential walk instead, decided before anything
 /// is dispatched.
