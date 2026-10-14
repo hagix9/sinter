@@ -2537,16 +2537,20 @@ pub struct FsEvent {
     pub actions: Vec<FsEventAction>,
 }
 
-/// How a scripted `sudo -n` wrapper fails. The texts are those of sudo 1.9 and
-/// sudo-rs; what only a real host can prove is that a given sudo prints them.
+/// How a scripted `sudo -n` wrapper fails. The texts are sentences sudo 1.9 or
+/// sudo-rs can print. What a real host prints under `-n` was checked on
+/// sudo 1.9.15p5, 1.9.17p2 and sudo-rs 0.2.13: see the notes on each variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FakeSudoFailure {
     /// `/usr/bin/sudo` does not exist (the remote shell says so, exit 127).
     Missing,
-    /// `sudo -n` needs a password (also what it prints for a user without a
-    /// sudo rule at all).
+    /// `sudo -n` needs a password. sudo 1.9 prints this also for a user without
+    /// a sudo rule, and for a rule that does not let the user run the command as
+    /// root: a rule for another user only, or for other commands only.
     PasswordRequired,
-    /// sudoers says the user may not run the command.
+    /// sudoers says the user may not run the command. This scripted text is
+    /// classic sudo wording, which sudo 1.9 was not seen to print under `-n`;
+    /// sudo-rs words its refusals `I'm sorry <user>. I'm afraid I can't do that`.
     NotAuthorized,
     /// A failure Sinter has no pattern for.
     Unrecognized,
@@ -4474,8 +4478,10 @@ mod tests {
     fn sudo_refusals_are_told_apart_by_what_sudo_printed() {
         use SudoFailure::*;
         let cases: [(i32, &str, SudoFailure); 13] = [
-            // sudo 1.9 (the text is what `sudo -n true` prints on a host
-            // where the user has no passwordless rule)
+            // sudo 1.9 under `-n` (seen on 1.9.15p5 and 1.9.17p2): what it
+            // prints for no rule, a rule that needs a password, a rule for
+            // another user only, a rule without Runas_Spec under a non-root
+            // `runas_default`, and a rule that does not cover the command
             (1, "sudo: a password is required\n", PasswordRequired),
             (
                 1,
@@ -4483,13 +4489,22 @@ mod tests {
                 PasswordRequired,
             ),
             (1, "sudo: no tty present and no askpass program specified\n", PasswordRequired),
-            // sudo-rs
+            // (the two sentences just above are sudo's wording without `-n` and
+            // without a terminal; not seen on the tested hosts)
+            // sudo-rs 0.2.13 under `-n`: a rule that needs a password
             (1, "sudo: interactive authentication is required\n", PasswordRequired),
+            // sudo-rs 0.2.13 under `-n`: no rule, a rule for another user only,
+            // a rule that does not cover the command
             (1, "sudo: I'm sorry fake. I'm afraid I can't do that\n", NotAuthorized),
+            // classic sudo wording (without `-n`, or once authenticated); not
+            // seen under `-n` from sudo 1.9 or sudo-rs on the tested hosts, kept
+            // so that such a refusal is never left unrecognized
             (1, "fake is not in the sudoers file.\n", NotAuthorized),
             (1, "Sorry, user fake is not allowed to execute '/usr/bin/id -u' as root on h.\n", NotAuthorized),
-            // what sudo 1.9 prints when the rule allows another user only
-            // (`-u root` is then refused instead of run as that user)
+            // classic sudo wording for a refused `-u root`; sudo 1.9 under `-n`
+            // prints "a password is required" for a rule that allows another
+            // user only (first case above), so this is kept as a defensive
+            // pattern, not as a claim about what sudo 1.9 prints
             (
                 1,
                 "Sorry, user fake is not allowed to execute '/usr/bin/env -i -C /root /usr/bin/test -r /etc/os-release' as root on h.\n",

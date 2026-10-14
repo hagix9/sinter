@@ -11,7 +11,8 @@
 //!   user without `--sudo`, and every way sudo can refuse. A site whose sudoers
 //!   allows only another user (`runas_default` not root) now gets sudo's
 //!   refusal of `-u root`, which Sinter names at connect and never works
-//!   around;
+//!   around (sudo 1.9 words it "a password is required"; sudo-rs has no
+//!   `runas_default`);
 //! * that the wrapper costs no command: the same run on the same target sends
 //!   as many commands with `--sudo` as without.
 //!
@@ -133,9 +134,10 @@ fn every_way_sudo_can_refuse_stops_the_run_at_connect_in_every_mode() {
     let cases = [
         (FakeSudoFailure::Missing, "sudo is not installed"),
         (FakeSudoFailure::PasswordRequired, "a password is required"),
-        // sudoers does not allow this user to run commands as root: no rule at
-        // all for root, or (runas_default not root) a rule that allows another
-        // user only, which `-u root` makes sudo refuse.
+        // sudoers does not allow this user to run commands as root: the sudo-rs
+        // wording for no rule at all, or for a rule that allows another user
+        // only (sudo 1.9 under `-n` words the same refusals "a password is
+        // required", the case above).
         (
             FakeSudoFailure::NotAuthorized,
             "sudoers does not allow this user to run commands as root",

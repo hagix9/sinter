@@ -109,15 +109,27 @@ All notable changes to Sinter are documented in this file.
   `sudo -n -- …`, which sudo runs as the sudoers `runas_default` user: root
   unless a site sets another user, while Sinter treated the run as root. Now
   sudo runs the command as root or refuses it; a refusal of the first command
-  is reported at connect, and a rule that allows root for some commands only
+  is reported at connect. A rule that allows root for some commands only is
+  refused at connect when it does not cover that first command, and otherwise
   makes a later command fail like any other command failure. Sinter still does
   not measure the uid of a wrapped command; it relies on sudo honouring
   `-u root`. No command is added, and a root login and a run without `--sudo`
-  are unchanged. The sudoers rule must allow running commands as root: `(root)`
-  or `(ALL)`, or no Runas_Spec when `runas_default` is root (its default).
-  **Compatibility:** a site that sets `runas_default` to another user, and used
-  to run `--sudo` as that user, now gets a refusal at connect; allow root in
-  its rule.
+  are unchanged; a root login needs no sudo. For a user who goes through sudo,
+  the sudoers rule must allow running commands as root: `(root)`, `(ALL)`,
+  `(ALL:ALL)` or `(#0)`, or no Runas_Spec when `runas_default` is root (its
+  default). `targetpw` and `rootpw` do not matter when the rule has NOPASSWD.
+  **Compatibility:** this matters only where sudoers sets `runas_default` to
+  another user (sudo 1.9; sudo-rs has no `runas_default`). A rule that allows
+  root, such as `(ALL) NOPASSWD: ALL`, is not refused: commands now run as root
+  instead of as that user. The old wrapper ran them as that user, so they
+  failed wherever that user could not enter `/root`, Sinter's default working
+  directory under `--sudo`. A rule that allows only that user, or has no
+  Runas_Spec, is now refused at connect and nothing is applied. sudo 1.9 words
+  every such refusal as "a password is required" (it does the same for a user
+  with no rule), so Sinter's connect error mentions a password although the
+  rule has NOPASSWD. sudo-rs, which has no `runas_default`, words a rule that
+  allows another user only as a refusal, and the error then says that sudoers
+  does not allow the user. Allow root in the rule.
 
 ### Changed
 
