@@ -2695,6 +2695,12 @@ impl Engine {
         req.env.extend(package_env);
         req.sensitive = sensitive;
         req.args = backend.mutate_args(want_installed, &name, snapshot_dir.as_deref());
+        if snapshot_dir.is_some() {
+            // This completion-only plugin writes a fixed live-cache path,
+            // ignoring cachedir. Keep repository/authentication plugins enabled.
+            req.args
+                .insert(0, "--disableplugin=generate_completion_cache".into());
+        }
         req.timeout_secs = 300;
         let action = if want_installed { "install" } else { "remove" };
         let pkg_disp = if sensitive {
@@ -3257,7 +3263,10 @@ impl Engine {
                 if let Err(e) = self.dnf_output_guard(
                     &check_out,
                     "metadata completeness check",
-                    &[DnfStderr::MetadataExpiration],
+                    &[
+                        DnfStderr::MetadataExpiration,
+                        DnfStderr::CompletionCachePluginAbsent,
+                    ],
                 ) {
                     return self.dnf_snapshot_blocked(&snap, e.message, false);
                 }
@@ -3305,7 +3314,10 @@ impl Engine {
                 if let Err(e) = self.dnf_output_guard(
                     &repos_out,
                     "repository enumeration",
-                    &[DnfStderr::MetadataExpiration],
+                    &[
+                        DnfStderr::MetadataExpiration,
+                        DnfStderr::CompletionCachePluginAbsent,
+                    ],
                 ) {
                     return self.dnf_snapshot_blocked(&snap, e.message, false);
                 }
@@ -3408,8 +3420,11 @@ impl Engine {
             // and is unexpected like any other line.
             Completion::Exited(0) | Completion::Exited(1) => {
                 let expected = match dry_out.completion {
-                    Completion::Exited(1) => &[DnfStderr::OperationAborted][..],
-                    _ => &[][..],
+                    Completion::Exited(1) => &[
+                        DnfStderr::OperationAborted,
+                        DnfStderr::CompletionCachePluginAbsent,
+                    ][..],
+                    _ => &[DnfStderr::CompletionCachePluginAbsent][..],
                 };
                 // R2-03: the transaction table must be complete and clean
                 // before it can be trusted as the exact payload set.
@@ -3573,6 +3588,33 @@ impl Engine {
                 }
             }
         }
+        // Discard the package payloads the cache copy carried over from the
+        // live cache, so the enumeration below observes ONLY what this
+        // transaction's own download placed.
+        //
+        // `copy_dnf_cache_into_snapshot` copies each child of
+        // `/var/cache/dnf` verbatim, and a host whose dnf cache holds
+        // previously downloaded RPMs (any earlier dnf transaction with
+        // `keepcache` on, `dnf install --downloadonly`, or an unattended
+        // update) therefore lands those RPMs inside the snapshot. They are
+        // not metadata, this transaction did not place them, and the set
+        // equality below is about the payloads this run is responsible for.
+        // Without this step such a host can never install anything: the copy
+        // and the enumeration are different commands, so the leftovers are
+        // already in the snapshot when the download starts.
+        //
+        // Only regular `*.rpm` files are removed, only inside the private
+        // snapshot, and only after each enumerated path has been proven to be
+        // one (R2-03/R2-04 keep their full strength: an empty starting set
+        // makes "nothing unexpected may be present" mean exactly "the
+        // transport delivered nothing beyond the frozen transaction").
+        // repodata, mirror lists and every other cache file are untouched, so
+        // the metadata completeness check above still describes this snapshot.
+        if let blocked @ DnfSnapshot::Blocked(..) =
+            self.discard_copied_payloads(snap, name_disp, sensitive)?
+        {
+            return Ok(blocked);
+        }
         // Delegate payload transport to native dnf: the exact frozen
         // identities only, against the snapshot cachedir, with metadata
         // expiry disabled. The exit status is the contract — the payload
@@ -3726,6 +3768,138 @@ impl Engine {
         Ok(DnfSnapshot::Ready(snap.to_string()))
     }
 
+    /// Remove the package payloads the metadata-cache copy carried into the
+    /// private snapshot, so the payload set equality observed after the
+    /// download describes only what this transaction placed.
+    ///
+    /// The removal target set is established the same way every other
+    /// observation in this file is: a helper command is run, its answer is
+    /// only interpretable when the whole capture completed and it wrote
+    /// nothing but the answer, and every path is then validated as a normalized
+    /// `*.rpm` descendant *inside this snapshot* before it is used as a `rm`
+    /// operand. Regular-file/type and non-following traversal rely on `find`.
+    /// A single unprovable path blocks the whole snapshot; it is
+    /// never skipped, narrowed, or passed through.
+    ///
+    /// Nothing outside the snapshot is ever a removal target: the search root
+    /// is the snapshot, and `parse_snapshot_rpm_paths` rejects any path that
+    /// is not a descendant of it. The live `/var/cache/dnf` is therefore never
+    /// modified -- only Sinter's own 0700 copy is.
+    fn discard_copied_payloads(
+        &mut self,
+        snap: &str,
+        name_disp: &str,
+        sensitive: bool,
+    ) -> Result<DnfSnapshot> {
+        let blocked = |s: &mut Self, reason: String, indeterminate: bool| -> Result<DnfSnapshot> {
+            let mut reason = reason;
+            if let Some(msg) = s.dnf_snapshot_cleanup(snap) {
+                reason.push_str(&format!("; private snapshot cleanup failed: {}", msg));
+            }
+            Ok(DnfSnapshot::Blocked(reason, indeterminate))
+        };
+        // `-print0` keeps names with spaces or newlines discrete, exactly as
+        // the live-cache enumeration does.
+        let mut req = ExecRequest::new("/usr/bin/find");
+        req.args = vec![
+            snap.to_string(),
+            "-type".to_string(),
+            "f".to_string(),
+            "-name".to_string(),
+            "*.rpm".to_string(),
+            "-print0".to_string(),
+        ];
+        req.env = baseline_env(self.fs.home_env());
+        req.sensitive = sensitive;
+        let out = self.snap_exec(
+            snap,
+            &req,
+            "copied payload enumeration",
+            "copied_payload_enum_fail",
+        )?;
+        let paths = match out.completion {
+            Completion::Exited(0) => {
+                if out.stdout_truncated || out.stderr_truncated {
+                    return blocked(
+                        self,
+                        "copied payload enumeration output was incomplete".to_string(),
+                        false,
+                    );
+                }
+                if !out.stderr.is_empty() {
+                    return blocked(
+                        self,
+                        "copied payload enumeration produced unexpected stderr".to_string(),
+                        false,
+                    );
+                }
+                match parse_snapshot_rpm_paths(&out.stdout, snap) {
+                    Ok(p) => p,
+                    Err(reason) => {
+                        return blocked(
+                            self,
+                            format!("copied payload enumeration is uninterpretable: {}", reason),
+                            false,
+                        );
+                    }
+                }
+            }
+            Completion::Indeterminate { reason, .. } => {
+                return blocked(
+                    self,
+                    format!("copied payload enumeration did not complete: {}", reason),
+                    true,
+                );
+            }
+            _ => {
+                return blocked(
+                    self,
+                    "cannot enumerate copied payloads in the snapshot".to_string(),
+                    false,
+                )
+            }
+        };
+        if paths.is_empty() {
+            return Ok(DnfSnapshot::Ready(snap.to_string()));
+        }
+        // Plan every bounded request before dispatch: an oversized operand
+        // must not cause a partially planned removal. All paths still come
+        // from the complete, validated listing; no subset is accepted.
+        let requests =
+            match snapshot_payload_removal_batches(&paths, &self.fs.home_env(), sensitive) {
+                Ok(requests) => requests,
+                Err(reason) => return blocked(self, reason.to_string(), false),
+            };
+        for req in requests {
+            match self
+                .snap_exec(
+                    snap,
+                    &req,
+                    "copied payload removal",
+                    "copied_payload_rm_fail",
+                )?
+                .completion
+            {
+                Completion::Exited(0) => {}
+                Completion::Indeterminate { reason, .. } => {
+                    return blocked(
+                        self,
+                        format!("copied payload removal did not complete: {}", reason),
+                        true,
+                    )
+                }
+                _ => {
+                    return blocked(
+                        self,
+                        format!("cannot discard copied payloads for {}", name_disp),
+                        false,
+                    )
+                }
+            }
+        }
+        Ok(DnfSnapshot::Ready(snap.to_string()))
+    }
+
     /// Run one snapshot-preparation command. A transport-level dispatch
     /// failure (`Err`) leaves the private snapshot directory behind, so it is
     /// cleaned up here and the failure is propagated with the cleanup outcome
@@ -3741,6 +3915,16 @@ impl Engine {
         what: &str,
         fault: &str,
     ) -> Result<Output> {
+        // DNF's bash-completion cache plugin hard-codes /var/cache/dnf/packages.db
+        // in both sack and transaction hooks, even with a private cachedir.
+        let private_dnf = (req.program == "/usr/bin/dnf").then(|| {
+            let mut request = req.clone();
+            request
+                .args
+                .insert(0, "--disableplugin=generate_completion_cache".into());
+            request
+        });
+        let req = private_dnf.as_ref().unwrap_or(req);
         let permit = self.fs.mutation_permit()?;
         let out = if !fault.is_empty() && self.fs.fault() == Some(fault) {
             Err(SinterError::apply(format!(
@@ -4693,6 +4877,9 @@ enum DnfStderr {
     /// `CliError`, which `main` logs at ERROR level → stderr (at most once).
     /// Expected only for the `install --assumeno` resolution step.
     OperationAborted,
+    /// DNF 4 warns when this optional plugin is absent. Only requests that
+    /// explicitly disable it allow this exact line, at most once.
+    CompletionCachePluginAbsent,
 }
 
 impl DnfStderr {
@@ -4700,6 +4887,9 @@ impl DnfStderr {
         match self {
             Self::MetadataExpiration => is_metadata_expiration_line(line),
             Self::OperationAborted => line == "Operation aborted.",
+            Self::CompletionCachePluginAbsent => {
+                line == "No matches found for the following disable plugin patterns: generate_completion_cache"
+            }
         }
     }
 }
@@ -5150,6 +5340,124 @@ fn repo_field_once<'a>(block_fields: &mut Vec<&'a str>, name: &'a str) -> bool {
     }
     block_fields.push(name);
     true
+}
+
+/// Validate the paths enumerated by `find -type f -name '*.rpm' -print0`
+/// inside `snap`, returning the paths in the form `rm` will receive them.
+///
+/// This is the only way a snapshot file becomes a removal target, so the
+/// same proof the snapshot root path needs applies per file: the answer must
+/// be NUL-framed and valid UTF-8, and every entry must be an absolute path
+/// strictly under `snap` whose remaining components name no `..`, no `.`, no
+/// empty component and no further absolute root. A `rm` operand therefore
+/// cannot lexically name the live cache or anything above the snapshot.
+/// Any normalized descendant ending in `.rpm` is permitted, including a
+/// direct child or a path without `packages/`; metadata names without that
+/// suffix are excluded. This does not authenticate RPM archive contents.
+///
+/// Regular-file/type and non-following traversal semantics come from `find`,
+/// not this lexical parser. The private snapshot's ownership/permissions
+/// protect the interval between enumeration and deletion.
+fn parse_snapshot_rpm_paths(
+    stdout: &[u8],
+    snap: &str,
+) -> std::result::Result<Vec<String>, &'static str> {
+    if stdout.is_empty() {
+        return Ok(Vec::new());
+    }
+    if std::str::from_utf8(stdout).is_err() {
+        return Err("a path is not valid UTF-8");
+    }
+    if stdout.last() != Some(&0) {
+        return Err("the listing is not NUL-terminated");
+    }
+    let parts: Vec<&[u8]> = stdout.split(|b| *b == 0).collect();
+    let parts = if parts.last() == Some(&&[][..]) {
+        &parts[..parts.len() - 1]
+    } else {
+        &parts[..]
+    };
+    let prefix = format!("{}/", snap);
+    let mut paths: Vec<String> = Vec::new();
+    for entry in parts {
+        if entry.is_empty() {
+            return Err("the listing contains an empty entry");
+        }
+        let text = std::str::from_utf8(entry).map_err(|_| "a path is not valid UTF-8")?;
+        let rest = match text.strip_prefix(prefix.as_str()) {
+            Some(r) => r,
+            None => return Err("a path is not inside the private snapshot"),
+        };
+        if rest.is_empty() {
+            return Err("a path is the snapshot root itself");
+        }
+        if !rest.ends_with(".rpm") {
+            return Err("a path is not an rpm payload");
+        }
+        for component in rest.split('/') {
+            if component.is_empty() || component == "." || component == ".." {
+                return Err("a path is not normalized");
+            }
+        }
+        // The snapshot root itself is never a removal target.
+        if text == snap {
+            return Err("a path is the snapshot root itself");
+        }
+        paths.push(text.to_string());
+    }
+    Ok(paths)
+}
+
+// Bound the actual UTF-8 remote command string (including env, cwd, sudo,
+// separators and POSIX quoting), not just the unescaped pathname lengths.
+// 16 KiB is deliberately below Linux's usual 128 KiB single-argument limit;
+// 128 operands also bounds execve's argv pointer overhead. These are internal
+// conservative limits, not a promise that every host can execute the command:
+// any dispatch/execution failure still blocks before download or install.
+const SNAPSHOT_RM_COMMAND_BYTES: usize = 16 * 1024;
+const SNAPSHOT_RM_MAX_PATHS: usize = 128;
+
+fn snapshot_payload_removal_batches(
+    paths: &[String],
+    home: &str,
+    sensitive: bool,
+) -> std::result::Result<Vec<ExecRequest>, &'static str> {
+    let mut req = ExecRequest::new("/usr/bin/rm");
+    req.args = vec!["-f".to_string(), "--".to_string()];
+    req.env = baseline_env(home.to_string());
+    req.sensitive = sensitive;
+    // Cover both non-sudo and sudo serialization; sudo on an already-root
+    // target omits the wrapper and is shorter than this bound.
+    let base = [false, true]
+        .into_iter()
+        .map(|sudo| crate::executor::build_remote_command(&req, sudo, home).len())
+        .max()
+        .expect("two serialization modes");
+    let available = SNAPSHOT_RM_COMMAND_BYTES
+        .checked_sub(base)
+        .ok_or("copied payload removal command environment exceeds the size limit")?;
+    let mut bytes = base;
+    let mut requests = Vec::new();
+    for path in paths {
+        let cost = crate::executor::shell_quote(path)
+            .len()
+            .checked_add(1)
+            .ok_or("copied payload removal operand size overflow")?;
+        if cost > available {
+            return Err("copied payload removal operand exceeds the size limit");
+        }
+        if req.args.len() - 2 == SNAPSHOT_RM_MAX_PATHS || cost > SNAPSHOT_RM_COMMAND_BYTES - bytes {
+            requests.push(req.clone());
+            req.args.truncate(2);
+            bytes = base;
+        }
+        req.args.push(path.clone());
+        bytes += cost; // Both bounds were checked before addition.
+    }
+    if req.args.len() > 2 {
+        requests.push(req);
+    }
+    Ok(requests)
 }
 
 /// Interpret a `find <root> -mindepth 1 -maxdepth 1 -print0` answer as raw
@@ -7412,6 +7720,234 @@ mod reset_failed_classifier_tests {
             x.stdout_truncated = o;
             x.stderr_truncated = e;
             assert!(!reset_failed_reports_not_loaded(&x, "foo.service"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod snapshot_rpm_path_tests {
+    use super::{
+        baseline_env, parse_snapshot_rpm_paths, snapshot_payload_removal_batches,
+        SNAPSHOT_RM_COMMAND_BYTES, SNAPSHOT_RM_MAX_PATHS,
+    };
+    use crate::executor::{build_remote_command, ExecRequest};
+
+    const SNAP: &str = "/var/tmp/sinter-dnf.abcdefgh";
+
+    fn framed(paths: &[&str]) -> Vec<u8> {
+        let mut v: Vec<u8> = Vec::new();
+        for p in paths {
+            v.extend_from_slice(p.as_bytes());
+            v.push(0);
+        }
+        v
+    }
+
+    /// The ordinary case: rpm payloads directly under a repository's package
+    /// directory of this snapshot are accepted and returned verbatim.
+    #[test]
+    fn accepts_rpm_files_inside_the_snapshot() {
+        let a = format!("{SNAP}/baseos-1111111111111111/packages/tree-1.8.0-10.el9.x86_64.rpm");
+        let b = format!("{SNAP}/appstream-2222222222222222/packages/curl-8.0-1.el9.x86_64.rpm");
+        let got = parse_snapshot_rpm_paths(&framed(&[&a, &b]), SNAP).expect("accepted");
+        assert_eq!(got, vec![a, b]);
+    }
+
+    /// A snapshot with no rpm answers an empty listing, not a failure.
+    #[test]
+    fn an_empty_listing_is_not_a_payload_list() {
+        assert!(parse_snapshot_rpm_paths(b"", SNAP)
+            .expect("accepted")
+            .is_empty());
+    }
+
+    /// Names with spaces and newlines survive NUL framing untouched: the path
+    /// handed to `rm` is byte-identical to the path `find` reported.
+    #[test]
+    fn unusual_names_survive_nul_framing() {
+        let a = format!(
+            "{SNAP}/baseos-1111111111111111/packages/name with spaces-1.0-1.el9.x86_64.rpm"
+        );
+        let b = format!(
+            "{SNAP}/baseos-1111111111111111/packages/name\nwith\nnewline-1.0-1.el9.x86_64.rpm"
+        );
+        let got = parse_snapshot_rpm_paths(&framed(&[&a, &b]), SNAP).expect("accepted");
+        assert_eq!(got, vec![a, b]);
+    }
+
+    /// Every way a listed path can fail to be a plain rpm file inside this
+    /// snapshot is rejected. A rejected listing blocks the run; it is never
+    /// narrowed, skipped, or passed through to `rm`.
+    #[test]
+    fn rejects_everything_that_is_not_an_rpm_inside_the_snapshot() {
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            // the live cache itself
+            (
+                "live cache path",
+                framed(&["/var/cache/dnf/baseos-1111111111111111/packages/x-1.0.rpm"]),
+            ),
+            // the snapshot root, with and without a trailing separator
+            ("snapshot root", framed(&[SNAP])),
+            (
+                "snapshot root with separator",
+                framed(&[&format!("{SNAP}/")]),
+            ),
+            // traversal out of the snapshot
+            (
+                "parent traversal",
+                framed(&[&format!("{SNAP}/../escape.rpm")]),
+            ),
+            (
+                "embedded parent traversal",
+                framed(&[&format!("{SNAP}/a/../../escape.rpm")]),
+            ),
+            // a sibling whose name merely starts with the snapshot's
+            (
+                "sibling prefix",
+                framed(&[&format!("{SNAP}-other/packages/x-1.0.rpm")]),
+            ),
+            // not an rpm payload
+            (
+                "repodata",
+                framed(&[&format!(
+                    "{SNAP}/baseos-1111111111111111/repodata/repomd.xml"
+                )]),
+            ),
+            (
+                "mirror list",
+                framed(&[&format!("{SNAP}/baseos-1111111111111111/mirrorlist")]),
+            ),
+            // relative and empty
+            ("relative path", framed(&["packages/x-1.0.rpm"])),
+            ("empty entry", framed(&[""])),
+            (
+                "doubled NUL",
+                framed(&[""]).into_iter().chain([0u8]).collect(),
+            ),
+            // framing defects
+            (
+                "no NUL terminator",
+                format!("{SNAP}/a/packages/x-1.0.rpm").into_bytes(),
+            ),
+            // invalid UTF-8
+            ("invalid utf-8", {
+                let mut v = format!("{SNAP}/a/packages/").into_bytes();
+                v.push(0xff);
+                v.push(0x2e);
+                v.extend_from_slice(b"rpm\0");
+                v
+            }),
+        ];
+        for (what, bytes) in cases {
+            assert!(
+                parse_snapshot_rpm_paths(&bytes, SNAP).is_err(),
+                "must reject: {}",
+                what
+            );
+        }
+    }
+
+    /// Layout does not restrict deletion to `packages/`: the existing rule
+    /// admits any normalized descendant with the `.rpm` suffix, verbatim.
+    #[test]
+    fn accepts_rpm_descendants_without_a_packages_component() {
+        let paths = [format!("{SNAP}/x.rpm"), format!("{SNAP}/repo/nested/x.rpm")];
+        assert_eq!(
+            parse_snapshot_rpm_paths(&framed(&[&paths[0], &paths[1]]), SNAP).unwrap(),
+            paths
+        );
+        for path in [
+            format!("{SNAP}/packages/repomd.xml"),
+            format!("{SNAP}/x.rpm/metadata"),
+            format!("{SNAP}/repo//x.rpm"),
+            format!("{SNAP}/repo/./x.rpm"),
+        ] {
+            assert!(parse_snapshot_rpm_paths(&framed(&[&path]), SNAP).is_err());
+        }
+    }
+
+    #[test]
+    fn removal_batches_bound_operand_count_and_preserve_every_path() {
+        for count in [0, 1, SNAPSHOT_RM_MAX_PATHS, SNAPSHOT_RM_MAX_PATHS + 1, 1025] {
+            let paths: Vec<_> = (0..count).map(|i| format!("{SNAP}/{i}.rpm")).collect();
+            let batches = snapshot_payload_removal_batches(&paths, "/root", true).unwrap();
+            assert_eq!(batches.len(), count.div_ceil(SNAPSHOT_RM_MAX_PATHS));
+            assert_eq!(
+                batches
+                    .iter()
+                    .flat_map(|b| b.args[2..].iter().cloned())
+                    .collect::<Vec<_>>(),
+                paths
+            );
+            for b in batches {
+                assert_eq!(&b.args[..2], &["-f", "--"]);
+                assert!(b.sensitive);
+                assert!(b.args.len() - 2 <= SNAPSHOT_RM_MAX_PATHS);
+                for sudo in [false, true] {
+                    assert!(
+                        build_remote_command(&b, sudo, "/root").len() <= SNAPSHOT_RM_COMMAND_BYTES
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn removal_batches_accept_exact_byte_limit_and_reject_one_byte_over() {
+        let mut base = ExecRequest::new("/usr/bin/rm");
+        base.args = vec!["-f".into(), "--".into()];
+        base.env = baseline_env("/root".into());
+        let overhead = build_remote_command(&base, true, "/root").len();
+        let prefix = format!("{SNAP}/");
+        let exact = format!(
+            "{}{}.rpm",
+            prefix,
+            "x".repeat(SNAPSHOT_RM_COMMAND_BYTES - overhead - 3 - prefix.len() - 4)
+        );
+        let batches =
+            snapshot_payload_removal_batches(std::slice::from_ref(&exact), "/root", false).unwrap();
+        assert_eq!(
+            build_remote_command(&batches[0], true, "/root").len(),
+            SNAPSHOT_RM_COMMAND_BYTES
+        );
+        let over = format!("{prefix}x{}", &exact[prefix.len()..]);
+        assert!(snapshot_payload_removal_batches(
+            &[format!("{SNAP}/safe.rpm"), over],
+            "/root",
+            false
+        )
+        .is_err());
+        assert!(snapshot_payload_removal_batches(
+            &[exact],
+            &"x".repeat(SNAPSHOT_RM_COMMAND_BYTES),
+            false
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn removal_batches_bound_quoted_utf8_and_environment_bytes() {
+        let paths: Vec<_> = (0..20)
+            .map(|i| format!("{SNAP}/{}-{i}.rpm", "'\n\tあ\\".repeat(200)))
+            .collect();
+        let home = "/home/odd'home\nあ";
+        let batches = snapshot_payload_removal_batches(&paths, home, false).unwrap();
+        assert!(
+            batches.len() > 1,
+            "the byte limit must split below 128 operands"
+        );
+        assert_eq!(
+            batches
+                .iter()
+                .flat_map(|b| b.args[2..].iter().cloned())
+                .collect::<Vec<_>>(),
+            paths
+        );
+        for b in batches {
+            assert_eq!(b.env, baseline_env(home.into()));
+            for sudo in [false, true] {
+                assert!(build_remote_command(&b, sudo, home).len() <= SNAPSHOT_RM_COMMAND_BYTES);
+            }
         }
     }
 }

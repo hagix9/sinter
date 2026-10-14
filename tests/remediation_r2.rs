@@ -933,3 +933,625 @@ fn snapshot_copy_widening_mode_blocks_after_copy() {
     assert_no_download(&r);
     assert_snapshot_cleaned(&r);
 }
+
+// ===========================================================================
+// DNF cache payload isolation — the payloads a metadata-cache copy carries
+// over from the live `/var/cache/dnf` must never be mistaken for the payloads
+// this transaction's own download placed.
+//
+// Before this contract, `copy_dnf_cache_into_snapshot` copied every child of
+// the live cache verbatim while `find <snap> -name '*.rpm'` enumerated the
+// whole snapshot, so a host whose dnf cache held any previously downloaded
+// RPM (an earlier dnf transaction, `dnf install --downloadonly`, or an
+// unattended update) could never install anything: the leftovers were already
+// in the snapshot when the set equality ran, and they are not in the frozen
+// transaction's payload set.
+// ===========================================================================
+
+/// The private snapshot root the scripted target hands out via `mktemp`.
+const CACHE_SNAP: &str = FAKE_SNAP;
+/// The repository cache directory `FakeTarget::rocky9` models.
+const CACHE_REPO_DIR: &str = "baseos-cafebabecafebabe";
+/// The payload file name this transaction's transport delivers.
+const CACHE_NANO_RPM: &str = "nano-1.0-1.el9.x86_64.rpm";
+
+#[test]
+fn dnf_private_snapshot_disables_only_completion_cache_writer() {
+    let dir = trusted_root("dnf-completion-cache-scope");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, FakeTarget::rocky9());
+    assert_eq!(r.status, AggregateStatus::Success);
+    let commands = commands_with(&r, "/usr/bin/dnf");
+    assert_eq!(commands.len(), 5);
+    for command in commands {
+        let disabled: Vec<_> = command
+            .args
+            .iter()
+            .filter(|arg| arg.starts_with("--disableplugin="))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(disabled, ["--disableplugin=generate_completion_cache"]);
+        assert!(!command.args.iter().any(|arg| arg == "--noplugins"));
+    }
+    let recipe = pkg_recipe(&dir, "nano", "absent");
+    let mut target = FakeTarget::rocky9();
+    target.packages.insert("nano".into());
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, target);
+    assert_eq!(r.status, AggregateStatus::Success);
+    assert!(commands_with(&r, "/usr/bin/dnf")
+        .iter()
+        .all(|c| !c.args.iter().any(|arg| arg.starts_with("--disableplugin="))));
+}
+
+#[test]
+fn dnf_absent_completion_plugin_warning_is_exact_and_non_repeatable() {
+    const WARNING: &str =
+        "No matches found for the following disable plugin patterns: generate_completion_cache";
+    for (stderr, accepted) in [
+        (format!("{WARNING}\n"), true),
+        (format!("{WARNING}\n{WARNING}\n"), false),
+        (format!("{WARNING}_other\n"), false),
+        (format!("{WARNING}\nError: unexpected failure\n"), false),
+    ] {
+        let dir = trusted_root("dnf-completion-cache-warning");
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut target = FakeTarget::rocky9();
+        target.dnf_repolist_output = Some(override_output(
+            Completion::Exited(0),
+            &dnf_repolist_text("baseos", true),
+            &stderr,
+        ));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, target);
+        if accepted {
+            assert_eq!(r.status, AggregateStatus::Success, "{:?}", find(&r, "p"));
+        } else {
+            assert_blocked_no_mutation(&r);
+            assert!(!r
+                .commands
+                .iter()
+                .any(|c| c.args.iter().any(|a| a == "--downloadonly")));
+        }
+    }
+}
+
+fn cache_nano_path() -> String {
+    format!(
+        "{}/{}/packages/{}",
+        CACHE_SNAP, CACHE_REPO_DIR, CACHE_NANO_RPM
+    )
+}
+
+/// Every `rm` that removed copied payloads, i.e. the `-f` removals as opposed
+/// to the final `rm -rf <snapshot>` cleanup.
+fn copied_payload_removals(report: &sinter::engine::RunReport) -> Vec<Vec<String>> {
+    commands_with(report, "/usr/bin/rm")
+        .into_iter()
+        .filter(|c| c.args.first().map(String::as_str) == Some("-f"))
+        .map(|c| c.args.clone())
+        .collect()
+}
+
+/// Assert no dispatched command ever names the live cache as a write target.
+fn assert_live_cache_untouched(report: &sinter::engine::RunReport) {
+    for c in &report.commands {
+        if c.program != "/usr/bin/rm" && c.program != "/usr/bin/cp" {
+            continue;
+        }
+        // `cp` reads the live cache (that is the snapshot source); only a
+        // removal would change it.
+        if c.program == "/usr/bin/rm" {
+            assert!(
+                !c.args.iter().any(|a| a.starts_with("/var/cache/dnf")),
+                "the live dnf cache must never be a removal target: {:?}",
+                c.args
+            );
+        }
+    }
+}
+
+/// T1 — an empty metadata cache still installs normally, and the run is
+/// unchanged: no payload removal is dispatched at all.
+#[test]
+fn dnf_cache_payload_t1_empty_cache_installs_unchanged() {
+    let dir = trusted_root("dnf-cache-t1");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let t = FakeTarget::rocky9();
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = find(&r, "p");
+    assert_eq!(p.execution, Execution::Succeeded, "install must succeed");
+    assert_eq!(p.change, Change::Changed);
+    assert_eq!(p.verification, Verification::Verified);
+    assert_eq!(dnf_mutations(&r), 1, "exactly one mutation");
+    assert!(
+        copied_payload_removals(&r).is_empty(),
+        "an empty cache has nothing to discard, so no removal is dispatched"
+    );
+    assert_live_cache_untouched(&r);
+}
+
+/// T2 — the defect itself: the live cache already holds an RPM belonging to
+/// no transaction row. The copy carries it into the snapshot; it must not be
+/// credited to this run, and the install must succeed.
+#[test]
+fn dnf_cache_payload_t2_unrelated_cached_rpm_does_not_block_install() {
+    let dir = trusted_root("dnf-cache-t2");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.live_cache_rpms = vec!["kernel-6.12.0-1.el9.x86_64.rpm".to_string()];
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = find(&r, "p");
+    assert_eq!(
+        p.execution,
+        Execution::Succeeded,
+        "an unrelated cached RPM must not fail the install: {:?}",
+        p.reason
+    );
+    assert_eq!(p.change, Change::Changed);
+    assert_eq!(p.verification, Verification::Verified);
+    assert_eq!(dnf_mutations(&r), 1, "exactly one mutation");
+
+    // The leftover really was present in the snapshot, and really was removed
+    // before the download — that is what keeps it out of the payload set.
+    let removals = copied_payload_removals(&r);
+    assert_eq!(
+        removals.len(),
+        1,
+        "exactly one copied-payload removal: {:?}",
+        removals
+    );
+    assert_eq!(removals[0][0], "-f", "-f is the only removal mode used");
+    assert!(
+        removals[0].iter().any(|a| a == "--"),
+        "option parsing must be terminated: {:?}",
+        removals[0]
+    );
+    let leftover = format!(
+        "{}/{}/packages/kernel-6.12.0-1.el9.x86_64.rpm",
+        CACHE_SNAP, CACHE_REPO_DIR
+    );
+    assert!(
+        removals[0].contains(&leftover),
+        "the copied leftover must be the removal target: {:?}",
+        removals[0]
+    );
+    assert_live_cache_untouched(&r);
+}
+
+/// T3 — the sharpest case: the live cache holds a payload with exactly the
+/// name this transaction needs, and the transport delivers nothing. A stale
+/// cache entry must never be credited to this run's download, so the run
+/// fails closed on the missing payload.
+#[test]
+fn dnf_cache_payload_t3_stale_same_named_rpm_is_not_credited() {
+    let dir = trusted_root("dnf-cache-t3");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    // Same file name as the transaction's payload.
+    t.live_cache_rpms = vec![CACHE_NANO_RPM.to_string()];
+    // The transport reports success but places no payload at all.
+    t.dnf_downloadonly_output = Some(override_output(Completion::Exited(0), "", ""));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = find(&r, "p");
+    assert_eq!(
+        p.execution,
+        Execution::Failed,
+        "a payload this run never downloaded must not satisfy the transaction: {:?}",
+        p.reason
+    );
+    assert_eq!(p.change, Change::None);
+    assert_eq!(p.verification, Verification::NotPerformed);
+    assert_eq!(dnf_mutations(&r), 0, "no mutation may be dispatched");
+    assert!(
+        p.reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("expected payload missing from snapshot"),
+        "the missing payload must be named: {:?}",
+        p.reason
+    );
+    assert_live_cache_untouched(&r);
+}
+
+/// T4 — the rejection of a payload the TRANSPORT added beyond the frozen
+/// transaction is unchanged: the fix separates the copy from the download, it
+/// does not relax what the download may contribute.
+#[test]
+fn dnf_cache_payload_t4_transport_extra_payload_still_fails_closed() {
+    let dir = trusted_root("dnf-cache-t4");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    // The live cache is clean, so nothing is discarded: whatever the listing
+    // reports is exactly what the transport placed.
+    t.snap_rpm_listing = Some(format!(
+        "{}\n{}/{}/packages/other-9.9-1.el9.x86_64.rpm\n",
+        cache_nano_path(),
+        CACHE_SNAP,
+        CACHE_REPO_DIR
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = find(&r, "p");
+    assert_eq!(p.execution, Execution::Failed);
+    assert_eq!(p.change, Change::None);
+    assert_eq!(dnf_mutations(&r), 0);
+    assert!(
+        p.reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("unexpected payload in snapshot"),
+        "an extra transported payload must be reported: {:?}",
+        p.reason
+    );
+    assert!(
+        copied_payload_removals(&r).is_empty(),
+        "nothing may be discarded when the cache carried no payload"
+    );
+    assert_live_cache_untouched(&r);
+}
+
+/// T5 — a payload the frozen transaction needs but the transport did not
+/// place is still a hard failure.
+#[test]
+fn dnf_cache_payload_t5_missing_payload_still_fails_closed() {
+    let dir = trusted_root("dnf-cache-t5");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.snap_rpm_listing = Some(String::new());
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = find(&r, "p");
+    assert_eq!(p.execution, Execution::Failed);
+    assert_eq!(dnf_mutations(&r), 0);
+    assert!(
+        p.reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("expected payload missing from snapshot"),
+        "{:?}",
+        p.reason
+    );
+    assert_live_cache_untouched(&r);
+}
+
+/// T6 — the per-payload header identity verification is still applied to
+/// every expected payload after the copy has been cleaned.
+#[test]
+fn dnf_cache_payload_t6_payload_identity_still_verified() {
+    let dir = trusted_root("dnf-cache-t6");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.live_cache_rpms = vec!["kernel-6.12.0-1.el9.x86_64.rpm".to_string()];
+    t.rpm_qp_results.push_back(override_output(
+        Completion::Exited(0),
+        "totally|different|package|1.0|x86_64\n",
+        "",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = find(&r, "p");
+    assert_eq!(p.execution, Execution::Failed);
+    assert_eq!(dnf_mutations(&r), 0);
+    assert!(
+        p.reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("payload identity mismatch"),
+        "identity verification must still run and fail closed: {:?}",
+        p.reason
+    );
+    // `rpm -q <name>` is the package-state observation; the payload identity
+    // proof is the separate `rpm -qp <path>` query.
+    let qp: Vec<_> = commands_with(&r, "/usr/bin/rpm")
+        .into_iter()
+        .filter(|c| c.args.iter().any(|a| a == "-qp"))
+        .collect();
+    assert_eq!(qp.len(), 1, "identity is verified for the expected payload");
+    assert_eq!(
+        qp[0].args.last().map(String::as_str),
+        Some(cache_nano_path().as_str()),
+        "identity must be checked on the transaction's own payload path"
+    );
+    assert_live_cache_untouched(&r);
+}
+
+/// T7 — when the copied payloads cannot be discarded, the run blocks before
+/// the download, mutates nothing, cleans the private snapshot up, and never
+/// reaches the live cache.
+#[test]
+fn dnf_cache_payload_t7_removal_failure_blocks() {
+    let dir = trusted_root("dnf-cache-t7");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.live_cache_rpms = vec!["kernel-6.12.0-1.el9.x86_64.rpm".to_string()];
+    t.copied_payload_rm_fails = true;
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = find(&r, "p");
+    assert_eq!(p.execution, Execution::Failed);
+    assert_eq!(p.change, Change::None);
+    assert_eq!(p.verification, Verification::NotPerformed);
+    assert_eq!(
+        dnf_mutations(&r),
+        0,
+        "a failed discard must stop the run before any mutation"
+    );
+    assert!(
+        p.reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("cannot discard copied payloads"),
+        "{:?}",
+        p.reason
+    );
+    // The download was never dispatched.
+    assert!(
+        !r.commands
+            .iter()
+            .any(|c| c.args.iter().any(|a| a == "--downloadonly")),
+        "the transport must not run after a failed discard"
+    );
+    let rm = commands_with(&r, "/usr/bin/rm");
+    assert_eq!(
+        rm.last().map(|c| c.args.clone()),
+        Some(vec!["-rf".to_string(), CACHE_SNAP.to_string()]),
+        "the private snapshot must still be cleaned up: {:?}",
+        rm
+    );
+    assert_live_cache_untouched(&r);
+}
+
+/// T8 — a copied-payload listing that is not provably inside the snapshot is
+/// never passed to `rm`: the run blocks instead.
+#[test]
+fn dnf_cache_payload_t8_escaping_prune_path_blocks() {
+    for escaping in [
+        // the live cache itself
+        "/var/cache/dnf/baseos-cafebabecafebabe/packages/evil.rpm".to_string(),
+        // the snapshot root itself
+        CACHE_SNAP.to_string(),
+        // traversal out of the snapshot
+        format!("{}/../escape.rpm", CACHE_SNAP),
+        // an absolute path that merely starts with the snapshot text
+        format!("{}-other/packages/evil.rpm", CACHE_SNAP),
+        // a path that is not an rpm payload
+        format!("{}/{}/repodata/repomd.xml", CACHE_SNAP, CACHE_REPO_DIR),
+    ] {
+        let dir = trusted_root("dnf-cache-t8");
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.snap_prune_rpm_listing = Some(format!("{}\0", escaping));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        let p = find(&r, "p");
+        assert_eq!(
+            p.execution,
+            Execution::Failed,
+            "an unprovable path must block, got {:?} for {}",
+            p.reason,
+            escaping
+        );
+        assert_eq!(dnf_mutations(&r), 0);
+        assert!(
+            p.reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("copied payload enumeration is uninterpretable"),
+            "the block must name the uninterpretable listing for {}: {:?}",
+            escaping,
+            p.reason
+        );
+        assert!(
+            copied_payload_removals(&r).is_empty(),
+            "an uninterpretable listing must never produce a removal: {:?}",
+            copied_payload_removals(&r)
+        );
+        assert!(
+            !r.commands
+                .iter()
+                .any(|c| c.args.iter().any(|a| a.contains("escape.rpm")
+                    || a.contains("evil.rpm")
+                    || a.contains("repomd.xml"))),
+            "no unproven path may reach a dispatched command"
+        );
+        assert_live_cache_untouched(&r);
+    }
+}
+
+/// T8b — a listing whose framing is broken is equally uninterpretable.
+#[test]
+fn dnf_cache_payload_t8b_malformed_prune_listing_blocks() {
+    for malformed in [
+        // not NUL terminated
+        format!(
+            "{}/{}/packages/{}\n",
+            CACHE_SNAP, CACHE_REPO_DIR, CACHE_NANO_RPM
+        ),
+        // an empty entry
+        format!("{}0", cache_nano_path()),
+    ] {
+        let dir = trusted_root("dnf-cache-t8b");
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.snap_prune_rpm_listing = Some(malformed.clone());
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        let p = find(&r, "p");
+        assert_eq!(
+            p.execution,
+            Execution::Failed,
+            "a malformed listing must block: {:?} for {:?}",
+            p.reason,
+            malformed
+        );
+        assert_eq!(dnf_mutations(&r), 0);
+        assert!(copied_payload_removals(&r).is_empty());
+        assert_live_cache_untouched(&r);
+    }
+}
+
+/// T9 — the discard is payload-only: repodata and the resolved mirror list
+/// stay in the snapshot, so the metadata completeness check still describes
+/// this snapshot and a mirror-resolving repository still works.
+#[test]
+fn dnf_cache_payload_t9_metadata_is_preserved() {
+    let dir = trusted_root("dnf-cache-t9");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    // The Rocky target resolves via a mirror list: its presence is proven
+    // from the snapshot copy and must keep working.
+    assert!(
+        t.dnf_repos.iter().any(|r| r.mirrors && r.mirrorlist_cached),
+        "the scripted Rocky target is expected to need a mirror list"
+    );
+    t.live_cache_rpms = vec![
+        "kernel-6.12.0-1.el9.x86_64.rpm".to_string(),
+        "curl-8.0-1.el9.x86_64.rpm".to_string(),
+    ];
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = find(&r, "p");
+    assert_eq!(
+        p.execution,
+        Execution::Succeeded,
+        "a cache with leftovers must still install: {:?}",
+        p.reason
+    );
+
+    // Every removed path is an `*.rpm` under the snapshot: nothing else.
+    let removals = copied_payload_removals(&r);
+    assert_eq!(removals.len(), 1);
+    let operands: Vec<&String> = removals[0].iter().skip(2).collect();
+    assert_eq!(operands.len(), 2, "both leftovers are discarded");
+    for o in operands {
+        assert!(o.starts_with(&format!("{}/", CACHE_SNAP)), "{}", o);
+        assert!(o.ends_with(".rpm"), "{}", o);
+        assert!(!o.contains("repodata"), "repodata must never be removed");
+        assert!(
+            !o.contains("mirrorlist"),
+            "mirror lists must never be removed"
+        );
+    }
+    // The metadata usability check and the repository enumeration both ran.
+    assert!(
+        r.commands
+            .iter()
+            .any(|c| c.program == "/usr/bin/dnf" && c.args.iter().any(|a| a == "repoquery")),
+        "the metadata completeness check must still run"
+    );
+    assert!(
+        r.commands
+            .iter()
+            .any(|c| c.program == "/usr/bin/dnf" && c.args.iter().any(|a| a == "repolist")),
+        "the repository enumeration must still run"
+    );
+    assert_live_cache_untouched(&r);
+}
+
+/// More copied RPMs than fit in one command must all be discarded before
+/// download, rather than hitting E2BIG or accepting only a prefix.
+#[test]
+fn dnf_cache_payload_large_cache_is_removed_in_bounded_batches() {
+    let dir = trusted_root("dnf-cache-large");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.live_cache_rpms = (0..300).map(|i| format!("leftover-{i}.rpm")).collect();
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_eq!(find(&r, "p").execution, Execution::Succeeded);
+    let removals = copied_payload_removals(&r);
+    assert_eq!(removals.len(), 3);
+    let operands: Vec<_> = removals.iter().flat_map(|a| a[2..].iter()).collect();
+    assert_eq!(operands.len(), 300);
+    for i in 0..300 {
+        assert_eq!(
+            operands
+                .iter()
+                .filter(
+                    |a| ***a == format!("{CACHE_SNAP}/{CACHE_REPO_DIR}/packages/leftover-{i}.rpm")
+                )
+                .count(),
+            1
+        );
+    }
+    let download = r
+        .commands
+        .iter()
+        .position(|c| c.args.iter().any(|a| a == "--downloadonly"))
+        .unwrap();
+    for (i, c) in r.commands.iter().enumerate().filter(|(_, c)| {
+        c.program == "/usr/bin/rm" && c.args.first().map(String::as_str) == Some("-f")
+    }) {
+        assert!(i < download);
+        assert_eq!(&c.args[..2], &["-f", "--"]);
+        assert!(c.args.len() - 2 <= 128);
+        let mut req = sinter::executor::ExecRequest::new(&c.program);
+        req.args = c.args.clone();
+        for sudo in [false, true] {
+            assert!(sinter::executor::build_remote_command(&req, sudo, "/root").len() < 16 * 1024);
+        }
+    }
+    assert_eq!(dnf_mutations(&r), 1);
+    assert_live_cache_untouched(&r);
+}
+
+/// A failure in the second batch cannot be salvaged by downloading or
+/// installing after the first batch's private deletions already succeeded.
+#[test]
+fn dnf_cache_payload_later_removal_failure_stops_all_following_work() {
+    for completion in [
+        Completion::Exited(1),
+        Completion::Indeterminate {
+            started: true,
+            reason: "late removal unknown".into(),
+        },
+    ] {
+        let dir = trusted_root("dnf-cache-late-failure");
+        let recipe = pkg_recipe(&dir, "nano", "present");
+        let mut t = FakeTarget::rocky9();
+        t.live_cache_rpms = (0..300).map(|i| format!("leftover-{i}.rpm")).collect();
+        t.copied_payload_rm_results
+            .push_back(override_output(Completion::Exited(0), "", ""));
+        t.copied_payload_rm_results.push_back(override_output(
+            completion,
+            "",
+            "injected late failure",
+        ));
+        let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+        assert_ne!(find(&r, "p").execution, Execution::Succeeded);
+        assert_eq!(find(&r, "p").change, Change::None);
+        assert_eq!(
+            copied_payload_removals(&r).len(),
+            2,
+            "no third batch or retry"
+        );
+        assert_eq!(dnf_mutations(&r), 0);
+        assert!(!r
+            .commands
+            .iter()
+            .any(|c| c.args.iter().any(|a| a == "--downloadonly")));
+        let cleanup: Vec<_> = commands_with(&r, "/usr/bin/rm")
+            .into_iter()
+            .filter(|c| c.args.first().map(String::as_str) == Some("-rf"))
+            .collect();
+        assert_eq!(cleanup.len(), 1, "exactly one private snapshot cleanup");
+        assert_eq!(
+            cleanup[0].args,
+            vec!["-rf".to_string(), CACHE_SNAP.to_string()]
+        );
+        assert_live_cache_untouched(&r);
+    }
+}
+
+/// The complete plan is checked before the first deletion, even if its
+/// oversized path follows a normal path. No narrowing to a safe subset.
+#[test]
+fn dnf_cache_payload_oversized_operand_blocks_before_any_removal() {
+    let dir = trusted_root("dnf-cache-oversized");
+    let recipe = pkg_recipe(&dir, "nano", "present");
+    let mut t = FakeTarget::rocky9();
+    t.snap_prune_rpm_listing = Some(format!(
+        "{CACHE_SNAP}/safe.rpm\0{CACHE_SNAP}/{}.rpm\0",
+        "x".repeat(16 * 1024)
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    assert_blocked_no_mutation(&r);
+    assert!(copied_payload_removals(&r).is_empty());
+    assert!(!r
+        .commands
+        .iter()
+        .any(|c| c.args.iter().any(|a| a == "--downloadonly")));
+    assert_snapshot_cleaned(&r);
+    assert_live_cache_untouched(&r);
+}

@@ -2431,6 +2431,28 @@ pub struct FakeTarget {
     /// tests can model NUL-framing defects, invalid UTF-8, duplicate entries
     /// and non-child paths through the production control path (R4-F01).
     pub live_cache_find_output: Option<Output>,
+    /// RPM file names the live metadata cache already holds, per repository
+    /// cache directory. The snapshot copy is verbatim, so these land inside
+    /// the private snapshot exactly as a real `cp -a` of `/var/cache/dnf`
+    /// brings them over — the case a host with an earlier dnf transaction
+    /// (or an unattended update) is in. The copy stays a no-op for every
+    /// other kind of file: repodata, mirror lists and the repository
+    /// directory layout are what the metadata completeness check reads, and
+    /// they remain modeled by `dnf_repos` as before.
+    pub live_cache_rpms: Vec<String>,
+    /// Overrides the `find <snap> -type f -name '*.rpm' -print0` listing used
+    /// to decide which copied payloads are discarded before the download, so
+    /// tests can model a path outside the snapshot, an unnormalized path, a
+    /// NUL-framing defect or an empty cache through the production control
+    /// path. When unset, the listing is the payloads the copy modeled.
+    pub snap_prune_rpm_listing: Option<String>,
+    /// When true, removing the copied payloads inside the private snapshot
+    /// fails, so the run must block without mutating anything and without
+    /// touching the live cache.
+    pub copied_payload_rm_fails: bool,
+    /// Script non-success results for individual copied-payload removals.
+    /// An Exited(0) entry performs the modeled deletion as usual.
+    pub copied_payload_rm_results: std::collections::VecDeque<Output>,
     /// Overrides the `mktemp -d` answer — the raw output the snapshot helper
     /// yields, so tests can model a path outside the private snapshot
     /// namespace, an extra line, or malformed output (R4-F01).
@@ -2637,6 +2659,10 @@ impl FakeTarget {
             rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
             live_cache_find_output: None,
+            live_cache_rpms: Vec::new(),
+            snap_prune_rpm_listing: None,
+            copied_payload_rm_fails: false,
+            copied_payload_rm_results: std::collections::VecDeque::new(),
             mktemp_output: None,
             snapshot_mode: "700".to_string(),
             snapshot_mode_after_copy: None,
@@ -2696,6 +2722,10 @@ impl FakeTarget {
             rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
             live_cache_find_output: None,
+            live_cache_rpms: Vec::new(),
+            snap_prune_rpm_listing: None,
+            copied_payload_rm_fails: false,
+            copied_payload_rm_results: std::collections::VecDeque::new(),
             mktemp_output: None,
             snapshot_mode: "700".to_string(),
             snapshot_mode_after_copy: None,
@@ -2741,6 +2771,10 @@ impl FakeTarget {
             rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
             live_cache_find_output: None,
+            live_cache_rpms: Vec::new(),
+            snap_prune_rpm_listing: None,
+            copied_payload_rm_fails: false,
+            copied_payload_rm_results: std::collections::VecDeque::new(),
             mktemp_output: None,
             snapshot_mode: "700".to_string(),
             snapshot_mode_after_copy: None,
@@ -2789,6 +2823,10 @@ impl FakeTarget {
             rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
             live_cache_find_output: None,
+            live_cache_rpms: Vec::new(),
+            snap_prune_rpm_listing: None,
+            copied_payload_rm_fails: false,
+            copied_payload_rm_results: std::collections::VecDeque::new(),
             mktemp_output: None,
             snapshot_mode: "700".to_string(),
             snapshot_mode_after_copy: None,
@@ -2831,6 +2869,10 @@ impl FakeTarget {
             rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
             live_cache_find_output: None,
+            live_cache_rpms: Vec::new(),
+            snap_prune_rpm_listing: None,
+            copied_payload_rm_fails: false,
+            copied_payload_rm_results: std::collections::VecDeque::new(),
             mktemp_output: None,
             snapshot_mode: "700".to_string(),
             snapshot_mode_after_copy: None,
@@ -3078,6 +3120,11 @@ pub struct FakeExecutor {
     /// snapshot's package caches — what `find <snap> -name '*.rpm'` then
     /// reports.
     snap_payloads: Vec<String>,
+    /// Payloads the metadata-cache copy brought into the snapshot from the
+    /// live cache. Kept apart from `snap_payloads` (what the download-only
+    /// transport placed) so the post-download enumeration observes their
+    /// union, the way the real filesystem does.
+    snap_copied_payloads: Vec<String>,
     stats: ExecStatsHandle,
 }
 
@@ -3093,6 +3140,7 @@ impl FakeExecutor {
             target,
             snap_copied: false,
             snap_payloads: Vec::new(),
+            snap_copied_payloads: Vec::new(),
             stats: ExecStatsHandle::default(),
         }
     }
@@ -3247,11 +3295,84 @@ impl FakeExecutor {
                     .any(|a| a.starts_with(FAKE_SNAP) || a.starts_with(LIVE_CACHE_ROOT));
                 if is_snap_copy {
                     self.snap_copied = true;
+                    // The copy is verbatim: whatever a copied child of the
+                    // live cache holds arrives inside the snapshot. Only the
+                    // RPM payloads are modeled here (see `live_cache_rpms`).
+                    for source in req.args.iter().skip_while(|a| *a != "--").skip(1) {
+                        let child = match source.strip_prefix(&format!("{}/", LIVE_CACHE_ROOT)) {
+                            Some(c) => c,
+                            None => continue,
+                        };
+                        for rpm in &self.target.live_cache_rpms {
+                            let landed = format!("{}/{}/packages/{}", FAKE_SNAP, child, rpm);
+                            if !self.snap_copied_payloads.contains(&landed) {
+                                self.snap_copied_payloads.push(landed);
+                            }
+                        }
+                    }
                 }
                 Self::exited(0, String::new(), String::new())
             }
             "mkdir" => Self::exited(0, String::new(), String::new()),
             "rm" => {
+                // `rm -f -- <snapshot payload paths>` discards the copied
+                // payloads before the download. Every operand must already be
+                // under the snapshot: an operand that is not is a model
+                // defect and fails instead of silently succeeding.
+                // Scope this arm to the snapshot payload removal only. Other
+                // `rm -f` dispatches exist (`targetfs::remove_file`,
+                // `remove_symlink`); they are not this model and must keep
+                // their historical unmodeled answer.
+                let rm_f_operands: Vec<String> =
+                    if req.args.first().map(String::as_str) == Some("-f") {
+                        req.args
+                            .iter()
+                            .skip_while(|a| *a != "--")
+                            .skip(1)
+                            .cloned()
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                let removes_snapshot_payloads = !rm_f_operands.is_empty()
+                    && rm_f_operands
+                        .iter()
+                        .any(|o| o.starts_with(&format!("{}/", FAKE_SNAP)));
+                if removes_snapshot_payloads {
+                    if let Some(out) = self.target.copied_payload_rm_results.pop_front() {
+                        if out.completion != Completion::Exited(0) {
+                            return out;
+                        }
+                    }
+                    if self.target.copied_payload_rm_fails {
+                        return Self::exited(
+                            1,
+                            String::new(),
+                            "injected payload removal failure".to_string(),
+                        );
+                    }
+                    let operands = rm_f_operands;
+                    for operand in &operands {
+                        if !operand.starts_with(&format!("{}/", FAKE_SNAP)) {
+                            return Self::exited(
+                                1,
+                                String::new(),
+                                format!(
+                                    "fake rm: refusal to remove a path outside the snapshot: {}",
+                                    operand
+                                ),
+                            );
+                        }
+                    }
+                    if operands
+                        .iter()
+                        .any(|o| self.snap_copied_payloads.iter().any(|p| p == o))
+                    {
+                        self.snap_copied_payloads
+                            .retain(|p| !operands.iter().any(|o| o == p));
+                    }
+                    return Self::exited(0, String::new(), String::new());
+                }
                 // `rm -rf <snap>` cleans up the private dnf metadata
                 // snapshot. Only the snapshot root is modeled; any other rm
                 // is an unmodeled no-op that succeeds.
@@ -3514,11 +3635,40 @@ impl FakeExecutor {
     fn run_find(&mut self, args: &[String]) -> Output {
         let root = args.first().cloned().unwrap_or_default();
         if args.iter().any(|a| a == "-name") {
+            // The copied-payload enumeration is NUL-framed and runs BEFORE the
+            // download; the payload enumeration runs after it and is line
+            // framed. They observe different sets, so they are separate arms.
+            if args.iter().any(|a| a == "-print0") {
+                if let Some(listing) = self.target.snap_prune_rpm_listing.clone() {
+                    return Self::exited(0, listing, String::new());
+                }
+                let mut out: Vec<u8> = Vec::new();
+                for p in &self.snap_copied_payloads {
+                    out.extend_from_slice(p.as_bytes());
+                    out.push(0);
+                }
+                return Output {
+                    completion: Completion::Exited(0),
+                    stdout: out,
+                    stderr: Vec::new(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                };
+            }
             if let Some(listing) = self.target.snap_rpm_listing.clone() {
                 return Self::exited(0, listing, String::new());
             }
-            let mut out = String::new();
+            // The post-download enumeration sees the union: what the copy
+            // brought over and what this transaction's transport placed.
+            let mut all: Vec<String> = self.snap_copied_payloads.clone();
             for p in &self.snap_payloads {
+                if !all.contains(p) {
+                    all.push(p.clone());
+                }
+            }
+            all.sort();
+            let mut out = String::new();
+            for p in &all {
                 out.push_str(p);
                 out.push('\n');
             }

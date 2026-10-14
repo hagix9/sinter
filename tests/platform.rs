@@ -130,9 +130,14 @@ fn dnf_observes_absent_and_installs() {
     // transaction dry-run, native download-only payload transport, then
     // the strictly cache-only install mutation against the snapshot.
     assert_eq!(dnf.len(), 5);
+    // Every snapshot-dispatched dnf call begins with the completion-cache
+    // plugin disabled: that plugin writes a live-cache packages.db even with
+    // a private cachedir (tests/remediation_r2.rs scope test).
+    const DISABLE_COMPLETION_CACHE: &str = "--disableplugin=generate_completion_cache";
     assert_eq!(
         dnf[0].args,
         vec![
+            DISABLE_COMPLETION_CACHE,
             "-C",
             "--setopt=cachedir=/var/tmp/sinter-dnf.fakesnap",
             "--setopt=*.skip_if_unavailable=0",
@@ -142,10 +147,14 @@ fn dnf_observes_absent_and_installs() {
             "nano"
         ]
     );
-    assert_eq!(dnf[1].args, vec!["-C", "repolist", "-v"]);
+    assert_eq!(
+        dnf[1].args,
+        vec![DISABLE_COMPLETION_CACHE, "-C", "repolist", "-v"]
+    );
     assert_eq!(
         dnf[2].args,
         vec![
+            DISABLE_COMPLETION_CACHE,
             "-C",
             "--setopt=cachedir=/var/tmp/sinter-dnf.fakesnap",
             "--setopt=*.skip_if_unavailable=0",
@@ -162,6 +171,7 @@ fn dnf_observes_absent_and_installs() {
     assert_eq!(
         dnf[3].args,
         vec![
+            DISABLE_COMPLETION_CACHE,
             "--setopt=cachedir=/var/tmp/sinter-dnf.fakesnap",
             "--setopt=*.metadata_expire=-1",
             "--setopt=*.skip_if_unavailable=0",
@@ -177,6 +187,7 @@ fn dnf_observes_absent_and_installs() {
     assert_eq!(
         dnf[4].args,
         vec![
+            DISABLE_COMPLETION_CACHE,
             "-C",
             "--setopt=cachedir=/var/tmp/sinter-dnf.fakesnap",
             "--setopt=*.skip_if_unavailable=0",
@@ -199,11 +210,25 @@ fn dnf_observes_absent_and_installs() {
     assert!(dl.args.iter().any(|a| a == "--setopt=*.metadata_expire=-1"));
     // Snapshot lifecycle: created, the live cache root enumerated (children
     // only, so the private root's own 0700 metadata is never a copy target),
-    // populated, listed, payloads downloaded natively then enumerated and
-    // rpm-verified, removed (R4-A04).
+    // populated, listed, the copied payloads enumerated and discarded, payloads
+    // downloaded natively then enumerated and rpm-verified, removed (R4-A04).
     assert_eq!(commands_with(&r, "/usr/bin/mktemp").len(), 1);
     assert_eq!(commands_with(&r, "/usr/bin/cp").len(), 1);
-    assert_eq!(commands_with(&r, "/usr/bin/find").len(), 3);
+    // The four enumerations, in order: the live cache root's children, the
+    // snapshot's per-repository layout, the copied payloads to discard, and
+    // the payloads the transport placed.
+    let finds = commands_with(&r, "/usr/bin/find");
+    assert_eq!(finds.len(), 4);
+    assert!(
+        finds[2].args.iter().any(|a| a == "-print0") && finds[2].args.iter().any(|a| a == "*.rpm"),
+        "the third enumeration is the NUL-framed copied-payload listing: {:?}",
+        finds[2].args
+    );
+    assert!(
+        finds[3].args.iter().any(|a| a == "*.rpm") && !finds[3].args.iter().any(|a| a == "-print0"),
+        "the fourth enumeration is the line-framed payload listing: {:?}",
+        finds[3].args
+    );
     assert_eq!(commands_with(&r, "/usr/bin/mkdir").len(), 1);
     // No explicit fetcher is ever dispatched: librepo owns the transfer.
     assert!(commands_with(&r, "/usr/bin/curl").is_empty());
