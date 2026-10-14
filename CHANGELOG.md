@@ -117,7 +117,9 @@ All notable changes to Sinter are documented in this file.
   are unchanged; a root login needs no sudo. For a user who goes through sudo,
   the sudoers rule must allow running commands as root: `(root)`, `(ALL)`,
   `(ALL:ALL)` or `(#0)`, or no Runas_Spec when `runas_default` is root (its
-  default). `targetpw` and `rootpw` do not matter when the rule has NOPASSWD.
+  default). With NOPASSWD, `targetpw` and `rootpw` were checked only in
+  `(ALL) NOPASSWD: ALL`, on sudo 1.9 and sudo-rs: commands still ran as root
+  with either set.
   **Compatibility:** this matters only where sudoers sets `runas_default` to
   another user (sudo 1.9; sudo-rs has no `runas_default`). A rule that allows
   root, such as `(ALL) NOPASSWD: ALL`, is not refused: commands now run as root

@@ -2254,7 +2254,7 @@ pub fn classify_sudo_failure(out: &Output) -> SudoFailure {
 pub fn recognized_sudo_failure(out: &Output) -> Option<SinterError> {
     let text = match classify_sudo_failure(out) {
         SudoFailure::Missing => SUDO_MISSING_MESSAGE,
-        SudoFailure::PasswordRequired => "--sudo was requested, but `sudo -n` reported that a password is required. Sinter runs sudo non-interactively and never asks for a password. sudo prints this both when the user's sudo rule needs a password and when the user has no sudo rule at all: allow this user to run commands as root without a password (NOPASSWD in sudoers), or connect as root",
+        SudoFailure::PasswordRequired => "--sudo was requested, but `sudo -n` reported that a password is required. Sinter runs sudo non-interactively and never asks for a password. This means that the sudoers rule for this user needs a password or, with sudo 1.9, that no rule lets this user run the command as root (no rule at all, a rule for another user only, or a rule for other commands only); the sentence does not say which. Allow this user to run commands as root without a password (a NOPASSWD rule that includes root), or connect as root",
         SudoFailure::NotAuthorized => "--sudo was requested, but sudoers does not allow this user to run commands as root: grant it in sudoers, or connect as root",
         SudoFailure::Unrecognized => return None,
     };
@@ -4590,14 +4590,73 @@ mod tests {
     #[test]
     fn the_password_message_does_not_claim_more_than_sudo_said() {
         let e = recognized_sudo_failure(&failed(1, "sudo: a password is required")).unwrap();
-        // Under -n sudo prints this both for a rule that needs a password and
-        // for a user without any rule; the message says so instead of choosing.
-        assert!(e.message.contains("both"), "{}", e.message);
+        let m = &e.message;
+        // Under -n sudo 1.9 prints this for a rule that needs a password and
+        // also when no rule lets the user run the command as root (G3: no
+        // rule, a rule for another user only, a rule for other commands
+        // only); the sentence does not tell which, and the message says so
+        // instead of choosing.
+        assert!(m.contains("reported that a password is required"), "{}", m);
+        assert!(m.contains("never asks for a password"), "{}", m);
+        assert!(m.contains("does not say which"), "{}", m);
+        assert!(!m.contains("both"), "{}", m);
+        // Those extra causes belong to sudo 1.9 only: sudo-rs words them as a
+        // refusal (NotAuthorized), so the message must not state them as
+        // what every sudo means.
+        let v = m
+            .find("sudo 1.9")
+            .expect("the sudo 1.9 causes are attributed");
+        // The cause both sudo 1.9 and sudo-rs report comes first; sudo-rs is
+        // not named as having the extra causes; the remedy stays a NOPASSWD
+        // rule that includes root, or a root login.
+        let main_cause = m
+            .find("the sudoers rule for this user needs a password")
+            .expect("the cause that sudo 1.9 and sudo-rs both report");
+        assert!(main_cause < v, "{}", m);
+        assert!(!m.contains("sudo-rs"), "{}", m);
         assert!(
-            e.message.contains("never asks for a password"),
+            m.contains("NOPASSWD") && m.contains("connect as root"),
             "{}",
-            e.message
+            m
         );
+        for cause in [
+            "no rule at all",
+            "a rule for another user only",
+            "a rule for other commands only",
+        ] {
+            let at = m.find(cause).unwrap_or_else(|| panic!("{}: {}", cause, m));
+            assert!(
+                at > v,
+                "{} must follow the sudo 1.9 attribution: {}",
+                cause,
+                m
+            );
+        }
+        // Fixed text: whichever sentence classified it, the same message, and
+        // nothing sudo printed is copied into it.
+        for text in [
+            "sudo: interactive authentication is required",
+            "sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper",
+            "sudo: no tty present and no askpass program specified",
+        ] {
+            let other = recognized_sudo_failure(&failed(1, text)).unwrap();
+            assert_eq!(&other.message, m, "{}", text);
+        }
+        assert!(!m.contains("interactive authentication"), "{}", m);
+        // The refusal stays a different answer with its own text.
+        let n = recognized_sudo_failure(&failed(
+            1,
+            "sudo: I'm sorry fake. I'm afraid I can't do that",
+        ))
+        .unwrap();
+        assert_ne!(&n.message, m);
+        assert!(
+            n.message
+                .contains("sudoers does not allow this user to run commands as root"),
+            "{}",
+            n.message
+        );
+        assert!(!n.message.contains("password"), "{}", n.message);
     }
 
     #[test]
