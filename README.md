@@ -84,9 +84,9 @@ inventory (hosts, flat groups, explicit per-recipe `targets`) — see
 
 ## Install
 
-Sinter **v1.3.0** ships one `sinter-v1.3.0-linux-x86_64.tar.gz` artifact
-covering every supported Linux x86_64 platform line: Ubuntu, Rocky Linux,
-RHEL 9 / 10, and AlmaLinux 9 / 10.
+Sinter **v1.4.0** is prepared for release as one
+`sinter-v1.4.0-linux-x86_64.tar.gz` artifact covering every supported Linux
+x86_64 platform line: Ubuntu, Rocky Linux, RHEL 9 / 10, and AlmaLinux 9 / 10.
 
 ```sh
 curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
@@ -322,7 +322,7 @@ real-host acceptance matrix.
 Each release from v1.0.0 on is acceptance-tested as its exact release
 artifact on the eight supported targets before it is published, and its
 acceptance evidence (manifest, raw logs, checksums) is published with the
-release. The current release, Sinter v1.3.0, passed the Linux x86_64
+release. The v1.3.0 release passed the Linux x86_64
 validation gate and was then acceptance-tested as its exact release artifact
 (`sinter-v1.3.0-linux-x86_64.tar.gz`) on eight real x86_64 Linux hosts — the
 exact point releases listed under [Install](#install). On every host the

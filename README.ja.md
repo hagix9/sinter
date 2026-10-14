@@ -84,9 +84,9 @@ embedded scriptingは依然として実装対象に含めません。複数ホ�
 
 ## インストール
 
-Sinter **v1.3.0** は、対応するすべての Linux x86_64 プラットフォーム
-ライン（Ubuntu、Rocky Linux、RHEL 9 / 10、AlmaLinux 9 / 10）を1つの
-`sinter-v1.3.0-linux-x86_64.tar.gz` アーティファクトで配布します。
+Sinter **v1.4.0** は、対応するすべての Linux x86_64 プラットフォーム
+ライン（Ubuntu、Rocky Linux、RHEL 9 / 10、AlmaLinux 9 / 10）向けに、
+1つの `sinter-v1.4.0-linux-x86_64.tar.gz` アーティファクトとしてリリースを準備します。
 
 ```sh
 curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
@@ -323,7 +323,7 @@ Sinterの実ホスト受入マトリクスには含まれていません。
 
 v1.0.0 以降の各リリースは、公開前にリリース成果物そのものを8つの対応
 ターゲットで受入検証し、その受入証跡（manifest、raw log、チェックサム）を
-リリースと一緒に公開します。現行リリースの Sinter v1.3.0 は、Linux x86_64
+リリースと一緒に公開します。Sinter v1.3.0 のリリースは、Linux x86_64
 検証ゲートを通過した後、リリース成果物そのもの
 （`sinter-v1.3.0-linux-x86_64.tar.gz`）を8台の実x86_64 Linuxホストで
 受入検証しました — [インストール](#インストール)に記載のpoint releaseです。

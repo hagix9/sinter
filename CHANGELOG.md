@@ -2,7 +2,7 @@
 
 All notable changes to Sinter are documented in this file.
 
-## [Unreleased]
+## [1.4.0] - 2026-10-14
 
 ### Added
 
@@ -70,6 +70,22 @@ All notable changes to Sinter are documented in this file.
   the same validation as any other row; anything else still fails closed.
   Before, such a transaction (for example `openstack-neutron-periodic-workers`)
   stopped with `cannot establish the install transaction set`.
+
+- **Package install works again on hosts whose dnf cache contains downloaded
+  packages, and no longer touches the live cache.** A metadata snapshot made
+  from the live dnf cache copied every `.rpm` already lying in the cache, and
+  the payload check then treated those files as unexpected downloads, so the
+  install failed closed on hosts with cached packages — for example right
+  after a kernel update. The copied payload is now removed from the private
+  snapshot in checked batches of at most 128 operands before the download
+  step, and the snapshot payload parser accepts only `.rpm` paths recorded
+  inside the private snapshot, so the live cache stays out of the removal
+  path. Snapshot-scoped dnf calls now run with
+  `--disableplugin=generate_completion_cache`: that plugin writes
+  `/var/cache/dnf/packages.db` even under a private cachedir, which changed
+  the live cache during an install. Other plugins keep running, a host
+  without the plugin still works (the exact one-line warning is tolerated),
+  and an unchanged live cache is a hard requirement again on every target.
 
 - **`plan` no longer fails a recipe that `apply` accepts when an account is
   created by a resource that simply runs earlier (F-3).** A `file`, `directory`
