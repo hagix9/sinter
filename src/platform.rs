@@ -182,9 +182,22 @@ impl PackageBackend {
     /// against the frozen transaction row before the payload may satisfy
     /// it. A file name only locates a candidate; rpm's own parse of the
     /// header is what proves the payload's identity.
+    ///
+    /// `--nosignature`: this query reads identity only. Without it rpm prints
+    /// `warning: ...: Header V4 RSA/SHA256 Signature, key ID ...: NOKEY` on
+    /// stderr for any payload signed with a key that is not in the rpm
+    /// database (CentOS SIG, RDO, third-party repositories), and the stderr
+    /// guard then refuses the whole transaction. Whether a signature is
+    /// required is the repository's `gpgcheck` and dnf's business at install
+    /// time, not this identity check's; the header digest is still verified.
+    /// What this gives up on purpose: an early refusal of a payload whose
+    /// signature is BAD against a key that IS in the rpm database. With
+    /// `gpgcheck=0` that is the repository owner's choice (dnf would install it
+    /// too); with `gpgcheck=1` dnf itself rejects it at install time.
     pub fn rpm_package_file_args(path: &str) -> Vec<String> {
         vec![
             "-qp".to_string(),
+            "--nosignature".to_string(),
             "--queryformat".to_string(),
             "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\\n".to_string(),
             path.to_string(),
@@ -523,6 +536,7 @@ mod tests {
             ),
             vec![
                 "-qp".to_string(),
+                "--nosignature".to_string(),
                 "--queryformat".to_string(),
                 "%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\\n".to_string(),
                 "/var/tmp/snap/baseos-x/packages/a-1-1.x86_64.rpm".to_string()

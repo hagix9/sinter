@@ -215,6 +215,16 @@ fn dnf_observes_absent_and_installs() {
             .last()
             .map(|a| a.ends_with("/baseos-cafebabecafebabe/packages/nano-1.0-1.el9.x86_64.rpm"))
             .unwrap_or(false)));
+    // The identity query must not verify signatures: rpm warns NOKEY on stderr for a payload signed with a key
+    // that is not in the rpm database (found on a real host: CentOS NFV SIG Open vSwitch), and the stderr guard
+    // would then refuse the install. Regression for that real-host failure.
+    for c in qp.iter().filter(|c| c.args.iter().any(|a| a == "-qp")) {
+        assert!(
+            c.args.iter().any(|a| a == "--nosignature"),
+            "payload identity query without --nosignature: {:?}",
+            c.args
+        );
+    }
     assert_eq!(commands_with(&r, "/usr/bin/rm").len(), 1);
     // Observation used rpm -q, never dpkg-query.
     assert!(commands_with(&r, "/usr/bin/dpkg-query").is_empty());

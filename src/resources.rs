@@ -5521,7 +5521,26 @@ fn parse_dnf_install_set(text: &str) -> Option<Vec<DnfInstallRow>> {
             }
             // A payload row must sit under a recognized section header.
             let section = current_section?;
-            let row = parse_dnf_row(t)?;
+            // dnf 4 puts a package name that is too wide for its column on a physical line of its own and the
+            // remaining columns, indented, on the next (`output.py` `_add_line`: a name longer than the name
+            // column wraps; common with `openstack-neutron-periodic-workers`-style names). The two lines are one
+            // logical row. Only a lone token followed by an indented line of the remaining 4-5 columns is joined,
+            // and the joined row goes through the same field validation as any other, so anything else still
+            // fails closed.
+            let joined: String;
+            let wrapped = t.split_whitespace().count() == 1
+                && lines.get(i).is_some_and(|next| {
+                    next.starts_with(char::is_whitespace)
+                        && matches!(next.split_whitespace().count(), 4 | 5)
+                });
+            let row_text = if wrapped {
+                joined = format!("{} {}", t, lines[i].trim());
+                i += 1;
+                joined.as_str()
+            } else {
+                t
+            };
+            let row = parse_dnf_row(row_text)?;
             rows.push((section, row));
         } else if !summary_divider {
             // The summary must be introduced by a divider.
@@ -6027,6 +6046,77 @@ mod package_tests {
         assert_eq!(rows[0].verrel, "2.4.62-13.el9_8.6");
         assert_eq!(rows[0].repoid, "appstream");
         assert_eq!(rows[2].repoid, "baseos");
+    }
+
+    #[test]
+    fn dnf_install_set_joins_a_name_that_dnf_wrapped_onto_its_own_line() {
+        // Real dnf 4 output (Rocky 10.2): a name wider than the name column is alone on a line and the other
+        // columns follow, indented, on the next. Found installing openstack-neutron-periodic-workers.
+        let out = table_summary(
+            "Installing:\n \
+             openstack-neutron-periodic-workers\n                                   \
+             noarch 1:28.0.2-2.el10 sinter-gazpacho  12 k\n \
+             httpd                  x86_64      2.4.62-13.el9_8.6      appstream       46 k\n\n",
+            "Install  2 Packages",
+        );
+        let rows = parse_dnf_install_set(&out).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "openstack-neutron-periodic-workers");
+        assert_eq!(rows[0].epoch.as_deref(), Some("1"));
+        assert_eq!(rows[0].verrel, "28.0.2-2.el10");
+        assert_eq!(rows[0].arch, "noarch");
+        assert_eq!(rows[0].repoid, "sinter-gazpacho");
+        assert_eq!(rows[1].name, "httpd");
+    }
+
+    #[test]
+    fn dnf_install_set_wrapped_rows_edge_cases() {
+        // two consecutive wrapped rows, the first right after the divider and the last right before the summary;
+        // a 4-token continuation (size without unit); a tab-indented continuation
+        let out = table_summary(
+            "Installing:\n openstack-neutron-periodic-workers\n                                   \
+             noarch 1:28.0.2-2.el10 sinter-gazpacho  12 k\n openstack-neutron-ovn-maintenance-worker\n\t\
+             noarch 1:28.0.2-2.el10 sinter-gazpacho  0\n\n",
+            "Install  2 Packages",
+        );
+        let rows = parse_dnf_install_set(&out).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].name, "openstack-neutron-ovn-maintenance-worker");
+        // a wrapped row followed by a `replacing` line, in an Upgrading section
+        let out = table_summary(
+            "Upgrading:\n openstack-neutron-periodic-workers\n                                   \
+             noarch 1:28.0.2-2.el10 sinter-gazpacho  12 k\n     replacing  openstack-neutron-periodic-workers.noarch 1:28.0.1-1.el10\n\n",
+            "Upgrade  1 Package",
+        );
+        let rows = parse_dnf_install_set(&out).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "openstack-neutron-periodic-workers");
+    }
+
+    #[test]
+    fn dnf_install_set_still_rejects_a_lone_name_without_a_valid_continuation() {
+        // A lone token that is not followed by an indented, well-formed remainder is not a row.
+        for body in [
+            // nothing follows but the next row
+            "Installing:\n openstack-neutron-periodic-workers\n \
+             httpd                  x86_64      2.4.62-13.el9_8.6      appstream       46 k\n\n",
+            // remainder not indented
+            "Installing:\n openstack-neutron-periodic-workers\nnoarch 1:28.0.2-2.el10 sinter-gazpacho  12 k\n\n",
+            // remainder with an invalid arch
+            "Installing:\n openstack-neutron-periodic-workers\n   $bad 1:28.0.2-2.el10 sinter-gazpacho  12 k\n\n",
+            // remainder with an invalid size
+            "Installing:\n openstack-neutron-periodic-workers\n   noarch 1:28.0.2-2.el10 sinter-gazpacho  1..2 k\n\n",
+            // a blank line between the name and its remainder
+            "Installing:\n openstack-neutron-periodic-workers\n\n   noarch 1:28.0.2-2.el10 sinter-gazpacho  12 k\n\n",
+            // a genuine 5-token row after a lone name (the name would be taken as the arch, and fails)
+            "Installing:\n lonely\n bar x86_64 1.0-1 repo 0\n\n",
+            // continuations of 3 and 6 tokens
+            "Installing:\n openstack-neutron-periodic-workers\n   noarch 1:28.0.2-2.el10 sinter-gazpacho\n\n",
+            "Installing:\n openstack-neutron-periodic-workers\n   noarch 1:28.0.2-2.el10 sinter-gazpacho 12 k extra\n\n",
+        ] {
+            let out = table_summary(body, "Install  1 Package");
+            assert!(parse_dnf_install_set(&out).is_none(), "{body}");
+        }
     }
 
     #[test]
