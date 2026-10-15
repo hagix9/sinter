@@ -1,0 +1,27 @@
+===== C re-run on Rocky 8 (after installing attr) =====
+--- C1 valid (must publish) ---
+== Sinter APPLY ==
+target facts: hostname=sinter-v15b-rocky8 os=Rocky Linux family=redhat version=8.10 arch=x86_64
+
+CHANGED  sshd [file] known/normal 
+
+summary: 1 changed, 0 possible, 0 failed, 0 indeterminate, 1 total
+status: success
+C1_RC=0
+published_sha256=50714428d94b12e32dd6d3be153791fdfa561dd46435ac913ae9a04553d7437a
+--- C2 invalid (must refuse, unchanged) ---
+== Sinter APPLY ==
+target facts: hostname=sinter-v15b-rocky8 os=Rocky Linux family=redhat version=8.10 arch=x86_64
+
+FAILED  sshd [file] known/normal sshd: the new content for /etc/ssh/sshd_config.d/60-sinter-demo.conf was refused by its validate command: the validation command exited 255: /etc/ssh/sshd_config.d/.sinter-stage.jzfllEkK/payload: line 2: Bad configuration option: BadDirectiveN1\r\n/etc/ssh/sshd_config.d/.sinter-stage.jzfllEkK/payload: terminating, 1 bad configuration optio… (staging cleanup succeeded)
+
+summary: 0 changed, 0 possible, 1 failed, 0 indeterminate, 1 total
+status: apply_failed
+C2_RC=5
+after_sha256=50714428d94b12e32dd6d3be153791fdfa561dd46435ac913ae9a04553d7437a
+C2_UNCHANGED=yes
+--- content ---
+PermitRootLogin no
+MaxAuthTries 4
+--- sshd -t ---
+SSHD_OK

@@ -1,0 +1,49 @@
+# Install Apache httpd, give it a dedicated account, and manage the service --
+# the smallest recipe that uses a package, a user and a service together.
+#
+# `depends_on` is ordering and gating, not inference. A resource runs only
+# after the ids it lists have succeeded; if one of them fails (or is blocked),
+# the dependent resource is NOT run at all -- it is reported as blocked. So the
+# service below is never started unless the package install actually succeeded.
+# Sinter adds no dependency by itself: the httpd package is not assumed to
+# create the account or the unit, so both are declared explicitly.
+#
+# Unit name: `httpd` on RHEL-family (the Debian/Ubuntu package apache2 ships
+# the `apache2` unit). Names, paths and the account here are illustrative.
+version: 1
+
+resources:
+  # The account that owns the site content. Declared explicitly -- a package is
+  # never treated as a producer of a user or group.
+  - id: webapp-group
+    type: group
+    with:
+      name: webapp
+      system: true
+
+  - id: webapp-user
+    type: user
+    depends_on: [webapp-group]
+    with:
+      name: webapp
+      group: webapp
+      system: true
+      shell: /usr/sbin/nologin
+
+  # Installs the server. If this fails, the service below is blocked and does
+  # not start.
+  - id: httpd-package
+    type: package
+    with:
+      name: httpd
+      state: present
+
+  # Runs only after the install succeeded (`depends_on`). `enabled: true` also
+  # sets boot enablement; a second apply reports no change.
+  - id: httpd-service
+    type: service
+    depends_on: [httpd-package]
+    with:
+      name: httpd
+      state: running
+      enabled: true

@@ -1,0 +1,27 @@
+# A package that lives in a DNF module stream.
+#
+# Sinter's `package` resource installs whatever the enabled repositories and
+# module state resolve. When a package is only reachable through a *non-default*
+# module stream, enable that stream first with a `command` — the same thing an
+# operator does by hand — and declare `depends_on` so the install runs after it.
+# (A package on the module's default stream needs no enable step.)
+#
+# `changed_when: "false"` keeps the enable step out of the change report:
+# enabling an already-enabled stream changes nothing. `dnf module enable` is
+# idempotent, so a second apply is a no-op.
+version: 1
+
+resources:
+  - id: enable-nodejs-stream
+    type: command
+    with:
+      program: /usr/bin/dnf
+      args: ["-y", "module", "enable", "nodejs:20"]
+      changed_when: "false"
+
+  - id: install-nodejs
+    type: package
+    depends_on: [enable-nodejs-stream]
+    with:
+      name: nodejs
+      state: present

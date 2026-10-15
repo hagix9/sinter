@@ -1,0 +1,111 @@
+########## Rocky Linux 8.10 (Green Obsidian) ##########
+date   : 2026-10-15T12:40:40Z
+dnf    :   Built    : infrastructure@rockylinux.org at Tue Dec 17 17:40:06 2024
+glibc  : ldd (GNU libc) 2.28
+sinter : sinter 1.4.0
+pre    : sinter 1.4.0
+
+===== reset =====
+  cachedir entries: 10
+
+===== B: cold dnf cache, then apply package tree (v1.5) =====
+  cachedir after clean: 10
+== Sinter APPLY ==
+target facts: hostname=sinter-v15b-rocky8 os=Rocky Linux family=redhat version=8.10 arch=x86_64
+
+CHANGED  p [package] known/normal 
+
+summary: 1 changed, 0 possible, 0 failed, 0 indeterminate, 1 total
+status: success
+  B_RC=0
+  tree: tree-1.7.0-15.el8.x86_64
+  cachedir after apply: 22
+
+===== C1: valid sshd drop-in with validate (must publish) =====
+== Sinter APPLY ==
+target facts: hostname=sinter-v15b-rocky8 os=Rocky Linux family=redhat version=8.10 arch=x86_64
+
+FAILED  sshd [file] known/normal cannot inspect access metadata of parent path /; refusing unsafe path; the target has no /usr/bin/getfattr, so access metadata cannot be inspected (install the 'attr' package: apt install attr on Debian/Ubuntu, dnf install attr on RHEL family)
+
+summary: 0 changed, 0 possible, 1 failed, 0 indeterminate, 1 total
+status: apply_failed
+  C1_RC=5
+  sshd -t: OK
+  published sha256: 
+===== C2: invalid sshd content with validate (must refuse, file unchanged) =====
+== Sinter APPLY ==
+target facts: hostname=sinter-v15b-rocky8 os=Rocky Linux family=redhat version=8.10 arch=x86_64
+
+FAILED  sshd [file] known/normal cannot inspect access metadata of parent path /; refusing unsafe path; the target has no /usr/bin/getfattr, so access metadata cannot be inspected (install the 'attr' package: apt install attr on Debian/Ubuntu, dnf install attr on RHEL family)
+
+summary: 0 changed, 0 possible, 1 failed, 0 indeterminate, 1 total
+status: apply_failed
+  C2_RC=5 (expect nonzero)
+  sha256 after: 
+  C2_UNCHANGED=yes
+  file content:
+cat: /etc/ssh/sshd_config.d/60-sinter-demo.conf: No such file or directory
+
+===== D: recipe env reaches commands; resource env overrides =====
+== Sinter APPLY ==
+target facts: hostname=sinter-v15b-rocky8 os=Rocky Linux family=redhat version=8.10 arch=x86_64
+
+CHANGED  wr1 [command] known/normal 
+CHANGED  wr2 [command] known/normal 
+
+summary: 2 changed, 0 possible, 0 failed, 0 indeterminate, 2 total
+status: success
+  D_RC=0
+  env.txt : proxy=http://proxy.example.com:3128 noproxy=localhost,.internal.example.com
+  env2.txt: http://override:1
+
+===== E: DNF module stream on Rocky 8 =====
+  --- E-pre: apply nodejs with the pre-fix binary (warm cache) ---
+== Sinter APPLY ==
+target facts: hostname=sinter-v15b-rocky8 os=Rocky Linux family=redhat version=8.10 arch=x86_64
+
+FAILED  p [package] known/normal dnf repository metadata not locally complete; refusing to fetch metadata (cannot establish the install transaction set)
+
+summary: 0 changed, 0 possible, 1 failed, 0 indeterminate, 1 total
+status: apply_failed
+  Epre_RC=5
+  nodejs after pre: package nodejs is not installed
+  --- E-post: apply nodejs with v1.5 ---
+== Sinter APPLY ==
+target facts: hostname=sinter-v15b-rocky8 os=Rocky Linux family=redhat version=8.10 arch=x86_64
+
+CHANGED  p [package] known/normal 
+
+summary: 1 changed, 0 possible, 0 failed, 0 indeterminate, 1 total
+status: success
+  Epost_RC=0
+  nodejs after post: nodejs-10.24.0-1.module+el8.3.0+101+f84c7154.x86_64
+  enabled modules:
+    Rocky Linux 8 - AppStream
+    Name     Stream      Profiles                              Summary                                 
+    nodejs   10 [d][e]   common [d], development, minimal, s2i Javascript runtime                      
+    python36 3.6 [d][e]  build, common [d]                     Python programming language, version 3.6
+    virt     rhel [d][e] common [d]                            Virtualization module                   
+    
+    Hint: [d]efault, [e]nabled, [x]disabled, [i]nstalled
+  --- E-idempotent: re-apply ---
+== Sinter APPLY ==
+target facts: hostname=sinter-v15b-rocky8 os=Rocky Linux family=redhat version=8.10 arch=x86_64
+
+ok    p [package] known/normal package already in desired state
+
+summary: 0 changed, 0 possible, 0 failed, 0 indeterminate, 1 total
+status: success
+  Eidem_RC=0
+  --- E-fail-closed: a non-existent package ---
+== Sinter APPLY ==
+target facts: hostname=sinter-v15b-rocky8 os=Rocky Linux family=redhat version=8.10 arch=x86_64
+
+FAILED  p [package] known/normal dnf repository metadata not locally complete (install set resolution produced unexpected stderr (56 bytes))
+
+summary: 0 changed, 0 possible, 1 failed, 0 indeterminate, 1 total
+status: apply_failed
+  Ebogus_RC=5 (expect nonzero)
+
+===== DONE 2026-10-15T12:47:14Z =====
+VERIFY3_=0

@@ -1,0 +1,31 @@
+# Validate a configuration file before it is published.
+#
+# `validate` runs a command against the STAGED copy of the new content — the
+# bytes Sinter built but has not yet put at the final path — and publishes only
+# if it exits 0. The command is `program args... <staged-file>`, argv-only, and
+# never sees /etc/ssh/sshd_config.d/60-sinter-demo.conf. A bad file is therefore
+# never left in place: a non-zero exit, a signal or a timeout leaves the
+# destination exactly as it was.
+#
+# Use each tool's non-applying syntax check:
+#   sshd:    sshd -t -f            (checks the whole configuration, no reload)
+#   sudo:    visudo -cf
+#   rsyslog: rsyslogd -N1 -f
+#   samba:   testparm -s
+# The staged file path is appended as the last argument, so `args` lists only
+# the flags.
+version: 1
+
+resources:
+  - id: sshd-drop-in
+    type: file
+    with:
+      path: /etc/ssh/sshd_config.d/60-sinter-demo.conf
+      content: "PermitRootLogin no\nMaxAuthTries 4\n"
+      owner: root
+      group: root
+      mode: "0600"
+      validate:
+        program: /usr/sbin/sshd
+        args: ["-t", "-f"]
+        timeout_seconds: 60

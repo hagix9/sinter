@@ -1,0 +1,24 @@
+# Smallest package example. Runs in a few seconds on a disposable RHEL-family
+# or Debian/Ubuntu host.
+#
+# On RHEL-family targets Sinter installs from a private snapshot of the dnf
+# metadata cache. If an enabled repository has no cached metadata (a fresh
+# image, or a repository added since the last refresh) Sinter refreshes the
+# target's own metadata cache once, exactly as `dnf makecache` does, so no
+# manual preparation step is needed. See the package reference:
+# docs-site/src/content/docs/en/reference/resources/package.md
+version: 1
+
+resources:
+  - id: install-tools
+    type: package
+    with:
+      name: curl
+      state: present
+
+  # Idempotent: the second apply reports no change for an installed package.
+  - id: install-tree
+    type: package
+    with:
+      name: tree
+      state: present

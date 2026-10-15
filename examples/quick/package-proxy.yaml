@@ -1,0 +1,33 @@
+# One proxy setting for every package and command in the recipe.
+#
+# The top-level `env` map is a default environment for `package` and `command`
+# resources (the only resources that run an external process). A resource's own
+# `env` overrides it per name; the default never reaches a connection step, a
+# package query, a service, or a file operation.
+#
+# `NO_PROXY`/`no_proxy` keeps hosts and networks that must be reached directly
+# (an internal mirror, an on-premise API) out of the proxy. Names are
+# case-sensitive, as on Linux; write both spellings if a tool needs both.
+version: 1
+
+env:
+  HTTP_PROXY: "http://proxy.example.com:3128"
+  HTTPS_PROXY: "http://proxy.example.com:3128"
+  NO_PROXY: "localhost,127.0.0.1,.internal.example.com"
+
+resources:
+  # Receives the recipe env through its own dnf/apt execution.
+  - id: install-through-proxy
+    type: package
+    with:
+      name: curl
+      state: present
+
+  # A resource may override a single name for itself; the others still apply.
+  - id: fetch-internal
+    type: command
+    with:
+      program: /usr/bin/curl
+      args: ["-fsS", "-o", "/var/tmp/app.tar.gz", "http://mirror.internal.example.com/app.tar.gz"]
+      env:
+        HTTPS_PROXY: "http://internal-proxy.example.com:3128"

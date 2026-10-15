@@ -1,0 +1,2364 @@
+   Compiling sinter v1.4.0 (/Volumes/VGX1000 SSD/Codex/Projects/Sinter/worktrees/v1.5-improvements)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.22s
+     Running unittests src/lib.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/sinter-9c9c4320915ff94b)
+
+running 482 tests
+test accounts::tests::names ... ok
+test accounts::tests::compare_refuses_renumbering ... ok
+test accounts::tests::paths ... ok
+test accounts::tests::useradd_argv_is_explicit ... ok
+test accounts::tests::nss_only_is_an_error_not_a_create ... ok
+test accounts::tests::a_password_spec_never_prints_its_hash ... ok
+test accounts::tests::user_line ... ok
+test accounts::tests::group_line ... ok
+test accounts::tests::usermod_never_moves_home_or_removes_groups ... ok
+test backup::tests::overlap_with_store_is_rejected ... ok
+test backup::tests::planned_report_lists_paths_only ... ok
+test backup::tests::store_chains ... ok
+test backup::tests::store_roots ... ok
+test backup::tests::utc_stamp_known_values ... ok
+test backup::tests::run_id_shape ... ok
+test diff::tests::c1_csi_escaped ... ok
+test diff::tests::controls_escaped ... ok
+test diff::tests::non_utf8_summarized ... ok
+test backup::tests::a_directory_directly_in_a_shared_directory_is_refused_before_anything_is_read_or_made ... ok
+test backup::tests::an_entry_of_another_account_in_a_shared_directory_is_still_refused_by_the_gate ... ok
+test diff::tests::ordinary_unicode_not_corrupted ... ok
+test diff::tests::sensitive_is_redacted ... ok
+test bundle::tests::plain_recipe_is_a_single_unit ... ok
+test bundle::tests::bundle_keeps_declared_order ... ok
+test executor::hostkey_tests::identity_is_port_scoped_and_alias_aware ... ok
+test executor::hostkey_tests::auth_failure_message_never_names_agent_socket ... ok
+test engine::tests::a_dependency_reason_is_withheld_when_the_dependency_is_sensitive ... ok
+test executor::hostkey_tests::key_type_from_blob ... ok
+test diff::tests::text_diff_simple ... ok
+test executor::hostkey_tests::revoked_marker_lines_are_collected ... ok
+test executor::hostkey_tests::ssh_policy_excludes_legacy_and_keeps_modern_algorithms ... ok
+test executor::hostkey_tests::ssh_policy_lists_are_well_formed ... ok
+test executor::hostkey_tests::known_types_are_preferred_within_the_allowlist ... ok
+test executor::stats_tests::a_clone_shares_the_same_statistics ... ok
+test executor::stats_tests::a_sensitive_request_keeps_no_program_name ... ok
+test backup::tests::files_and_links_in_a_shared_directory_and_directories_elsewhere_are_still_copied ... ok
+test executor::stats_tests::outcomes_programs_scopes_and_order_are_recorded ... ok
+test executor::stats_tests::the_connect_lookup_is_counted_without_a_request ... ok
+test executor::tests::a_completion_is_described_by_status_only ... ok
+test executor::tests::quoting_is_exact ... ok
+test executor::tests::a_root_target_gets_the_sudo_contract_without_the_wrapper ... ok
+test executor::tests::only_a_sentence_that_names_the_cause_is_recognized ... ok
+test executor::tests::remote_command_contains_quoted_argv ... ok
+test executor::tests::sudo_refusals_are_told_apart_by_what_sudo_printed ... ok
+test executor::tests::the_diagnostic_is_one_command_without_sudo_and_only_when_needed ... ok
+test executor::tests::the_local_wrapper_names_root_and_matches_the_ssh_wrapper ... ok
+test executor::tests::the_wrapper_arguments_are_pinned ... ok
+test executor::tests::the_password_message_does_not_claim_more_than_sudo_said ... ok
+test executor::tests::the_ssh_wrapper_names_root_and_leaves_everything_else_alone ... ok
+test expressions::tests::a_tag_is_paired_with_its_own_closer ... ok
+test expressions::tests::an_opener_without_a_closer_stays_plain_text ... ok
+test expressions::tests::boolean_ops ... ok
+test expressions::tests::error_category_redacts_raw_values ... ok
+test expressions::tests::escaped_interpolation ... ok
+test expressions::tests::interpolation_type_retention ... ok
+test expressions::tests::jinja_tags_are_found_with_their_position ... ok
+test expressions::tests::numeric_comparison ... ok
+test expressions::tests::ordering_boolean_errors ... ok
+test expressions::tests::short_circuit_avoids_undefined ... ok
+test expressions::tests::sensitive_propagation ... ok
+test expressions::tests::string_comparison ... ok
+test expressions::tests::the_description_names_the_fix_and_no_template_text ... ok
+test expressions::tests::undefined_is_error_when_evaluated ... ok
+test expressions::tests::text_that_only_contains_an_opener_is_not_a_tag ... ok
+test facts::tests::family_ubuntu ... ok
+test facts::tests::family_rhel_relatives ... ok
+test expressions::tests::unknown_table ... ok
+test facts::tests::family_unknown_does_not_match ... ok
+test bundle::tests::invalid_bundles_fail ... ok
+test facts::tests::parse_almalinux10_release ... ok
+test facts::tests::parse_release ... ok
+test facts::tests::parse_almalinux9_release ... ok
+test facts::tests::parse_rhel10_release ... ok
+test facts::tests::parse_rhel9_release ... ok
+test facts::tests::parse_rocky10_release ... ok
+test facts::tests::parse_ubuntu2604_release ... ok
+test fsstage::tests::a_reject_reason_is_the_scripts_own_line ... ok
+test fsstage::tests::argv_passes_values_only_after_the_script_and_never_inside_it ... ok
+test fsstage::tests::only_a_second_name_or_an_unknown_state_needs_attention ... ok
+test fsstage::tests::cleanup_answers_are_parsed_strictly ... ok
+test fsstage::tests::the_log_names_the_script_by_digest ... ok
+test fsstage::tests::staged_answers_are_parsed_strictly ... ok
+test fsstage::tests::the_script_is_a_constant_without_interpolation_points ... ok
+test fsstage::tests::the_script_is_pinned ... ok
+test inventory::tests::address_defaults_to_the_host_name ... ok
+test inventory::tests::group_target_selects_members_only ... ok
+test inventory::tests::loads_hosts_and_groups ... ok
+test inventory::tests::missing_targets_fail_closed ... ok
+test inventory::tests::host_and_group_targets_union ... ok
+test executor::hostkey_tests::ssh_policy_installs_on_a_session ... ok
+test executor::hostkey_tests::ssh_policy_matches_the_linked_libssh2 ... ok
+test executor::hostkey_tests::ssh_policy_failure_is_an_error ... ok
+test manager::tests::manager_config_is_recognized_without_unit_path ... ok
+test manager::tests::manager_config_symlinks_are_recognized_lexically_and_user_config_is_not ... ok
+test manager::tests::resolution_uses_manager_roots_not_a_fixed_directory ... ok
+test manager::tests::resolution_names_a_unit_only_when_safely_derivable ... ok
+test manager::tests::shapes_ignore_unrelated_paths ... ok
+test manager::tests::shapes_recognize_unit_files_dropins_and_links ... ok
+test manager::tests::unit_path_never_evaluates_shell_syntax ... ok
+test manager::tests::unit_path_parses_quoted_paths_with_spaces_and_escapes ... ok
+test manager::tests::unit_path_parses_standard_output ... ok
+test manager::tests::unit_path_rejects_malformed_output ... ok
+test manager::tests::yes_no_is_strict ... ok
+test inventory::tests::unknown_target_names_fail_closed ... ok
+test mcp::tests::f02_host_plan_redacts_text_diffs ... ok
+test mcp::tests::f03_empty_profile_values_are_safe ... ok
+test inventory::tests::toml_inventory_is_equivalent ... ok
+test mcp::tests::f03_overlapping_profile_values_fully_redacted ... ok
+test mcp::tests::plan_report_carries_manager_reloads_and_redacts_sensitive_reasons ... ok
+test mcp::tests::r2_include_rejected_in_all_forms ... ok
+test mcp::tests::concurrent_staging_does_not_collide ... ok
+test mcp::tests::n3_short_profile_values_redact_at_boundaries ... ok
+test mcp::tests::r2_source_include_words_in_scalars_not_rejected ... ok
+test mcp::tests::redaction_covers_whole_stage_dir ... ok
+test mcp::tests::r2_source_rejected_in_every_key_spelling ... ok
+test mcp::tests::stage_permissions_are_private ... ok
+test mcp::tests::staged_manifest_refuses_existing_entry ... ok
+test mcp::tests::stage_names_are_unique_and_unpredictable ... ok
+test mcp::tests::stage_removed_on_drop ... ok
+test model::tests::facts_cannot_form_path ... ok
+test model::tests::duplicate_include_is_error ... ok
+test model::tests::expands_loop_ids ... ok
+test model::tests::loop_register_rejected ... ok
+test model::tests::ownership_conflict_detected ... ok
+test model::tests::reserved_env_rejected ... ok
+test model::tests::sensitive_path_rejected ... ok
+test model::tests::register_direct_dependency_required ... ok
+test passwd_hash::tests::chpasswd_input_is_one_record ... ok
+test model::tests::include_order_and_dup_detection ... ok
+test passwd_hash::tests::accepts_the_two_formats_and_one_trailing_newline ... ok
+test paths::tests::ancestors ... ok
+test passwd_hash::tests::stored_fields_are_classified_and_compared ... ok
+test passwd_hash::tests::refuses_everything_else_without_echoing_it ... ok
+test paths::tests::rejects_bad_paths ... ok
+test paths::tests::valid_paths ... ok
+test paths::tests::mode_parsing ... ok
+test platform::tests::apt_exit_one_with_an_ambiguous_absence_diagnostic_is_not_absent ... ok
+test platform::tests::apt_exit_one_with_an_unrelated_error_is_not_absent ... ok
+test platform::tests::apt_exit_zero_with_truncated_stdout_is_not_installed ... ok
+test platform::tests::apt_exit_zero_with_malformed_status_output_is_not_installed ... ok
+test platform::tests::apt_exit_zero_with_unexpected_diagnostic_is_not_installed ... ok
+test platform::tests::apt_invalid_utf8_never_becomes_a_state ... ok
+test platform::tests::apt_present_contract_requires_a_complete_clean_record ... ok
+test platform::tests::apt_present_record_never_normalizes_whitespace ... ok
+test platform::tests::dnf_mutation_args_are_exact ... ok
+test platform::tests::dnf_payload_download_args_are_exact ... ok
+test platform::tests::dnf_snapshot_check_args_are_exact ... ok
+test platform::tests::family_selects_backend ... ok
+test platform::tests::rpm_absent_classification_fails_closed_on_any_ambiguity ... ok
+test platform::tests::rpm_absent_marker_is_exact_stdout_only ... ok
+test platform::tests::rpm_classification ... ok
+test platform::tests::rpm_exit_zero_naming_another_package_is_not_installed ... ok
+test platform::tests::rpm_exit_zero_with_contradictory_diagnostic_is_not_installed ... ok
+test platform::tests::rpm_exit_zero_with_malformed_output_is_not_installed ... ok
+test platform::tests::rpm_exit_zero_with_multiple_result_records_is_not_installed ... ok
+test platform::tests::rpm_exit_zero_with_truncated_output_is_not_installed ... ok
+test platform::tests::rpm_invalid_utf8_never_becomes_a_state ... ok
+test platform::tests::rpm_present_contract_requires_a_complete_single_record ... ok
+test platform::tests::rpm_present_record_rejects_prefix_garbage_and_wrong_identity ... ok
+test platform::tests::sensitive_observation_error_is_redacted ... ok
+test platform::tests::sensitive_package_errors_never_include_raw_stderr ... ok
+test progress::tests::counts_saturate ... ok
+test progress::tests::dropping_a_tracker_ends_the_stage_as_failed ... ok
+test platform::tests::dnf_install_without_snapshot_is_rejected - should panic ... ok
+test progress::tests::event_payload_is_closed_by_construction ... ok
+test progress::tests::item_kind_vocabulary_matches_the_statistics_scope_labels ... ok
+test progress::tests::stage_order_is_the_documented_order ... ok
+test progress::tests::tracker_counts_the_in_flight_item_and_ends_exactly_once ... ok
+test progress::tests::validator_accepts_conforming_streams ... ok
+test progress::tests::dropping_a_tracker_while_unwinding_emits_nothing ... ok
+test progress::tests::validator_rejects_each_violation ... ok
+test progress_plain::tests::a_connection_failure_before_any_resource_reads_cleanly ... ok
+test progress::tests::recording_sink_survives_a_poisoned_lock ... ok
+test progress_plain::tests::a_failed_or_indeterminate_stage_and_run_say_so_and_nothing_else ... ok
+test progress_plain::tests::a_milestone_resets_the_interval_but_a_plain_item_start_does_not ... ok
+test progress_plain::tests::a_hundred_items_print_nine_milestones_between_start_and_end ... ok
+test progress_plain::tests::a_muted_renderer_is_mute_in_every_entry_point ... ok
+test progress_plain::tests::a_resolve_stage_counts_hosts_and_shows_no_item ... ok
+test progress_plain::tests::a_step_that_crosses_several_thresholds_prints_one_line ... ok
+test progress_plain::tests::a_tick_before_the_interval_is_over_prints_nothing ... ok
+test progress_plain::tests::a_whole_apply_run_reads_as_documented ... ok
+test progress_plain::tests::a_write_error_ends_all_output_without_panicking ... ok
+test progress_plain::tests::a_panic_unwind_mutes_the_detached_plain_worker ... ok
+test progress_plain::tests::a_long_id_is_cut_and_a_short_one_is_not ... ok
+test progress_plain::tests::a_session_that_references_secrets_gets_no_surface_and_writes_nothing ... ok
+test progress_plain::tests::dropping_a_renderer_writes_no_final_line ... ok
+test progress_plain::tests::control_bytes_and_non_ascii_in_an_id_never_reach_the_output ... ok
+test progress_plain::tests::every_line_has_the_prefix_and_never_the_error_token ... ok
+test progress_plain::tests::heartbeat_wording_depends_on_what_is_known ... ok
+test progress_plain::tests::milestones_restart_with_every_stage ... ok
+test progress_plain::tests::no_line_after_the_run_ended ... ok
+test progress_plain::tests::no_total_or_an_empty_stage_has_no_milestones ... ok
+test progress_plain::tests::no_wakeup_is_asked_for_without_an_active_stage ... ok
+test progress_plain::tests::the_heartbeat_doubles_up_to_the_cap_and_names_the_item ... ok
+test inventory::tests::invalid_inventories_fail_closed ... ok
+test progress_plain::tests::the_resource_stage_is_named_after_the_command ... ok
+test progress_plain::tests::the_heartbeat_interval_is_30_60_120_240_then_300 ... ok
+test progress_plain::tests::few_items_print_at_most_one_line_each_and_never_more_than_ten ... ok
+test progress_session::tests::a_normal_drop_still_ends_the_run_and_leaves_the_latch_alone ... ok
+test progress_plain::tests::the_worker_delivers_a_whole_run_in_order_and_tears_down_clean ... ok
+test progress_session::tests::channel_sink_discards_a_closed_receiver ... ok
+test progress_session::tests::mode_table ... ok
+test progress_session::tests::mode_table_with_an_explicit_plain_request ... ok
+test progress_session::tests::a_session_dropped_by_a_panic_mutes_its_detached_worker ... ok
+test progress_session::tests::only_the_exact_value_plain_requests_plain_progress ... ok
+test progress_tty::tests::a_changed_line_replaces_the_old_one_and_an_unchanged_one_is_not_rewritten ... ok
+test progress_tty::tests::a_failed_run_clears_the_line_just_the_same ... ok
+test progress_tty::tests::a_failing_clear_is_tolerated ... ok
+test progress_tty::tests::a_long_id_is_shortened_with_dots_and_keeps_label_counter_and_elapsed ... ok
+test progress_tty::tests::a_missing_current_item_leaves_no_placeholder ... ok
+test progress_tty::tests::a_new_event_resets_the_quiet_clock ... ok
+test executor::tests::a_local_root_runs_with_sudo_requested_but_never_starts_sudo ... ok
+test progress_tty::tests::a_one_column_terminal_gets_no_line_and_no_panic ... ok
+test progress_plain::tests::ten_thousand_resources_and_a_day_long_wait_stay_bounded ... ok
+test progress_tty::tests::a_normal_teardown_is_far_below_the_bound ... ok
+test progress_tty::tests::a_secret_bearing_session_never_creates_a_surface_and_writes_nothing ... ok
+test progress_plain::tests::a_stage_never_prints_more_than_twelve_lines_without_a_stall ... ok
+test progress_tty::tests::a_terminal_with_no_room_for_a_line_asks_for_no_wakeups ... ok
+test progress_tty::tests::a_tick_that_changes_nothing_writes_nothing ... ok
+test progress_tty::tests::a_write_error_ends_all_drawing_and_never_panics ... ok
+test progress_tty::tests::a_zero_total_shows_zero_of_zero ... ok
+test progress_tty::tests::an_abandoned_renderer_is_mute_in_every_entry_point_and_in_drop ... ok
+test progress_tty::tests::an_ended_stage_states_its_outcome_and_never_infers_success_from_the_counter ... ok
+test progress_tty::tests::an_ended_stage_without_a_started_one_has_no_total ... ok
+test progress_plain::tests::no_sensitive_value_reaches_the_plain_log_of_a_real_engine_stream ... ok
+test progress_tty::tests::an_unknown_or_zero_width_uses_the_documented_fallback ... ok
+test progress_tty::tests::dropping_a_core_with_a_line_on_screen_erases_it ... ok
+test progress_tty::tests::elapsed_appears_after_the_quiet_threshold_and_refreshes_every_second ... ok
+test progress_tty::tests::elapsed_comes_from_the_clock_it_is_given_and_a_backwards_clock_is_harmless ... ok
+test progress_tty::tests::elapsed_text_is_stable_and_ascii ... ok
+test progress_tty::tests::every_item_kind_is_shown_by_its_label ... ok
+test progress_tty::tests::extreme_widths_do_not_panic_or_allocate_the_width ... ok
+test progress_tty::tests::hostile_ids_cannot_inject_lines_or_sequences ... ok
+test progress_tty::tests::narrowing_the_terminal_to_nothing_erases_an_existing_line ... ok
+test progress_tty::tests::no_sensitive_value_reaches_the_transient_bytes_of_a_real_engine_stream ... ok
+test progress_tty::tests::only_the_clear_sequence_and_printable_text_are_ever_written ... ok
+test progress_tty::tests::progress_with_a_known_total_and_a_current_item ... ok
+test progress_tty::tests::progress_with_an_unknown_total_invents_no_denominator ... ok
+test progress_tty::tests::redraws_are_coalesced_to_the_minimum_interval_and_flushed_by_a_tick ... ok
+test progress_tty::tests::replacement_is_one_question_mark_per_character ... ok
+test progress_tty::tests::run_ended_erases_the_line_and_nothing_is_drawn_afterwards ... ok
+test progress_tty::tests::run_started_and_run_ended_show_no_line ... ok
+test progress_tty::tests::sanitization_does_not_touch_the_event ... ok
+test progress_tty::tests::stage_started_shows_the_label_and_a_known_counter ... ok
+test progress_tty::tests::the_budget_is_one_less_than_the_width ... ok
+test progress_tty::tests::the_first_event_draws_immediately_with_one_clear_and_no_newline ... ok
+test progress_plain::tests::the_worker_prints_heartbeats_by_itself_with_a_real_clock ... ok
+test progress_tty::tests::the_line_between_stages_is_the_last_stage_not_an_invented_one ... ok
+test progress_tty::tests::the_renderer_survives_every_event_in_any_order_at_any_width ... ok
+test progress_tty::tests::the_resource_stage_is_labelled_with_the_command ... ok
+test progress_tty::tests::the_width_comes_from_the_terminal_and_a_non_terminal_has_none ... ok
+test progress_session::tests::the_panic_branch_neither_waits_nor_emits ... ok
+test progress_tty::tests::wake_after_is_never_zero_and_asks_nothing_when_there_is_nothing_to_show ... ok
+test progress_tty::tests::when_the_item_cannot_be_shown_sensibly_it_is_dropped_first ... ok
+test progress_tty::tests::width_failure_falls_back_and_width_is_asked_again_at_every_draw ... ok
+test resources::package_tests::a_content_spec_never_prints_its_bytes ... ok
+test resources::package_tests::cache_children_framing_and_domain ... ok
+test resources::package_tests::cache_dir_hash_is_the_native_format ... ok
+test resources::package_tests::clean_states ... ok
+test resources::package_tests::dnf_enabled_repos_parses_strictly ... ok
+test resources::package_tests::dnf_enabled_repos_rejects_incomplete_blocks ... ok
+test resources::package_tests::dnf_enabled_repos_rejects_malformed_fields ... ok
+test resources::package_tests::dnf_install_set_accepts_wrapped_header_rhel10 ... ok
+test resources::package_tests::dnf_install_set_accepts_wrapped_header_rhel9 ... ok
+test resources::package_tests::dnf_install_set_joins_a_name_that_dnf_wrapped_onto_its_own_line ... ok
+test resources::package_tests::dnf_install_set_nothing_to_do_is_an_empty_set ... ok
+test resources::package_tests::dnf_install_set_parses_exact_rows ... ok
+test resources::package_tests::dnf_install_set_rejects_malformed_and_incomplete ... ok
+test resources::package_tests::dnf_install_set_rejects_malformed_wrapped_headers ... ok
+test resources::package_tests::dnf_install_set_still_rejects_a_lone_name_without_a_valid_continuation ... ok
+test resources::package_tests::dnf_install_set_strips_epoch_for_basename ... ok
+test resources::package_tests::dnf_install_set_summary_must_account_for_the_body ... ok
+test resources::package_tests::dnf_install_set_wrapped_header_parses_multiple_rows ... ok
+test resources::package_tests::dnf_install_set_wrapped_rows_edge_cases ... ok
+test resources::package_tests::dnf_remove_and_cleanup_rows_need_no_payload ... ok
+test resources::package_tests::dnf_row_epoch_zero_is_no_epoch ... ok
+test resources::package_tests::dnf_row_nevra_and_basename_without_epoch ... ok
+test resources::package_tests::empty_status_is_an_error_not_absence ... ok
+test resources::package_tests::inconsistent_states_error ... ok
+test resources::package_tests::metadata_expiration_line_grammar_is_exact ... ok
+test resources::package_tests::repolist_block_boundary_is_explicit ... ok
+test resources::package_tests::repolist_footer_grammar_is_exact ... ok
+test resources::package_tests::repolist_preamble_grammar_is_exact ... ok
+test resources::package_tests::rocky10_dnf420_install_table_parses ... ok
+test resources::package_tests::rocky10_dnf420_repolist_footer_is_ungrouped_under_pinned_locale ... ok
+test resources::package_tests::rocky10_dnf420_repolist_parses_with_mirror_flags ... ok
+test resources::package_tests::rocky10_metadata_expiration_line_is_native ... ok
+test resources::package_tests::rpm_identity_must_equal_the_frozen_row ... ok
+test resources::package_tests::rpm_payload_identity_parses_and_matches ... ok
+test resources::package_tests::snapshot_path_namespace_is_validated ... ok
+test resources::package_tests::transaction_header_and_preamble_are_exact ... ok
+test resources::package_tests::transaction_identifiers_are_domain_validated ... ok
+test resources::package_tests::whitespace_is_not_normalized_into_a_status ... ok
+test resources::reset_failed_classifier_tests::a_truncated_capture_never_matches ... ok
+test resources::reset_failed_classifier_tests::only_the_complete_sentence_for_the_requested_unit_matches ... ok
+test resources::reset_failed_classifier_tests::requested_name_maps_to_the_name_systemctl_prints ... ok
+test resources::snapshot_rpm_path_tests::accepts_rpm_descendants_without_a_packages_component ... ok
+test resources::snapshot_rpm_path_tests::accepts_rpm_files_inside_the_snapshot ... ok
+test resources::snapshot_rpm_path_tests::an_empty_listing_is_not_a_payload_list ... ok
+test resources::snapshot_rpm_path_tests::rejects_everything_that_is_not_an_rpm_inside_the_snapshot ... ok
+test resources::snapshot_rpm_path_tests::removal_batches_accept_exact_byte_limit_and_reject_one_byte_over ... ok
+test progress_tty::tests::a_real_pty_receives_one_bounded_transient_line_and_is_left_clean ... ok
+test resources::snapshot_rpm_path_tests::removal_batches_bound_operand_count_and_preserve_every_path ... ok
+test resources::snapshot_rpm_path_tests::unusual_names_survive_nul_framing ... ok
+test resources::snapshot_rpm_path_tests::removal_batches_bound_quoted_utf8_and_environment_bytes ... ok
+test secret_source::tests::observation_distinguishes_absent_from_refused ... ok
+test secret_source::tests::shape_accepts_only_the_exact_reference_form ... ok
+test secret_source::tests::reference_only_defers_exactly_the_filesystem_checks ... ok
+test progress_tty::tests::a_stalled_surface_is_abandoned_within_the_teardown_bound ... ok
+test secret_source::tests::strict_is_the_default_and_the_public_function_is_strict ... ok
+test secrets::tests::armored_files_are_accepted_for_inspect_and_decrypt ... ok
+test progress_tty::tests::an_idle_worker_with_no_line_makes_no_wakeups_and_still_stops_at_once ... ok
+test secrets::tests::errors_are_fixed_text_and_never_carry_secrets ... ok
+test secrets::tests::excessive_scrypt_work_is_refused_before_it_is_done ... ok
+test secrets::tests::hostile_headers_are_rejected_fast_by_decrypt_and_inspect ... ok
+test secrets::tests::files_made_by_the_reference_implementation_open_here ... ok
+test secrets::tests::identity_file_parsing_is_strict ... ok
+test secrets::tests::identity_file_errors_leave_keys_unchanged ... ok
+test secrets::tests::inspect_classifies_without_trusting_names_or_decrypting ... ok
+test secrets::tests::multiple_recipients_any_one_opens_and_a_stranger_does_not ... ok
+test progress_plain::tests::an_abandoned_plain_worker_writes_nothing_after_the_bound ... ok
+test secrets::tests::passphrase_mode_wrong_passphrase_and_missing_key ... ok
+test progress_tty::tests::the_worker_refreshes_the_quiet_line_without_any_event_and_ends_it_promptly ... ok
+test secrets::tests::process_hardening_disables_core_dumps ... ok
+test secrets::tests::armored_size_boundary_for_many_recipients ... ok
+test secrets::tests::protected_identity_and_the_two_way_recovery_construction ... ok
+test secrets::tests::recipient_parsing_is_strict ... ok
+test secrets::tests::short_passphrases_are_refused_for_encryption_only ... ok
+test secrets::tests::plaintext_buffer_does_not_reallocate ... ok
+test secrets::tests::size_caps_apply_to_plaintext_and_ciphertext ... ok
+test secrets::tests::tamper_error_classes_are_accurate ... ok
+test secrets::tests::truncation_at_chunk_boundaries_is_detected ... ok
+test secrets_cli::tests::display_helpers ... ok
+test secrets_cli::tests::exclusive_create_never_replaces_and_cleans_up ... ok
+test sshconfig::tests::builtin_defaults_without_ssh_config ... ok
+test sshconfig::tests::default_ssh_g_keeps_known_hosts_default_and_expands_keys ... ok
+test sshconfig::tests::explicit_values_override_ssh_config ... ok
+test sshconfig::tests::host_argument_validation ... ok
+test sshconfig::tests::identity_agent_forms ... ok
+test sshconfig::tests::missing_user_without_env_is_an_error ... ok
+test sshconfig::tests::parses_ssh_g_output ... ok
+test sshconfig::tests::percent_tokens_expand ... ok
+test sshconfig::tests::proxy_settings_fail_closed ... ok
+test sshconfig::tests::ssh_config_supplies_connection_parameters ... ok
+test style::tests::disabled_paint_is_identity ... ok
+test style::tests::dumb_terminal_disables_color ... ok
+test style::tests::leading_token_paints_only_known_status ... ok
+test style::tests::neutral_is_never_painted ... ok
+test style::tests::no_color_disables_color ... ok
+test style::tests::non_tty_disables_color ... ok
+test style::tests::paint_keeps_padding_outside_escape ... ok
+test secrets::tests::tampering_and_truncation_fail_closed ... ok
+test style::tests::tones_for_status_tokens ... ok
+test style::tests::tty_enables_color ... ok
+test targetfs::tests::a_mutation_makes_the_next_lookup_live_and_current ... ok
+test targetfs::tests::a_sensitive_primary_gid_lookup_is_redacted_in_the_log ... ok
+test targetfs::tests::a_sensitive_primary_gid_lookup_never_reads_the_memo ... ok
+test targetfs::tests::a_sensitive_primary_gid_lookup_never_writes_the_memo ... ok
+test targetfs::tests::a_sensitive_resource_gets_no_diagnostic_of_the_target_from_a_staging_step ... ok
+test targetfs::tests::absence_contract_accepts_only_a_clean_recognized_missing_result ... ok
+test targetfs::tests::absence_contract_accepts_the_uutils_errno_suffixed_missing_result ... ok
+test targetfs::tests::absence_contract_rejects_a_malformed_or_extended_errno_suffix ... ok
+test targetfs::tests::absence_contract_rejects_a_marker_mixed_with_another_error ... ok
+test targetfs::tests::absence_contract_rejects_a_missing_extra_blank_record ... ok
+test targetfs::tests::absence_contract_rejects_a_permission_error_with_misleading_text ... ok
+test targetfs::tests::absence_contract_rejects_a_truncated_missing_diagnostic ... ok
+test targetfs::tests::absence_contract_rejects_a_wrong_errno_suffix ... ok
+test targetfs::tests::absence_contract_rejects_an_unexpected_program_identity ... ok
+test targetfs::tests::absence_contract_rejects_an_unknown_diagnostic ... ok
+test targetfs::tests::absence_contract_rejects_an_unterminated_diagnostic ... ok
+test targetfs::tests::absence_contract_rejects_invalid_bytes ... ok
+test targetfs::tests::absence_contract_rejects_stdout_alongside_the_marker ... ok
+test targetfs::tests::absence_contract_rejects_the_recognized_wording_for_another_path ... ok
+test targetfs::tests::acl_complete_with_extended ... ok
+test targetfs::tests::acl_complete_without_extended ... ok
+test targetfs::tests::acl_empty_is_incomplete ... ok
+test targetfs::tests::acl_malformed_base_entry_is_malformed ... ok
+test targetfs::tests::acl_missing_base_entry_is_incomplete ... ok
+test targetfs::tests::acl_permission_positions_are_strict ... ok
+test targetfs::tests::base64_decode_roundtrip ... ok
+test targetfs::tests::base64_roundtrip_known ... ok
+test targetfs::tests::every_mutating_operation_empties_the_memo ... ok
+test targetfs::tests::memo_answers_a_repeated_lookup_without_a_second_command ... ok
+test targetfs::tests::memo_distinguishes_a_uid_from_the_primary_gid_of_that_uid ... ok
+test targetfs::tests::memo_does_not_cache_a_missing_account ... ok
+test targetfs::tests::memo_does_not_cache_failed_or_malformed_lookups ... ok
+test targetfs::tests::memo_keeps_user_and_group_namespaces_apart ... ok
+test targetfs::tests::memo_looks_up_each_distinct_identity_once ... ok
+test targetfs::tests::memo_never_stores_or_reads_a_sensitive_lookup ... ok
+test targetfs::tests::memo_stores_only_a_number_never_the_record ... ok
+test targetfs::tests::memos_of_two_targets_never_share_an_answer ... ok
+test targetfs::tests::missing_getfattr_yields_an_actionable_refusal_reason ... ok
+test targetfs::tests::observations_do_not_empty_the_memo ... ok
+test targetfs::tests::other_security_attrs_still_unsafe ... ok
+test targetfs::tests::path_c_accepts_real_captures_of_safe_chains_from_every_tool_family ... ok
+test targetfs::tests::path_c_access_affecting_attributes_refuse_and_benign_ones_pass ... ok
+test targetfs::tests::path_c_attributes_real_getfattr_blocks_to_their_ancestors ... ok
+test targetfs::tests::path_c_batch_commands_are_direct_argv ... ok
+test targetfs::tests::fs2_a_shared_directory_is_accepted_only_when_sticky_and_trusted ... ok
+test targetfs::tests::path_c_batch_requests_are_counted_as_one_command_each ... ok
+test targetfs::tests::path_c_batched_grammar_is_as_strict_as_the_sequential_grammar ... ok
+test targetfs::tests::path_c_branch_follows_the_getfacl_capability_and_nothing_else ... ok
+test targetfs::tests::path_c_control_characters_select_the_sequential_walk ... ok
+test targetfs::tests::path_c_does_not_require_one_device_across_the_ancestors ... ok
+test targetfs::tests::path_c_empty_clean_getfattr_means_no_attributes ... ok
+test targetfs::tests::path_c_getfacl_present_walk_is_the_unchanged_sequential_walk ... ok
+test targetfs::tests::path_c_first_failing_ancestor_decides_the_reason_in_ancestor_order ... ok
+test targetfs::tests::path_c_getfattr_batch_attributes_each_block_to_its_own_ancestor ... ok
+test targetfs::tests::path_c_guard_counts_the_sudo_wrapper_and_quoting ... ok
+test targetfs::tests::path_c_getfattr_batch_failures_refuse_without_retry ... ok
+test targetfs::tests::path_c_indeterminate_stat_batch_is_an_indeterminate_error ... ok
+test targetfs::tests::path_c_issues_exactly_two_commands_for_any_depth ... ok
+test targetfs::tests::path_c_missing_ancestor_is_a_refusal_with_one_command ... ok
+test targetfs::tests::path_c_missing_getfattr_keeps_the_existing_actionable_refusal ... ok
+test targetfs::tests::path_c_numeric_and_timestamp_corruption_is_refused_at_every_position ... ok
+test targetfs::tests::path_c_refuses_a_real_partial_stat_failure ... ok
+test targetfs::tests::path_c_refuses_real_acl_captures_at_whichever_gate_sees_them ... ok
+test targetfs::tests::path_c_refuses_real_captures_of_unsafe_chains ... ok
+test targetfs::tests::path_c_same_filesystem_stays_a_separate_fresh_observation ... ok
+test targetfs::tests::path_c_matches_the_sequential_walk_on_every_trust_decision ... ok
+test targetfs::tests::path_c_size_guard_is_exact_and_decided_before_dispatch ... ok
+test targetfs::tests::path_c_stat_batch_failures_refuse_before_getfattr_and_never_retry ... ok
+test targetfs::tests::path_c_stat_batch_message_does_not_expose_the_capture ... ok
+test targetfs::tests::path_c_uninspectable_parent_fault_uses_the_sequential_walk ... ok
+test targetfs::tests::path_c_unusual_file_names_are_attributed_exactly ... ok
+test targetfs::tests::path_c_walks_are_independent_invocations ... ok
+test targetfs::tests::readlink_contract_accepts_a_complete_single_target ... ok
+test targetfs::tests::readlink_contract_rejects_a_diagnostic_alongside_the_target ... ok
+test targetfs::tests::readlink_contract_rejects_a_forbidden_trailing_newline ... ok
+test targetfs::tests::readlink_contract_rejects_a_target_with_extra_output ... ok
+test targetfs::tests::readlink_contract_rejects_invalid_utf8 ... ok
+test targetfs::tests::path_c_unsafe_stat_record_never_reaches_getfattr ... ok
+test targetfs::tests::readlink_contract_rejects_truncation_even_when_the_target_matches ... ok
+test targetfs::tests::selinux_label_is_preservable_not_unsafe ... ok
+test targetfs::tests::sha256_contract_accepts_a_complete_matching_record ... ok
+test targetfs::tests::sha256_contract_accepts_the_coreutils_escaped_name_form ... ok
+test targetfs::tests::sha256_contract_rejects_a_malformed_short_hash ... ok
+test targetfs::tests::sha256_contract_rejects_a_non_hex_digest ... ok
+test targetfs::tests::sha256_contract_rejects_a_record_about_a_different_path ... ok
+test targetfs::tests::sha256_contract_rejects_a_record_without_the_defined_terminator ... ok
+test targetfs::tests::sha256_contract_rejects_a_valid_digest_with_malformed_trailing_structure ... ok
+test targetfs::tests::sha256_contract_rejects_an_expected_prefix_with_truncated_remainder ... ok
+test targetfs::tests::sha256_contract_rejects_invalid_utf8 ... ok
+test targetfs::tests::sha256_contract_rejects_stderr_alongside_a_valid_record ... ok
+test targetfs::tests::sha256_contract_rejects_unexpected_multiple_result_lines ... ok
+test targetfs::tests::single_operand_getfattr_interpretation_is_unchanged ... ok
+test targetfs::tests::staging_refuses_an_owner_the_tree_or_the_shared_directory_does_not_allow ... ok
+test targetfs::tests::stat_contract_accepts_a_complete_record ... ok
+test targetfs::tests::stat_contract_proves_absence_only_with_a_clean_missing_result ... ok
+test targetfs::tests::stat_contract_rejects_a_malformed_timestamp_field ... ok
+test targetfs::tests::stat_contract_rejects_a_missing_field ... ok
+test targetfs::tests::stat_contract_rejects_a_missing_terminator ... ok
+test targetfs::tests::stat_contract_rejects_an_extra_ambiguous_field ... ok
+test targetfs::tests::stat_contract_rejects_an_extra_blank_record ... ok
+test targetfs::tests::stat_contract_rejects_an_invalid_numeric_field ... ok
+test targetfs::tests::stat_contract_rejects_trailing_bytes_after_the_record ... ok
+test targetfs::tests::stat_contract_rejects_unexpected_diagnostic_output ... ok
+test targetfs::tests::stat_contract_treats_a_valid_wrong_type_as_drift_evidence ... ok
+test targetfs::tests::stat_contract_treats_an_unknown_diagnostic_as_an_error_not_absence ... ok
+test targetfs::tests::stat_contract_treats_truncated_output_as_incomplete ... ok
+test targetfs::tests::timestamp_field_shape_is_strict ... ok
+test targetfs::tests::xattr_encoded_values_validated ... ok
+test targets::tests::loads_sorted_names ... ok
+test targets::tests::malformed_toml_fails_closed ... ok
+test targets::tests::missing_file_fails_closed ... ok
+test toml_front::tests::parses_basic_types ... ok
+test toml_front::tests::rejects_datetime ... ok
+test toml_front::tests::rejects_non_finite ... ok
+test yaml::tests::parses_simple_mapping ... ok
+test yaml::tests::quoted_numbers_are_strings ... ok
+test yaml::tests::rejects_aliases_and_anchors ... ok
+test yaml::tests::rejects_duplicate_keys ... ok
+test yaml::tests::rejects_merge_keys ... ok
+test yaml::tests::rejects_multiple_documents ... ok
+test yaml::tests::rejects_non_finite_floats ... ok
+test targets::tests::invalid_profile_fails_closed ... ok
+test progress_tty::tests::a_really_stalled_terminal_costs_one_bound_and_recovers_when_it_drains ... ok
+test secrets::tests::opaque_bytes_roundtrip_exactly ... ok
+test secrets::tests::age_forbids_mixing_a_passphrase_with_recipients ... ok
+test secrets::tests::passphrase_work_factor_is_fixed_and_ceiling_is_enforced ... ok
+test secrets::tests::protect_identity_uses_the_default_work_factor_path ... ok
+test progress_tty::tests::the_formatter_never_panics_and_never_exceeds_the_budget ... ok
+
+test result: ok. 482 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.91s
+
+     Running unittests src/main.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/sinter-98b363cddfec694d)
+
+running 30 tests
+{
+  "facts": {
+    "arch": "x86_64",
+    "hostname": "ubuntu2404.test",
+    "os_family": "debian",
+    "os_name": "Ubuntu",
+    "os_version": "24.04"
+  },
+  "handlers": [],
+  "handlers_pending": [],
+  "manager_reloads": [],
+  "mode": "plan",
+  "resources": [
+    {
+      "change": "changed",
+      "diff": {
+        "current": "absent",
+        "desired": "1 bytes",
+        "type": "summary"
+      },
+      "disposition": "normal",
+      "execution": "succeeded",
+      "id": "a",
+      "loop_index": null,
+      "notes": [
+        "needs root: /etc/perf belongs to root and is not writable by group or others, so uid 1000 cannot create, replace or remove entries in it; apply will fail unless the connection is root or --sudo is used"
+      ],
+      "origin": "/private/var/folders/wv/_1wt2_3d7dn6x9921mb0nssh0000gn/T/.tmp8tksig/r.yaml",
+      "reason": null,
+      "sensitive": false,
+      "type": "file",
+      "unknown": false,
+      "verification": "not_performed"
+    }
+  ],
+  "status": "success"
+}
+== Sinter PLAN ==
+target facts: hostname=ubuntu2404.test os=Ubuntu family=debian version=24.04 arch=x86_64
+
+CHANGED  a [file] known/normal 
+    current: absent
+    desired: 1 bytes
+
+summary: 1 changed, 0 possible, 0 failed, 0 indeterminate, 1 total
+status: success
+test tests::a_connect_failure_ends_the_run_and_returns_the_unchanged_error ... ok
+test tests::a_resolve_failure_ends_the_run ... ok
+test tests::a_disabled_mode_builds_no_session_at_all ... ok
+test tests::a_bundle_with_one_secret_recipe_suppresses_its_resolution_scope ... ok
+== Sinter APPLY ==
+target facts: hostname=ubuntu2404.test os=Ubuntu family=debian version=24.04 arch=x86_64
+
+CHANGED  a [file] known/normal 
+
+summary: 1 changed, 0 possible, 0 failed, 0 indeterminate, 1 total
+status: success
+test tests::aggregate_exit_code_is_the_most_severe ... ok
+== Sinter APPLY ==
+target facts: hostname=mystery.test os=Mystery Linux family=mysteryos version=1 arch=x86_64
+
+FAILED  acct [user] known/normal <redacted>
+
+summary: 0 changed, 0 possible, 1 failed, 0 indeterminate, 1 total
+status: apply_failed
+test tests::a_failing_execution_does_not_disturb_the_others_in_plan ... ok
+test tests::a_bundle_on_localhost_has_one_scope_per_recipe_and_no_resolution_scope ... ok
+test tests::an_inventory_failure_ends_the_resolution_scope ... ok
+test tests::apply_stops_on_every_non_zero_exit_code ... ok
+== Sinter AUDIT ==
+DRIFT a [file]
+    state: observed=absent desired=file
+summary: 1 total, 0 compliant, 1 drifted, 0 not_auditable, 0 not_applicable, 0 errors
+status: drift
+== Sinter AUDIT ==
+ERROR acct [user]
+    reason: observation failed (details redacted)
+summary: 1 total, 0 compliant, 0 drifted, 0 not_auditable, 0 not_applicable, 1 errors
+status: indeterminate
+test tests::a_plain_run_prints_bounded_lines_for_every_command ... ok
+== Sinter PLAN ==
+target facts: hostname=ubuntu2404.test os=Ubuntu family=debian version=24.04 arch=x86_64
+
+CHANGED  a [file] known/normal 
+    current: absent
+    desired: 1 bytes
+
+summary: 1 changed, 0 possible, 0 failed, 0 indeterminate, 1 total
+status: success
+test tests::a_secret_reference_is_reported_to_the_consumer_and_stays_out_of_every_stream ... ok
+{
+  "mode": "audit",
+  "resources": [
+    {
+      "details": [
+        {
+          "desired": "file",
+          "dimension": "state",
+          "observed": "absent"
+        }
+      ],
+      "id": "a",
+      "loop_index": null,
+      "origin": "/private/var/folders/wv/_1wt2_3d7dn6x9921mb0nssh0000gn/T/.tmpih84Ns/r.yaml",
+      "reason": null,
+      "sensitive": false,
+      "status": "drift",
+      "type": "file"
+    }
+  ],
+  "status": "drift",
+  "summary": {
+    "compliant": 0,
+    "drifted": 1,
+    "errors": 0,
+    "not_applicable": 0,
+    "not_auditable": 0,
+    "total": 1
+  }
+}
+{
+  "facts": {
+    "arch": "x86_64",
+    "hostname": "ubuntu2404.test",
+    "os_family": "debian",
+    "os_name": "Ubuntu",
+    "os_version": "24.04"
+  },
+  "handlers": [],
+  "handlers_pending": [],
+  "manager_reloads": [],
+  "mode": "plan",
+  "resources": [
+    {
+      "change": "changed",
+      "diff": {
+        "current": "absent",
+        "desired": "1 bytes",
+        "type": "summary"
+      },
+      "disposition": "normal",
+      "execution": "succeeded",
+      "id": "a",
+      "loop_index": null,
+      "notes": [
+        "needs root: /etc/perf belongs to root and is not writable by group or others, so uid 1000 cannot create, replace or remove entries in it; apply will fail unless the connection is root or --sudo is used"
+      ],
+      "origin": "/private/var/folders/wv/_1wt2_3d7dn6x9921mb0nssh0000gn/T/.tmpByCGGf/r.yaml",
+      "reason": null,
+      "sensitive": false,
+      "type": "file",
+      "unknown": false,
+      "verification": "not_performed"
+    }
+  ],
+  "status": "success"
+}
+test tests::audit_drift_completes_the_run ... ok
+test tests::json_never_enables_progress_whatever_the_terminal ... ok
+test tests::a_secret_bearing_recipe_never_draws_on_a_terminal ... ok
+== Sinter APPLY ==
+target facts: hostname=ubuntu2404.test os=Ubuntu family=debian version=24.04 arch=x86_64
+
+CHANGED  a [file] known/normal 
+
+summary: 1 changed, 0 possible, 0 failed, 0 indeterminate, 1 total
+status: success
+== Sinter PLAN ==
+target facts: hostname=ubuntu2404.test os=Ubuntu family=debian version=24.04 arch=x86_64
+
+CHANGED  a [file] known/normal 
+    current: absent
+    desired: 1 bytes
+
+summary: 1 changed, 0 possible, 0 failed, 0 indeterminate, 1 total
+status: success
+test tests::apply_that_stops_gives_the_unrun_executions_no_session ... ok
+test tests::json_and_disabled_modes_never_reach_the_renderer ... ok
+== Sinter AUDIT ==
+DRIFT a [file]
+    state: observed=absent desired=file
+summary: 1 total, 0 compliant, 1 drifted, 0 not_auditable, 0 not_applicable, 0 errors
+status: drift
+== Sinter APPLY ==
+target facts: hostname=mystery.test os=Mystery Linux family=mysteryos version=1 arch=x86_64
+
+FAILED  acct [user] known/normal <redacted>
+
+summary: 0 changed, 0 possible, 1 failed, 0 indeterminate, 1 total
+status: apply_failed
+test tests::an_eligible_run_draws_a_transient_line_and_leaves_the_terminal_clean ... ok
+{
+  "facts": {
+    "arch": "x86_64",
+    "hostname": "ubuntu2404.test",
+    "os_family": "debian",
+    "os_name": "Ubuntu",
+    "os_version": "24.04"
+  },
+  "handlers": [],
+  "handlers_pending": [],
+  "manager_reloads": [],
+  "mode": "plan",
+  "resources": [
+    {
+      "change": "changed",
+      "diff": {
+        "current": "absent",
+        "desired": "1 bytes",
+        "type": "summary"
+      },
+      "disposition": "normal",
+      "execution": "succeeded",
+      "id": "a",
+      "loop_index": null,
+      "notes": [
+        "needs root: /etc/perf belongs to root and is not writable by group or others, so uid 1000 cannot create, replace or remove entries in it; apply will fail unless the connection is root or --sudo is used"
+      ],
+      "origin": "/private/var/folders/wv/_1wt2_3d7dn6x9921mb0nssh0000gn/T/.tmpWgL6sp/r.yaml",
+      "reason": null,
+      "sensitive": false,
+      "type": "file",
+      "unknown": false,
+      "verification": "not_performed"
+    }
+  ],
+  "status": "success"
+}
+test tests::read_only_phases_never_stop ... ok
+{
+  "facts": {
+    "arch": "x86_64",
+    "hostname": "ubuntu2404.test",
+    "os_family": "debian",
+    "os_name": "Ubuntu",
+    "os_version": "24.04"
+  },
+  "handlers": [],
+  "handlers_pending": [],
+  "manager_reloads": [],
+  "mode": "apply",
+  "resources": [
+    {
+      "change": "changed",
+      "diff": null,
+      "disposition": "normal",
+      "execution": "succeeded",
+      "id": "a",
+      "loop_index": null,
+      "notes": [],
+      "origin": "/private/var/folders/wv/_1wt2_3d7dn6x9921mb0nssh0000gn/T/.tmpByCGGf/r.yaml",
+      "reason": null,
+      "sensitive": false,
+      "type": "file",
+      "unknown": false,
+      "verification": "verified"
+    }
+  ],
+  "status": "success"
+}
+test tests::json_stays_silent_whatever_mode_a_plain_request_would_pick ... ok
+== Sinter PLAN ==
+target facts: hostname=ubuntu2404.test os=Ubuntu family=debian version=24.04 arch=x86_64
+
+CHANGED  p [package] known/normal 
+    current: absent
+    desired: installed
+
+summary: 1 changed, 0 possible, 0 failed, 0 indeterminate, 1 total
+status: success
+{
+  "mode": "audit",
+  "resources": [
+    {
+      "details": [
+        {
+          "desired": "file",
+          "dimension": "state",
+          "observed": "absent"
+        }
+      ],
+      "id": "a",
+      "loop_index": null,
+      "origin": "/private/var/folders/wv/_1wt2_3d7dn6x9921mb0nssh0000gn/T/.tmpByCGGf/r.yaml",
+      "reason": null,
+      "sensitive": false,
+      "status": "drift",
+      "type": "file"
+    }
+  ],
+  "status": "drift",
+  "summary": {
+    "compliant": 0,
+    "drifted": 1,
+    "errors": 0,
+    "not_applicable": 0,
+    "not_auditable": 0,
+    "total": 1
+  }
+}
+== Sinter AUDIT ==
+ERROR acct [user]
+    reason: observation failed (details redacted)
+summary: 1 total, 0 compliant, 0 drifted, 0 not_auditable, 0 not_applicable, 1 errors
+status: indeterminate
+== Sinter PLAN ==
+target facts: hostname=ubuntu2404.test os=Ubuntu family=debian version=24.04 arch=x86_64
+
+CHANGED  p [package] known/normal 
+    current: absent
+    desired: installed
+
+summary: 1 changed, 0 possible, 0 failed, 0 indeterminate, 1 total
+status: success
+== Sinter PLAN ==
+target facts: hostname=ubuntu2404.test os=Ubuntu family=debian version=24.04 arch=x86_64
+
+CHANGED  p [package] known/normal 
+    current: absent
+    desired: installed
+
+summary: 1 changed, 0 possible, 0 failed, 0 indeterminate, 1 total
+status: success
+test tests::plain_progress_reports_every_failure_with_a_word_and_never_a_message ... ok
+test tests::each_command_reports_its_own_run_kind ... ok
+== Sinter PLAN ==
+target facts: hostname=ubuntu2404.test os=Ubuntu family=debian version=24.04 arch=x86_64
+
+CHANGED  p [package] known/normal 
+    current: absent
+    desired: installed
+
+summary: 1 changed, 0 possible, 0 failed, 0 indeterminate, 1 total
+status: success
+{
+  "facts": {
+    "arch": "x86_64",
+    "hostname": "ubuntu2404.test",
+    "os_family": "debian",
+    "os_name": "Ubuntu",
+    "os_version": "24.04"
+  },
+  "handlers": [],
+  "handlers_pending": [],
+  "manager_reloads": [],
+  "mode": "plan",
+  "resources": [
+    {
+      "change": "changed",
+      "diff": {
+        "current": "absent",
+        "desired": "1 bytes",
+        "type": "summary"
+      },
+      "disposition": "normal",
+      "execution": "succeeded",
+      "id": "a",
+      "loop_index": null,
+      "notes": [
+        "needs root: /etc/perf belongs to root and is not writable by group or others, so uid 1000 cannot create, replace or remove entries in it; apply will fail unless the connection is root or --sudo is used"
+      ],
+      "origin": "/private/var/folders/wv/_1wt2_3d7dn6x9921mb0nssh0000gn/T/.tmpRssMDT/r.yaml",
+      "reason": null,
+      "sensitive": false,
+      "type": "file",
+      "unknown": false,
+      "verification": "not_performed"
+    }
+  ],
+  "status": "success"
+}
+test tests::multiple_executions_leave_one_clean_line_each_and_no_accumulation ... ok
+test tests::single_recipe_is_one_valid_run_covering_connect_and_resources ... ok
+test tests::a_secret_bearing_recipe_prints_no_plain_progress_either ... ok
+test tests::plain_multiple_executions_are_delimited_run_by_run ... ok
+{
+  "facts": {
+    "arch": "x86_64",
+    "hostname": "ubuntu2404.test",
+    "os_family": "debian",
+    "os_name": "Ubuntu",
+    "os_version": "24.04"
+  },
+  "handlers": [],
+  "handlers_pending": [],
+  "manager_reloads": [],
+  "mode": "plan",
+  "resources": [
+    {
+      "change": "changed",
+      "diff": {
+        "current": "absent",
+        "desired": "1 bytes",
+        "type": "summary"
+      },
+      "disposition": "normal",
+      "execution": "succeeded",
+      "id": "a",
+      "loop_index": null,
+      "notes": [
+        "needs root: /etc/perf belongs to root and is not writable by group or others, so uid 1000 cannot create, replace or remove entries in it; apply will fail unless the connection is root or --sudo is used"
+      ],
+      "origin": "/private/var/folders/wv/_1wt2_3d7dn6x9921mb0nssh0000gn/T/.tmpYdt0RA/r.yaml",
+      "reason": null,
+      "sensitive": false,
+      "type": "file",
+      "unknown": false,
+      "verification": "not_performed"
+    }
+  ],
+  "status": "success"
+}
+test tests::the_line_is_erased_on_every_failure_path ... ok
+test tests::without_ssh_config_there_is_no_resolve_stage ... ok
+test tests::without_ssh_config_the_resolution_scope_has_no_stage ... ok
+{
+  "facts": {
+    "arch": "x86_64",
+    "hostname": "ubuntu2404.test",
+    "os_family": "debian",
+    "os_name": "Ubuntu",
+    "os_version": "24.04"
+  },
+  "handlers": [],
+  "handlers_pending": [],
+  "manager_reloads": [],
+  "mode": "plan",
+  "resources": [
+    {
+      "change": "changed",
+      "diff": {
+        "current": "absent",
+        "desired": "1 bytes",
+        "type": "summary"
+      },
+      "disposition": "normal",
+      "execution": "succeeded",
+      "id": "a",
+      "loop_index": null,
+      "notes": [
+        "needs root: /etc/perf belongs to root and is not writable by group or others, so uid 1000 cannot create, replace or remove entries in it; apply will fail unless the connection is root or --sudo is used"
+      ],
+      "origin": "/private/var/folders/wv/_1wt2_3d7dn6x9921mb0nssh0000gn/T/.tmpkxOJ8b/r.yaml",
+      "reason": null,
+      "sensitive": false,
+      "type": "file",
+      "unknown": false,
+      "verification": "not_performed"
+    }
+  ],
+  "status": "success"
+}
+test tests::single_host_resolution_is_a_stage_of_the_run ... ok
+test tests::inventory_runs_have_a_resolution_scope_then_one_scope_per_execution ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/accounts.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/accounts-8c4657c6f093ce70)
+
+running 72 tests
+test a_sensitive_consumer_deferred_to_an_earlier_producer_names_no_account ... ok
+test a_blocked_same_named_group_neither_refuses_the_user_in_plan_nor_in_apply ... ok
+test a_group_that_runs_earlier_is_known_to_plan_without_depends_on ... ok
+test account_commands_are_fixed_executables_with_argv_only ... ok
+test an_earlier_producer_whose_condition_plan_cannot_decide_defers_instead_of_failing ... ok
+test a_same_named_group_that_certainly_runs_earlier_is_refused_in_plan_as_in_apply ... ok
+test an_indeterminate_account_command_is_possible_change_and_indeterminate ... ok
+test a_group_that_runs_later_is_still_a_plan_error_as_it_is_an_apply_error ... ok
+test failed_user_stops_its_dependents ... ok
+test audit_of_accounts_declared_in_order_without_depends_on_is_not_deferred_or_compliant ... ok
+test audit_and_plan_never_run_an_account_mutation ... ok
+test an_earlier_producer_that_is_skipped_or_absent_does_not_cover_the_consumer ... ok
+test consumer_of_a_deferred_user_is_unknown_not_unchanged ... ok
+test an_earlier_producer_blocked_by_its_own_dependency_does_not_cover_the_consumer ... ok
+test file_group_naming_a_created_group_is_deferred_with_explicit_depends_on ... ok
+test group_absent_audit_reports_a_present_group_as_drift ... ok
+test group_absent_deletes_without_touching_anything_else ... ok
+test group_absent_refuses_a_users_primary_group ... ok
+test group_absent_refuses_the_root_group ... ok
+test group_absent_when_already_absent_is_unchanged ... ok
+test account_ids_are_range_checked_and_root_ids_are_never_declarable ... ok
+test group_apply_creates_with_exact_argv_and_verifies ... ok
+test group_create_refuses_a_gid_already_in_use ... ok
+test group_audit_dimensions ... ok
+test group_failed_command_is_reported_as_possible_change_and_fails_dependents ... ok
+test group_default_state_is_present_and_gid_is_optional ... ok
+test file_owner_naming_a_created_user_is_deferred_only_with_explicit_depends_on ... ok
+test group_gid_mismatch_is_refused_not_renumbered ... ok
+test group_plan_reports_a_create_and_mutates_nothing ... ok
+test group_matching_is_idempotent ... ok
+test group_local_lookup_that_getent_cannot_do_fails_closed ... ok
+test group_success_without_effect_fails_verification ... ok
+test group_provided_only_by_nss_is_an_error_never_a_create ... ok
+test group_then_user_with_depends_on_plans_deferred_and_applies_in_order ... ok
+test interpolated_and_looped_names_resolve_before_use ... ok
+test local_lookup_is_always_files_only_before_any_decision ... ok
+test owner_deferral_requires_a_confirmed_absence ... ok
+test account_names_are_validated ... ok
+test sensitive_errors_do_not_carry_ids ... ok
+test group_user_file_in_declaration_order_without_depends_on_plans_and_applies_alike ... ok
+test sensitive_plan_diffs_are_redacted_at_the_result_level ... ok
+test sensitive_account_resources_redact_names_in_commands_and_errors ... ok
+test several_earlier_producers_cover_user_groups_and_file_owner_and_group ... ok
+test two_resources_may_not_manage_the_same_account ... ok
+test nss_only_primary_or_supplementary_group_is_an_error ... ok
+test user_absent_deletes_without_removing_the_home_or_files ... ok
+test user_absent_reports_the_private_group_userdel_removed ... ok
+test truncated_or_multi_record_getent_output_fails_closed ... ok
+test user_already_a_member_needs_no_usermod ... ok
+test service_account_unit_group_user_directory_file_applies_end_to_end ... ok
+test user_absent_when_already_absent_is_unchanged ... ok
+test user_audit_compliant_absent_and_missing ... ok
+test user_audit_reports_each_declared_dimension_independently ... ok
+test user_failure_after_effect_still_reports_possible_change ... ok
+test user_audit_with_a_missing_group_is_drift_not_an_error ... ok
+test user_create_refuses_a_uid_already_in_use ... ok
+test user_absent_refuses_root_and_the_executing_and_session_accounts ... ok
+test user_created_without_group_reports_the_private_group ... ok
+test user_minimal_create_is_explicit_about_the_home_directory ... ok
+test user_uid_mismatch_is_refused_and_nothing_is_run ... ok
+test user_full_create_uses_exact_argv ... ok
+test user_matching_is_idempotent_and_unmanaged_dimensions_are_ignored ... ok
+test user_success_without_effect_fails_verification ... ok
+test user_provided_only_by_nss_is_never_created ... ok
+test user_with_a_missing_group_and_no_dependency_is_an_error ... ok
+test user_with_running_processes_fails_truthfully ... ok
+test user_update_is_one_usermod_and_membership_is_additive ... ok
+test user_with_one_covered_and_one_uncovered_missing_group_is_an_error ... ok
+test user_without_group_is_refused_when_a_same_named_group_exists ... ok
+test user_without_group_is_refused_when_a_dependency_creates_the_same_name ... ok
+test unsupported_fields_are_rejected ... ok
+test user_paths_and_groups_are_validated ... ok
+
+test result: ok. 72 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/audit.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/audit-0f3f61eb54d3385a)
+
+running 83 tests
+test audit_allowlist_rejects_shell_construction_in_arguments ... ok
+test audit_allowlist_accepts_every_defined_observation_shape ... ok
+test audit_allowlist_rejects_loose_package_and_service_shapes ... ok
+test audit_absence_truncated_diagnostic_is_error ... ok
+test audit_absence_marker_mixed_with_another_error_is_error_not_drift ... ok
+test audit_command_is_not_auditable_and_never_dispatched ... ok
+test audit_absence_permission_error_with_misleading_text_is_error ... ok
+test audit_cli_outputs_never_leak_sensitive_values ... ok
+test audit_absence_clean_recognized_marker_is_drift_for_a_present_desire ... ok
+test audit_dependency_drift_does_not_block_independent_observation ... ok
+test audit_dpkg_exit_zero_truncated_stdout_is_error_not_present ... ok
+test audit_dpkg_exit_one_ambiguous_absence_is_error_not_absent ... ok
+test audit_dnf_backend_dispatches_no_snapshot_or_mutation ... ok
+test audit_dpkg_exit_one_unrelated_error_is_error_not_absent ... ok
+test audit_dpkg_exit_zero_malformed_status_is_error ... ok
+test audit_exit_code_error_dominates_drift ... ok
+test audit_exit_code_compliant_is_zero ... ok
+test audit_dpkg_exit_zero_unexpected_diagnostic_is_error ... ok
+test absence_extra_blank_is_error_never_absent_or_pass ... ok
+test audit_exit_code_drift_is_seven ... ok
+test audit_interpolated_invalid_link_state_is_error_not_compliant ... ok
+test audit_exit_code_not_applicable_and_not_auditable_only_is_zero ... ok
+test audit_loop_expands_and_audits_each_item ... ok
+test audit_package_query_failure_is_error_not_drift ... ok
+test audit_notify_never_queues_and_handlers_never_run ... ok
+test audit_interpolated_valid_link_state_is_unchanged ... ok
+test audit_package_clean_present_and_absent_still_classify ... ok
+test audit_json_output_structure ... ok
+test audit_package_states ... ok
+test audit_output_order_is_deterministic_dependency_order ... ok
+test audit_refuses_mutation_enabled_engine ... ok
+test audit_register_unavailable_with_value_is_not_auditable ... ok
+test audit_readlink_captured_target_matches_but_truncated_is_error ... ok
+test audit_report_renders_labels ... ok
+test audit_rpm_exit_code_inconsistent_with_output_is_error ... ok
+test audit_readlink_complete_match_is_pass_and_dangling_target_is_fine ... ok
+test audit_rpm_exit_zero_contradictory_diagnostic_is_error ... ok
+test audit_rpm_exit_zero_malformed_output_is_error ... ok
+test audit_readlink_target_plus_diagnostic_is_error ... ok
+test audit_interpolated_invalid_state_is_error_for_every_path_resource ... ok
+test audit_rpm_exit_zero_truncated_output_is_error_not_installed ... ok
+test audit_sensitive_package_observation_error_does_not_leak ... ok
+test audit_sha256_complete_digest_match_is_pass ... ok
+test audit_sensitive_canary_never_appears ... ok
+test audit_sha256_complete_digest_mismatch_is_drift ... ok
+test audit_sensitive_observation_error_does_not_leak ... ok
+test audit_sha256_expected_prefix_plus_stderr_truncation_is_error_not_pass ... ok
+test audit_sha256_expected_prefix_plus_truncation_is_error_not_pass ... ok
+test audit_sha256_invalid_utf8_is_error ... ok
+test audit_sha256_malformed_short_hash_is_error ... ok
+test audit_service_states ... ok
+test audit_sha256_valid_digest_with_malformed_trailing_structure_is_error ... ok
+test audit_stat_extra_ambiguous_field_is_error ... ok
+test audit_sha256_unexpected_multiple_result_lines_is_error ... ok
+test audit_stat_invalid_numeric_field_is_error ... ok
+test audit_sha256_non_hex_digest_is_error ... ok
+test audit_status_labels_are_stable ... ok
+test audit_sha256_valid_record_with_stderr_is_error_not_pass ... ok
+test audit_service_missing_masked_static_are_drift_not_error ... ok
+test audit_stat_missing_field_is_error ... ok
+test audit_stat_unexpected_diagnostic_output_is_error ... ok
+test audit_template_unknown_register_in_when_is_not_auditable ... ok
+test audit_template_unknown_command_register_is_not_auditable ... ok
+test audit_text_output_is_deterministic_and_shows_all_statuses ... ok
+test audit_stat_valid_prefix_plus_truncation_is_error ... ok
+test audit_template_genuine_parse_error_is_error ... ok
+test audit_summary_aggregates_all_statuses ... ok
+test audit_template_genuine_render_error_is_error ... ok
+test package_name_option_injection_stays_rejected ... ok
+test readlink_invalid_utf8_is_error ... ok
+test readlink_different_complete_target_is_drift_and_prefix_extension_is_drift ... ok
+test dpkg_exact_records_still_classify ... ok
+test audit_when_variants ... ok
+test readlink_exact_match_still_passes_and_dangling_target_is_fine ... ok
+test rpm_exact_identity_and_exact_absence_are_the_only_passing_answers ... ok
+test stat_exact_record_still_comparators_and_absence_still_drifts ... ok
+test readlink_trailing_newline_is_error_never_pass ... ok
+test sensitive_framing_errors_never_leak_raw_observations ... ok
+test stat_valid_wrong_type_is_drift_and_encoding_failures_are_error ... ok
+test systemctl_observation_argv_is_option_injection_safe ... ok
+test dpkg_framing_violations_are_error_never_a_clean_state ... ok
+test stat_extra_blank_is_error_never_pass ... ok
+test rpm_malformed_nevra_is_error_never_present_or_pass ... ok
+
+test result: ok. 83 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/backup.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/backup-57a0113bd855f1d7)
+
+running 6 tests
+test valid_backup_declaration ... ok
+test recipes_without_backup_are_unchanged ... ok
+test toml_backup_declaration_is_equivalent ... ok
+test backup_paths_merge_across_includes_and_reject_duplicates ... ok
+test invalid_backup_declarations_are_schema_errors ... ok
+test validate_does_not_touch_backup_paths ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.86s
+
+     Running tests/backup_store_plan.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/backup_store_plan-49985f83e273efac)
+
+running 5 tests
+test without_a_backup_section_nothing_changes ... ok
+test an_existing_store_defers_nothing ... ok
+test only_the_first_missing_store_directory_is_the_planned_change ... ok
+test a_path_below_a_store_directory_apply_creates_is_deferred_not_refused ... ok
+test the_other_privilege_modes_store_and_unrelated_paths_stay_certain ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/cli.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/cli-912b55b5e6086544)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli_multihost.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/cli_multihost-2515b1eb50d05c4c)
+
+running 41 tests
+test duplicate_resolved_address_is_rejected_before_connecting ... ok
+test bundle_apply_stops_across_recipes ... ok
+test bundle_with_an_untargeted_recipe_fails_closed ... ok
+test aggregate_backup_record_follows_recipe_identity ... ok
+test apply_stops_at_the_first_failed_execution ... ok
+test bundle_on_one_explicit_host_runs_each_recipe_there ... ok
+test bundle_resolves_each_recipe_against_its_own_targets ... ok
+test host_and_group_targets_union ... ok
+test group_target_selects_only_its_members ... ok
+test aggregate_backup_record_per_phase ... ok
+test inventory_without_recipe_targets_fails_closed ... ok
+test no_color_disables_tty_color ... ok
+test json_is_never_colored_even_on_a_tty ... ok
+test no_ssh_config_skips_openssh ... ok
+test missing_script_fails_under_strict_mode ... ok
+test invalid_bundles_fail_validation ... ok
+test overlapping_selection_executes_each_host_once ... ok
+test shipped_multihost_example_resolves_as_documented ... ok
+test host_and_inventory_conflict ... ok
+test single_host_keeps_the_single_document_contract ... ok
+test single_host_json_has_no_execution_level_backup_field ... ok
+test read_only_phases_attempt_every_selected_host ... ok
+test malformed_and_missing_inventories_exit_2 ... ok
+test piped_output_is_never_colored ... ok
+test single_host_target ... ok
+test targets_in_an_included_file_are_rejected ... ok
+test text_output_shows_resolution_and_summary ... ok
+test unknown_target_names_fail_closed ... ok
+test unknown_or_misspelled_options_fail ... ok
+test tty_output_is_colored ... ok
+test validate_bundle ... ok
+test validate_recipe_only ... ok
+test validate_rejects_a_present_link_without_a_target ... ok
+test validate_rejects_invalid_link_state_and_empty_handler_service ... ok
+test validate_ignores_execution_options_without_reading_anything ... ok
+test validate_still_fails_on_bad_recipes ... ok
+test failing_ssh_config_evaluation_is_a_connect_error ... ok
+test proxy_jump_fails_closed ... ok
+test precedence_cli_over_inventory_over_ssh_config ... ok
+test ssh_config_supplies_hostname_port_user ... ok
+test skipped_hosts_are_never_resolved ... ok
+
+test result: ok. 41 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.51s
+
+     Running tests/command_budget.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/command_budget-fd7829a4be669c87)
+
+running 10 tests
+test baseline_setup_cost_is_six_commands_all_labelled_setup ... ok
+test compliant_files_report_no_change_in_this_harness ... ok
+test sensitive_requests_are_redacted_in_the_statistics ... ok
+test every_command_is_labelled_with_a_fixed_scope_and_scopes_add_up ... ok
+test budget_file_creation_apply ... ok
+test baseline_compliant_owned_file_costs_six_commands_in_plan_and_audit ... ok
+test budget_mixed_resources_plan ... ok
+test statistics_agree_with_the_command_log_in_plan_audit_and_apply ... ok
+test baseline_shared_owner_and_group_are_looked_up_once_per_run ... ok
+test budget_plan_and_audit_of_compliant_owned_files ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/commands.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/commands-d443ae9403fe7cb4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/daemon_reload.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/daemon_reload-a6ecc02d3a17fb87)
+
+running 89 tests
+test a07_stop_and_disable_then_remove_succeeds_with_final_flush ... ok
+test a06_removed_loaded_unit_is_not_reported_stopped ... ok
+test a02_changed_unit_reloads_then_observes_fresh_without_restart ... ok
+test a09_package_unit_already_loaded_needs_no_extra_reload ... ok
+test a03_changed_dropin_reloads_before_service_decision ... ok
+test a05_new_never_loaded_unit_is_started_after_reload ... ok
+test a01_a31_unchanged_service_and_second_apply_reload_zero ... ok
+test a04_new_unit_with_cached_not_found_is_discovered_by_reload ... ok
+test a11_wrong_unit_name_after_package_fails_without_a_retry_loop ... ok
+test a12_changed_package_and_stale_loaded_unit_reloads_before_the_decision ... ok
+test a14_stop_only_with_stale_unit_reloads_then_stops ... ok
+test a10_changed_package_with_cached_missing_unit_gets_one_discovery_reload ... ok
+test a13_start_only_with_stale_unit_reloads_then_starts ... ok
+test a17_enable_then_start_decides_from_a_fresh_observation ... ok
+test a18_changed_unit_notify_restart_reloads_manager_first ... ok
+test a15_a16_enable_and_disable_only_do_not_add_an_explicit_reload ... ok
+test a19_changed_unit_notify_reload_keeps_manager_and_application_reload_separate ... ok
+test a20_ordinary_application_config_restart_has_zero_manager_reloads ... ok
+test a21_many_unit_writes_before_services_share_one_reload ... ok
+test a23_one_covered_generation_is_not_reloaded_again_for_each_handler ... ok
+test a22_unit_service_unit_service_needs_a_reload_per_consumer_boundary ... ok
+test a24_file_only_final_flush_failure_fails_the_overall_apply ... ok
+test a25_handler_does_not_run_after_a_failed_reload ... ok
+test a28_audit_with_an_unusable_unit_path_is_an_error_not_a_pass ... ok
+test a29_final_flush_reload_succeeds_but_verification_show_fails ... ok
+test a24_file_only_unit_update_is_flushed_before_a_normal_finish ... ok
+test a29_handler_reload_succeeds_but_fresh_show_fails_so_no_restart ... ok
+test a30_the_decision_uses_the_observation_taken_after_the_reload ... ok
+test a28_unit_path_that_cannot_be_read_stops_before_any_mutation ... ok
+test a29_reload_succeeds_but_the_fresh_show_fails ... ok
+test a25_a45_reload_nonzero_stops_dependents_keeps_changes_and_never_retries ... ok
+test a26_reload_timeout_or_signal_is_indeterminate_not_success_or_unchanged ... ok
+test a33_same_mtime_change_by_sinter_is_still_reloaded_but_external_edit_is_not_seen ... ok
+test a32_metadata_only_and_unrelated_changes_do_not_reload ... ok
+test a38_an_earlier_failure_runs_no_handler_and_no_final_reload ... ok
+test a27_need_daemon_reload_that_cannot_be_read_never_becomes_no ... ok
+test a39_explicit_gate_and_native_enable_reload_are_separate ... ok
+test a40_plan_is_mutation_free_and_defers_instead_of_inventing_state ... ok
+test a37_unrelated_systemd_files_are_not_manager_input ... ok
+test a35_template_type_wide_and_prefix_dropins_are_recognized_without_a_unit_name ... ok
+test a36_system_conf_and_dropins_reload_but_user_conf_does_not ... ok
+test a43_roots_come_from_the_manager_not_from_a_fixed_directory ... ok
+test a47_stale_manager_after_a_previous_failed_apply_is_reloaded_when_bytes_already_match ... ok
+test a17_all_state_and_enabled_combinations_end_verified_from_fresh_observations ... ok
+test a34_alias_mask_and_wants_links_are_manager_input ... ok
+test a41_audit_reports_manager_reload_as_its_own_facet_and_never_reloads ... ok
+test a42_secret_unit_content_and_names_never_reach_any_report_surface ... ok
+test f01_a_link_and_a_file_in_manager_config_share_one_final_flush ... ok
+test f02_discovery_reload_still_missing_dispatches_no_service_mutation ... ok
+test f02_discovery_reload_found_but_still_stale_dispatches_no_service_mutation ... ok
+test f02_discovery_reload_then_observation_error_dispatches_no_service_mutation ... ok
+test f03_handler_path_with_a_sensitive_cause_never_leaks ... ok
+test f02_discovery_reload_with_a_valid_synchronized_state_mutates_from_it ... ok
+test a44_user_manager_paths_and_options_are_never_touched ... ok
+test f03_final_flush_failure_with_a_sensitive_cause_never_leaks ... ok
+test f03_observation_failures_in_a_sensitive_episode_never_leak ... ok
+test f03_without_a_sensitive_resource_the_diagnostic_is_kept ... ok
+test f03_sensitive_package_discovery_failure_never_leaks ... ok
+test f04_desired_absent_loaded_unit_without_a_stale_signal_states_its_limit ... ok
+test f04_desired_absent_unit_with_a_synchronized_manager_is_verified_not_assumed ... ok
+test f03_reload_failure_with_a_sensitive_producer_never_leaks ... ok
+test f01_unchanged_unrelated_and_user_manager_links_do_not_reload ... ok
+test f03_post_reload_show_failure_never_leaks_for_any_sensitivity_mix ... ok
+test f04_desired_absent_with_an_unobservable_manager_is_an_error_not_no_drift ... ok
+test f04_desired_absent_unit_that_the_manager_still_has_loaded_is_drift ... ok
+test fr2_reset_failed_runs_under_the_c_utf8_locale ... ok
+test f04_ordinary_and_user_manager_absent_paths_are_unaffected_and_audit_stays_read_only ... ok
+test f01_manager_config_symlink_create_replace_remove_and_mask_schedule_a_reload ... ok
+test fr2_incomplete_capture_of_either_stream_is_rejected ... ok
+test fr2_audit_counterexamples_are_rejected ... ok
+test fr2_signal_and_timeout_are_not_the_benign_case ... ok
+test fr2_formal_diagnostic_for_the_requested_unit_is_accepted_when_inactive ... ok
+test r1_missing_service_plan_is_an_error_when_the_manager_is_synchronized ... ok
+test plan_marks_stale_unit_unknown_and_lists_the_manager_operation_separately ... ok
+test fr2_successful_reset_failed_and_failed_stop_keep_their_paths ... ok
+test r2_already_stopped_loaded_unit_runs_neither_stop_nor_reset_failed ... ok
+test r1_missing_service_plan_stays_unknown_and_read_only_when_the_manager_is_stale ... ok
+test r2_enabled_running_unit_stop_then_reset_failed_succeeds ... ok
+test manager_reloads_json_is_additive_and_shaped ... ok
+test r2_not_loaded_without_authoritative_proof_stays_a_failure ... ok
+test fr2_formal_diagnostic_still_needs_a_fresh_inactive_observation ... ok
+test r2_stop_failure_stays_a_failure_and_never_reaches_reset_failed ... ok
+test r2_r3_unit_that_is_absent_keeps_the_documented_not_found_failure ... ok
+test r2_unreferenced_unit_unloaded_by_the_stop_is_not_a_failure ... ok
+test r4_audit_of_a_removed_but_running_unit_does_not_imply_it_stopped ... ok
+test removing_a_link_or_unit_in_plan_is_projected_but_never_executed ... ok
+test fr2_unit_identity_follows_the_requested_name_and_systemctls_mangling ... ok
+test r2_only_systemds_not_loaded_refusal_is_benign_and_everything_else_stays_a_failure ... ok
+test fr2_malformed_or_foreign_diagnostics_are_rejected ... ok
+
+test result: ok. 89 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/dependency_semantics.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/dependency_semantics-2378da2daa44dd33)
+
+running 15 tests
+test a_partly_converged_host_after_a_failed_apply_replans_only_what_is_left ... ok
+test a_resource_skipped_by_when_silently_blocks_its_dependents_so_recipes_never_depend_on_a_conditional_one ... ok
+test a_command_in_the_chain_makes_everything_after_it_unknown_in_plan_not_an_error ... ok
+test a_converged_host_plans_no_change_and_audits_compliant ... ok
+test a_config_change_restarts_only_through_the_declared_handler_once_and_only_when_it_changed ... ok
+test a_missing_parent_directory_is_not_noticed_by_plan_but_stops_apply ... ok
+test a_package_created_account_is_not_known_to_plan_before_the_package_exists ... ok
+test plan_refuses_a_missing_parent_unless_a_changing_dependency_could_create_it ... ok
+test a_user_and_group_resource_defers_the_file_it_owns_instead_of_failing_plan ... ok
+test depends_on_orders_package_then_config_then_service ... ok
+test a_restart_owed_to_a_changed_config_is_lost_when_the_apply_fails_before_the_handlers_run ... ok
+test apply_stops_at_the_first_failure_and_runs_nothing_after_it ... ok
+test without_notify_a_changed_config_never_restarts_the_service ... ok
+test a_stopped_or_disabled_service_is_started_and_enabled_by_the_service_resource ... ok
+test plan_apply_and_audit_agree_on_which_resources_differ ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/dnf_metadata_refresh.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/dnf_metadata_refresh-429daf998c6304da)
+
+running 8 tests
+test an_indeterminate_check_is_not_refreshed ... ok
+test a_failed_first_snapshot_cleanup_blocks_before_refreshing ... ok
+test a_failed_refresh_fails_closed_without_a_mutation ... ok
+test a_refresh_that_leaves_the_cache_incomplete_still_fails_closed ... ok
+test a_warm_metadata_cache_is_not_refreshed ... ok
+test a_cold_metadata_cache_is_refreshed_then_the_install_succeeds ... ok
+test the_refresh_carries_the_packages_environment ... ok
+test the_refresh_happens_at_most_once_per_run ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/engine.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/engine-7c583b8571c96835)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/file_safety.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/file_safety-d54f6049f1979c81)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/frontends.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/frontends-d94387398630d1e1)
+
+running 26 tests
+test handler_empty_service_is_a_validation_error ... ok
+test every_template_field_in_the_field_table_is_accepted ... ok
+test empty_loop_expands_to_zero_resources ... ok
+test conflicting_id_between_resource_and_handler ... ok
+test handler_service_names_are_otherwise_unchanged ... ok
+test rejects_conflicting_ownership ... ok
+test link_state_outside_present_or_absent_is_a_validation_error ... ok
+test rejects_duplicate_variable_after_include ... ok
+test link_state_valid_forms_stay_valid ... ok
+test link_target_rule_keeps_valid_links_valid ... ok
+test rejects_invalid_mode ... ok
+test rejects_unknown_top_level_field ... ok
+test rejects_unknown_resource_field ... ok
+test rejects_non_static_identifiers ... ok
+test rejects_unknown_with_field ... ok
+test link_without_target_when_present_is_a_validation_error ... ok
+test rejects_yaml_alias_merge_datetime ... ok
+test rejects_unsupported_recipe_version ... ok
+test rejects_variable_null ... ok
+test typed_values_across_frontends ... ok
+test template_rejects_content ... ok
+test relative_source_relative_to_recipe ... ok
+test file_directory_template_state_outside_present_or_absent_is_a_validation_error ... ok
+test service_enabled_literal_string_is_a_validation_error ... ok
+test yaml_and_toml_produce_identical_ir ... ok
+test file_directory_template_valid_states_stay_valid ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/fs0_root_identity.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/fs0_root_identity-287cb957837c7eff)
+
+running 23 tests
+test a_named_sudo_failure_needs_no_diagnostic ... ok
+test a_real_linux_probe_failure_after_a_working_sudo_is_reported_as_linux ... ok
+test a_metadata_only_change_is_not_a_parent_directory_write ... ok
+test a_command_that_did_not_finish_is_reported_as_that ... ok
+test a_non_root_user_without_the_flag_is_unchanged ... ok
+test a_sensitive_resource_names_no_path_in_the_note ... ok
+test a_linux_probe_failure_without_sudo_is_unchanged ... ok
+test a_non_root_user_with_authorized_sudo_wraps_every_command ... ok
+test a_silent_failure_through_sudo_is_not_blamed_on_either_side_without_proof ... ok
+test an_unsettled_diagnostic_is_not_turned_into_a_verdict ... ok
+test an_unknown_sudo_wording_is_reported_without_repeating_it ... ok
+test apply_after_a_planned_note_still_fails_exactly_as_before ... ok
+test every_sudo_failure_is_named_and_none_is_called_non_linux ... ok
+test no_note_for_root_for_sudo_or_for_a_directory_the_user_owns ... ok
+test plan_says_which_changes_need_root_when_the_user_is_not_root ... ok
+test root_with_the_flag_needs_no_sudo_binary ... ok
+test stderr_alone_never_decides_sudo_authorization ... ok
+test root_with_the_flag_uses_no_wrapper_and_the_same_results ... ok
+test the_note_adds_no_status_no_field_and_no_command ... ok
+test the_identity_of_a_command_resource_is_the_runs_identity_and_unchanged ... ok
+test root_without_the_flag_runs_directly ... ok
+test the_backup_store_follows_the_flag_not_the_user ... ok
+test plan_apply_and_audit_choose_the_same_transport ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/fs2_script_real.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/fs2_script_real-befbde3acc4f40a7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fs2_sensitive_failfast.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/fs2_sensitive_failfast-a4eeb4b4b1435d8f)
+
+running 4 tests
+test a_non_sensitive_failure_still_explains_itself_to_the_resource_it_blocks ... ok
+test a_sensitive_resource_that_stops_the_run_in_its_condition_does_not_hand_its_reason_on ... ok
+test a_staging_cleanup_failure_of_a_sensitive_file_does_not_name_its_paths_in_the_next_resource ... ok
+test a_target_drift_of_a_sensitive_file_does_not_name_its_path_in_the_next_resource ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/fs2_shared_directory.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/fs2_shared_directory-ac4f9b6e0055be01)
+
+running 66 tests
+test a3_a_directory_directly_in_a_shared_directory_stops_the_backup_before_any_copy ... ok
+test a1_the_observation_of_an_entry_is_the_gates_own_lstat ... ok
+test a3_a_directory_elsewhere_and_a_file_in_a_shared_directory_are_backed_up_as_before ... ok
+test a1_a_content_read_never_runs_for_an_entry_that_was_not_there_at_the_gate ... ok
+test a1_the_sensitive_text_and_json_name_no_path_and_no_metadata ... ok
+test c05_a_file_system_without_hard_links_fails_and_never_falls_back_to_a_rename ... ok
+test b01_a_backup_of_a_path_in_a_shared_directory_goes_through_the_entry_gate ... ok
+test c08_the_lost_race_of_a_sensitive_resource_names_no_path ... ok
+test c06_a_failed_staging_cleanup_after_publication_is_reported_as_such ... ok
+test g01_g02_g05_outside_a_shared_directory_nothing_changes_and_inside_it_costs_the_gate ... ok
+test a1_no_metadata_of_an_entry_that_appears_after_the_gate_reaches_the_output ... ok
+test a1_apply_refuses_an_entry_whose_owner_changed_between_the_gate_and_the_change ... ok
+test c01_to_c04_a_name_taken_before_the_exclusive_publication_is_not_replaced ... ok
+test l1_an_ordinary_publication_is_unchanged ... ok
+test l1_a_staging_name_taken_over_by_another_account_is_left_alone ... ok
+test l1_a_failed_recheck_below_an_existing_root_file_also_cleans_up ... ok
+test l1_a_failed_recheck_in_an_accounts_tree_cleans_up_as_that_account ... ok
+test l1_a_staging_name_that_is_no_longer_a_directory_is_left_alone ... ok
+test l1_i3_the_cleanup_is_one_step_that_names_the_staging_directory_by_identity ... ok
+test l1_i3_a_staging_directory_swapped_for_a_symlink_before_the_cleanup_reaches_nothing_behind_it ... ok
+test model_a_setgid_directory_and_an_unsafe_parent_are_refused_before_anything_is_written ... ok
+test l1_the_final_identity_check_reports_its_cleanup_too ... ok
+test model_a_staging_directory_that_is_not_the_one_made_is_refused_and_nothing_is_removed ... ok
+test model_the_publication_result_and_the_cleanup_result_are_separate ... ok
+test model_the_cleanup_removes_by_name_only_where_nobody_else_can_rename ... ok
+test p02_a_new_file_outside_a_shared_directory_still_publishes_by_rename ... ok
+test p05_plan_does_not_show_the_content_of_an_entry_that_changed_hands_after_the_digest ... ok
+test p04_plan_judges_the_entry_again_where_it_decides_a_change ... ok
+test l1_sensitive_resources_still_name_nothing ... ok
+test r04_u02_a_root_file_with_two_hard_links_is_refused_unread ... ok
+test l1_a_failed_recheck_after_staging_leaves_no_staging_directory ... ok
+test a1_apply_refuses_a_swapped_entry_before_removing_or_changing_it ... ok
+test r07_r08_a_world_writable_directory_without_sticky_or_with_another_owner_is_refused ... ok
+test r09_an_ancestor_symlink_in_tmp_is_refused_and_nothing_behind_it_is_read ... ok
+test r12_a_shared_directory_inside_another_accounts_tree_is_refused ... ok
+test l1_the_next_run_after_a_failed_recheck_does_not_go_wrong ... ok
+test r01_r02_r03_p01_an_entry_of_another_account_is_refused_unread_unchanged ... ok
+test r16_a_directory_symlink_put_at_the_link_name_is_not_followed ... ok
+test r16b_the_model_does_create_inside_a_directory_for_the_old_form_of_ln ... ok
+test r05_q02_state_absent_never_removes_an_entry_of_another_account ... ok
+test r06_q01_an_owner_other_than_root_is_refused_in_a_shared_directory ... ok
+test r14_p03_a_sensitive_resource_names_neither_path_nor_uid ... ok
+test s03_a_converged_root_file_plans_unchanged_and_audits_compliant ... ok
+test r17_an_existing_directory_where_a_file_is_wanted_is_refused ... ok
+test s06_q03_state_absent_removes_a_root_file_and_is_unchanged_when_absent ... ok
+test s04_s05_an_existing_root_file_is_updated_by_rename_and_a_mode_change_by_chmod ... ok
+test s07_a_directory_in_tmp_is_made_by_mkdir_and_converges ... ok
+test s08_a_link_in_tmp_is_created_exclusively_and_replaced_through_staging ... ok
+test s09_a_template_in_tmp_is_created_like_a_file ... ok
+test s12_a_directory_and_a_file_below_it_plan_and_apply_in_tmp ... ok
+test t02_a_file_of_alice_directly_in_tmp_is_refused ... ok
+test s10_s11_a_nested_root_sticky_directory_is_shared_and_a_root_0755_one_is_not ... ok
+test s01_s02_a_new_file_in_tmp_and_var_tmp_is_created_exclusively_and_converges ... ok
+test t05_the_directory_of_alice_itself_is_not_managed_but_the_message_points_below ... ok
+test s14_a_plain_user_manages_their_own_files_in_tmp ... ok
+test s13_a_sudo_login_is_as_safe_as_a_root_login ... ok
+test the_sticky_model_forbids_a_plain_user_to_replace_or_remove_roots_entry ... ok
+test l1_the_original_reason_is_kept_and_a_failed_cleanup_is_reported_with_it ... ok
+test t03_t04_a_path_in_alices_tree_below_tmp_is_managed_as_alice_without_the_entry_gate ... ok
+test t06_t07_a_symlink_of_alice_is_neither_a_tree_nor_followed ... ok
+test t09_a_file_where_a_directory_is_needed_never_reaches_the_owner_decision ... ok
+test u03_an_entry_replaced_by_another_account_before_the_final_check_is_refused ... ok
+test t10_an_entry_that_is_alices_by_the_time_it_is_judged_is_refused_unread ... ok
+test t08_alices_directory_that_others_can_write_is_not_a_tree ... ok
+test l1_the_staging_is_removed_as_its_owner_for_a_non_root_login_with_and_without_sudo ... ok
+test u04_apply_judges_the_entry_again_before_it_removes_or_changes_it ... ok
+
+test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/fs2_staging_script.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/fs2_staging_script-401c34f5d3f8301f)
+
+running 23 tests
+test a_publication_that_was_lost_is_indeterminate_and_is_not_cleaned_up_behind_it ... ok
+test a_clean_cleanup_is_an_ordinary_success ... ok
+test a_link_is_replaced_by_staging_and_a_rename_through_the_script ... ok
+test a_parent_that_stopped_being_safe_before_staging_is_refused_for_a_plain_user ... ok
+test a_failed_step_of_a_sensitive_resource_names_neither_the_path_nor_what_the_target_said ... ok
+test a_second_name_left_behind_is_a_failure_that_needs_attention_after_a_publication ... ok
+test a_leading_dash_and_an_odd_name_publish_exactly ... ok
+test a_link_cleanup_that_leaves_something_follows_the_same_rules ... ok
+test a_link_that_drifted_before_publication_is_not_replaced_and_its_staging_is_removed ... ok
+test a_stray_staging_directory_from_before_is_not_swept ... ok
+test a_refused_or_failed_publication_is_not_a_publication ... ok
+test a_setgid_directory_refuses_staged_publication_and_nothing_else ... ok
+test an_abnormal_end_after_a_successful_rename_keeps_the_change ... ok
+test an_empty_staging_directory_left_in_place_does_not_undo_the_publication ... ok
+test an_injected_rename_failure_publishes_nothing_and_cleans_up ... ok
+test an_injected_lost_rename_is_indeterminate_and_is_not_cleaned_up ... ok
+test root_without_setpriv_fails_closed_and_writes_nothing ... ok
+test every_step_runs_the_constant_script_and_values_are_only_arguments ... ok
+test an_unknown_cleanup_state_is_a_failure_that_needs_attention_after_a_publication ... ok
+test content_never_appears_in_any_command_and_a_link_target_is_redacted ... ok
+test a_stage_answer_that_is_not_understood_writes_nothing_more ... ok
+test answers_the_script_cannot_have_given_are_never_taken_for_a_clean_cleanup ... ok
+test an_unexpected_publication_exit_may_follow_a_publication_and_is_indeterminate ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/fs3_c1_shared_tree.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/fs3_c1_shared_tree-a545a2da459e1aa8)
+
+running 21 tests
+test c1_06_a_users_home_needs_no_owner ... ok
+test c1_02_the_same_in_var_tmp_and_for_a_file_the_account_made_first ... ok
+test c1_01_a_directory_made_first_by_another_account_is_refused_without_an_owner ... ok
+test c1_07_a_root_owned_directory_needs_no_owner_even_in_a_shared_directory ... ok
+test c1_08_a_directory_resource_makes_the_directory_root_s_and_the_file_follows ... ok
+test c1_05_an_owner_that_is_not_the_account_of_the_directory_found_is_refused ... ok
+test c1_04_the_owner_of_the_directory_may_be_named_and_the_run_converges ... ok
+test c1_09_a_non_root_login_with_sudo_is_covered_in_the_same_way ... ok
+test c1_11_a_directory_in_the_tree_needs_the_owner_too_new_or_changed ... ok
+test c1_13_the_state_of_a_file_that_is_already_right_is_not_a_write ... ok
+test c1_15_audit_reports_what_is_missing_and_never_writes_or_leaks ... ok
+test c1_12_a_link_and_a_removal_write_no_content_and_run_as_the_account ... ok
+test c1_10_a_template_needs_the_owner_like_a_file ... ok
+test c1_17_a_directory_another_account_makes_between_plan_and_apply_gets_nothing ... ok
+test c1_03_naming_root_or_a_third_account_as_owner_is_refused_too ... ok
+test c1_18_a_converged_run_is_stable ... ok
+test c1_20_a_directory_that_is_not_directly_in_a_shared_directory_is_not_a_squat ... ok
+test c1_21_content_that_is_sensitive_only_at_run_time_gets_the_fixed_refusal_too ... ok
+test c1_19_the_sequential_walk_decides_like_the_batched_one ... ok
+test c1_16_a_sensitive_refusal_names_no_path_uid_or_content_anywhere_it_appears ... ok
+test c1_14_plan_and_apply_refuse_and_accept_the_same_recipes ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/fs3_observation_gate.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/fs3_observation_gate-97d0f322732efc37)
+
+running 19 tests
+test a_directory_resource_does_not_stat_behind_a_planted_ancestor ... ok
+test a_fifo_is_never_hashed ... ok
+test a_planted_ancestor_symlink_is_refused_and_nothing_behind_it_is_read ... ok
+test a_converged_file_is_unchanged_and_costs_one_walk ... ok
+test a_planted_symlink_hides_nothing_even_when_the_desired_content_matches ... ok
+test a_link_resource_does_not_read_a_link_behind_a_planted_ancestor ... ok
+test a_refused_parent_that_an_earlier_change_may_alter_is_unknown_and_unread ... ok
+test a_parent_that_does_not_exist_yet_still_plans_as_a_creation ... ok
+test a_sensitive_resource_names_no_path_when_its_parent_is_refused ... ok
+test apply_refuses_a_planted_ancestor_symlink_without_reading_or_changing_anything ... ok
+test audit_does_not_follow_a_planted_ancestor_symlink ... ok
+test audit_of_a_path_below_a_missing_parent_is_drift_not_an_error ... ok
+test audit_in_a_tree_of_an_account_without_an_entry_is_an_error_and_unread ... ok
+test audit_of_link_and_directory_does_not_follow_a_planted_ancestor_symlink ... ok
+test plan_walks_the_parents_before_it_observes_the_path ... ok
+test audit_of_a_sensitive_resource_names_neither_path_nor_reason ... ok
+test in_a_users_tree_plan_observes_the_path_as_that_user ... ok
+test audit_of_a_converged_file_is_compliant_and_changes_nothing ... ok
+test audit_in_a_users_tree_observes_as_that_user ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/fs3_user_tree.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/fs3_user_tree-4d057bc511eab660)
+
+running 22 tests
+test a_missing_setpriv_fails_closed_and_says_so ... ok
+test a_third_accounts_directory_inside_the_tree_is_refused ... ok
+test a_non_root_login_is_still_refused_in_another_users_directory ... ok
+test a_backup_of_a_path_in_the_tree_is_refused ... ok
+test a_group_or_other_writable_directory_stays_refused ... ok
+test a_symlink_inside_the_tree_is_never_followed ... ok
+test a_sensitive_resource_in_the_tree_does_not_name_the_path_or_uid_it_refuses ... ok
+test an_audit_resource_after_a_refused_tree_resource_observes_as_root ... ok
+test an_owner_without_an_account_entry_is_refused ... ok
+test a_converged_page_is_unchanged_in_plan_apply_and_audit ... ok
+test an_owner_the_account_cannot_hand_over_is_refused_in_plan_and_apply ... ok
+test apply_stops_at_a_refused_tree_resource_and_nothing_runs_as_the_account_after_it ... ok
+test an_existing_entry_owned_by_someone_else_is_not_adopted ... ok
+test audit_does_not_change_anything ... ok
+test plan_names_the_changes_and_agrees_with_apply ... ok
+test root_updates_an_existing_file_and_its_mode ... ok
+test defaults_belong_to_the_account_when_the_recipe_names_no_owner ... ok
+test root_with_sudo_on_a_non_root_login_does_the_same_through_both_wrappers ... ok
+test root_creates_the_page_in_a_users_home_without_any_option ... ok
+test the_accounts_own_primary_group_is_used_not_the_directorys_group ... ok
+test plan_and_audit_hold_no_identity_once_an_observation_is_done ... ok
+test the_account_identity_does_not_leak_into_the_next_resource ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/handlers.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/handlers-65e839b4a7e870d8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/identity_memo.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/identity_memo-d06889abd1fd479c)
+
+running 17 tests
+test a_shared_owner_is_looked_up_once ... ok
+test a_shared_group_is_looked_up_once ... ok
+test a_missing_account_is_asked_again_and_found_once_it_exists ... ok
+test a_sensitive_owner_value_marks_the_primary_gid_lookup_sensitive ... ok
+test a_command_that_deletes_and_recreates_an_account_invalidates_the_memo ... ok
+test a_numeric_owner_still_looks_up_its_primary_gid_live_when_sensitive ... ok
+test a_sensitive_primary_gid_lookup_does_not_feed_an_ordinary_resource ... ok
+test a_sensitive_primary_gid_lookup_does_not_consume_an_ordinary_entry ... ok
+test audit_shares_the_memo_too ... ok
+test a_user_resource_that_recreates_an_account_invalidates_the_memo ... ok
+test distinct_users_and_groups_still_get_one_lookup_each ... ok
+test ordinary_objects_keep_sharing_their_lookups ... ok
+test plan_and_audit_hold_no_permit_so_the_memo_lives_for_the_whole_run ... ok
+test a_user_and_a_group_with_the_same_name_stay_distinct ... ok
+test sensitive_objects_never_use_the_memo_in_any_lookup ... ok
+test mixed_sensitivity_objects_each_pay_for_their_own_primary_gid_lookup ... ok
+test two_engines_and_two_hosts_never_share_an_answer ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/json_contract.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/json_contract-c927162b561fac13)
+
+running 13 tests
+test cli_exit_glue_is_pinned ... ok
+test audit_json_matches_v1_contract ... ok
+test apply_json_matches_v1_contract ... ok
+test handler_object_shape_in_apply ... ok
+test audit_details_are_redacted_for_sensitive_resources ... ok
+test handler_state_labels_are_pinned ... ok
+test audit_status_and_exit_mapping ... ok
+test diff_shapes_summary_text_and_redacted ... ok
+test plan_json_matches_v1_contract ... ok
+test run_status_and_exit_mapping ... ok
+test validate_json_matches_v1_contract ... ok
+test failure_before_report_writes_no_json_to_stdout ... ok
+test connection_failure_before_report_writes_no_json_to_stdout ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/mcp.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/mcp-cecb451f0a3c388b)
+
+running 31 tests
+test classify_platform_truth ... ok
+test batch_requests ... ok
+test canary_secrets_never_disclosed ... ok
+test get_version_matches_crate ... ok
+test host_tool_schemas_expose_only_manifest_and_target ... ok
+test forbidden_authority_rejected_identically_regardless_of_filesystem ... ok
+test immutable_registry_across_requests ... ok
+test host_tools_reject_connection_parameters ... ok
+test c1_inline_manifests_still_work ... ok
+test host_tools_reject_all_include_forms ... ok
+test c1_tools_reject_identically_regardless_of_filesystem ... ok
+test inspect_manifest_structure ... ok
+test initialize_list_tools ... ok
+test include_is_policy_rejected_without_path_echo ... ok
+test list_targets_returns_sorted_names_only ... ok
+test malformed_and_unknown_requests ... ok
+test registry_is_exact_allowlist ... ok
+test c1_manifest_tools_reject_source_and_include ... ok
+test sequential_requests_and_clean_shutdown ... ok
+test no_targets_file_eight_tools_and_closed_host_tools ... ok
+test overlapping_profile_values_fully_redacted_in_errors ... ok
+test host_tools_reject_source_in_every_key_spelling ... ok
+test plan_is_pure_and_deterministic ... ok
+test unknown_tool_rejected ... ok
+test unknown_target_fails_closed_and_sanitized ... ok
+test no_stage_path_in_any_diagnostic ... ok
+test source_include_words_in_data_are_not_policy_rejected ... ok
+test unreachable_host_error_is_sanitized ... ok
+test startup_fails_closed_on_bad_targets_file ... ok
+test validate_manifest_parity ... ok
+test adversarial_inputs ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+     Running tests/multihost_lab.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/multihost_lab-e32953051c5cca74)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/package_service.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/package_service-f6d6859f12ecdbf9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/password_hash.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/password_hash-e658d2deb5c2e3fc)
+
+running 27 tests
+test a_reference_loads_without_any_key_and_makes_the_user_sensitive ... ok
+test a_non_local_user_is_refused_and_nothing_is_written ... ok
+test a_failed_password_only_change_is_not_reported_as_done ... ok
+test a_secret_swapped_for_a_symlink_after_loading_is_refused ... ok
+test a_failed_chpasswd_after_useradd_is_reported_as_a_partial_change ... ok
+test a_sensitive_user_redacts_reference_errors ... ok
+test a_user_without_password_hash_is_unchanged_by_phase_d ... ok
+test a_converged_user_is_a_no_op_in_plan_apply_and_audit ... ok
+test a_different_hash_is_replaced_by_chpasswd_alone ... ok
+test account_changes_come_before_the_password ... ok
+test a_locked_account_keeps_its_lock_and_is_never_silently_unlocked ... ok
+test a_skipped_user_never_opens_its_secret ... ok
+test an_interpolated_state_that_evaluates_to_absent_is_refused_at_run_time ... ok
+test creating_a_user_sets_the_password_after_useradd ... ok
+test an_absent_user_is_drift_in_audit_and_a_create_in_plan ... ok
+test every_no_password_state_is_set_normally ... ok
+test an_unreadable_shadow_record_is_an_error_not_a_no_change ... ok
+test password_hash_needs_sudo_in_plan_apply_and_audit_never_no_change ... ok
+test only_a_secret_reference_is_accepted_as_password_hash ... ok
+test setting_a_password_on_an_existing_user_runs_exactly_one_chpasswd ... ok
+test the_leak_detector_would_see_a_hash - should panic ... ok
+test mcp_refuses_a_password_hash_secret_in_manifest_text ... ok
+test an_unavailable_wrong_or_damaged_key_fails_closed_without_touching_the_account ... ok
+test yescrypt_is_refused_on_el9_and_accepted_elsewhere ... ok
+test password_hash_follows_the_effective_privilege_not_the_flag ... ok
+test the_binary_validates_a_user_secret_without_decrypting ... ok
+test a_secret_that_is_not_an_accepted_hash_is_refused_without_echoing_it ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/path_c.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/path_c-d2deafa6cf419f17)
+
+running 16 tests
+test a_refused_walk_reports_no_raw_batch_output ... ok
+test a_failing_walk_2_stat_batch_blocks_staging ... ok
+test each_walk_is_a_fresh_stat_batch_then_getfattr_batch_in_that_order ... ok
+test a_failing_walk_1_stops_everything_before_any_mutation ... ok
+test plan_walks_once_per_resource_and_a_planned_change_reuses_that_walk ... ok
+test sensitive_resources_run_the_batched_walk_without_leaking_anything_new ... ok
+test statistics_agree_with_the_log_for_batched_walks ... ok
+test the_batched_walk_does_not_change_ownership_or_mutation_behaviour_of_the_resource ... ok
+test walk_3_stat_gate_failure_also_blocks_publication ... ok
+test walk_2_getfattr_failure_or_unsafe_attribute_blocks_staging ... ok
+test walk_3_is_live_and_blocks_publication ... ok
+test the_getfacl_capability_alone_selects_the_branch ... ok
+test an_oversized_walk_falls_back_before_anything_is_dispatched ... ok
+test an_unsafe_ancestor_refuses_in_every_position_and_kind_like_the_sequential_walk ... ok
+test command_counts_without_getfacl_drop_to_the_path_c_targets ... ok
+test command_counts_with_getfacl_are_exactly_unchanged ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/plan_apply_consistency.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/plan_apply_consistency-9b7f582045258d02)
+
+running 20 tests
+test a_sensitive_resource_is_refused_without_its_details ... ok
+test a_guard_seen_through_a_symlinked_ancestor_may_be_flipped_by_any_earlier_change ... ok
+test a_package_already_present_is_not_a_planned_change ... ok
+test a_command_guard_that_an_earlier_change_flips_does_not_hide_its_effect ... ok
+test a_package_or_command_planned_earlier_defers_the_check ... ok
+test a_command_guard_nothing_flips_stays_satisfied_and_defers_nothing ... ok
+test a_parent_this_run_creates_is_deferred_and_apply_then_succeeds ... ok
+test an_earlier_unrelated_change_does_not_hide_a_certain_refusal ... ok
+test a_path_that_only_shares_a_name_prefix_is_not_an_ancestor_or_a_descendant ... ok
+test an_earlier_change_defers_the_metadata_check_and_keeps_the_diff ... ok
+test an_empty_directory_is_removed_as_before ... ok
+test an_uninspectable_replaced_file_fails_at_plan_like_apply ... ok
+test removing_a_directory_that_is_not_empty_fails_at_plan_like_apply ... ok
+test refusals_name_the_cause_and_what_to_do ... ok
+test entries_removed_earlier_in_the_run_defer_the_emptiness_check ... ok
+test an_earlier_change_at_a_missing_parent_defers_and_an_unrelated_one_does_not ... ok
+test removal_and_replacement_are_checked_like_creation ... ok
+test plan_reports_each_parent_refusal_that_apply_makes_with_the_same_reason ... ok
+test only_an_earlier_change_that_can_affect_the_path_defers ... ok
+test safe_paths_plan_without_notes_and_apply_succeeds ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/platform.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/platform-1263468b30cabf47)
+
+running 47 tests
+test dnf_ambiguous_absent_query_is_an_error_not_absent ... ok
+test dnf_absent_already_absent_is_unchanged ... ok
+test apt_backend_mutation_args_unchanged ... ok
+test dnf_missing_mirrorlist_blocks_mutation ... ok
+test dnf_missing_payload_blocks_mutation ... ok
+test dnf_indeterminate_reports_possible ... ok
+test blank_handler_service_fails_without_a_mutating_systemctl ... ok
+test dnf_failure_reports_failed_possible_and_stops ... ok
+test dnf_removes_installed_package ... ok
+test dnf_mutation_then_reobserve_failure_keeps_changed ... ok
+test dnf_missing_repodata_with_failed_refresh_blocks_mutation ... ok
+test dnf_payload_download_failure_blocks_mutation ... ok
+test dnf_observes_present_and_is_unchanged ... ok
+test dnf_observes_absent_and_installs ... ok
+test dnf_unusable_metadata_cache_fails_closed ... ok
+test dnf_verification_mismatch_fails_and_blocks ... ok
+test dnf_sudo_path_records_sudo ... ok
+test nonsensitive_invalid_package_name_stays_descriptive ... ok
+test fake_target_unmodeled_command_fails_deterministically ... ok
+test nonsensitive_interpolation_error_stays_descriptive_model ... ok
+test interpolated_non_boolean_service_enabled_fails_closed_at_runtime ... ok
+test interpolated_invalid_link_state_fails_closed_at_runtime ... ok
+test package_env_rejects_invalid_names_and_redacts_sensitive_values ... ok
+test package_env_reaches_dnf_mutation_and_special_values_are_argv_safe ... ok
+test package_null_env_is_empty_and_keeps_existing_behavior ... ok
+test rocky9_target_selects_dnf_backend ... ok
+test rocky_service_already_running_is_unchanged ... ok
+test rocky_service_uses_same_systemd_path ... ok
+test package_env_reaches_apt_mutation_and_plan_is_non_mutating ... ok
+test package_name_rejects_option_injection ... ok
+test rpm_reobserve_db_error_after_mutation_keeps_changed ... ok
+test rpm_marker_plus_db_error_is_observation_failure ... ok
+test rpm_substring_marker_is_not_absent ... ok
+test sensitive_derived_invalid_package_name_is_redacted ... ok
+test sensitive_interpolation_error_is_redacted_at_reference_analysis ... ok
+test sensitive_var_package_name_is_redacted ... ok
+test sensitive_package_never_records_raw_name ... ok
+test sensitive_var_malformed_interpolation_is_redacted ... ok
+test supported_family_missing_dnf_is_capability_error ... ok
+test sensitive_invalid_package_name_is_redacted ... ok
+test sensitive_when_expression_error_is_redacted ... ok
+test interpolated_invalid_resource_state_fails_closed_at_runtime ... ok
+test systemctl_mutation_argv_keeps_ordinary_unit_names ... ok
+test unsupported_os_with_package_resource_fails_safely ... ok
+test unsupported_os_without_package_resources_still_runs ... ok
+test ubuntu_target_selects_apt_backend ... ok
+test systemctl_mutation_argv_is_option_injection_safe ... ok
+
+test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/platform_next.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/platform_next-29046958d6bc3eb0)
+
+running 8 tests
+test rocky10_absent_marker_classification_matches_rpm419 ... ok
+test rocky10_target_selects_dnf_backend ... ok
+test rocky10_second_apply_is_idempotent ... ok
+test ubuntu2604_apt_install_keeps_the_v021_argv ... ok
+test ubuntu2604_absent_package_plans_without_mutation ... ok
+test ubuntu2604_target_selects_apt_backend ... ok
+test ubuntu2604_apt_remove_keeps_the_v021_argv ... ok
+test rocky10_installs_through_the_dnf_snapshot_contract ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/precondition_integrity.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/precondition_integrity-6aba499292769f5e)
+
+running 28 tests
+test failing_daemon_reload_is_a_removal_failure ... ok
+test already_absent_unit_satisfies_the_precondition ... ok
+test fr1_valid_answers_are_parsed_exactly ... ok
+test fr1_valid_answers_through_the_helper ... ok
+test fr1_reload_failure_is_a_failure ... ok
+test reload_reporting_success_while_the_manager_stays_stale_is_a_failure ... ok
+test failing_or_missing_reload_is_a_failure_and_leaves_the_manager_stale ... ok
+test seed_that_cannot_be_read_back_is_a_failure - should panic ... ok
+test seed_that_did_not_produce_the_content_is_a_failure - should panic ... ok
+test seed_that_exits_non_zero_is_a_failure - should panic ... ok
+test seeded_target_file_is_read_back ... ok
+test failing_removal_command_is_a_failure_even_if_the_unit_is_absent ... ok
+test removal_tool_that_cannot_run_is_a_failure ... ok
+test fr1_unexpectedly_loaded_probe_is_not_the_precondition ... ok
+test target_private_dir_is_created_when_both_steps_succeed ... ok
+test target_private_dir_rejects_a_command_that_could_not_run - should panic ... ok
+test target_private_dir_rejects_a_failed_dir_creation - should panic ... ok
+test target_private_dir_rejects_a_failed_root_creation - should panic ... ok
+test stale_manager_is_reloaded_and_the_synchronized_state_is_proven ... ok
+test stale_unit_is_removed_and_absence_is_proven ... ok
+test fr1_the_state_after_the_helpers_reload_is_proven_with_the_same_strict_parser ... ok
+test unit_still_reported_loaded_or_active_is_a_failure ... ok
+test unreadable_state_is_never_treated_as_absent ... ok
+test unreadable_or_unexpected_manager_state_is_never_treated_as_synchronized ... ok
+test synchronized_manager_is_left_alone_and_needs_no_privilege ... ok
+test removal_reporting_success_while_the_unit_remains_is_a_failure ... ok
+test fr1_need_values_other_than_yes_and_no_are_errors ... ok
+test fr1_ambiguous_or_unprovable_answers_fail_closed_without_a_reload ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.99s
+
+     Running tests/progress.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/progress-ba43d018c54fcc8d)
+
+running 31 tests
+test backup_failure_during_store_setup_attempts_no_item ... ok
+test apply_backup_is_a_stage_with_one_anonymous_item_per_path ... ok
+test audit_observation_error_is_indeterminate_and_the_stage_still_completes_its_items ... ok
+test an_earlier_resource_failure_starts_no_handler_stage ... ok
+test audit_drift_is_a_completed_stage_not_a_failure ... ok
+test apply_failure_ends_the_stage_failed_and_does_not_announce_fast_forwarded_items ... ok
+test audit_counts_not_applicable_and_not_auditable_items ... ok
+test construction_reports_the_connect_stage_with_no_total ... ok
+test backup_failure_while_copying_counts_the_failing_path_and_starts_nothing_after ... ok
+test connect_failure_ends_the_connect_stage_and_returns_the_unchanged_error ... ok
+test early_ssh_connect_failure_ends_the_connect_stage ... ok
+test failure_of_the_first_resource_counts_it ... ok
+test handler_failure_ends_the_stage_and_leaves_later_handlers_unvisited ... ok
+test handlers_stage_total_is_the_queue_and_counts_each_handler ... ok
+test empty_recipe_runs_an_empty_resources_stage ... ok
+test include_expanded_resources_are_part_of_the_total ... ok
+test new_delegates_to_the_progress_aware_constructor_with_a_noop_sink ... ok
+test loop_expanded_resources_are_counted_by_instance_and_never_name_the_item ... ok
+test no_handler_stage_when_nothing_was_queued ... ok
+test plan_error_ends_the_stage_failed_before_the_error_is_returned ... ok
+test plan_lists_backups_without_a_backup_stage ... ok
+test plan_never_has_a_handler_stage_even_when_handlers_would_run ... ok
+test plan_reports_connect_then_one_resources_stage ... ok
+test recipe_without_backup_has_no_backup_stage ... ok
+test resource_types_map_to_the_fixed_item_vocabulary ... ok
+test skipped_and_dependency_blocked_items_reach_a_terminal_disposition ... ok
+test command_counts_with_a_sink_match_the_pinned_baselines ... ok
+test single_resource_counts_to_one_of_one ... ok
+test no_sensitive_value_can_appear_in_any_event_on_any_path ... ok
+test every_scenario_yields_a_valid_deterministic_stream ... ok
+test every_sink_leaves_reports_errors_audits_order_and_command_counts_unchanged ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/progress_cli.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/progress_cli-cc32455a1ce5a071)
+
+running 21 tests
+test a_returned_error_is_never_a_completed_run ... ok
+test an_abandoned_resolve_stage_ends_failed_and_the_run_still_ends ... ok
+test events_after_run_ended_are_discarded_without_panic ... ok
+test a_panicking_run_neither_waits_nor_emits_and_the_worker_still_exits ... ok
+test a_connect_failure_is_a_complete_valid_lifecycle ... ok
+test mode_decision_follows_the_owner_policy ... ok
+test every_aggregate_status_maps_to_a_closed_outcome ... ok
+test an_err_that_skips_the_explicit_end_still_gets_run_ended ... ok
+test secret_references_are_reported_to_the_consumer_and_nothing_is_displayed ... ok
+test every_execution_gets_exactly_one_run_started_and_one_run_ended ... ok
+test a_vanished_receiver_does_not_affect_execution ... ok
+test a_disabled_session_has_no_consumer_no_worker_and_no_events ... ok
+test a_panicking_worker_does_not_affect_execution ... ok
+test sequential_executions_have_independent_valid_streams ... ok
+test the_resolve_stage_precedes_connect_in_the_same_valid_stream ... ok
+test the_production_null_consumer_is_silent_and_changes_nothing ... ok
+test concurrent_executions_do_not_cross_talk ... ok
+test the_plain_renderer_changes_no_result_and_adds_no_command ... ok
+test the_stream_through_the_channel_equals_the_stream_a_direct_sink_sees ... ok
+test teardown_is_bounded_and_a_blocked_consumer_never_blocks_the_run ... ok
+test repeated_sessions_do_not_accumulate_workers ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/progress_cli_output.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/progress_cli_output-8c79aec45bba1ed4)
+
+running 2 tests
+test a_terminal_run_prints_exactly_what_a_piped_run_prints ... ok
+test json_mode_on_a_terminal_adds_nothing_to_any_stream ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+
+     Running tests/progress_plain_output.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/progress_plain_output-c8571578524e8026)
+
+running 8 tests
+test validate_never_shows_progress ... ok
+test a_scripted_resolution_shows_a_resolve_stage_and_a_failed_one_ends_failed ... ok
+test an_invalid_recipe_starts_nothing_and_prints_no_progress ... ok
+test on_a_terminal_plain_progress_is_persistent_lines_and_replaces_the_transient_line ... ok
+test plain_progress_only_adds_progress_lines_to_stderr ... ok
+test json_is_byte_identical_with_plain_requested_on_every_stream ... ok
+test only_the_exact_value_plain_changes_anything ... ok
+test a_secret_bearing_recipe_has_no_plain_progress_at_all ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.93s
+
+     Running tests/progress_tty.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/progress_tty-161e6ae52d15c031)
+
+running 15 tests
+test an_unknown_width_uses_the_documented_fallback ... ok
+test a_resolve_failure_leaves_no_line_behind ... ok
+test a_non_terminal_stderr_has_no_progress_even_when_stdout_is_a_terminal ... ok
+test an_invalid_recipe_starts_nothing ... ok
+test an_eligible_run_draws_on_stderr_only_and_its_persistent_output_is_unchanged ... ok
+test a_terminal_one_column_wide_has_no_room_for_a_line_and_nothing_breaks ... ok
+test colour_settings_never_change_the_persistent_output ... ok
+test validate_never_shows_progress ... ok
+test every_scope_draws_and_erases_its_own_line_and_nothing_accumulates ... ok
+test json_on_a_terminal_has_no_progress_on_any_stream ... ok
+test term_dumb_has_no_progress ... ok
+test the_terminal_width_bounds_every_frame ... ok
+test a_secret_bearing_recipe_has_no_progress_at_all ... ok
+test closed_ports_are_refused_and_no_two_live_reservations_overlap ... ok
+test closed_ports_stay_refused_while_other_threads_fork_children ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.05s
+
+     Running tests/progress_tty_stall.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/progress_tty_stall-e9fa7bc048049801)
+
+running 5 tests
+test child_entry ... ok
+test the_private_descriptor_is_closed_blocking_and_absent_for_secrets ... ok
+test a_panic_unwind_leaves_no_progress_bytes_after_the_panic_text ... ok
+test a_stalled_terminal_blocks_only_the_plain_progress_worker ... ok
+test a_stalled_terminal_blocks_only_the_progress_worker ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.19s
+
+     Running tests/remediation.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/remediation-61d335ff8af1d86c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/remediation_r2.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/remediation_r2-959f74b7b5a18433)
+
+running 40 tests
+test dnf_cache_payload_t1_empty_cache_installs_unchanged ... ok
+test dnf_cache_payload_t4_transport_extra_payload_still_fails_closed ... ok
+test dnf_cache_payload_t3_stale_same_named_rpm_is_not_credited ... ok
+test dnf_cache_payload_t2_unrelated_cached_rpm_does_not_block_install ... ok
+test dnf_cache_payload_oversized_operand_blocks_before_any_removal ... ok
+test dnf_cache_payload_t5_missing_payload_still_fails_closed ... ok
+test dnf_cache_payload_t7_removal_failure_blocks ... ok
+test dnf_cache_payload_t6_payload_identity_still_verified ... ok
+test dnf_cache_payload_t9_metadata_is_preserved ... ok
+test dnf_cache_payload_later_removal_failure_stops_all_following_work ... ok
+test dnf_cache_payload_t8b_malformed_prune_listing_blocks ... ok
+test dnf_private_snapshot_disables_only_completion_cache_writer ... ok
+test r2_02_completed_mutation_cleans_up_and_reobserves ... ok
+test dnf_absent_completion_plugin_warning_is_exact_and_non_repeatable ... ok
+test r2_01_non_sensitive_expression_keeps_descriptive_error ... ok
+test dnf_cache_payload_t8_escaping_prune_path_blocks ... ok
+test r2_02_indeterminate_mutation_forbids_further_target_commands ... ok
+test r2_03_incomplete_repolist_block_fails_closed ... ok
+test r2_03_truncated_repolist_output_fails_closed ... ok
+test r2_03_payload_download_failure_fails_closed ... ok
+test r2_03_transaction_body_summary_mismatch_fails_closed ... ok
+test r2_03_unexpected_payload_fails_closed ... ok
+test r2_03_unexpected_stderr_on_transaction_table_fails_closed ... ok
+test r2_05_cleanup_failure_surfaces_without_weakening_mutation_truth ... ok
+test r2_01_case3_runtime_when_derived_sensitivity_redacts_token ... ok
+test r2_04_missing_payload_fails_closed ... ok
+test r2_05_dispatch_failure_cleans_up_and_propagates_cleanup_outcome ... ok
+test r2_04_ambiguous_repo_cache_dir_fails_closed ... ok
+test r2_05_mutation_dispatch_and_cleanup_failures_are_both_observable ... ok
+test r2_05_payload_directory_dispatch_failure_cleans_up ... ok
+test r2_05_payload_download_dispatch_failure_cleans_up ... ok
+test snapshot_permission_verification_failure_blocks ... ok
+test r2_05_payload_verify_dispatch_failure_cleans_up ... ok
+test r2_05_mutation_dispatch_failure_applies_cleanup_policy ... ok
+test snapshot_copy_widening_mode_blocks_after_copy ... ok
+test snapshot_permission_enforcement_failure_blocks ... ok
+test snapshot_wrong_mode_blocks ... ok
+test dnf_cache_payload_large_cache_is_removed_in_bounded_batches ... ok
+test r2_01_case1_sensitive_changed_when_is_redacted_everywhere ... ok
+test r2_01_case2_include_ordering_does_not_leak_parent_secret ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/remediation_r4.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/remediation_r4-1892cab639ee4a96)
+
+running 36 tests
+test r4_a01_duplicate_repo_id_in_block_rejected ... ok
+test r4_a01_duplicate_repo_status_rejected ... ok
+test r4_a01_duplicate_optional_field_rejected ... ok
+test r4_a01_duplicate_repository_block_rejected ... ok
+test r4_a01_conflicting_repo_status_rejected ... ok
+test r4_a01_decorated_count_rejected ... ok
+test r4_a01_duplicate_summary_verb_rejected ... ok
+test r4_a01_empty_field_value_rejected ... ok
+test r4_a01_one_bad_block_among_valid_rejected ... ok
+test r4_a01_extra_summary_token_rejected ... ok
+test r4_a01_prefix_confusable_field_rejected ... ok
+test r4_a01_malformed_total_line_rejected ... ok
+test r4_a01_summary_singular_plural_mismatch_rejected ... ok
+test a_version_outside_the_rpm_grammar_is_still_rejected ... ok
+test r4_a01_trailing_garbage_rejected ... ok
+test r4_a01_valid_fractional_size_installs ... ok
+test r4_a01_valid_multi_repo_output_installs ... ok
+test r4_a02_epoch_identity_accepted ... ok
+test r4_a02_payload_identity_mismatch_rejected ... ok
+test r4_a03_duplicate_directory_listing_rejected ... ok
+test r4_a03_correct_dir_chosen_among_prefix_confusable ... ok
+test r4_a02_payload_in_wrong_repo_dir_rejected ... ok
+test r4_a03_exact_mapping_accepted ... ok
+test r4_a03_prefix_collision_rejected ... ok
+test r4_a03_stale_duplicate_dirs_rejected ... ok
+test r4_a03_similar_repo_ids_disambiguated ... ok
+test r4_a03_traversal_like_value_rejected ... ok
+test r4_a03_unusual_repo_id_accepted ... ok
+test r4_a02_every_identity_field_is_checked ... ok
+test r4_argv_boundaries_hold_for_payload_and_paths ... ok
+test r4_a04_copy_children_only_never_the_root ... ok
+test tilde_and_caret_versions_install ... ok
+test r4_a03_malformed_directory_name_rejected ... ok
+test r4_a02_malformed_or_unreadable_payload_rejected ... ok
+test r4_a04_destination_root_is_never_a_copy_target ... ok
+test r4_a04_real_filesystem_copy_keeps_root_private ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/remediation_r5.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/remediation_r5-336c8f642aa54ef5)
+
+running 42 tests
+test r51_assumeno_abort_in_stdout_rejected ... ok
+test r51_assumeno_native_streams_accepted ... ok
+test r51_repolist_native_preamble_and_stderr_accepted ... ok
+test r51_assumeno_abort_stderr_on_exit0_rejected ... ok
+test r51_full_real_rocky_capture_replay ... ok
+test r51_repoquery_empty_stderr_accepted ... ok
+test r51_repoquery_extra_or_duplicate_stderr_rejected ... ok
+test r51_repoquery_native_expiration_stderr_accepted ... ok
+test r51_repolist_unknown_stderr_rejected ... ok
+test r51_assumeno_unexpected_stderr_rejected ... ok
+test r51_repoquery_truncated_or_nonutf8_stderr_rejected ... ok
+test r51_malformed_installed_size_rejected ... ok
+test r5_f01_duplicate_entry_rejected ... ok
+test r5_f01_empty_entry_rejected ... ok
+test r5_f01_invalid_utf8_rejected ... ok
+test r51_repolist_malformed_preamble_rejected ... ok
+test r51_repolist_preamble_misplaced_or_duplicate_rejected ... ok
+test r5_f01_missing_trailing_nul_rejected ... ok
+test r51_transaction_trailing_garbage_rejected ... ok
+test r5_f03_duplicate_summary_rejected ... ok
+test r5_f03_fake_header_rejected ... ok
+test r51_repoquery_unknown_stderr_rejected ... ok
+test r5_f01_truncated_and_stderr_rejected ... ok
+test r5_f03_malformed_count_rejected ... ok
+test r5_f03_malformed_size_rejected ... ok
+test r5_f03_orphan_field_after_block_rejected ... ok
+test r5_f03_native_dependency_install_accepted ... ok
+test r5_f03_native_upgrade_transaction_accepted ... ok
+test r5_f03_unknown_preamble_rejected ... ok
+test r5_f05_multiple_valid_cache_hashes_rejected ... ok
+test r5_f04_native_multi_repo_repolist_accepted ... ok
+test r5_f04_native_repolist_without_status_accepted ... ok
+test r5_f03_unknown_repo_field_rejected ... ok
+test r5_f05_option_like_package_name_rejected ... ok
+test r5_f03_garbage_footer_rejected ... ok
+test r5_f01_legal_children_are_copied_and_root_stays_private ... ok
+test r5_f01_find_injection_rejected_before_copy ... ok
+test r5_f05_path_like_package_name_rejected ... ok
+test r5_f05_native_repo_ids_accepted ... ok
+test r5_f01_snapshot_path_outside_namespace_rejected_without_cleanup ... ok
+test r5_f05_non_native_cache_hash_rejected ... ok
+test r5_f05_traversal_repo_id_rejected ... ok
+
+test result: ok. 42 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/secrets_canary.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/secrets_canary-83e1c2cd1571a03e)
+
+running 11 tests
+test carriers_redact_in_debug_and_expose_no_display_or_serialize ... ok
+test a_panic_message_built_from_a_carrier_or_its_error_holds_no_secret ... ok
+test a_secret_that_is_not_a_valid_hash_is_refused_without_echoing_it ... ok
+test nothing_secret_reaches_argv_environment_or_a_recipe_derived_path ... ok
+test the_leak_detector_sees_a_leak ... ok
+test an_unavailable_key_leaves_the_target_untouched_for_both_resources ... ok
+test mcp_refuses_every_secret_reference_form_on_every_manifest_tool_without_echoing_it ... ok
+test a_reference_that_is_not_a_clean_relative_path_is_refused_before_any_open ... ok
+test a_hostile_ciphertext_is_rejected_with_fixed_text_and_no_partial_plaintext ... ok
+test no_surface_of_plan_apply_or_audit_ever_carries_a_canary ... ok
+test the_cli_never_prints_a_canary_except_decrypt_writing_the_plaintext_it_was_asked_for ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running tests/secrets_cli.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/secrets_cli-4f3683906a479117)
+
+running 43 tests
+test bidi_and_control_characters_in_names_are_neutralised_in_listings ... ok
+test decrypt_output_failure_reports_no_content ... ok
+test decrypt_hostile_header_fails_fast ... ok
+test decrypt_refuses_a_terminal_stdout_before_prompting ... ok
+test decrypt_wrong_identity_and_malformed_inputs ... ok
+test encrypt_binary_roundtrip_with_a_recipient ... ok
+test encrypt_does_not_search_above_a_non_repository_directory ... ok
+test encrypt_discovers_the_nearest_recipients_file_inside_the_repository ... ok
+test discovered_recipients_are_announced_and_confirmed_on_a_terminal ... ok
+test binary_round_trip_exit_codes_and_environment_identity ... ok
+test a_fatal_signal_at_the_prompt_restores_the_terminal ... ok
+test encrypt_interactive_key_pair_never_overwrites_an_existing_identity ... ok
+test encrypt_from_stdin_needs_an_output_and_refuses_a_terminal ... ok
+test encrypt_multiple_recipients_and_malformed_recipient_is_not_echoed ... ok
+test encrypt_never_writes_ciphertext_to_stdout ... ok
+test encrypt_output_collision_force_and_symlink_rules ... ok
+test encrypt_passphrase_and_recipient_cannot_be_combined ... ok
+test an_unreachable_default_identity_fails_closed ... ok
+test encrypt_refuses_unsafe_sources ... ok
+test encrypt_without_configuration_and_without_a_terminal_fails_clearly ... ok
+test external_default_path_follows_xdg_then_home ... ok
+test identity_candidates_never_fall_back_to_each_other ... ok
+test encrypt_interactive_choice_passphrase ... ok
+test key_material_in_an_identity_setting_is_never_echoed ... ok
+test encrypt_passphrase_mode_prompts_twice_and_enforces_policy ... ok
+test list_inspects_an_explicit_file_by_content_not_name ... ok
+test list_recipient_count_ignores_the_decoy_stanza_and_json_is_structured ... ok
+test long_names_double_extensions_and_odd_paths_are_handled ... ok
+test malformed_and_oversized_identity_files_are_refused ... ok
+test identity_precedence_flag_env_external_repository ... ok
+test plaintext_identity_permissions_and_ownership_are_enforced ... ok
+test list_describes_files_without_decrypting_and_in_a_stable_order ... ok
+test repository_identity_must_be_protected_and_is_never_a_symlink ... ok
+test repository_protected_identity_needs_a_terminal ... ok
+test encrypt_interactive_key_pair_in_the_repository_is_explicit_and_protected ... ok
+test unsafe_permission_hint_quotes_the_path ... ok
+test encrypt_interactive_key_pair_outside_the_repository_is_the_default_choice ... ok
+test encrypt_empty_file_and_size_boundary ... ok
+test decrypt_passphrase_ciphertext ... ok
+test decrypt_with_a_protected_identity ... ok
+test no_secret_reaches_any_non_decrypt_surface ... ok
+test real_terminal_prompts_without_echo_and_decrypt_refuses_a_terminal_stdout ... ok
+test stdin_input_at_the_limit_works ... ok
+
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.07s
+
+     Running tests/secrets_files.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/secrets_files-1bc6279f17fe489a)
+
+running 30 tests
+test a_plaintext_identity_in_a_repository_is_never_discovered ... ok
+test a_plaintext_identity_must_be_private ... ok
+test a_reference_loads_without_any_key_and_makes_the_resource_sensitive ... ok
+test a_reference_is_relative_to_the_recipe_that_names_it ... ok
+test a_resource_that_is_skipped_never_opens_its_secret ... ok
+test a_secret_swapped_for_a_symlink_after_loading_is_refused ... ok
+test a_missing_wrong_or_damaged_key_fails_without_writing_or_leaking ... ok
+test a_sensitive_resource_redacts_reference_errors ... ok
+test an_explicit_mode_and_a_content_change_are_applied_and_verified ... ok
+test audit_of_a_missing_target_file_is_drift_without_needing_the_key ... ok
+test audit_reports_compliant_drift_and_error_never_the_content ... ok
+test content_and_source_stay_mutually_exclusive_and_templates_take_no_secret ... ok
+test apply_writes_and_verifies_the_decrypted_bytes_and_is_idempotent ... ok
+test bytes_are_compared_exactly_with_no_newline_or_line_ending_normalization ... ok
+test every_loop_expanded_resource_is_sensitive ... ok
+test only_the_exact_reference_shape_is_accepted ... ok
+test malformed_and_unsafe_references_are_refused_while_loading ... ok
+test request_and_content_carriers_never_print_their_bytes ... ok
+test removing_a_file_does_not_need_its_secret ... ok
+test the_cause_goes_to_the_diagnostics_channel_while_the_report_stays_redacted ... ok
+test the_external_default_identity_is_used_when_the_environment_names_none ... ok
+test mcp_refuses_secret_references_in_manifest_text ... ok
+test the_leak_detector_would_see_an_unprotected_value ... ok
+test without_a_source_the_resource_fails_closed ... ok
+test the_binary_validates_without_decrypting_anything ... ok
+test a_large_secret_round_trips ... ok
+test a_protected_identity_needs_a_terminal_and_the_right_passphrase ... ok
+test a_protected_repository_identity_is_unlocked_once_per_run ... ok
+test a_passphrase_secret_asks_on_the_terminal_and_never_without_one ... ok
+test a_failed_unlock_or_passphrase_is_not_asked_again_and_a_good_one_is_remembered ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.62s
+
+     Running tests/secrets_inventory.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/secrets_inventory-7d995a75aab84d08)
+
+running 28 tests
+test a_referenced_secret_outside_the_listed_paths_is_still_shown ... ok
+test a_missing_secret_does_not_hide_a_later_structural_error ... ok
+test a_case_variant_spelling_is_matched_where_the_filesystem_ignores_case ... ok
+test a_sensitive_resource_keeps_its_redacted_structural_error ... ok
+test an_absolute_recipe_argument_is_shown_as_given ... ok
+test a_bundle_is_analysed_as_all_of_its_recipes ... ok
+test loop_expanded_and_included_references_are_followed ... ok
+test an_uninspectable_reference_withholds_every_unreferenced_conclusion ... ok
+test any_structural_error_fails_the_whole_command_and_names_every_failing_recipe ... ok
+test a_missing_secret_is_a_record_not_a_failure_and_validate_still_refuses ... ok
+test only_a_parsed_age_file_can_be_called_unreferenced ... ok
+test equivalent_spellings_of_a_referenced_file_are_not_unreferenced ... ok
+test only_the_recipes_named_are_considered_and_none_is_discovered ... ok
+test recipe_labels_are_the_operators_arguments ... ok
+test recipe_mode_adds_only_additive_keys_to_each_entry ... ok
+test only_labels_are_shown_never_resource_values ... ok
+test resources_that_may_not_run_still_count_as_references ... ok
+test bundles_and_every_other_caller_still_require_the_secret_to_exist ... ok
+test spelling_the_same_recipe_or_missing_file_two_ways_changes_nothing ... ok
+test the_path_of_a_missing_secret_is_shown_even_for_a_sensitive_resource ... ok
+test used_by_is_deduplicated_and_the_unreferenced_claim_is_scoped ... ok
+test without_recipe_the_listing_is_exactly_the_phase_b_listing ... ok
+test without_recipe_the_output_is_the_phase_b_output ... ok
+test other_reference_problems_are_never_called_missing ... ok
+test the_reference_text_rules_are_identical_in_both_modes ... ok
+test recovery_warnings_are_the_header_facts_only ... ok
+test the_inventory_needs_no_key_no_terminal_and_never_looks_for_one ... ok
+test a_possible_identity_file_is_never_presented_as_unreferenced ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.62s
+
+     Running tests/ssh.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/ssh-bf4553c30e3d87fe)
+
+running 23 tests
+test ssh_changed_host_key_fails ... ok
+test ssh_continuous_stdout_timeout_bounded ... ok
+test ssh_direct_cat_stdin_none_exit_zero ... ok
+test ssh_file_created_with_expected_owner ... ok
+test ssh_default_port_portless_match_accepts ... ok
+test ssh_argv_exactness_verification_command ... ok
+test ssh_host_port_match_accepts ... ok
+test ssh_host_port_mismatch_rejects_despite_portless_match ... ok
+test ssh_ip_literal_still_connects ... ok
+test ssh_known_host_success ... ok
+test ssh_large_stdin_cat_full_duplex_no_deadlock ... ok
+test ssh_localhost_hostname_connects ... ok
+test ssh_no_sudo_effective_uid_target_user ... ok
+test ssh_non_utf8_and_signal_and_timeout ... ok
+test ssh_portless_only_non_default_port_rejects ... ok
+test ssh_special_argv_file_roundtrip ... ok
+test ssh_stdin_none_sends_eof_and_cat_exits_cleanly ... ok
+test ssh_stdin_supplied_consumed ... ok
+test ssh_sudo_denied_is_hard_error ... ok
+test ssh_sudo_effective_uid_root ... ok
+test ssh_sudo_privileged_file_replace_read_verify ... ok
+test ssh_timeout_after_dispatch_is_indeterminate_and_not_retried ... ok
+test ssh_unknown_host_fails ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ssh_keys.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/ssh_keys-c89a4bc38eef28f9)
+
+running 9 tests
+test host_enrolled_with_any_single_key_type_is_accepted ... ok
+test every_common_key_format_authenticates ... ok
+test hashed_known_hosts_entries_are_honored ... ok
+test host_key_alias_selects_the_known_hosts_name ... ok
+test host_key_policy_still_fails_closed ... ok
+test encrypted_key_file_needs_the_agent ... ok
+test server_offering_only_legacy_algorithms_is_refused ... ok
+test server_offering_only_modern_algorithms_is_accepted ... ok
+test missing_local_sshd_fails_under_strict_mode ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/sudo_root_explicit.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/sudo_root_explicit-e86663a872854acd)
+
+running 5 tests
+test a_user_without_the_flag_never_uses_the_wrapper ... ok
+test a_user_with_working_sudo_goes_through_the_wrapper ... ok
+test every_way_sudo_can_refuse_stops_the_run_at_connect_in_every_mode ... ok
+test root_with_and_without_the_flag_never_uses_the_wrapper ... ok
+test the_wrapper_costs_no_command ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/template_syntax.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/template_syntax-85b1083526558ca3)
+
+running 6 tests
+test a_jinja_comment_is_a_validation_error ... ok
+test a_sensitive_template_names_the_position_but_not_the_file_or_text ... ok
+test a_jinja_statement_is_a_validation_error_with_its_position ... ok
+test a_template_changed_after_validation_is_refused_at_render_without_mutation ... ok
+test supported_syntax_and_lookalike_text_render_unchanged ... ok
+test the_cli_validate_command_refuses_it ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/truthfulness.rs (/Volumes/VGX1000 SSD/Codex/tmp/v15-target/debug/deps/truthfulness-d497e1caef81f2ec)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+EXIT=0

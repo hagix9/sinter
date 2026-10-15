@@ -1,0 +1,52 @@
+# Account and directory creation, in an explicit dependency order.
+#
+# Declare the producer before its consumer and list it in `depends_on`:
+#   group -> user -> directory (owned by the user) -> file (owned by the user)
+# When the producer runs earlier, `plan` can predict the creation and reports
+# the dependent resources as deferred instead of failing. A consumer declared
+# BEFORE its producer is a plan error — the order in the recipe is the order
+# Sinter executes.
+#
+# The parent path is trusted (/opt is root-owned and not group/other-writable),
+# so no world-writable-parent refusal applies.
+#
+# Accounts a PACKAGE would create are never inferred from its name: declare the
+# account here (or with a command guarded by `creates`) and order it with
+# `depends_on`, as below. Sinter does not guess what a package's maintainer
+# scripts create.
+version: 1
+
+resources:
+  - id: app-group
+    type: group
+    with:
+      name: sinterdemo
+      system: true
+
+  - id: app-user
+    type: user
+    depends_on: [app-group]
+    with:
+      name: sinterdemo
+      group: sinterdemo
+      shell: /usr/sbin/nologin
+      system: true
+
+  - id: app-dir
+    type: directory
+    depends_on: [app-user]
+    with:
+      path: /opt/sinterdemo
+      owner: sinterdemo
+      group: sinterdemo
+      mode: "0750"
+
+  - id: app-config
+    type: file
+    depends_on: [app-dir]
+    with:
+      path: /opt/sinterdemo/app.conf
+      content: "managed by sinter\n"
+      owner: sinterdemo
+      group: sinterdemo
+      mode: "0640"

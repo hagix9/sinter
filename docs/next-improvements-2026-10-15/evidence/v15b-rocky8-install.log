@@ -1,0 +1,30 @@
+sinter 1.4.0
++ TARBALL=/home/a0000/sinter-pre-src.tar.gz
++ WORK=/root/sinter-pre-src
++ export PATH=/root/.cargo/bin:/sbin:/bin:/usr/sbin:/usr/bin
++ PATH=/root/.cargo/bin:/sbin:/bin:/usr/sbin:/usr/bin
++ cd /root/sinter-pre-src
++ mkdir -p /root/sinter-pre-src
++ rm -rf /root/sinter-pre-src
++ mkdir -p /root/sinter-pre-src
++ tar -xzf /home/a0000/sinter-pre-src.tar.gz -C /root/sinter-pre-src
++ cd /root/sinter-pre-src
++ echo 'ARGV: cargo build --locked -j1'
++ cargo build --locked -j1
++ tee /root/pre-build.log
++ tail -5
+   Compiling ssh2 v0.9.6
+   Compiling clap v4.6.6
+   Compiling toml v0.8.23
+   Compiling sinter v1.4.0 (/root/sinter-pre-src)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5m 39s
++ strip target/debug/sinter
++ sha256sum target/debug/sinter
++ tee /root/pre-binary.sha256
+7541d987f856d3cb9b0010c1a546ecf8c6abfd1b6a7c39674a2d7854264e3c48  target/debug/sinter
++ install -m 0755 target/debug/sinter /usr/local/bin/sinter-pre
+sinter 1.4.0
++ /usr/local/bin/sinter-pre --version
+=== PRE BUILD DONE ===
++ echo '=== PRE BUILD DONE ==='
+PRE_=0
