@@ -45,10 +45,13 @@ Fully idempotent — a symlink already pointing at `target` is left alone.
 - `path` is an existing non-symlink (file, directory) → failure; Sinter will
   not replace it implicitly.
 - Unexpected symlinks in the *parent* path are rejected before mutation.
+- A new link is created with `ln -sT`, so a directory symlink already sitting
+  at the link path cannot make the link appear inside the directory it points to.
 
 ## Platform notes
 
-Applies to all supported targets.
+Applies to all supported targets. Link creation uses the same parent-path trust
+boundary as [`file`](/en/reference/resources/file/#trust-boundary).
 
 ## Related
 

@@ -71,9 +71,12 @@ as RHEL family (dnf) but is not acceptance-tested.
 
 **`parent path` / symlink errors**
 
-Filesystem mutations require a trusted parent path — unexpected symlinks or
-unsafe parents (e.g. directly under `/tmp`) are rejected. Point `path` at a
-trusted location.
+Filesystem mutations require a trusted parent path — unexpected symlinks, a
+group- or other-writable parent that is not a sticky shared directory, or a
+parent owned by a third account are refused before mutation. Sticky, root-owned
+directories such as `/tmp` and `/var/tmp` are trusted, and when running as root
+a path inside an unprivileged account's own directory is accepted. See
+[file § Trust boundary](/en/reference/resources/file/#trust-boundary).
 
 **`service unit ... was not found`**
 
@@ -127,8 +130,15 @@ inspect the target state first, then re-apply if safe.
 
 **Metadata/cache failures on RHEL-family targets**
 
-Installs use a private metadata snapshot under `/var/tmp/sinter-dnf.*`
-(mode 0700). Snapshot residues should not persist after runs — if any remain,
+Installs run cache-only against a private snapshot of the target's dnf
+metadata under `/var/tmp/sinter-dnf.*` (mode 0700); Sinter never fetches
+repository metadata itself. The snapshot needs the target's dnf metadata cache
+to be complete for every enabled repository, so on a host where an enabled
+repository has no cached metadata (for example one that has never run
+`dnf makecache`) the install fails closed — run `dnf makecache` on the target.
+Packages already downloaded in the live cache are no longer mistaken for the
+transaction payloads, and the snapshot never writes the live cache. Snapshot
+residues should not persist after runs — if any remain,
 [report it as a bug](/en/contributing/#reporting-bugs).
 
 ## Getting more detail

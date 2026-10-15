@@ -102,7 +102,10 @@ are reported as `blocked`.
 - Command resources get a fixed baseline environment (`PATH`, `LANG`,
   `LC_ALL`, `HOME`); controller and SSH-session variables are not inherited.
 - Filesystem mutations enforce a parent-path trust boundary, reject
-  unexpected symlinks, and publish content atomically by rename.
+  unexpected symlinks, and publish content atomically: by rename outside a
+  shared directory, or by hard-linking a private staging file inside a sticky
+  shared directory such as `/tmp`. When running as root, a path inside an
+  unprivileged account's own directory is managed as that account (`setpriv`).
 - Captured stdout/stderr per command is limited (1 MiB each).
 
 ## Package backend isolation (dnf)

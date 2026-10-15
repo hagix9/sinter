@@ -47,7 +47,7 @@ not configure a persistent host-wide environment.
   identity — recipes stay platform-neutral.
 - `present` on Ubuntu → `apt`; on RHEL-family targets (Rocky Linux, RHEL,
   AlmaLinux, Oracle Linux) → `dnf`.
-- No version pinning in v1.3.0.
+- No version pinning in v1.4.0.
 - On dnf targets, installs run through a private cache snapshot — see
   [Execution Model](/en/concepts/execution-model/) and the
   [Rocky guide](/en/guides/rocky-linux/).
@@ -64,6 +64,18 @@ produce no mutation and no package transaction.
 - Unresolvable package, repository errors, or ambiguous observation → failure
   or indeterminate, never a false change report.
 - Observation failure before mutation is never reported as a change.
+
+## Metadata snapshot (dnf)
+
+On RHEL-family targets an install runs cache-only against a private snapshot of
+the target's dnf metadata; Sinter never fetches repository metadata itself. The
+snapshot must be complete for every enabled repository, so a host where an
+enabled repository has no cached metadata (for example one that has never run
+`dnf makecache`) makes the install fail closed — run `dnf makecache` on the
+target first. The snapshot no longer treats packages already downloaded in the
+live cache as the transaction payloads, and it never writes the live cache. The
+package identity query (`rpm -qp`) ignores an untrusted-signature warning;
+whether a signature is trusted is still decided by dnf and the payload digest.
 
 ## Platform notes
 

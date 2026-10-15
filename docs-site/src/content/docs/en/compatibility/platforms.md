@@ -30,7 +30,7 @@ is required.
 
 ## Unified Linux x86_64 distribution
 
-Sinter v1.3.0 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for all
+Sinter v1.4.0 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for all
 supported x86_64 version lines. The executable is unified; runtime platform
 detection still selects APT on Ubuntu and DNF on RHEL-family targets. This
 is not a claim of support for arbitrary Linux systems or architectures.
@@ -40,19 +40,19 @@ artifact on the eight supported targets before it is published; the
 acceptance manifest, raw logs, and checksums are published as release assets
 (see [acceptance evidence](https://github.com/hagix9/sinter/blob/main/release/ACCEPTANCE_EVIDENCE.md)).
 
-The current release, Sinter v1.3.0, passed the Linux x86_64 validation gate
+The current release, Sinter v1.4.0, passed the Linux x86_64 validation gate
 and was then acceptance-tested as its exact release artifact,
-`sinter-v1.3.0-linux-x86_64.tar.gz`, on eight real x86_64 Linux hosts. The
+`sinter-v1.4.0-linux-x86_64.tar.gz`, on eight real x86_64 Linux hosts. The
 tested point releases were Ubuntu 24.04.5 LTS, Ubuntu 26.04.1 LTS, Rocky
 Linux 9.8, Rocky Linux 10.2, RHEL 9.8, RHEL 10.2, AlmaLinux 9.8, and
 AlmaLinux 10.2, all x86_64. On every host the tarball and the extracted
-executable were verified byte-identical (SHA-256) and ran the established
-acceptance scenario plus artifact-identity and MCP checks, a real-host
-`group` → `user` → `directory` → `file` lifecycle, and a real-host suite for
-the v1.3.0 features (progress output, `plan`/`apply` agreement, template tag
-errors, rpm `~`/`^` versions).
-**Result: 3,980 checks passed, 0 failed** (see the
-[v1.3.0 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.3.0)).
+executable were verified byte-identical (SHA-256) and ran the release
+acceptance scenario: artifact identity, platform detection, SSH command
+execution, `package` install and remove with independent native verification
+and idempotency, `file`, `service`, `command` guards, a pre-mutation failure,
+secret redaction, `audit`, and a no-residue check.
+**Result: 264 checks passed, 0 failed (33 per target)** (see the
+[v1.4.0 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.4.0)).
 Sinter v1.2.0 passed the earlier eight-host acceptance (1240 checks, 0 failed;
 [v1.2.0 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.2.0)).
 Sinter v1.1.3, v1.1.2, v1.1.1, v1.1.0 and v1.0.0 each passed the earlier

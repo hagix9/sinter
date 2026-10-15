@@ -1,9 +1,9 @@
 ---
 title: Resource Reference
-description: All Sinter resource types implemented in v1.3.0.
+description: All Sinter resource types implemented in v1.4.0.
 ---
 
-Sinter v1.3.0 implements nine resource types. Parameters below are the
+Sinter v1.4.0 implements nine resource types. Parameters below are the
 complete supported set — unknown `with` fields are schema errors.
 
 | Type | Purpose | Key parameters |
@@ -21,7 +21,10 @@ complete supported set — unknown `with` fields are schema errors.
 ## Shared conventions
 
 - `path`-type parameters are absolute paths; parent paths must already exist
-  and pass the trust-boundary check (no unexpected symlinks).
+  and pass the trust-boundary check (no unexpected symlinks; sticky, root-owned
+  shared directories such as `/tmp` and `/var/tmp` are accepted, and when
+  running as root a path inside an unprivileged account's own directory is
+  accepted — see [file § Trust boundary](/en/reference/resources/file/#trust-boundary)).
 - `mode` is always a quoted four-digit octal string (`"0644"`).
 - `state` defaults to `present` for filesystem resources; `package` requires
   it explicitly.

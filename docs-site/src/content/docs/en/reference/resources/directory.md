@@ -47,7 +47,8 @@ Fully idempotent.
 
 ## Platform notes
 
-Applies to all supported targets.
+Applies to all supported targets. Directory creation uses the same parent-path
+trust boundary as [`file`](/en/reference/resources/file/#trust-boundary).
 
 ## Related
 

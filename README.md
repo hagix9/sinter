@@ -10,7 +10,7 @@
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/hagix9/sinter?quickstart=1)
 
-Try Sinter v1.3.0 in a disposable Ubuntu container in your browser — nothing to
+Try Sinter v1.4.0 in a disposable Ubuntu container in your browser — nothing to
 install locally, no SSH, no servers. See the [start guide](examples/start/README.md).
 
 Sinter is a lightweight, agentless configuration-management tool inspired by Itamae.
@@ -93,7 +93,7 @@ curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
 $HOME/.local/bin/sinter --version
 ```
 
-Acceptance-tested point releases (v1.3.0 release artifact): Ubuntu 24.04.5 LTS,
+Acceptance-tested point releases (v1.4.0 release artifact): Ubuntu 24.04.5 LTS,
 Ubuntu 26.04.1 LTS, Rocky Linux 9.8, Rocky Linux 10.2, RHEL 9.8, RHEL 10.2,
 AlmaLinux 9.8 and AlmaLinux 10.2, all x86_64. Other point releases have not
 each been independently accepted.
@@ -322,17 +322,17 @@ real-host acceptance matrix.
 Each release from v1.0.0 on is acceptance-tested as its exact release
 artifact on the eight supported targets before it is published, and its
 acceptance evidence (manifest, raw logs, checksums) is published with the
-release. The v1.3.0 release passed the Linux x86_64
-validation gate and was then acceptance-tested as its exact release artifact
-(`sinter-v1.3.0-linux-x86_64.tar.gz`) on eight real x86_64 Linux hosts — the
+release. The v1.4.0 release passed the Linux x86_64 validation gate and was
+then acceptance-tested as its exact release artifact
+(`sinter-v1.4.0-linux-x86_64.tar.gz`) on eight real x86_64 Linux hosts — the
 exact point releases listed under [Install](#install). On every host the
 tarball and the extracted binary were verified byte-identical (SHA-256) and
-ran the established acceptance scenario plus artifact-identity and MCP
-checks, a real-host `group` → `user` → `directory` → `file` lifecycle, and a
-real-host suite for the v1.3.0 features (progress output, `plan`/`apply`
-agreement, template tag errors, rpm `~`/`^` versions):
-**3,980 checks passed, 0 failed** (see the
-[v1.3.0 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.3.0)).
+ran the release acceptance scenario: artifact identity, platform detection,
+SSH command execution, `package` install and remove with independent native
+verification and idempotency, `file`, `service`, `command` guards, a
+pre-mutation failure, secret redaction, `audit`, and a no-residue check:
+**264 checks passed, 0 failed (33 per target)** (see the
+[v1.4.0 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.4.0)).
 Sinter v1.2.0 passed the earlier eight-host acceptance (1240 checks, 0 failed;
 [v1.2.0 evidence](https://github.com/hagix9/sinter/releases/tag/v1.2.0)).
 Sinter v1.1.3, v1.1.2, v1.1.1, v1.1.0 and v1.0.0 each passed the earlier eight-host acceptance (408/408), and v0.5.1

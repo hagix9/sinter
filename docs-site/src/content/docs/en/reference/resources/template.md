@@ -75,7 +75,9 @@ no handler notification.
 
 ## Platform notes
 
-Applies to all supported targets.
+Applies to all supported targets. Template publication uses the same trust
+boundary as [`file`](/en/reference/resources/file/#trust-boundary), including
+shared directories such as `/tmp` and the exclusive staging rules there.
 
 ## Related
 

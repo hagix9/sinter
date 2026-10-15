@@ -108,10 +108,39 @@ mutation.
 - A `content: { secret: … }` whose key is unavailable fails before any change
   (see [Secret content](#secret-content)).
 
-## Platform notes
+## Trust boundary
 
-Applies to all supported targets. Paths under world-writable directories such
-as `/tmp` fail the trust-boundary check.
+Applies to all supported targets. A managed path is observed only through a
+parent chain Sinter has accepted, and it refuses rather than guessing.
+
+- A parent must be a real directory owned by root (or, without `--sudo`, by
+  the connecting user) and not group- or other-writable, unless it is a shared
+  directory; the path must not cross a directory owned by a third account.
+- **Shared directories** (`/tmp`, `/var/tmp`): a directory others can write is
+  accepted as a parent when it is owned by root (without `--sudo`, also by the
+  connecting user) and has the **sticky bit**. Inside it Sinter manages only
+  entries owned by root. A new file is created exclusively — content, owner,
+  mode and extended attributes are fixed on a private staging file, which is
+  then hard-linked at the final path — so a name another account took first is
+  never replaced (the resource fails and a rerun converges). Directly in `/tmp`,
+  below a directory of another account, the operation runs as that account but
+  only when the recipe sets `owner` to that account; otherwise it is refused in
+  `plan` and `apply`.
+- **Root managing an unprivileged account's directory** (a root login or
+  `--sudo`): a path such as `/home/alice/page` is accepted when the first
+  untrusted ancestor is a plain directory of an unprivileged account (not
+  group- or other-writable, no ACL, nothing below it owned by a third account,
+  no symlink). Sinter's file operations there run as that account (`setpriv`;
+  capabilities dropped), so the account's tree cannot be used to make root
+  write elsewhere. `setpriv` (util-linux) is required on the target for this
+  case.
+- **setgid directories**: staging a `file` or `link` in a directory with the
+  setgid bit is refused before anything is written (a directory created there
+  would inherit the group, so Sinter could not prove it is its own). Directories,
+  metadata-only changes and removals there are managed as before.
+- Directories others can write without the sticky bit, shared directories owned
+  by another account, and shared directories inside another account's tree stay
+  refused.
 
 ## Related
 

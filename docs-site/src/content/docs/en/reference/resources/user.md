@@ -130,9 +130,10 @@ hash with your own tooling (`mkpasswd -m sha-512`, `openssl passwd -6`,
   libxcrypt there are built without yescrypt): use `$6$`. Sinter does not check
   other platforms: a `$y$` hash on a distribution that cannot verify yescrypt
   (older than the supported targets) would be stored but could not log in.
-- **`--sudo` is required.** `/etc/shadow` is readable only by root. Without
-  `--sudo`, `plan`, `apply` and `audit` fail (`audit` reports `ERROR`); they
-  never report "no change". The secret is not opened before that check.
+- **Root privileges are required.** `/etc/shadow` is readable only by root. Run
+  as root or with `--sudo` (a root login needs no `--sudo`). As a non-root user
+  without `--sudo`, `plan`, `apply` and `audit` fail (`audit` reports `ERROR`);
+  they never report "no change". The secret is not opened before that check.
 - **Always sensitive**, whatever `sensitive:` says, and this covers the **whole
   resource**, not only the password: the plan diff is shown as redacted, notes
   and errors are fixed text (the account name appears as `[redacted]` and a
