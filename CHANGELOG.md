@@ -2,7 +2,7 @@
 
 All notable changes to Sinter are documented in this file.
 
-## [Unreleased]
+## [1.5.0] - 2026-10-16
 
 ### Changed
 
