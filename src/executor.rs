@@ -2405,6 +2405,13 @@ pub struct FakeTarget {
     /// Overrides the `dnf repolist -v` output, so tests can model truncated or
     /// malformed repository enumeration (R2-03).
     pub dnf_repolist_output: Option<Output>,
+    /// Overrides the `dnf makecache` answer — the metadata-cache refresh
+    /// Sinter runs when the private snapshot proves the host's cache
+    /// incomplete. When unset the invocation populates every modeled
+    /// repository's repodata and mirror list (a successful `dnf makecache`),
+    /// so the rebuilt snapshot verifies; an override models a refresh that
+    /// fails or does not change the cache.
+    pub dnf_makecache_output: Option<Output>,
     /// Overrides the cache-only `dnf install --assumeno` transaction table,
     /// so tests can model truncated, malformed, or ambiguous transactions
     /// (R2-03/R2-04).
@@ -2653,6 +2660,7 @@ impl FakeTarget {
                 mirrorlist_cached: true,
             }],
             dnf_repolist_output: None,
+            dnf_makecache_output: None,
             dnf_dry_run_output: None,
             dnf_downloadonly_output: None,
             snap_rpm_listing: None,
@@ -2716,6 +2724,7 @@ impl FakeTarget {
                 mirrorlist_cached: true,
             }],
             dnf_repolist_output: None,
+            dnf_makecache_output: None,
             dnf_dry_run_output: None,
             dnf_downloadonly_output: None,
             snap_rpm_listing: None,
@@ -2765,6 +2774,7 @@ impl FakeTarget {
             query_results: std::collections::VecDeque::new(),
             dnf_repos: Vec::new(),
             dnf_repolist_output: None,
+            dnf_makecache_output: None,
             dnf_dry_run_output: None,
             dnf_downloadonly_output: None,
             snap_rpm_listing: None,
@@ -2817,6 +2827,7 @@ impl FakeTarget {
             query_results: std::collections::VecDeque::new(),
             dnf_repos: Vec::new(),
             dnf_repolist_output: None,
+            dnf_makecache_output: None,
             dnf_dry_run_output: None,
             dnf_downloadonly_output: None,
             snap_rpm_listing: None,
@@ -2863,6 +2874,7 @@ impl FakeTarget {
             query_results: std::collections::VecDeque::new(),
             dnf_repos: Vec::new(),
             dnf_repolist_output: None,
+            dnf_makecache_output: None,
             dnf_dry_run_output: None,
             dnf_downloadonly_output: None,
             snap_rpm_listing: None,
@@ -3799,6 +3811,24 @@ impl FakeExecutor {
                 "Last metadata expiration check: 0:30:00 ago on Wed Sep 16 10:28:01 2026.\n"
                     .to_string(),
             );
+        }
+        if prog == "dnf" && args.iter().any(|a| a == "makecache") {
+            // `dnf makecache`: populate the target's own metadata cache. With
+            // no override the invocation makes every modeled repository's
+            // repodata (and, for mirror-resolving repos, its mirror list)
+            // available, exactly as a successful refresh does, so the rebuilt
+            // snapshot verifies. An override models a refresh that failed or
+            // left the cache unchanged (the run must then still fail closed).
+            if let Some(o) = self.target.dnf_makecache_output.clone() {
+                return o;
+            }
+            for r in self.target.dnf_repos.iter_mut() {
+                r.repodata_cached = true;
+                if r.mirrors {
+                    r.mirrorlist_cached = true;
+                }
+            }
+            return Self::exited(0, "Metadata cache created.\n".to_string(), String::new());
         }
         if prog == "dnf" && args.iter().any(|a| a == "repoquery") {
             // DESIGN §27 snapshot-usability check: a full-output override

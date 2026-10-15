@@ -23,11 +23,57 @@ handlers: [...]               # 省略可。ハンドラのリスト
 targets: { hosts: [...], groups: [...] }   # 省略可。v1.1.0 以降（インベントリ実行）
 
 backup: { paths: [...] }      # 省略可。v1.1.0 以降（apply 前にコピー）
+
+env: { NAME: value }          # 省略可。package/command の既定環境変数
 ```
 
 許可されるトップレベルフィールド: `version`、`vars`、`include`、
-`resources`、`handlers`、および（v1.1.0 以降）`targets` と `backup`。
+`resources`、`handlers`、（v1.1.0 以降）`targets` と `backup`、および `env`。
 それ以外はスキーマエラーです。
+
+## env
+
+レシピ内のすべての `package` / `command` リソースに既定で与える環境変数の
+マップです。すべてのリソースに共通する設定（多くは HTTP(S) プロキシ）を
+一度だけ書くためにあります。
+
+```yaml
+env:
+  HTTP_PROXY: "http://proxy.example.com:3128"
+  HTTPS_PROXY: "http://proxy.example.com:3128"
+  NO_PROXY: "localhost,127.0.0.1,.internal.example.com"
+
+resources:
+  - id: install
+    type: package
+    with: { name: curl, state: present }
+  - id: one-off
+    type: command
+    with:
+      program: /usr/local/bin/fetch
+      env: { HTTPS_PROXY: "http://other-proxy:3128" }  # このリソースだけ上書き
+```
+
+- **適用範囲。** 受け取るのは `package` と `command` だけです（外部プロセスに
+  環境変数を与える唯一のリソースだからです）。接続処理、パッケージの問い合わせ、
+  サービス、ファイル操作には渡しません。
+- **優先順位。** リソース自身の `env` が、その名前についてレシピ `env` を上書き
+  します。他の名前は引き続き適用されます。リソースの値が既定で置き換わることは
+  ありません。
+- **名前は大文字小文字を区別します**（Linux と同様）。`HTTP_PROXY` と
+  `http_proxy` は別の変数で、書いたとおりに渡されます。dnf と apt はどちらの
+  綴りも解釈します。Sinter は大文字小文字を変換しません。
+- **予約名** `PATH`、`LANG`、`LC_ALL`、`HOME` は拒否されます。ベースラインは
+  Sinter が必ず設定します。
+- **値**はリソース `env` と同様に `vars`/`facts` を補間できます（例:
+  `"{{ vars.proxy }}"`）。`sensitive` な変数から導かれる値を使うと、継承する
+  各リソースが sensitive になり、値はすべての出力で伏せられます。
+- `env` は実行するレシピ本体にのみ書けます（include されたファイルには書けません）。
+
+ホスト単位の `env` はありません。インベントリが定義するのはホスト・ポート・
+資格情報だけで、ホスト変数はありません（`/ja/reference/cli/#複数ホスト`）。ホスト
+ごとに異なるプロキシは、そのホスト用の別レシピ（または独自のリソースを持つ
+include 断片）で表現します。
 
 ## targets
 

@@ -68,12 +68,17 @@ produce no mutation and no package transaction.
 ## Metadata snapshot (dnf)
 
 On RHEL-family targets an install runs cache-only against a private snapshot of
-the target's dnf metadata; Sinter never fetches repository metadata itself. The
-snapshot must be complete for every enabled repository, so a host where an
-enabled repository has no cached metadata (for example one that has never run
-`dnf makecache`) makes the install fail closed — run `dnf makecache` on the
-target first. The snapshot no longer treats packages already downloaded in the
-live cache as the transaction payloads, and it never writes the live cache. The
+the target's dnf metadata. The snapshot must be complete for every enabled
+repository. If an enabled repository has no cached metadata — a fresh image, or
+a repository added since the last refresh — Sinter refreshes the target's own
+dnf metadata cache once, exactly as `dnf makecache` does, then rebuilds and
+re-verifies the snapshot; no manual preparation is needed. Only absent metadata
+is fetched (`metadata_expire=-1`), so a warm host does no extra network
+traffic, and only repository metadata is fetched — no package payload is
+downloaded by that step. If the metadata cannot be established the resource
+fails closed before any package mutation. The snapshot no longer treats packages
+already downloaded in the live cache as the transaction payloads, and it never
+removes or copies the live cache. The
 package identity query (`rpm -qp`) ignores an untrusted-signature warning;
 whether a signature is trusted is still decided by dnf and the payload digest.
 

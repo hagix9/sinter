@@ -30,6 +30,7 @@ and mode — or is absent.
 | `owner` | no | string | — | Owner name. |
 | `group` | no | string | — | Group name. |
 | `mode` | no | string | — | Quoted four-digit octal, e.g. `"0644"`. |
+| `validate` | no | map | — | Command run against the staged file before publication (`program`, `args`, `timeout_seconds`). |
 
 ## Expected behavior
 
@@ -45,6 +46,44 @@ and mode — or is absent.
   `systemctl daemon-reload` automatically before the next service or handler
   that needs it, and at the end of a successful apply. See
   [service](/en/reference/resources/service/#automatic-manager-synchronization).
+
+## Pre-publication validation (validate)
+
+```yaml
+- id: sshd_conf
+  type: file
+  with:
+    path: /etc/ssh/sshd_config.d/60-app.conf
+    content: "PermitRootLogin no\nMaxAuthTries 4\n"
+    owner: root
+    group: root
+    mode: "0600"
+    validate:
+      program: /usr/sbin/sshd
+      args: ["-t", "-f"]
+      timeout_seconds: 60        # optional, default 300
+```
+
+`validate` runs a command against the **staged** file — the content Sinter has
+built but not yet published — and only publishes it if the command exits 0. The
+command is executed as `program args... <staged-file>`, argv-only (no shell), as
+the operation's own identity, and never sees the production path. Use a tool's
+non-applying syntax check:
+
+| Software | `validate` |
+|----------|-----------|
+| OpenSSH | `program: /usr/sbin/sshd`, `args: ["-t", "-f"]` |
+| sudo | `program: /usr/sbin/visudo`, `args: ["-cf"]` |
+| rsyslog | `program: /usr/sbin/rsyslogd`, `args: ["-N1", "-f"]` |
+| Samba | `program: /usr/bin/testparm`, `args: ["-s"]` |
+
+- On a non-zero exit, a signal, or a timeout the content is **not published**
+  and the destination is left exactly as it was; a timeout or lost response is
+  reported as indeterminate (the file is still unchanged).
+- `program` must be an absolute path. `program`/`args` may interpolate
+  `vars`/`facts`. A value derived from a `sensitive` variable makes the
+  resource sensitive, and the validation command's output is then never shown.
+- Without `validate`, the file is published exactly as before.
 
 ## Secret content
 

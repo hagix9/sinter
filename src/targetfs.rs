@@ -388,6 +388,14 @@ impl StagedObject {
     pub(crate) fn path(&self) -> String {
         format!("{}/{}", self.dir, self.staged.name)
     }
+
+    /// The path of the staged payload file inside the staging directory. The
+    /// fixed staging script always names the payload `payload` (DESIGN §23.4),
+    /// so this is the file a pre-publication `validate` command reads. It is
+    /// never the production path.
+    pub(crate) fn payload_path(&self) -> String {
+        format!("{}/payload", self.path())
+    }
 }
 
 /// What a staging step did.

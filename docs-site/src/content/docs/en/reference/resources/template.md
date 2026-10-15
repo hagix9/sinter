@@ -36,6 +36,7 @@ hostname = {{ facts.hostname }}
 | `owner` | no | string | — | Owner name. |
 | `group` | no | string | — | Group name. |
 | `mode` | no | string | — | Quoted four-digit octal. |
+| `validate` | no | map | — | Command run against the staged file before publication (`program`, `args`, `timeout_seconds`). |
 
 ## Expected behavior
 
@@ -55,6 +56,8 @@ hostname = {{ facts.hostname }}
   `systemctl daemon-reload` automatically before the next service or handler
   that needs it, and at the end of a successful apply. See
   [service](/en/reference/resources/service/#automatic-manager-synchronization).
+- `validate` checks the staged render before publication, exactly as for
+  [file](/en/reference/resources/file/#pre-publication-validation-validate).
 
 ## Idempotency
 

@@ -134,6 +134,7 @@ pub(crate) fn load_model_with(
         backups: Vec::new(),
         entry: None,
         targets: None,
+        recipe_env: None,
         refs,
     };
     state.load(entry)?;
@@ -192,6 +193,8 @@ struct LoadState {
     entry: Option<PathBuf>,
     /// `targets` of the entry recipe.
     targets: Option<TargetSelector>,
+    /// Recipe-wide default `env` of the entry recipe (DESIGN §27.1).
+    recipe_env: Option<Value>,
     /// How strictly secret references are checked (strict unless listing).
     refs: crate::secret_source::ReferenceCheck,
 }
@@ -223,11 +226,19 @@ impl LoadState {
         if self.entry.is_none() {
             self.entry = Some(canon.clone());
             self.targets = doc.targets.clone();
+            self.recipe_env = doc.env.clone();
         } else if doc.targets.is_some() {
             // Execution targets belong to the recipe that is run, never to a
             // fragment pulled in by `include` (no implicit merging).
             return Err(SinterError::schema(format!(
                 "{}: targets may only be declared in the top-level recipe, not in an included file",
+                canon.display()
+            )));
+        } else if doc.env.is_some() {
+            // The recipe-wide default environment belongs to the recipe that
+            // is run; an included fragment may not add or override it.
+            return Err(SinterError::schema(format!(
+                "{}: env may only be declared in the top-level recipe, not in an included file",
                 canon.display()
             )));
         }
@@ -539,6 +550,9 @@ fn validate_declaration_shape(
                         .is_some_and(|v| value_references_sensitive_var(v, sensitive_var_names)),
             )?;
             require_content_type(&d.with, ctx)?;
+            if let Some(v) = d.with.get("validate") {
+                validate_validate_spec(v, ctx)?;
+            }
         }
         "directory" => {
             validate_with_fields(&d.with, DIR_FIELDS, ctx)?;
@@ -592,6 +606,9 @@ fn validate_declaration_shape(
                         .get("mode")
                         .is_some_and(|v| value_references_sensitive_var(v, sensitive_var_names)),
             )?;
+            if let Some(v) = d.with.get("validate") {
+                validate_validate_spec(v, ctx)?;
+            }
         }
         "command" => {
             validate_with_fields(&d.with, COMMAND_FIELDS, ctx)?;
@@ -1068,6 +1085,40 @@ fn require_content_type(with: &BTreeMap<String, Value>, ctx: &str) -> Result<()>
     }
 }
 
+/// Apply the recipe-wide default `env` to a resource's `with`.
+///
+/// Only `package` and `command` resources run an external process Sinter gives
+/// an environment to, so only they inherit it (DESIGN §27.1). A name the
+/// resource sets explicitly overrides the recipe default; the default is never
+/// merged into an unrelated resource type, and never passed to a service,
+/// package query, or connection step. The merged map is an ordinary `env`
+/// value, so interpolation and sensitivity behave exactly as if the resource
+/// had written it.
+fn merge_recipe_env(
+    type_: &str,
+    with: &BTreeMap<String, Value>,
+    recipe: &Value,
+) -> BTreeMap<String, Value> {
+    if type_ != "package" && type_ != "command" {
+        return with.clone();
+    }
+    let Some(defaults) = recipe.as_map() else {
+        return with.clone();
+    };
+    if defaults.is_empty() {
+        return with.clone();
+    }
+    let mut merged: BTreeMap<String, Value> = defaults.clone();
+    if let Some(Value::Map(own)) = with.get("env") {
+        for (k, v) in own {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    let mut out = with.clone();
+    out.insert("env".to_string(), Value::Map(merged));
+    out
+}
+
 fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
     // Duplicate resource and handler ID detection.
     let mut resource_ids: BTreeSet<String> = BTreeSet::new();
@@ -1156,6 +1207,9 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
     let mut frozen: Vec<FrozenResource> = Vec::with_capacity(state.resources.len());
     let mut path_owner: BTreeMap<String, String> = BTreeMap::new();
     let mut account_name_owner: BTreeMap<(String, String), String> = BTreeMap::new();
+    // Recipe-wide default environment, applied to `package`/`command`
+    // resources as a base their own `env` overrides (DESIGN §27.1).
+    let recipe_env = state.recipe_env.clone().unwrap_or(Value::Null);
 
     for r in &state.resources {
         // Dependency / notify reference validation.
@@ -1230,7 +1284,7 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
         let mut fr = FrozenResource {
             id: r.id.clone(),
             type_: r.type_.clone(),
-            with: r.with.clone(),
+            with: merge_recipe_env(&r.type_, &r.with, &recipe_env),
             when: r.when.clone(),
             depends_on: r.depends_on.clone(),
             notify: r.notify.clone(),
@@ -1268,6 +1322,9 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
         match r.type_.as_str() {
             "file" => {
                 validate_with_fields(&r.with, FILE_FIELDS, &resource_ctx)?;
+                if let Some(v) = r.with.get("validate") {
+                    validate_validate_spec(v, &resource_ctx)?;
+                }
                 let path = static_string(
                     &r.with,
                     "path",
@@ -1338,6 +1395,9 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                     )));
                 }
                 validate_with_fields(&r.with, TEMPLATE_FIELDS, &resource_ctx)?;
+                if let Some(v) = r.with.get("validate") {
+                    validate_validate_spec(v, &resource_ctx)?;
+                }
                 let path = static_string(
                     &r.with,
                     "path",
@@ -1598,8 +1658,12 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
         // BEFORE template body validation so body-derived values are redacted
         // whenever sensitivity is explicit OR inherited from a sensitive
         // variable in a `with` field or in the `when` condition (DESIGN §31).
+        // Iterate the FROZEN `with` (which already carries the merged
+        // recipe-wide `env`), not the raw one: a default environment derived
+        // from a sensitive variable must make the resource sensitive for early
+        // diagnostics too.
         let mut derived_from_with = r.sensitive;
-        for v in r.with.values() {
+        for v in fr.with.values() {
             if value_references_sensitive_var(v, &sensitive_var_names) {
                 derived_from_with = true;
             }
@@ -2105,7 +2169,7 @@ fn validate_command_fields(
     Ok(())
 }
 
-const RESERVED_ENV: &[&str] = &["PATH", "LANG", "LC_ALL", "HOME"];
+pub(crate) const RESERVED_ENV: &[&str] = &["PATH", "LANG", "LC_ALL", "HOME"];
 
 fn validate_env_map(value: &Value, ctx: &str) -> Result<()> {
     match value {
@@ -2140,6 +2204,99 @@ fn validate_env_map(value: &Value, ctx: &str) -> Result<()> {
         }
         _ => Err(SinterError::schema(format!(
             "{}: env must be a map of strings",
+            ctx
+        ))),
+    }
+}
+
+/// Allowed keys of a `file`/`template` `validate` map.
+const VALIDATE_FIELDS: &[&str] = &["program", "args", "timeout_seconds"];
+
+/// Validate the optional `validate` map of a `file`/`template` resource. It
+/// names a command run against the *staged* file before it is published
+/// (DESIGN §24.4). The shape is checked here; the command itself is only
+/// resolved and run at apply time.
+fn validate_validate_spec(value: &Value, ctx: &str) -> Result<()> {
+    match value {
+        Value::Null => Ok(()),
+        Value::Map(m) => {
+            for k in m.keys() {
+                if !VALIDATE_FIELDS.contains(&k.as_str()) {
+                    return Err(SinterError::schema(format!(
+                        "{}: validate has no field {}",
+                        ctx, k
+                    )));
+                }
+            }
+            match m.get("program") {
+                Some(Value::Str(p)) => {
+                    if p.is_empty() {
+                        return Err(SinterError::schema(format!(
+                            "{}: validate.program must not be empty",
+                            ctx
+                        )));
+                    }
+                    if !crate::expressions::has_interpolation(p) && !p.starts_with('/') {
+                        return Err(SinterError::schema(format!(
+                            "{}: validate.program must be an absolute path",
+                            ctx
+                        )));
+                    }
+                }
+                _ => {
+                    return Err(SinterError::schema(format!(
+                        "{}: validate.program is required and must be a string",
+                        ctx
+                    )))
+                }
+            }
+            if let Some(v) = m.get("args") {
+                match v {
+                    Value::Null => {}
+                    Value::List(items) => {
+                        for i in items {
+                            match i {
+                                Value::Str(s) if !crate::value::has_nul(s) => {}
+                                Value::Str(_) => {
+                                    return Err(SinterError::schema(format!(
+                                        "{}: validate.args may not contain NUL",
+                                        ctx
+                                    )))
+                                }
+                                _ => {
+                                    return Err(SinterError::schema(format!(
+                                        "{}: validate.args must be a list of strings",
+                                        ctx
+                                    )))
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(SinterError::schema(format!(
+                            "{}: validate.args must be a list of strings",
+                            ctx
+                        )))
+                    }
+                }
+            }
+            if let Some(v) = m.get("timeout_seconds") {
+                if !matches!(v, Value::Null) {
+                    match v.as_int() {
+                        Some(n) if (1..=86400).contains(&n) => {}
+                        _ => {
+                            return Err(SinterError::schema(format!(
+                                "{}: validate.timeout_seconds must be an integer in 1..86400",
+                                ctx
+                            )))
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        _ => Err(SinterError::schema(format!(
+            "{}: validate must be a map with program/args/timeout_seconds",
             ctx
         ))),
     }
@@ -2273,11 +2430,13 @@ fn validate_with_fields(with: &BTreeMap<String, Value>, allowed: &[&str], ctx: &
 }
 
 pub const FILE_FIELDS: &[&str] = &[
-    "path", "state", "content", "source", "owner", "group", "mode",
+    "path", "state", "content", "source", "owner", "group", "mode", "validate",
 ];
 pub const DIR_FIELDS: &[&str] = &["path", "state", "owner", "group", "mode"];
 pub const LINK_FIELDS: &[&str] = &["path", "target", "state"];
-pub const TEMPLATE_FIELDS: &[&str] = &["path", "state", "source", "owner", "group", "mode", "vars"];
+pub const TEMPLATE_FIELDS: &[&str] = &[
+    "path", "state", "source", "owner", "group", "mode", "vars", "validate",
+];
 pub const COMMAND_FIELDS: &[&str] = &[
     "program",
     "args",

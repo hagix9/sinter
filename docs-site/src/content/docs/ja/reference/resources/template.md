@@ -36,6 +36,7 @@ hostname = {{ facts.hostname }}
 | `owner` | いいえ | string | — | 所有者名。 |
 | `group` | いいえ | string | — | グループ名。 |
 | `mode` | いいえ | string | — | 引用符付きの 4 桁 8 進数。 |
+| `validate` | いいえ | map | — | 公開前に staging ファイルへ実行する検証コマンド（`program`、`args`、`timeout_seconds`）。 |
 
 ## 期待される動作
 
@@ -60,6 +61,8 @@ hostname = {{ facts.hostname }}
   最後に、Sinter が `systemctl daemon-reload` を自動的に実行します。
   [service](/ja/reference/resources/service/#マネージャの自動同期)を参照して
   ください。
+- `validate` は、公開前にレンダリング結果（staging ファイル）を検証します。
+  詳しくは [file](/ja/reference/resources/file/#公開前の検証validate) と同じです。
 
 ## 冪等性
 

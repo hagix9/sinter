@@ -2,6 +2,58 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **A cold dnf metadata cache no longer blocks an install.** On RHEL-family
+  targets an install still runs cache-only against a private snapshot of the
+  target's dnf metadata, but when an enabled repository has no cached
+  metadata — a fresh image, or a repository added since the last refresh — the
+  install no longer fails with "repository metadata not locally complete" and
+  no longer needs a manual `dnf makecache` first. Sinter refreshes the
+  target's own metadata cache once, exactly as `dnf makecache` does (only
+  absent metadata is fetched, `metadata_expire=-1`; no package payload is
+  downloaded by that step), then rebuilds and re-verifies the private
+  snapshot. It is attempted once and bounded: a refresh that cannot make the
+  cache complete fails the resource closed before any package mutation, and
+  later packages in the same run reuse the warmed cache. The private snapshot
+  still never removes or copies the live cache.
+
+### Added
+
+- **`file` / `template` can validate the new content before it is published.**
+  A `validate` block (`program`, `args`, optional `timeout_seconds`) runs a
+  command against the **staged** file — `program args... <staged-file>`,
+  argv-only, as the operation's identity — and publishes only if it exits 0.
+  On a non-zero exit, a signal, a timeout or a lost response nothing is
+  published and the destination is left unchanged (a timeout is reported as
+  indeterminate). Use a tool's non-applying syntax check: `sshd -t -f`,
+  `visudo -cf`, `rsyslogd -N1 -f`, `testparm -s`. The command never sees the
+  production path, and a sensitive resource's validator output is never shown.
+
+- **A recipe-wide default environment for `package` and `command`.** A
+  top-level `env` map is applied to every `package`/`command` resource, so a
+  common HTTP(S) proxy is written once. A resource's own `env` overrides it per
+  name; the default never reaches a connection step, a package query, a
+  service, or a file operation. Names are case-sensitive (Sinter does not fold
+  `HTTP_PROXY`/`http_proxy`), `PATH`/`LANG`/`LC_ALL`/`HOME` are reserved, and a
+  value derived from a `sensitive` variable is redacted. `env` is allowed only
+  in the recipe that is run.
+
+- **DNF module-stream transactions are recognized.** A transaction table that
+  dnf prints with an `Enabling module streams:` section (measured on Rocky
+  Linux 8 when a default module stream is enabled during resolution) is parsed:
+  the `<module> <stream>` pairs name no payload and are validated and skipped,
+  while the package rows are handled exactly as before. No stream is chosen and
+  no module is enabled by Sinter — dnf enables the default stream in its own
+  transaction; only the output is understood. Any other module/profile section
+  still fails closed.
+
+- Quick, single-behaviour example recipes under `examples/quick/` (packages,
+  dnf metadata, a DNF module stream, a proxy, accounts/paths, a
+  package/user/service recipe, config validation).
+
 ## [1.4.0] - 2026-10-14
 
 ### Added

@@ -131,14 +131,17 @@ inspect the target state first, then re-apply if safe.
 **Metadata/cache failures on RHEL-family targets**
 
 Installs run cache-only against a private snapshot of the target's dnf
-metadata under `/var/tmp/sinter-dnf.*` (mode 0700); Sinter never fetches
-repository metadata itself. The snapshot needs the target's dnf metadata cache
-to be complete for every enabled repository, so on a host where an enabled
-repository has no cached metadata (for example one that has never run
-`dnf makecache`) the install fails closed — run `dnf makecache` on the target.
-Packages already downloaded in the live cache are no longer mistaken for the
-transaction payloads, and the snapshot never writes the live cache. Snapshot
-residues should not persist after runs — if any remain,
+metadata under `/var/tmp/sinter-dnf.*` (mode 0700), and the snapshot never
+removes or copies the live cache. The snapshot needs the target's dnf metadata
+cache to be complete for every enabled repository. When an enabled repository
+has no cached metadata — a host that has never run `dnf makecache`, or a
+repository added since the last refresh — Sinter refreshes the target's own dnf
+metadata cache once (only absent metadata; present metadata is left alone) and
+re-verifies the snapshot, so no manual preparation step is needed. If the
+metadata still cannot be established the resource fails closed before any
+package mutation. Packages already downloaded in the live cache are no longer
+mistaken for the transaction payloads. Snapshot residues should not persist
+after runs — if any remain,
 [report it as a bug](/en/contributing/#reporting-bugs).
 
 ## Getting more detail

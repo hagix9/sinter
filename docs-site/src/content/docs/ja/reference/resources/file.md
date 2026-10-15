@@ -30,6 +30,7 @@ description: 通常ファイルの内容とメタデータを管理する。
 | `owner` | いいえ | string | — | 所有者名。 |
 | `group` | いいえ | string | — | グループ名。 |
 | `mode` | いいえ | string | — | 引用符付きの 4 桁 8 進数。例: `"0644"`。 |
+| `validate` | いいえ | map | — | 公開前に staging ファイルへ実行する検証コマンド（`program`、`args`、`timeout_seconds`）。 |
 
 ## 期待される動作
 
@@ -47,6 +48,44 @@ description: 通常ファイルの内容とメタデータを管理する。
   最後に、Sinter が `systemctl daemon-reload` を自動的に実行します。
   [service](/ja/reference/resources/service/#マネージャの自動同期)を参照して
   ください。
+
+## 公開前の検証（validate）
+
+```yaml
+- id: sshd_conf
+  type: file
+  with:
+    path: /etc/ssh/sshd_config.d/60-app.conf
+    content: "PermitRootLogin no\nMaxAuthTries 4\n"
+    owner: root
+    group: root
+    mode: "0600"
+    validate:
+      program: /usr/sbin/sshd
+      args: ["-t", "-f"]
+      timeout_seconds: 60        # 省略可。既定 300
+```
+
+`validate` は、Sinter が内容を組み立てたがまだ公開していない **staging
+ファイル**に対して検証コマンドを実行し、終了コード 0 のときだけ公開します。
+コマンドは `program args... <staging ファイル>` の形で、シェルを介さず argv
+のみ、操作自身の権限で実行され、本番パスを見ることはありません。各ソフトの
+**適用しない**構文チェックを使ってください。
+
+| ソフトウェア | `validate` |
+|--------------|-----------|
+| OpenSSH | `program: /usr/sbin/sshd`, `args: ["-t", "-f"]` |
+| sudo | `program: /usr/sbin/visudo`, `args: ["-cf"]` |
+| rsyslog | `program: /usr/sbin/rsyslogd`, `args: ["-N1", "-f"]` |
+| Samba | `program: /usr/bin/testparm`, `args: ["-s"]` |
+
+- 非ゼロ終了・シグナル・タイムアウトのときは内容を**公開しません**。宛先は
+  そのままです。タイムアウトや応答不明は indeterminate として報告されます
+  （ファイルは変わりません）。
+- `program` は絶対パスでなければなりません。`program`/`args` は `vars`/`facts`
+  を補間できます。`sensitive` な変数から導かれる値を使うとリソースが
+  sensitive になり、検証コマンドの出力は表示されません。
+- `validate` を書かなければ、従来どおり公開されます。
 
 ## シークレットの内容
 

@@ -165,6 +165,104 @@ fn ev_env(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<(BTreeMap<String, 
     Ok((out, v.sensitive))
 }
 
+/// A resolved `validate` block of a `file`/`template` resource: a command run
+/// against the *staged* file before it is published (DESIGN §24.4).
+struct ValidateSpec {
+    program: String,
+    args: Vec<String>,
+    timeout_secs: u64,
+}
+
+/// Read and type-check the evaluated `with.validate` map. `None` when the field
+/// is absent or null (no pre-publication validation). The returned `bool` is
+/// the field's sensitivity, so a validation command derived from a secret is
+/// redacted.
+fn ev_validate(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<Option<(ValidateSpec, bool)>> {
+    let Some(v) = m.get(key) else {
+        return Ok(None);
+    };
+    let Some(value) = &v.val else {
+        return Err(SinterError::unknown(format!(
+            "with.{} could not be evaluated (unknown)",
+            key
+        )));
+    };
+    if matches!(value, Value::Null) {
+        return Ok(None);
+    }
+    let Value::Map(entries) = value else {
+        return Err(SinterError::apply(format!("with.{} must be a map", key)));
+    };
+    let program = match entries.get("program") {
+        Some(Value::Str(s)) if !s.is_empty() => s.clone(),
+        _ => {
+            return Err(SinterError::apply(format!(
+                "with.{}.program must be a non-empty string",
+                key
+            )))
+        }
+    };
+    if !program.starts_with('/') {
+        return Err(SinterError::apply(format!(
+            "with.{}.program must be an absolute path{}",
+            key,
+            if v.sensitive { " (value redacted)" } else { "" }
+        )));
+    }
+    let mut args = Vec::new();
+    match entries.get("args") {
+        None | Some(Value::Null) => {}
+        Some(Value::List(items)) => {
+            for item in items {
+                match item {
+                    Value::Str(s) if !s.contains('\0') => args.push(s.clone()),
+                    _ => {
+                        return Err(SinterError::apply(format!(
+                            "with.{}.args must be strings without NUL",
+                            key
+                        )))
+                    }
+                }
+            }
+        }
+        Some(_) => {
+            return Err(SinterError::apply(format!(
+                "with.{}.args must be a list of strings",
+                key
+            )))
+        }
+    }
+    let timeout_secs = match entries.get("timeout_seconds") {
+        None | Some(Value::Null) => 300,
+        Some(Value::Int(n)) if (1..=86400).contains(n) => *n as u64,
+        Some(_) => {
+            return Err(SinterError::apply(format!(
+                "with.{}.timeout_seconds must be an integer in 1..86400",
+                key
+            )))
+        }
+    };
+    Ok(Some((
+        ValidateSpec {
+            program,
+            args,
+            timeout_secs,
+        },
+        v.sensitive,
+    )))
+}
+
+/// The outcome of a pre-publication validation command.
+enum ValidateOutcome {
+    /// Exit 0: the staged content may be published.
+    Accepted,
+    /// Definite non-success: the staged content is refused, nothing published.
+    Rejected(String),
+    /// The command's own completion is unknown (timeout or lost response): the
+    /// content is refused and no publication is attempted.
+    Unresolved(String),
+}
+
 fn derived_sensitivity(base: bool, vals: &BTreeMap<String, EvalVal>) -> bool {
     base || vals.values().any(|v| v.sensitive)
 }
@@ -228,8 +326,12 @@ impl Engine {
         }
 
         let content = self.resolve_content(res, &vals)?;
+        let (validate, validate_sensitive) = match ev_validate(&vals, "validate")? {
+            Some((spec, s)) => (Some(spec), s),
+            None => (None, false),
+        };
         let content_sensitive = content.sensitive || res.sensitive;
-        let effective_content_sensitive = res.sensitive || content_sensitive;
+        let effective_content_sensitive = res.sensitive || content_sensitive || validate_sensitive;
         let meta = self.file_meta(res, &vals, stat.kind, effective_content_sensitive)?;
         self.file_present(
             res,
@@ -239,6 +341,7 @@ impl Engine {
             effective_content_sensitive,
             meta,
             &input,
+            validate.as_ref(),
         )
     }
 
@@ -843,6 +946,7 @@ impl Engine {
         sensitive: bool,
         meta: MetaSpec,
         input: &Option<ManagerInput>,
+        validate: Option<&ValidateSpec>,
     ) -> Result<ResourceResult> {
         // The content may be sensitive only at run time (it comes from a
         // register or a secret): what the filesystem layer refuses from here on
@@ -1069,6 +1173,8 @@ impl Engine {
                 enforce_mode,
                 &xattrs,
                 stat,
+                sensitive,
+                validate,
             )?;
 
             match outcome {
@@ -1083,6 +1189,17 @@ impl Engine {
                 PublishOutcome::FailedBeforePublish(reason) => {
                     let mut r = changed_result_sensitive(res, sensitive);
                     r.execution = Execution::Failed;
+                    r.change = Change::None;
+                    r.verification = Verification::NotPerformed;
+                    r.reason = Some(reason);
+                    Ok(r)
+                }
+                PublishOutcome::ValidationIndeterminate(reason) => {
+                    // Validation was unresolved, so the publication was never
+                    // dispatched: the destination is unchanged. The command's
+                    // own completion is unknown, so execution is Indeterminate.
+                    let mut r = changed_result_sensitive(res, sensitive);
+                    r.execution = Execution::Indeterminate;
                     r.change = Change::None;
                     r.verification = Verification::NotPerformed;
                     r.reason = Some(reason);
@@ -1234,6 +1351,7 @@ impl Engine {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn publish_file(
         &mut self,
         res: &FrozenResource,
@@ -1244,6 +1362,8 @@ impl Engine {
         mode: u32,
         xattrs: &Xattrs,
         observed: Stat,
+        sensitive: bool,
+        validate: Option<&ValidateSpec>,
     ) -> Result<PublishOutcome> {
         let (dir, _name) = parent_and_name(path);
         // Revalidate the protected parent and final path before writing any
@@ -1333,6 +1453,36 @@ impl Engine {
                 "{}: injected indeterminate publication result",
                 res.id
             )));
+        }
+
+        // Pre-publication validation (DESIGN §24.4): the command runs against
+        // the STAGED file only, before the final name is touched. A failure, an
+        // unknown result, or a signal refuses the content and leaves the
+        // destination exactly as it was.
+        if let Some(spec) = validate {
+            match self.run_validate(&permit, &staged, spec, sensitive)? {
+                ValidateOutcome::Accepted => {}
+                ValidateOutcome::Rejected(reason) => {
+                    let cleanup = self.fs.discard_staged(&permit, &staged);
+                    return Ok(PublishOutcome::FailedBeforePublish(format!(
+                        "{}: the new content for {} was refused by its validate command: {} ({})",
+                        res.id,
+                        if sensitive { "[redacted]" } else { path },
+                        reason,
+                        cleanup_phrase(&cleanup)
+                    )));
+                }
+                ValidateOutcome::Unresolved(reason) => {
+                    // Do not clean up: the validator may still be running.
+                    return Ok(PublishOutcome::ValidationIndeterminate(format!(
+                        "{}: validation of the new content for {} is unresolved and nothing was \
+                         published: {}",
+                        res.id,
+                        if sensitive { "[redacted]" } else { path },
+                        reason
+                    )));
+                }
+            }
         }
 
         // Revalidate once more immediately before the publication. The
@@ -1471,6 +1621,83 @@ impl Engine {
                     Cleanup::Left(_) => Ok(PublishOutcome::PublishedLeft(cleanup.describe())),
                     _ => Ok(PublishOutcome::Published),
                 }
+            }
+        }
+    }
+
+    /// Run a `file`/`template` resource's pre-publication validation command
+    /// against the staged payload file and classify its result (DESIGN §24.4).
+    ///
+    /// The command is argv-only (no shell): `program` `args…` then the staged
+    /// file path as the last argument. It never sees the production path. A
+    /// definite non-success is `Rejected` (nothing is published); a timeout,
+    /// lost response or signal is `Unresolved` (nothing is published, and the
+    /// staging is left for evidence). A sensitive resource's command output is
+    /// never placed in the reason.
+    fn run_validate(
+        &mut self,
+        permit: &crate::targetfs::MutationPermit,
+        staged: &crate::targetfs::StagedObject,
+        spec: &ValidateSpec,
+        sensitive: bool,
+    ) -> Result<ValidateOutcome> {
+        if !spec.program.starts_with('/') {
+            return Err(SinterError::apply(format!(
+                "the validate program must be an absolute path{}",
+                if sensitive { " (value redacted)" } else { "" }
+            )));
+        }
+        let mut req = ExecRequest::new(&spec.program);
+        req.args = spec.args.clone();
+        req.args.push(staged.payload_path());
+        req.env = baseline_env(self.fs.home_env());
+        req.sensitive = sensitive;
+        req.timeout_secs = spec.timeout_secs;
+        let out = match self.fs.exec(permit, &req) {
+            Ok(o) => o,
+            Err(e) => {
+                // No validation command completed; the content is refused.
+                return Ok(ValidateOutcome::Rejected(if sensitive {
+                    "the validation command could not be run".to_string()
+                } else {
+                    format!("the validation command could not be run: {}", e.message)
+                }));
+            }
+        };
+        match out.completion {
+            Completion::Exited(0) => Ok(ValidateOutcome::Accepted),
+            Completion::Exited(c) => {
+                if sensitive {
+                    Ok(ValidateOutcome::Rejected(format!(
+                        "the validation command exited {}",
+                        c
+                    )))
+                } else {
+                    let detail = String::from_utf8_lossy(&out.stderr);
+                    let detail = detail.trim();
+                    let detail = crate::diff::sanitize_line(detail);
+                    let detail = if detail.chars().count() > 200 {
+                        format!("{}…", detail.chars().take(200).collect::<String>())
+                    } else {
+                        detail
+                    };
+                    Ok(ValidateOutcome::Rejected(if detail.is_empty() {
+                        format!("the validation command exited {}", c)
+                    } else {
+                        format!("the validation command exited {}: {}", c, detail)
+                    }))
+                }
+            }
+            Completion::Signaled(s) => Ok(ValidateOutcome::Rejected(format!(
+                "the validation command was terminated by signal {}",
+                s
+            ))),
+            Completion::Indeterminate { reason, .. } => {
+                Ok(ValidateOutcome::Unresolved(if sensitive {
+                    "the validation command did not complete".to_string()
+                } else {
+                    format!("the validation command did not complete: {}", reason)
+                }))
             }
         }
     }
@@ -2219,8 +2446,12 @@ impl Engine {
             }
         };
 
+        let (validate, validate_sensitive) = match ev_validate(&vals, "validate")? {
+            Some((spec, s)) => (Some(spec), s),
+            None => (None, false),
+        };
         let stat = self.observe_stat(res, &path)?;
-        let sensitive = res.sensitive || rendered.1;
+        let sensitive = res.sensitive || rendered.1 || validate_sensitive;
         let meta = self.file_meta(res, &vals, stat.kind, sensitive)?;
         self.file_present(
             res,
@@ -2230,6 +2461,7 @@ impl Engine {
             sensitive,
             meta,
             &input,
+            validate.as_ref(),
         )
     }
 
@@ -2681,7 +2913,7 @@ impl Engine {
                         Execution::Failed
                     };
                     r.reason = Some(format!(
-                        "{} repository metadata not locally complete; refusing to fetch metadata ({})",
+                        "{} repository metadata not locally complete ({})",
                         backend.label(),
                         detail
                     ));
@@ -3153,11 +3385,32 @@ impl Engine {
     /// disappearing or changing system cache cannot invalidate the proof.
     /// Any gap — missing repodata, a missing mirror list, an unparseable
     /// repository list, an unresolvable payload — blocks the mutation.
+    ///
+    /// When the snapshot's metadata completeness check fails because an
+    /// enabled repository has no cached repodata (a host that has never run
+    /// dnf, or a repository added since the last refresh), the metadata is
+    /// fetched once the way the operator's own `dnf makecache` would, then the
+    /// private snapshot is rebuilt from the refreshed cache and re-verified
+    /// (see `dnf_metadata_snapshot_inner`). A warm cache fetches nothing.
     fn dnf_metadata_snapshot(
         &mut self,
         name: &str,
         sensitive: bool,
         package_env: &BTreeMap<String, String>,
+    ) -> Result<DnfSnapshot> {
+        self.dnf_metadata_snapshot_inner(name, sensitive, package_env, true)
+    }
+
+    /// The body of [`Self::dnf_metadata_snapshot`]. `allow_refresh` bounds the
+    /// metadata acquisition to one attempt: the retry after a refresh passes
+    /// `false`, so a repository that stays incomplete after `dnf makecache`
+    /// fails closed instead of looping.
+    fn dnf_metadata_snapshot_inner(
+        &mut self,
+        name: &str,
+        sensitive: bool,
+        package_env: &BTreeMap<String, String>,
+        allow_refresh: bool,
     ) -> Result<DnfSnapshot> {
         let name_disp = if sensitive { "[redacted]" } else { name };
         // 1. Private snapshot directory.
@@ -3249,52 +3502,58 @@ impl Engine {
         //    snapshot alone. `-C` makes this check itself incapable of
         //    fetching; `*.skip_if_unavailable=0` turns any unusable
         //    repository into an error instead of a silent skip.
-        let mut req = ExecRequest::new("/usr/bin/dnf");
-        req.args = PackageBackend::dnf_snapshot_check_args(&snap, name);
-        req.env = baseline_env(self.fs.home_env());
-        req.sensitive = sensitive;
-        req.timeout_secs = 120;
-        let check_out = self.snap_exec(&snap, &req, "metadata completeness check", "")?;
-        match check_out.completion {
-            Completion::Exited(0) => {
-                // R2-03: a clean check must also be a complete one. Exit 0
-                // with unexpected stderr or a truncated capture cannot prove
-                // the snapshot usable.
-                if let Err(e) = self.dnf_output_guard(
-                    &check_out,
-                    "metadata completeness check",
-                    &[
-                        DnfStderr::MetadataExpiration,
-                        DnfStderr::CompletionCachePluginAbsent,
-                    ],
-                ) {
-                    return self.dnf_snapshot_blocked(&snap, e.message, false);
+        let mut refresh_reason: Option<String> = None;
+        match self.dnf_check_snapshot_metadata(&snap, name, sensitive, name_disp)? {
+            DnfCheck::Complete => {}
+            // An uninterpretable check (unexpected stderr, truncation, a
+            // signal, or an unknown completion) is not a statement about the
+            // cache: refreshing would be guesswork, so it blocks without
+            // touching the host.
+            DnfCheck::Unusable(detail, indeterminate) => {
+                return self.dnf_snapshot_blocked(&snap, detail, indeterminate);
+            }
+            // A definite incompleteness: the check exited non-zero, so an
+            // enabled repository's repodata is not usable from the snapshot.
+            DnfCheck::Incomplete(detail) => refresh_reason = Some(detail),
+        }
+        if let Some(detail) = refresh_reason {
+            if !allow_refresh {
+                return self.dnf_snapshot_blocked(&snap, detail, false);
+            }
+            // Fetch the metadata the way the operator would
+            // (`dnf makecache`), then rebuild the private snapshot from the
+            // refreshed cache and re-verify once. The retry is bounded
+            // (`allow_refresh=false`) and re-establishes every invariant from
+            // scratch; the refresh only decides whether the metadata is
+            // *obtainable*, never whether it may be trusted — the rebuilt
+            // snapshot's completeness check still authorizes the install.
+            let mut reason = detail;
+            if let Some(msg) = self.dnf_snapshot_cleanup(&snap) {
+                // A leftover private snapshot is a defect the run must not
+                // hide behind a successful retry: block here rather than
+                // continue and risk reporting success with the residue
+                // unremarked (R2-05).
+                reason.push_str(&format!("; private snapshot cleanup failed: {}", msg));
+                return Ok(DnfSnapshot::Blocked(reason, false));
+            }
+            return match self.dnf_acquire_host_metadata(sensitive, name_disp, package_env) {
+                Ok(()) => {
+                    match self.dnf_metadata_snapshot_inner(name, sensitive, package_env, false)? {
+                        DnfSnapshot::Blocked(detail2, indeterminate2) => Ok(DnfSnapshot::Blocked(
+                            format!(
+                                "{} (after refreshing repository metadata: {})",
+                                reason, detail2
+                            ),
+                            indeterminate2,
+                        )),
+                        ready => Ok(ready),
+                    }
                 }
-            }
-            Completion::Indeterminate { reason, .. } => {
-                return self.dnf_snapshot_blocked(
-                    &snap,
-                    format!("metadata completeness check did not complete: {}", reason),
-                    true,
-                );
-            }
-            Completion::Signaled(s) => {
-                return self.dnf_snapshot_blocked(
-                    &snap,
-                    format!("metadata completeness check terminated by signal {}", s),
-                    false,
-                );
-            }
-            Completion::Exited(c) => {
-                return self.dnf_snapshot_blocked(
-                    &snap,
-                    format!(
-                        "snapshot repodata unusable for {} (check exited {})",
-                        name_disp, c
-                    ),
-                    false,
-                );
-            }
+                Err((note, indeterminate)) => Ok(DnfSnapshot::Blocked(
+                    format!("{}; {}", reason, note),
+                    indeterminate,
+                )),
+            };
         }
         // 4. Enumerate enabled repositories and which resolve via a mirror
         //    list — a repo whose repodata exists but whose mirror list is
@@ -3472,6 +3731,153 @@ impl Engine {
             }
         }
         Ok(DnfSnapshot::Ready(snap))
+    }
+
+    /// Run the private snapshot's metadata-completeness check (`dnf -C
+    /// repoquery`): every enabled repository's repodata must load from the
+    /// snapshot alone.
+    ///
+    /// [`DnfCheck::Complete`] means the snapshot is complete for the install;
+    /// [`DnfCheck::Incomplete`] that the check exited non-zero (the one
+    /// refreshable outcome); [`DnfCheck::Unusable`] that the answer cannot be
+    /// trusted. This helper never cleans the snapshot up, so a caller can
+    /// first refresh the host's metadata cache and retry the same snapshot
+    /// namespace.
+    fn dnf_check_snapshot_metadata(
+        &mut self,
+        snap: &str,
+        name: &str,
+        sensitive: bool,
+        name_disp: &str,
+    ) -> Result<DnfCheck> {
+        let mut req = ExecRequest::new("/usr/bin/dnf");
+        req.args = PackageBackend::dnf_snapshot_check_args(snap, name);
+        req.env = baseline_env(self.fs.home_env());
+        req.sensitive = sensitive;
+        req.timeout_secs = 120;
+        let check_out = self.snap_exec(snap, &req, "metadata completeness check", "")?;
+        match check_out.completion {
+            Completion::Exited(0) => {
+                // R2-03: a clean check must also be a complete one. Exit 0
+                // with unexpected stderr or a truncated capture cannot prove
+                // the snapshot usable.
+                if let Err(e) = self.dnf_output_guard(
+                    &check_out,
+                    "metadata completeness check",
+                    &[
+                        DnfStderr::MetadataExpiration,
+                        DnfStderr::CompletionCachePluginAbsent,
+                    ],
+                ) {
+                    return Ok(DnfCheck::Unusable(e.message, false));
+                }
+                Ok(DnfCheck::Complete)
+            }
+            Completion::Indeterminate { reason, .. } => Ok(DnfCheck::Unusable(
+                format!("metadata completeness check did not complete: {}", reason),
+                true,
+            )),
+            Completion::Signaled(s) => Ok(DnfCheck::Unusable(
+                format!("metadata completeness check terminated by signal {}", s),
+                false,
+            )),
+            Completion::Exited(c) => Ok(DnfCheck::Incomplete(format!(
+                "snapshot repodata unusable for {} (check exited {})",
+                name_disp, c
+            ))),
+        }
+    }
+
+    /// Populate the target's own dnf metadata cache because the private
+    /// snapshot proved it incomplete for an enabled repository.
+    ///
+    /// This is the operator's `dnf makecache`, run by Sinter so a host whose
+    /// enabled repositories hold no cached metadata — a fresh image, or a
+    /// repository added since the last refresh — needs no manual preparation.
+    /// Only repository *metadata* is fetched: no package payload is
+    /// downloaded and no package transaction runs, and only *absent* metadata
+    /// is fetched (`metadata_expire=-1`), so a warm cache incurs no traffic.
+    /// Returns `Err((reason, indeterminate))` when the cache could not be
+    /// established; there is no partial success and no retry (the caller's
+    /// bounded retry re-runs the whole snapshot verification instead).
+    /// `indeterminate` is true only when the refresh's own completion is
+    /// unknown — the process may still be writing the cache — so the caller
+    /// can keep the resource's execution state truthful rather than rounding
+    /// it to a definite failure.
+    fn dnf_acquire_host_metadata(
+        &mut self,
+        sensitive: bool,
+        name_disp: &str,
+        package_env: &BTreeMap<String, String>,
+    ) -> std::result::Result<(), (String, bool)> {
+        let mut req = ExecRequest::new("/usr/bin/dnf");
+        req.args = PackageBackend::dnf_makecache_args();
+        // The completion-cache plugin writes a fixed live-cache path; keep it
+        // disabled here too so Sinter never leaves that artifact behind.
+        req.args
+            .insert(0, "--disableplugin=generate_completion_cache".into());
+        req.env = baseline_env(self.fs.home_env());
+        // The refresh touches the network, so it must carry the operation's
+        // own environment (a proxy, a NO_PROXY list) exactly as the payload
+        // transport below does.
+        req.env.extend(package_env.clone());
+        req.sensitive = sensitive;
+        // Metadata refresh can be a large transfer on a cold host; give it the
+        // same budget as the payload transport below rather than a shorter one.
+        req.timeout_secs = 600;
+        let permit = match self.fs.mutation_permit() {
+            Ok(p) => p,
+            Err(e) => {
+                return Err((
+                    format!(
+                        "cannot refresh the repository metadata cache for {}: {}",
+                        name_disp, e.message
+                    ),
+                    false,
+                ))
+            }
+        };
+        let out = if self.fs.fault() == Some("dnf_makecache_dispatch_fail") {
+            return Err((
+                format!(
+                    "cannot refresh the repository metadata cache for {}",
+                    name_disp
+                ),
+                false,
+            ));
+        } else {
+            self.fs.exec(&permit, &req)
+        };
+        match out {
+            Ok(o) => match o.completion {
+                Completion::Exited(0) => Ok(()),
+                Completion::Exited(c) => Err((
+                    format!("refreshing the repository metadata cache exited {}", c),
+                    false,
+                )),
+                Completion::Signaled(s) => Err((
+                    format!(
+                        "refreshing the repository metadata cache terminated by signal {}",
+                        s
+                    ),
+                    false,
+                )),
+                Completion::Indeterminate { reason, .. } => Err((
+                    format!(
+                        "refreshing the repository metadata cache did not complete: {}",
+                        reason
+                    ),
+                    true,
+                )),
+            },
+            Err(e) => Err((
+                format!(
+                    "refreshing the repository metadata cache failed to dispatch: {}",
+                    e.message
+                ),
+                false,
+            )),
+        }
     }
 
     /// Prefetch every payload the install transaction needs into the
@@ -4861,6 +5267,25 @@ enum DnfSnapshot {
     Blocked(String, bool),
 }
 
+/// The outcome of the private snapshot's metadata-completeness check.
+enum DnfCheck {
+    /// Every enabled repository's repodata loads from the snapshot alone.
+    Complete,
+    /// The check exited non-zero. It almost always means the snapshot's
+    /// metadata is not complete for an enabled repository — the one outcome a
+    /// metadata refresh may address — but `dnf -C repoquery <name>` also exits
+    /// non-zero when the package itself cannot be resolved, so this is not a
+    /// per-cause classification. That is safe: a refresh is only a cheap
+    /// network step with no package mutation, and the re-check plus the
+    /// dry-run resolution below still decide whether the install may proceed.
+    Incomplete(String),
+    /// The check's answer itself cannot be trusted — an unexpected or
+    /// truncated stderr, a signal, or an unknown completion. A refresh would
+    /// be guesswork, so it is never a refresh trigger; `bool` is whether the
+    /// result is indeterminate.
+    Unusable(String, bool),
+}
+
 /// A benign stderr line one dnf subcommand is known to print on a normal,
 /// successful run (R5-F04). The contract is per-command and each kind is
 /// matched by an exact grammar — never a prefix — so a line that merely
@@ -5799,6 +6224,31 @@ const DNF_TABLE_SECTIONS: &[&str] = &[
     "Cleanup:",
 ];
 
+/// A module-streams section dnf prints inside the transaction table when it
+/// enables a module stream during resolution (measured on Rocky Linux 8 /
+/// dnf 4.14: `Enabling module streams:`). Its rows are `<module> <stream>`
+/// pairs, not packages, so they carry no payload. Only the measured section is
+/// recognized; `dnf module install` profile/group sections are not, and stay
+/// fail-closed.
+const DNF_MODULE_STREAM_SECTIONS: &[&str] = &["Enabling module streams:"];
+
+/// A module-streams table token: a module name or a stream. The character set
+/// is the one module names/streams use (`nodejs`, `python36`, `container-tools`,
+/// `3.6`, `10`); a value with a path separator, whitespace or control byte
+/// proves the line is not the module row dnf printed.
+fn valid_module_token(t: &str) -> bool {
+    !t.is_empty()
+        && !t.starts_with('-')
+        && t.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'+'))
+}
+
+/// A row of a module-streams section: exactly `<module> <stream>`.
+fn is_module_stream_row(t: &str) -> bool {
+    let f: Vec<&str> = t.split_whitespace().collect();
+    f.len() == 2 && valid_module_token(f[0]) && valid_module_token(f[1])
+}
+
 /// The Transaction Summary verb a table section's rows are counted by.
 fn dnf_section_verb(section: &str) -> Option<&'static str> {
     match section {
@@ -6113,6 +6563,7 @@ fn parse_dnf_install_set(text: &str) -> Option<Vec<DnfInstallRow>> {
     let mut rows: Vec<(&'static str, DnfInstallRow)> = Vec::new();
     let mut counts: Vec<(&'static str, usize)> = Vec::new();
     let mut current_section: Option<&'static str> = None;
+    let mut module_section = false;
     let mut seen_summary = false;
     let mut summary_divider = false;
     let mut i = header_idx + 2;
@@ -6132,6 +6583,24 @@ fn parse_dnf_install_set(text: &str) -> Option<Vec<DnfInstallRow>> {
             }
             if let Some(section) = DNF_TABLE_SECTIONS.iter().copied().find(|s| *s == t) {
                 current_section = Some(section);
+                module_section = false;
+                continue;
+            }
+            // A module-streams section (`Enabling module streams:`) lists
+            // `<module> <stream>` pairs, not packages. It was measured on
+            // Rocky Linux 8 (dnf 4.14) when a default module stream is enabled
+            // during resolution. The pairs name no payload, so they are
+            // validated and skipped; they are not counted by a summary verb.
+            // No other module profile/group section is recognized.
+            if let Some(section) = DNF_MODULE_STREAM_SECTIONS.iter().copied().find(|s| *s == t) {
+                current_section = Some(section);
+                module_section = true;
+                continue;
+            }
+            if module_section {
+                if !is_module_stream_row(t) {
+                    return None;
+                }
                 continue;
             }
             // `     replacing  <name>.<arch> <evr>` is appended under a row
@@ -6277,6 +6746,10 @@ enum PublishOutcome {
     FailedAfterPublish(String),
     /// Completion of the mutation cannot be established.
     Indeterminate(String),
+    /// Pre-publication validation did not complete. Unlike [`Self::Indeterminate`]
+    /// the publication itself was never dispatched, so the destination is
+    /// provably unchanged (change none).
+    ValidationIndeterminate(String),
 }
 
 /// How a result's reason words what became of a staging directory.
@@ -6681,6 +7154,75 @@ mod package_tests {
         assert_eq!(rows[0].verrel, "2.4.62-13.el9_8.6");
         assert_eq!(rows[0].repoid, "appstream");
         assert_eq!(rows[2].repoid, "baseos");
+    }
+
+    #[test]
+    fn dnf_install_set_accepts_a_measured_module_streams_section() {
+        // Real dnf 4.14 output on Rocky Linux 8.10 installing `nodejs`: the
+        // default module stream is enabled during resolution, and the table
+        // carries an `Enabling module streams:` section naming `<module>
+        // <stream>` pairs that are not packages. The pairs carry no payload and
+        // must not enter the frozen transaction set.
+        let out = table_summary(
+            "Installing:\n \
+             nodejs x86_64 1:10.24.0-1.module+el8.3.0+101+f84c7154 appstream 8.8 M\n\
+             Installing dependencies:\n \
+             npm x86_64 1:6.14.11-1.10.24.0.1.module+el8.3.0+101+f84c7154 appstream 3.7 M\n\
+             Installing weak dependencies:\n \
+             nodejs-full-i18n x86_64 1:10.24.0-1.module+el8.3.0+101+f84c7154 appstream 7.3 M\n\
+             Enabling module streams:\n \
+             nodejs 10\n\n",
+            "Install  3 Packages",
+        );
+        let rows = parse_dnf_install_set(&out).unwrap();
+        assert_eq!(rows.len(), 3, "only the package rows are payloads");
+        assert!(rows.iter().all(|r| r.needs_payload));
+        assert_eq!(rows[0].name, "nodejs");
+        assert_eq!(rows[0].epoch.as_deref(), Some("1"));
+        assert_eq!(
+            rows[0].payload_basename(),
+            "nodejs-10.24.0-1.module+el8.3.0+101+f84c7154.x86_64.rpm"
+        );
+        assert_eq!(
+            rows[0].nevra(),
+            "nodejs-1:10.24.0-1.module+el8.3.0+101+f84c7154.x86_64"
+        );
+    }
+
+    #[test]
+    fn dnf_install_set_rejects_a_malformed_module_stream_row() {
+        // Under a module-streams header only `<module> <stream>` is native; a
+        // row with an extra token, a path separator, or an empty field fails
+        // closed rather than being tolerated.
+        for row in ["nodejs 10 extra", "nodejs ../etch", "nodejs", "nodejs 10/2"] {
+            let out = table_summary(
+                &format!(
+                    "Installing:\n \
+                     nodejs x86_64 1:10.24.0-1.module+el8.3.0+101+f84c7154 appstream 8.8 M\n\
+                     Enabling module streams:\n \
+                     {row}\n\n"
+                ),
+                "Install  1 Package",
+            );
+            assert!(
+                parse_dnf_install_set(&out).is_none(),
+                "module row {row:?} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn dnf_install_set_rejects_an_unmeasured_module_section() {
+        // Only `Enabling module streams:` was measured. A profile/group module
+        // section that Sinter does not model stays fail-closed.
+        let out = table_summary(
+            "Installing module profiles:\n \
+             nodejs 10\n\
+             Installing:\n \
+             nodejs x86_64 1:10.24.0-1.module+el8.3.0+101+f84c7154 appstream 8.8 M\n\n",
+            "Install  1 Package",
+        );
+        assert!(parse_dnf_install_set(&out).is_none());
     }
 
     #[test]

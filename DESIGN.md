@@ -951,6 +951,8 @@ Plan and the accounts a resource uses (F-3). Order is declaration order plus dep
 
 Dependencies also define order. Sinter never reorders resources. A resource that produces systemd manager input (§28.2) must be ordered before the service resource or handler that consumes it, by depends_on or declaration order. A producer declared after its consumer does not cause the consumer to be redone; only the end-of-run synchronization (§28.3) still happens.
 
+Accounts and services created by a package are not inferred. A package resource is not treated as a producer of a user, group or unit: Sinter never guesses from a package name what accounts or units it creates, and it does not add an implicit dependency between a package and a user/group/service that happens to name a matching account or unit. A package creates what its own maintainer scripts create, which differs by package, version and distribution and cannot be proven before it runs; guessing would make plan optimistic and could order resources on a dependency that does not exist. Such a producer is therefore declared explicitly, as a user or group resource, or as a command whose effect is visible through a creates guard, and ordered with depends_on — see the accounts/paths example in examples/quick.
+
 15. Result model
 
 Every resource result contains independent dimensions.
@@ -1475,6 +1477,20 @@ There is no non-atomic fallback.
 Atomic visibility is required.
 Full power-loss crash durability is not guaranteed unless separately documented.
 
+24.4 Pre-publication validation (file, template)
+
+A file or template resource may declare an optional validate block:
+
+program: required absolute path of the checking program
+args: optional list of strings
+timeout_seconds: optional integer, default 300
+
+Apply runs `<program> <args...> <staged payload path>` as the operation's own identity, argv-only (no shell), against the staged file the fixation step produced in the private staging directory (§23.4). It is never run against the production path, and it runs after staging and before the publication step, so the destination cannot have been changed yet.
+
+Exit 0 permits publication; the ordinary publication then proceeds unchanged. A non-zero exit, a signal, or a transport failure before completion refuses the content: the staged object is discarded and nothing is published (failed, change none). A timeout or lost response is unresolved: nothing is published and no cleanup runs that could destroy evidence (indeterminate, change none — the publication was provably not dispatched).
+
+The command is a validator, not an apply step: Sinter never carries its stdout/stderr into the result for a sensitive resource, and the production path is never named in a sensitive resource's reason. No tool-specific adapter exists; the recipe names the program and its arguments. Without validate, behavior is unchanged.
+
 25. Safe file replacement
 
 Required conceptual sequence:
@@ -1654,7 +1670,18 @@ absent: remove package only if installed
 
 package purge is not performed
 
-automatic repository metadata refresh is not performed by Sinter
+apt never refreshes repository metadata. On dnf an install runs cache-only
+against a private snapshot of the target's metadata cache (mode 0700, under
+/var/tmp), and the snapshot is never the live cache. When an enabled
+repository has no cached metadata (a host that has never run dnf, or a
+repository added since the last refresh), Sinter populates the target's own
+metadata cache once — the operator's `dnf makecache`, fetching only absent
+metadata (metadata_expire=-1) and downloading no package payload — then
+rebuilds and re-verifies the private snapshot; a repository that still
+cannot be made complete fails closed before any package mutation. Whether a
+payload's signature is trusted remains dnf's and the repository's business
+(gpgcheck), and every transaction payload is identity-verified from its rpm
+header before the cache-only install runs.
 
 Package observation distinguishes cleanly installed, absent, and unsupported/inconsistent states.
 
@@ -1663,6 +1690,14 @@ If dpkg/apt reports a half-configured, unpacked-but-not-configured, broken, or o
 Sinter does not run an explicit apt lock retry loop. Each apt mutation is bounded by the general operation timeout of 300 seconds; a lock-related non-success or timeout is reported according to normal failure/indeterminate rules.
 
 Package maintainer scripts may have side effects outside Sinter's complete predictive control.
+
+27.1 Recipe-wide default environment
+
+A recipe may declare a top-level env map of strings. It is a base for the environment Sinter gives to package and command resources — the only resources that run an external process with an environment. It is never passed to a connection step, a package or service query, a file operation, or a service management command.
+
+Precedence is per variable name: a name the resource sets in its own env overrides the recipe default; every other name of the default still applies. The default never replaces an explicit resource value. Merging happens when the resource is frozen, so the merged map is an ordinary env value: interpolation and sensitivity behave exactly as if the resource had written it (a value derived from a sensitive variable makes the inheriting resource sensitive and is redacted everywhere).
+
+Names are case-sensitive, as on Linux; Sinter passes exactly the names given and does not fold case (HTTP_PROXY and http_proxy are distinct; dnf/apt honor both). The names PATH, LANG, LC_ALL and HOME are reserved and rejected, because Sinter always sets the baseline itself. env may be declared only in the recipe that is run, never in an included file. There is no per-host env: the inventory has no host variables (§19.2), and per-host variation is expressed with a separate recipe or include.
 
 28. Service resource
 

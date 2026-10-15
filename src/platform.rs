@@ -210,6 +210,34 @@ impl PackageBackend {
         vec!["-C".to_string(), "repolist".to_string(), "-v".to_string()]
     }
 
+    /// argv that populates the target's own dnf metadata cache, exactly as an
+    /// operator's `dnf makecache` does.
+    ///
+    /// `dnf install` is deterministic only against metadata the host already
+    /// holds; a fresh image, or a repository added since the last refresh,
+    /// has no cached repodata and the private snapshot cannot be shown
+    /// complete. Rather than refuse and require a manual `dnf makecache`
+    /// first, Sinter fetches the metadata itself when — and only when — the
+    /// snapshot proves it missing.
+    ///
+    /// `*.metadata_expire=-1` keeps *present* metadata authoritative: nothing
+    /// already cached is refreshed or re-downloaded, so a warm host pays no
+    /// extra network traffic. `*.skip_if_unavailable=0` keeps every enabled
+    /// repository a hard requirement rather than a silent skip. Only
+    /// repository metadata is fetched — no package payload is downloaded and
+    /// no transaction runs — and this step only decides whether the metadata
+    /// is *obtainable*; the private-snapshot completeness check that follows
+    /// is still what authorizes the install, so nothing about it is trusted
+    /// on this step's word.
+    pub fn dnf_makecache_args() -> Vec<String> {
+        vec![
+            "--setopt=*.metadata_expire=-1".to_string(),
+            "--setopt=*.skip_if_unavailable=0".to_string(),
+            "-y".to_string(),
+            "makecache".to_string(),
+        ]
+    }
+
     /// Classify a completed package-database query into a clean state.
     ///
     /// Both backends distinguish a positively-confirmed "not installed" from
@@ -565,6 +593,19 @@ mod tests {
         assert_eq!(
             PackageBackend::dnf_repolist_args(),
             vec!["-C".to_string(), "repolist".to_string(), "-v".to_string()]
+        );
+        // The metadata-cache refresh runs against the host's own cache (no
+        // `cachedir` override, no `-C`), fetches only absent metadata
+        // (`metadata_expire=-1`), and treats every enabled repository as a
+        // hard requirement (`skip_if_unavailable=0`).
+        assert_eq!(
+            PackageBackend::dnf_makecache_args(),
+            vec![
+                "--setopt=*.metadata_expire=-1".to_string(),
+                "--setopt=*.skip_if_unavailable=0".to_string(),
+                "-y".to_string(),
+                "makecache".to_string(),
+            ]
         );
     }
 

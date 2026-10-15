@@ -9,7 +9,7 @@ mod common;
 use common::*;
 use sinter::engine::{AggregateStatus, Mode};
 use sinter::error::ErrorKind;
-use sinter::executor::{Completion, FakeTarget};
+use sinter::executor::{Completion, FakeTarget, Output};
 use sinter::model::load_model;
 use sinter::result::{Change, Disposition, Execution, Verification};
 
@@ -308,9 +308,11 @@ fn dnf_absent_already_absent_is_unchanged() {
 
 #[test]
 fn dnf_unusable_metadata_cache_fails_closed() {
-    // DESIGN §27: when the snapshot completeness check fails, the mutation
-    // is never attempted — dnf must not fall back to retrieving metadata.
-    // Nothing was mutated, so the truth is Failed/None, not Possible.
+    // DESIGN §27: when the snapshot completeness check fails and the
+    // automatic metadata refresh cannot make the cache complete, the mutation
+    // is never attempted — dnf must not fall back to retrieving metadata
+    // during the install. Nothing was mutated, so the truth is Failed/None,
+    // not Possible.
     let dir = trusted_root("plat-dnf-nocache");
     let recipe = write_recipe(
         &dir,
@@ -319,6 +321,13 @@ fn dnf_unusable_metadata_cache_fails_closed() {
     );
     let mut t = FakeTarget::rocky9();
     t.probe_completion = Some(Completion::Exited(1));
+    t.dnf_makecache_output = Some(Output {
+        completion: Completion::Exited(1),
+        stdout: Vec::new(),
+        stderr: b"Error: Failed to download metadata for repo 'baseos'\n".to_vec(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+    });
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     let p = find(&r, "p");
     assert_eq!(p.execution, Execution::Failed);
@@ -326,32 +335,63 @@ fn dnf_unusable_metadata_cache_fails_closed() {
     assert_eq!(p.verification, Verification::NotPerformed);
     let reason = p.reason.as_deref().unwrap_or("");
     assert!(reason.contains("not locally complete"), "{}", reason);
-    // Only the snapshot-usability check ran; no install/remove dispatched.
+    // The check ran, the refresh was attempted exactly once, and the re-check
+    // failed; no install/remove was dispatched.
     let dnf = commands_with(&r, "/usr/bin/dnf");
-    assert_eq!(dnf.len(), 1);
-    assert!(dnf[0].args.iter().any(|a| a == "repoquery"));
+    assert_eq!(
+        dnf.iter()
+            .filter(|c| c.args.iter().any(|a| a == "makecache"))
+            .count(),
+        1
+    );
+    assert!(dnf.iter().any(|c| c.args.iter().any(|a| a == "repoquery")));
+    assert!(dnf
+        .iter()
+        .all(|c| !c.args.iter().any(|a| a == "install" || a == "remove")));
     let marker = find(&r, "marker");
     assert_eq!(marker.disposition, Disposition::BlockedByFailFast);
     assert_eq!(r.status, AggregateStatus::ApplyFailed);
 }
 
 #[test]
-fn dnf_missing_repodata_blocks_mutation() {
+fn dnf_missing_repodata_with_failed_refresh_blocks_mutation() {
     // Case B: an enabled repo without cached repodata makes the snapshot
-    // unusable — fail closed before any mutation (DESIGN §27).
+    // unusable; Sinter refreshes the host's metadata cache once, and when
+    // that cannot establish the metadata it fails closed before any package
+    // mutation (DESIGN §27). The automatic refresh itself is exercised in
+    // tests/dnf_metadata_refresh.rs.
     let dir = trusted_root("plat-dnf-norepodata");
     let recipe = pkg_recipe(&dir, "nano", "present");
     let mut t = FakeTarget::rocky9();
     t.dnf_repos[0].repodata_cached = false;
+    t.dnf_makecache_output = Some(Output {
+        completion: Completion::Exited(1),
+        stdout: Vec::new(),
+        stderr: b"Error: Failed to download metadata for repo 'baseos'\n".to_vec(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+    });
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     let p = find(&r, "p");
     assert_eq!(p.execution, Execution::Failed);
     assert_eq!(p.change, Change::None);
     assert_eq!(p.verification, Verification::NotPerformed);
     let dnf = commands_with(&r, "/usr/bin/dnf");
-    assert_eq!(dnf.len(), 1);
-    assert!(dnf[0].args.iter().any(|a| a == "repoquery"));
-    // The snapshot was still cleaned up.
+    assert_eq!(
+        dnf.iter()
+            .filter(|c| c.args.iter().any(|a| a == "repoquery"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        dnf.iter()
+            .filter(|c| c.args.iter().any(|a| a == "makecache"))
+            .count(),
+        1
+    );
+    assert!(dnf.iter().all(|c| !c.args.iter().any(|a| a == "install")));
+    // The first snapshot was cleaned up before the refresh; the refresh
+    // failed, so no second snapshot was created.
     assert_eq!(commands_with(&r, "/usr/bin/rm").len(), 1);
 }
 

@@ -54,6 +54,8 @@ pub const TOP_LEVEL_FIELDS: &[&str] = &[
     "handlers",
     "backup",
     "targets",
+    // Recipe-wide default environment for `package`/`command` resources.
+    "env",
 ];
 /// Fields of the top-level `backup` map.
 pub const BACKUP_FIELDS: &[&str] = &["paths"];

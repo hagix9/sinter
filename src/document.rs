@@ -22,6 +22,9 @@ pub struct Document {
     pub backup_paths: Vec<String>,
     /// Inventory hosts/groups this recipe may be applied to (`targets`).
     pub targets: Option<TargetSelector>,
+    /// Recipe-wide default environment for `package`/`command` resources
+    /// (`env`), from the entry recipe only.
+    pub env: Option<Value>,
 }
 
 /// A recipe's explicit execution targets, by inventory host and group
@@ -209,6 +212,16 @@ pub fn document_from_value(root: Value, path: &Path, origin: &str) -> Result<Doc
         None => None,
         Some(v) => Some(parse_targets(v, origin)?),
     };
+    // Recipe-wide default environment for `package`/`command` resources. A
+    // resource's own `env` overrides these per variable name (see
+    // `merge_recipe_env` in the model freeze step).
+    let env = match map.get("env") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            validate_recipe_env(v, origin)?;
+            Some(v.clone())
+        }
+    };
 
     Ok(Document {
         path: path.to_path_buf(),
@@ -219,7 +232,43 @@ pub fn document_from_value(root: Value, path: &Path, origin: &str) -> Result<Doc
         handlers,
         backup_paths,
         targets,
+        env,
     })
+}
+
+/// Validate a recipe-level `env` map: string keys that are valid environment
+/// variable names and not reserved by Sinter's command baseline, with string
+/// values. The same rules a `command`/`package` `env` map follows.
+fn validate_recipe_env(v: &Value, origin: &str) -> Result<()> {
+    let m = v
+        .as_map()
+        .ok_or_else(|| SinterError::schema(format!("{}: env must be a map of strings", origin)))?;
+    for (key, val) in m {
+        let mut chars = key.chars();
+        let valid = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid {
+            return Err(SinterError::schema(format!(
+                "{}: invalid environment variable name {:?}",
+                origin, key
+            )));
+        }
+        if crate::model::RESERVED_ENV.contains(&key.as_str()) {
+            return Err(SinterError::schema(format!(
+                "{}: env name {} is reserved by the command baseline",
+                origin, key
+            )));
+        }
+        if !matches!(val, Value::Str(_)) {
+            return Err(SinterError::schema(format!(
+                "{}: env values must be strings",
+                origin
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Parse the top-level `targets` declaration:

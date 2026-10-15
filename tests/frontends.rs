@@ -323,6 +323,7 @@ fn every_template_field_in_the_field_table_is_accepted() {
             "group" => "root",
             "mode" => "\"0644\"",
             "vars" => "{ k: v }",
+            "validate" => "{ program: /bin/true }",
             other => {
                 panic!("no sample value for template field {other}; add one if it is supported")
             }

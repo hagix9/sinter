@@ -23,11 +23,59 @@ handlers: [...]               # optional list of handlers
 targets: { hosts: [...], groups: [...] }   # optional, v1.1.0+ (inventory runs)
 
 backup: { paths: [...] }      # optional, v1.1.0+ (copied before apply)
+
+env: { NAME: value }          # optional default environment for package/command
 ```
 
 Top-level fields allowed: `version`, `vars`, `include`, `resources`,
-`handlers`, and (from v1.1.0) `targets` and `backup`. Anything else is a
-schema error.
+`handlers`, (from v1.1.0) `targets` and `backup`, and `env`. Anything else is
+a schema error.
+
+## env
+
+A map of environment variables given by default to every `package` and
+`command` resource in the recipe. It exists so a setting that applies to all of
+them — most often an HTTP(S) proxy — is written once.
+
+```yaml
+env:
+  HTTP_PROXY: "http://proxy.example.com:3128"
+  HTTPS_PROXY: "http://proxy.example.com:3128"
+  NO_PROXY: "localhost,127.0.0.1,.internal.example.com"
+
+resources:
+  - id: install
+    type: package
+    with: { name: curl, state: present }
+  - id: one-off
+    type: command
+    with:
+      program: /usr/local/bin/fetch
+      env: { HTTPS_PROXY: "http://other-proxy:3128" }  # overrides for this resource
+```
+
+- **Scope.** Only `package` and `command` resources receive it — they are the
+  only resources that run an external process with an environment. It is never
+  passed to a connection step, a package query, a service, or a file operation.
+- **Precedence.** A resource's own `env` overrides the recipe `env` for each
+  name it sets; other recipe names still apply. A resource value is never
+  replaced by the default.
+- **Names are case-sensitive**, as on Linux: `HTTP_PROXY` and `http_proxy` are
+  different variables and both are passed exactly as written. dnf and apt honor
+  both spellings; Sinter does not fold case.
+- **Reserved names** `PATH`, `LANG`, `LC_ALL` and `HOME` are rejected; Sinter
+  always sets the baseline itself.
+- **Values** may interpolate `vars`/`facts` (for example
+  `"{{ vars.proxy }}"`), exactly like a resource `env`. A value derived from a
+  `sensitive` variable makes each resource that inherits it sensitive, so the
+  value is redacted everywhere.
+- `env` may be declared only in the recipe that is run, not in an included
+  file.
+
+There is no per-host `env`: the inventory defines hosts, ports and credentials
+only, with no host variables (`/en/reference/cli/#multiple-hosts`). A per-host
+proxy is expressed by running a different recipe (or an included fragment with
+its own resources) for that host.
 
 ## targets
 
