@@ -285,8 +285,11 @@ handlers:
   予約済みの変数名をrecipeから上書きすることはできません。
 - filesystem mutationでは親pathのtrust boundaryを検証し、想定外の
   symlinkを拒否します。省略された既存metadataを保持し、
-  未対応のsecurity metadataを勝手に破棄せず、内容はrenameによって
-  atomicにpublishします。
+  未対応のsecurity metadataを勝手に破棄せず、内容はatomicに
+  publishします（rename、または `/tmp` のようなstickyな共有ディレクトリ内での
+  privateなstagingファイルのhard linkによる）。stickyでroot所有の共有
+  ディレクトリは信頼され、rootとして実行する場合は非特権アカウント自身の
+  ディレクトリ配下のpathはそのアカウントとして管理されます（`setpriv`）。
 - timeout after dispatch、応答消失、signal不確実性などのindeterminateな
   mutationは自動再試行しません。
 - fail-fastにより、最初のfailedまたはindeterminate resourceで後続実行を

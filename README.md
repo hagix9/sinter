@@ -283,7 +283,11 @@ handlers:
   are not inherited. Reserved names cannot be overridden by recipes.
 - Filesystem mutations enforce a parent-path trust boundary, reject unexpected
   symlinks, preserve existing metadata when omitted, refuse to discard
-  unsupported security metadata, and publish content atomically by rename.
+  unsupported security metadata, and publish content atomically (by rename, or
+  by hard-linking a private staging file in a sticky shared directory such as
+  `/tmp`). Sticky, root-owned shared directories are trusted, and when running
+  as root a path inside an unprivileged account's own directory is managed as
+  that account (`setpriv`).
 - Indeterminate mutations (timeout after dispatch, lost response, signal
   uncertainty) are never retried automatically.
 - Fail-fast: the first failed or indeterminate resource stops further execution
