@@ -2962,6 +2962,26 @@ impl Engine {
         if backend == PackageBackend::Dnf && want_installed {
             match self.dnf_metadata_snapshot(&name, sensitive, &package_env)? {
                 DnfSnapshot::Ready(p) => snapshot_dir = Some(p),
+                DnfSnapshot::Refused(refusal, cleanup, context) => {
+                    // dnf refused the install for a cause it reported (DNF-01,
+                    // DNF-09). Nothing was dispatched that changes the host.
+                    let pkg_disp = if sensitive {
+                        "[redacted]"
+                    } else {
+                        name.as_str()
+                    };
+                    let mut r = changed_result_sensitive(res, sensitive);
+                    r.change = Change::None;
+                    r.verification = Verification::NotPerformed;
+                    r.execution = Execution::Failed;
+                    let mut reason = refusal.render(pkg_disp, sensitive);
+                    if let Some(note) = context {
+                        reason.push_str(&format!(" ({})", note));
+                    }
+                    r.reason = Some(reason);
+                    Self::note_snapshot_cleanup_failure(&mut r, &cleanup);
+                    return Ok(r);
+                }
                 DnfSnapshot::Blocked(detail, indeterminate) => {
                     let mut r = changed_result_sensitive(res, sensitive);
                     r.change = Change::None;
@@ -3608,7 +3628,12 @@ impl Engine {
                         ready => Ok(ready),
                     }
                 }
-                Err((note, indeterminate)) => Ok(DnfSnapshot::Blocked(
+                // DNF-09: a refresh dnf refused because a repository's
+                // metadata cannot be downloaded names that repository.
+                Err((note, false, Some(refusal))) => {
+                    Ok(DnfSnapshot::Refused(refusal, None, Some(note)))
+                }
+                Err((note, indeterminate, _)) => Ok(DnfSnapshot::Blocked(
                     format!("{}; {}", reason, note),
                     indeterminate,
                 )),
@@ -3737,20 +3762,49 @@ impl Engine {
             // resolution — on an exit-0 stderr it contradicts the completion
             // and is unexpected like any other line.
             Completion::Exited(0) | Completion::Exited(1) => {
-                let expected = match dry_out.completion {
-                    Completion::Exited(1) => &[
+                let aborted = dry_out.completion == Completion::Exited(1);
+                let expected = if aborted {
+                    &[
                         DnfStderr::OperationAborted,
                         DnfStderr::CompletionCachePluginAbsent,
-                    ][..],
-                    _ => &[DnfStderr::CompletionCachePluginAbsent][..],
+                    ][..]
+                } else {
+                    &[DnfStderr::CompletionCachePluginAbsent][..]
                 };
                 // R2-03: the transaction table must be complete and clean
                 // before it can be trusted as the exact payload set.
                 if let Err(e) = self.dnf_output_guard(&dry_out, "install set resolution", expected)
                 {
+                    // An exit-1 resolution whose stderr is not the abort line
+                    // is dnf reporting a resolution error: name the cause it
+                    // printed (DNF-09) instead of a metadata claim. A
+                    // truncated capture is not an answer and stays blocked.
+                    // A complete table with extra stderr is not a resolution
+                    // error but an output-contract violation, and stays one.
+                    if aborted
+                        && !dry_out.stdout_truncated
+                        && !dry_out.stderr_truncated
+                        && parse_dnf_install_set(&String::from_utf8_lossy(&dry_out.stdout))
+                            .is_none()
+                    {
+                        let refusal =
+                            classify_dnf_resolution_failure(name, &dry_out.stdout, &dry_out.stderr);
+                        return self.dnf_snapshot_refused(&snap, refusal);
+                    }
                     return self.dnf_snapshot_blocked(&snap, e.message, false);
                 }
-                match parse_dnf_install_set(&String::from_utf8_lossy(&dry_out.stdout)) {
+                let stdout = String::from_utf8_lossy(&dry_out.stdout);
+                // DNF-01: the requested name was observed NOT installed, so a
+                // "nothing to do" answer means another installed package
+                // provides it. Installing would change nothing and the result
+                // could never be verified — refuse before any change.
+                if !aborted {
+                    if let Some(providers) = parse_dnf_nothing_to_do(&stdout) {
+                        return self
+                            .dnf_snapshot_refused(&snap, DnfRefusal::InstalledProvider(providers));
+                    }
+                }
+                match parse_dnf_install_set(&stdout) {
                     Some(r) => r,
                     None => {
                         return self.dnf_snapshot_blocked(
@@ -3768,6 +3822,11 @@ impl Engine {
                     true,
                 );
             }
+            Completion::Exited(_) if !dry_out.stdout_truncated && !dry_out.stderr_truncated => {
+                let refusal =
+                    classify_dnf_resolution_failure(name, &dry_out.stdout, &dry_out.stderr);
+                return self.dnf_snapshot_refused(&snap, refusal);
+            }
             _ => {
                 return self.dnf_snapshot_blocked(
                     &snap,
@@ -3776,6 +3835,20 @@ impl Engine {
                 );
             }
         };
+        // DNF-01: the transaction must install the requested name itself. A
+        // name dnf only matched through provides (`python3` -> `python36`)
+        // would install a differently named package that the name-exact
+        // re-observation can never confirm; refuse before any change and name
+        // the package dnf chose. An empty transaction for a name that is not
+        // installed is the same mismatch.
+        if let Some(providers) = dnf_provides_mismatch(name, &rows) {
+            let refusal = if rows.is_empty() {
+                DnfRefusal::InstalledProvider(Vec::new())
+            } else {
+                DnfRefusal::ProvidesMismatch(providers)
+            };
+            return self.dnf_snapshot_refused(&snap, refusal);
+        }
         if !rows.is_empty() {
             match self.dnf_prefetch_payloads(
                 &snap,
@@ -3856,7 +3929,7 @@ impl Engine {
     /// Only repository *metadata* is fetched: no package payload is
     /// downloaded and no package transaction runs, and only *absent* metadata
     /// is fetched (`metadata_expire=-1`), so a warm cache incurs no traffic.
-    /// Returns `Err((reason, indeterminate))` when the cache could not be
+    /// Returns `Err((reason, indeterminate, refusal))` when the cache could not be
     /// established; there is no partial success and no retry (the caller's
     /// bounded retry re-runs the whole snapshot verification instead).
     /// `indeterminate` is true only when the refresh's own completion is
@@ -3868,7 +3941,7 @@ impl Engine {
         sensitive: bool,
         name_disp: &str,
         package_env: &BTreeMap<String, String>,
-    ) -> std::result::Result<(), (String, bool)> {
+    ) -> std::result::Result<(), (String, bool, Option<DnfRefusal>)> {
         let mut req = ExecRequest::new("/usr/bin/dnf");
         req.args = PackageBackend::dnf_makecache_args();
         // The completion-cache plugin writes a fixed live-cache path; keep it
@@ -3893,6 +3966,7 @@ impl Engine {
                         name_disp, e.message
                     ),
                     false,
+                    None,
                 ))
             }
         };
@@ -3903,6 +3977,7 @@ impl Engine {
                     name_disp
                 ),
                 false,
+                None,
             ));
         } else {
             self.fs.exec(&permit, &req)
@@ -3913,6 +3988,11 @@ impl Engine {
                 Completion::Exited(c) => Err((
                     format!("refreshing the repository metadata cache exited {}", c),
                     false,
+                    if o.stderr_truncated {
+                        None
+                    } else {
+                        classify_dnf_refresh_failure(&o.stderr)
+                    },
                 )),
                 Completion::Signaled(s) => Err((
                     format!(
@@ -3920,6 +4000,7 @@ impl Engine {
                         s
                     ),
                     false,
+                    None,
                 )),
                 Completion::Indeterminate { reason, .. } => Err((
                     format!(
@@ -3927,6 +4008,7 @@ impl Engine {
                         reason
                     ),
                     true,
+                    None,
                 )),
             },
             Err(e) => Err((
@@ -3935,6 +4017,7 @@ impl Engine {
                     e.message
                 ),
                 false,
+                None,
             )),
         }
     }
@@ -4092,10 +4175,8 @@ impl Engine {
         req.env.extend(package_env.clone());
         req.sensitive = sensitive;
         req.timeout_secs = 600;
-        match self
-            .snap_exec(snap, &req, "payload download", "payload_download_fail")?
-            .completion
-        {
+        let dl_out = self.snap_exec(snap, &req, "payload download", "payload_download_fail")?;
+        match dl_out.completion {
             Completion::Exited(0) => {}
             Completion::Indeterminate { reason, .. } => {
                 return blocked(
@@ -4103,6 +4184,12 @@ impl Engine {
                     format!("payload download did not complete: {}", reason),
                     true,
                 );
+            }
+            Completion::Exited(_) if !dl_out.stderr_truncated => {
+                // DNF-09: name the cause dnf printed (a signature refusal, an
+                // unreachable repository) instead of a metadata claim.
+                let refusal = classify_dnf_download_failure(&dl_out.stderr);
+                return self.dnf_snapshot_refused(snap, refusal);
             }
             _ => {
                 return blocked(
@@ -4464,6 +4551,14 @@ impl Engine {
             }
         }
         Ok(())
+    }
+
+    /// Clean the private snapshot up and report a refusal dnf itself
+    /// reported (DNF-01, DNF-09). A cleanup failure is carried alongside so
+    /// it is never swallowed (R2-05).
+    fn dnf_snapshot_refused(&mut self, snap: &str, refusal: DnfRefusal) -> Result<DnfSnapshot> {
+        let cleanup = self.dnf_snapshot_cleanup(snap);
+        Ok(DnfSnapshot::Refused(refusal, cleanup, None))
     }
 
     fn dnf_snapshot_blocked(
@@ -5324,6 +5419,12 @@ enum DnfSnapshot {
     /// Completeness could not be proven — the mutation must fail closed.
     /// (reason, indeterminate)
     Blocked(String, bool),
+    /// dnf itself refused the install for a cause it reported in a recognized
+    /// form (DNF-01, DNF-09). Definite, never indeterminate; the private
+    /// snapshot has already been cleaned up. The first `Option<String>` is a
+    /// snapshot cleanup failure to surface alongside the cause, the second a
+    /// short fixed-text context note (which step failed).
+    Refused(DnfRefusal, Option<String>, Option<String>),
 }
 
 /// The outcome of the private snapshot's metadata-completeness check.
@@ -6191,6 +6292,10 @@ struct DnfInstallRow {
     /// and downgrade rows do; removal and cleanup rows never carry a
     /// payload.
     needs_payload: bool,
+    /// The table section the row sat under (`Installing:`, `Installing
+    /// dependencies:`, ...). The top-level `Installing:` rows are the
+    /// packages dnf resolved the requested name to (DNF-01).
+    section: &'static str,
 }
 
 impl DnfInstallRow {
@@ -6409,6 +6514,7 @@ fn parse_dnf_row(t: &str) -> Option<DnfInstallRow> {
         arch: f[1].to_string(),
         repoid: f[3].to_string(),
         needs_payload: false,
+        section: "",
     })
 }
 
@@ -6550,6 +6656,345 @@ fn is_wrapped_header_continuation(t: &str) -> bool {
         && f[1] == "Version"
         && (f[2] == "Repo" || f[2] == "Repository")
         && f[3] == "Size"
+}
+
+/// Why dnf refused an install before any change, for a cause dnf reported in
+/// a recognized form (DNF-01, DNF-09). Every token carried here was extracted
+/// from dnf output by a fixed grammar and domain-validated (a package name, a
+/// repository id, a dependency capability); raw dnf output is never carried,
+/// so a reason built from this cannot echo a repository URL, a credential or
+/// any other unmodeled text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DnfRefusal {
+    /// `Error: Unable to find a match: <name>`: no package of that name (and
+    /// nothing providing it) in the enabled repositories.
+    NoMatch,
+    /// The requested name is not a package name: dnf resolved it through a
+    /// provides match to differently named packages (`python3` -> `python36`).
+    ProvidesMismatch(Vec<String>),
+    /// No package of the requested name is installed, yet dnf reports nothing
+    /// to install: an installed package of another name provides it. The
+    /// names are the installed packages dnf printed, when it printed any.
+    InstalledProvider(Vec<String>),
+    /// Dependency resolution failed. The first `nothing provides`
+    /// capability, when dnf printed one in a safe form.
+    Dependency(Option<String>),
+    /// `Error: GPG check FAILED`: a payload is unsigned or not signed by a
+    /// key the repository trusts.
+    Signature,
+    /// `Error: Failed to download metadata for repo '<id>'`.
+    RepoMetadata(Option<String>),
+    /// The payload download failed for a reason not modeled above.
+    PayloadDownload,
+    /// Resolution failed with output this parser does not model; only its
+    /// size is reported.
+    UnrecognizedResolution(usize),
+}
+
+impl DnfRefusal {
+    /// The user-facing reason. `name_disp` is already redacted for a
+    /// sensitive resource; every dnf-derived token is redacted the same way.
+    fn render(&self, name_disp: &str, sensitive: bool) -> String {
+        let tok = |t: &str| -> String {
+            if sensitive {
+                "[redacted]".to_string()
+            } else {
+                t.to_string()
+            }
+        };
+        let names = |v: &[String]| -> String {
+            if sensitive {
+                "[redacted]".to_string()
+            } else {
+                v.join(", ")
+            }
+        };
+        match self {
+            Self::NoMatch => format!(
+                "dnf found no package named {} in the enabled repositories; nothing was \
+                 changed (check the name, and that the repository providing it is enabled)",
+                name_disp
+            ),
+            Self::ProvidesMismatch(p) if p.is_empty() => format!(
+                "the dnf transaction for {} does not install a package of that name (a \
+                 provides match); nothing was changed. Declare the package by its own name",
+                name_disp
+            ),
+            Self::ProvidesMismatch(p) => format!(
+                "{n} is not a package name: dnf resolves it through a provides match to \
+                 package {p}; nothing was changed. Declare the package by its own name \
+                 (name: {first}) so the result can be verified",
+                n = name_disp,
+                p = names(p),
+                first = p.first().map(|f| tok(f)).unwrap_or_default()
+            ),
+            Self::InstalledProvider(p) if !p.is_empty() => format!(
+                "no package named {n} is installed, but dnf reports the request already \
+                 satisfied by installed package {p} (a provides match); nothing was changed. \
+                 Declare the package by its own name (name: {first})",
+                n = name_disp,
+                p = names(p),
+                first = tok(&p[0])
+            ),
+            Self::InstalledProvider(_) => format!(
+                "no package named {} is installed, but dnf reports nothing to install for it \
+                 (another installed package provides it); nothing was changed. Declare the \
+                 package by its own name",
+                name_disp
+            ),
+            Self::Dependency(Some(cap)) => format!(
+                "dnf cannot resolve the dependencies of {}: nothing provides {}; nothing was \
+                 changed (a repository the package needs, such as CRB or PowerTools, may not \
+                 be enabled)",
+                name_disp,
+                tok(cap)
+            ),
+            Self::Dependency(None) => format!(
+                "dnf cannot resolve the dependencies of {} (dependency problem); nothing was \
+                 changed",
+                name_disp
+            ),
+            Self::Signature => format!(
+                "dnf refused a package signature while preparing {} (GPG check FAILED: a \
+                 package is unsigned or not signed by a key its repository trusts); nothing \
+                 was installed",
+                name_disp
+            ),
+            Self::RepoMetadata(Some(id)) => format!(
+                "dnf could not download the metadata of repository {} while preparing {}; \
+                 nothing was installed (every enabled repository must be reachable)",
+                tok(id),
+                name_disp
+            ),
+            Self::RepoMetadata(None) => format!(
+                "dnf could not download repository metadata while preparing {}; nothing was \
+                 installed (every enabled repository must be reachable)",
+                name_disp
+            ),
+            Self::PayloadDownload => format!(
+                "dnf could not download the packages required for {}; nothing was installed",
+                name_disp
+            ),
+            Self::UnrecognizedResolution(n) => format!(
+                "dnf could not resolve the install of {} ({} bytes of unrecognized dnf error \
+                 output withheld); nothing was changed",
+                name_disp, n
+            ),
+        }
+    }
+}
+
+/// The non-empty lines of a dnf stream, without the completion-cache plugin
+/// warning Sinter's own `--disableplugin` provokes. `None` for bytes that are
+/// not UTF-8 — such a stream is not a message dnf printed.
+fn dnf_diag_lines(bytes: &[u8]) -> Option<Vec<&str>> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    Some(
+        text.lines()
+            .map(|l| l.trim_end())
+            .filter(|l| !l.trim().is_empty())
+            .filter(|l| !DnfStderr::CompletionCachePluginAbsent.matches(l))
+            .collect(),
+    )
+}
+
+/// A dependency capability as dnf prints it after `nothing provides `
+/// (`lua-devel >= 5.3`, `libfoo.so.1()(64bit)`, `/usr/bin/python3`): a short
+/// value over the characters capabilities use. Anything else is not reported.
+fn safe_dnf_capability(t: &str) -> Option<String> {
+    let ok = !t.is_empty()
+        && t.len() <= 128
+        && t.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'.' | b'_'
+                        | b'+'
+                        | b'-'
+                        | b'('
+                        | b')'
+                        | b'/'
+                        | b':'
+                        | b'<'
+                        | b'>'
+                        | b'='
+                        | b' '
+                        | b','
+                )
+        });
+    ok.then(|| t.to_string())
+}
+
+/// The repository id in `Error: Failed to download metadata for repo
+/// '<id>': ...`, when the line has that exact shape and the id is valid.
+fn dnf_failed_metadata_repo(line: &str) -> Option<Option<String>> {
+    let rest = line.strip_prefix("Error: Failed to download metadata for repo '")?;
+    let id = rest.split_once('\'').map(|(id, _)| id);
+    Some(id.filter(|id| valid_repo_id(id)).map(str::to_string))
+}
+
+/// Classify a failed install-set resolution (`dnf -C install --assumeno`
+/// exited with an error) from the lines dnf printed (DNF-09). Only exact,
+/// measured grammars are recognized; anything else is
+/// [`DnfRefusal::UnrecognizedResolution`] with the stderr size only.
+fn classify_dnf_resolution_failure(name: &str, stdout: &[u8], stderr: &[u8]) -> DnfRefusal {
+    let unrecognized = DnfRefusal::UnrecognizedResolution(stderr.len());
+    let (Some(err), Some(out)) = (dnf_diag_lines(stderr), dnf_diag_lines(stdout)) else {
+        return unrecognized;
+    };
+    // Unable to find a match (dnf 4.7 / 4.14 / 4.20): `No match for argument:
+    // <name>` (stdout or stderr, depending on the version) and the final
+    // `Error: Unable to find a match: <name>` on stderr.
+    let no_match_arg = format!("No match for argument: {}", name);
+    let no_match_err = format!("Error: Unable to find a match: {}", name);
+    if err.contains(&no_match_err.as_str())
+        && err
+            .iter()
+            .chain(out.iter().filter(|l| !is_metadata_expiration_line(l)))
+            .all(|l| *l == no_match_arg || *l == no_match_err)
+    {
+        return DnfRefusal::NoMatch;
+    }
+    // A dependency problem: `Error: ` then ` Problem: ...` and its
+    // `  - ...` detail lines, optionally the `(try to add '--skip-broken'
+    // ...)` hint (libdnf's solver report).
+    if let Some((first, rest)) = err.split_first() {
+        let first_ok = first.trim_end() == "Error:"
+            || first.starts_with("Error: Problem")
+            || *first == "Error: ";
+        let has_problem =
+            first.starts_with("Error: Problem") || rest.iter().any(|l| l.starts_with(" Problem"));
+        let rest_ok = rest.iter().all(|l| {
+            l.starts_with(" Problem") || l.starts_with("  - ") || l.starts_with("(try to add")
+        });
+        if first_ok && has_problem && rest_ok {
+            let cap = rest.iter().find_map(|l| {
+                let r = l.trim_start().strip_prefix("- nothing provides ")?;
+                let (cap, _) = r.split_once(" needed by ")?;
+                safe_dnf_capability(cap)
+            });
+            return DnfRefusal::Dependency(cap);
+        }
+    }
+    unrecognized
+}
+
+/// Classify a failed payload download (`dnf install --downloadonly`) from its
+/// stderr (DNF-09). A signature refusal and an unreachable repository are
+/// recognized by dnf's own final error line; anything else is a plain
+/// download failure.
+fn classify_dnf_download_failure(stderr: &[u8]) -> DnfRefusal {
+    let Some(err) = dnf_diag_lines(stderr) else {
+        return DnfRefusal::PayloadDownload;
+    };
+    if err.iter().any(|l| l.trim() == "Error: GPG check FAILED") {
+        return DnfRefusal::Signature;
+    }
+    if let Some(repo) = err.iter().find_map(|l| dnf_failed_metadata_repo(l)) {
+        return DnfRefusal::RepoMetadata(repo);
+    }
+    DnfRefusal::PayloadDownload
+}
+
+/// Classify a failed metadata refresh (`dnf makecache`) from its stderr:
+/// `Some` only for dnf's own `Failed to download metadata for repo` error.
+fn classify_dnf_refresh_failure(stderr: &[u8]) -> Option<DnfRefusal> {
+    let err = dnf_diag_lines(stderr)?;
+    err.iter()
+        .find_map(|l| dnf_failed_metadata_repo(l))
+        .map(DnfRefusal::RepoMetadata)
+}
+
+/// The installed package name in dnf's `Package <nevra> is already
+/// installed.` line: `<name>-[<epoch>:]<version>-<release>.<arch>`. Version
+/// and release never contain `-`, so the name is everything before the last
+/// two `-`-separated fields; each part must be domain-valid.
+fn dnf_already_installed_name(line: &str) -> Option<String> {
+    let nevra = line
+        .strip_prefix("Package ")?
+        .strip_suffix(" is already installed.")?;
+    let (nvr, arch) = nevra.rsplit_once('.')?;
+    let (nv, rel) = nvr.rsplit_once('-')?;
+    let (name, ver) = nv.rsplit_once('-')?;
+    let ver = match ver.split_once(':') {
+        Some((ep, v)) if !ep.is_empty() && ep.bytes().all(|b| b.is_ascii_digit()) => v,
+        _ => ver,
+    };
+    (valid_package_name(name)
+        && valid_package_arch(arch)
+        && valid_version_release(&format!("{}-{}", ver, rel)))
+    .then(|| name.to_string())
+}
+
+/// Parse the "nothing to do" answer of a dry-run install (DNF-01): an
+/// optional metadata-age line, zero or more `Package <nevra> is already
+/// installed.` lines, an optional `Dependencies resolved.`, `Nothing to do.`
+/// and an optional `Complete!` — in that order and nothing else. Returns the
+/// installed package names dnf printed. Only consulted when the requested
+/// name was observed NOT installed, so any such answer means another
+/// installed package provides it.
+fn parse_dnf_nothing_to_do(text: &str) -> Option<Vec<String>> {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let mut i = 0;
+    if lines.get(i).is_some_and(|l| is_metadata_expiration_line(l)) {
+        i += 1;
+    }
+    let mut names = Vec::new();
+    while let Some(l) = lines.get(i) {
+        if !l.starts_with("Package ") {
+            break;
+        }
+        names.push(dnf_already_installed_name(l)?);
+        i += 1;
+    }
+    if lines.get(i) == Some(&"Dependencies resolved.") {
+        i += 1;
+    }
+    if lines.get(i) != Some(&"Nothing to do.") {
+        return None;
+    }
+    i += 1;
+    if lines.get(i) == Some(&"Complete!") {
+        i += 1;
+    }
+    if i != lines.len() {
+        return None;
+    }
+    names.dedup();
+    Some(names)
+}
+
+/// The top-level sections whose rows are the packages dnf resolved the
+/// requested name to (as opposed to dependencies it pulled in).
+const DNF_REQUESTED_SECTIONS: &[&str] =
+    &["Installing:", "Upgrading:", "Reinstalling:", "Downgrading:"];
+
+/// DNF-01: the transaction must act on the requested name itself (a
+/// top-level `Installing:`/`Upgrading:`/... row of exactly that name). When
+/// the name reached dnf only through a provides match, the top-level rows name
+/// other packages; returns those names so the install is refused before any
+/// change.
+fn dnf_provides_mismatch(name: &str, rows: &[DnfInstallRow]) -> Option<Vec<String>> {
+    if rows
+        .iter()
+        .any(|r| DNF_REQUESTED_SECTIONS.contains(&r.section) && r.name == name)
+    {
+        return None;
+    }
+    let mut names: Vec<String> = Vec::new();
+    for r in rows
+        .iter()
+        .filter(|r| DNF_REQUESTED_SECTIONS.contains(&r.section))
+    {
+        if !names.contains(&r.name) {
+            names.push(r.name.clone());
+        }
+    }
+    Some(names)
 }
 
 /// Parse a `dnf install --assumeno` transaction table into the exact
@@ -6767,6 +7212,7 @@ fn parse_dnf_install_set(text: &str) -> Option<Vec<DnfInstallRow>> {
                 // payload fetched; `Remove` and uncounted `Cleanup` rows
                 // never do.
                 r.needs_payload = dnf_section_verb(section).is_some_and(|v| v != "Remove");
+                r.section = section;
                 r
             })
             .collect(),

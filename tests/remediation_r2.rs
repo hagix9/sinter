@@ -500,7 +500,7 @@ fn r2_03_payload_download_failure_fails_closed() {
         p.reason
             .as_deref()
             .unwrap_or("")
-            .contains("payload download failed"),
+            .contains("could not download the packages required for nano"),
         "a failed payload download must be reported: {:?}",
         p.reason
     );

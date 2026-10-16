@@ -334,7 +334,13 @@ fn dnf_unusable_metadata_cache_fails_closed() {
     assert_eq!(p.change, Change::None);
     assert_eq!(p.verification, Verification::NotPerformed);
     let reason = p.reason.as_deref().unwrap_or("");
-    assert!(reason.contains("not locally complete"), "{}", reason);
+    // DNF-09: the refresh failed with dnf's own repository error, which is
+    // reported as such.
+    assert!(
+        reason.contains("could not download the metadata of repository baseos"),
+        "{}",
+        reason
+    );
     // The check ran, the refresh was attempted exactly once, and the re-check
     // failed; no install/remove was dispatched.
     let dnf = commands_with(&r, "/usr/bin/dnf");
@@ -439,7 +445,13 @@ fn dnf_payload_download_failure_blocks_mutation() {
     assert_eq!(p.change, Change::None);
     assert_eq!(p.verification, Verification::NotPerformed);
     let reason = p.reason.as_deref().unwrap_or("");
-    assert!(reason.contains("payload download failed"), "{}", reason);
+    // DNF-09: an unclassified download failure is reported as a download
+    // failure, not as incomplete metadata.
+    assert!(
+        reason.contains("could not download the packages required for nano"),
+        "{}",
+        reason
+    );
     // No install mutation was dispatched; check + repolist + dry-run +
     // the failed download-only ran.
     let dnf = commands_with(&r, "/usr/bin/dnf");

@@ -193,8 +193,10 @@ fn a_failed_refresh_fails_closed_without_a_mutation() {
         "no install may run when the metadata could not be obtained"
     );
     let reason = p.reason.as_deref().unwrap_or("");
+    // DNF-09: dnf's own "Failed to download metadata for repo" error names
+    // the repository instead of a generic metadata claim.
     assert!(
-        reason.contains("repository metadata not locally complete"),
+        reason.contains("could not download the metadata of repository baseos"),
         "{reason}"
     );
     assert!(
