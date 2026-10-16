@@ -304,8 +304,126 @@ fn expand_document(canon: &Path, doc: Document, state: &mut LoadState) -> Result
     Ok(())
 }
 
+/// The internal marker a `{{ staged }}` placeholder of `validate.args` is
+/// lowered to (COM-07). NUL can never occur in a recipe-supplied argument —
+/// one is rejected before lowering, and NUL cannot cross an exec boundary —
+/// so a NUL in a lowered argument is always, and only, this placeholder.
+pub(crate) const STAGED_PLACEHOLDER_MARK: char = '\0';
+
+/// The length of a `{{ staged }}` placeholder (`{{`, optional blanks,
+/// `staged`, optional blanks, `}}`) starting at `chars[i]`, if one does.
+fn staged_placeholder_len(chars: &[char], i: usize) -> Option<usize> {
+    if chars.get(i) != Some(&'{') || chars.get(i + 1) != Some(&'{') {
+        return None;
+    }
+    let mut j = i + 2;
+    while matches!(chars.get(j), Some(' ' | '\t')) {
+        j += 1;
+    }
+    for c in "staged".chars() {
+        if chars.get(j) != Some(&c) {
+            return None;
+        }
+        j += 1;
+    }
+    while matches!(chars.get(j), Some(' ' | '\t')) {
+        j += 1;
+    }
+    if chars.get(j) != Some(&'}') || chars.get(j + 1) != Some(&'}') {
+        return None;
+    }
+    Some(j + 2 - i)
+}
+
+/// Replace every `{{ staged }}` placeholder in `s` with
+/// [`STAGED_PLACEHOLDER_MARK`]. An escaped `\{{` is copied unchanged (it stays
+/// literal text for the interpolation that follows). Returns the lowered
+/// string and the number of placeholders.
+fn lower_staged_placeholders(s: &str) -> (String, usize) {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut n = 0;
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' && chars.get(i + 1) == Some(&'{') && chars.get(i + 2) == Some(&'{') {
+            out.push_str("\\{{");
+            i += 3;
+            continue;
+        }
+        if let Some(len) = staged_placeholder_len(&chars, i) {
+            out.push(STAGED_PLACEHOLDER_MARK);
+            n += 1;
+            i += len;
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    (out, n)
+}
+
+/// COM-07: lower the `{{ staged }}` placeholders of a `file`/`template`
+/// `validate.args` list to the internal marker, so the argument that carries
+/// the staged path is fixed at load time and every later interpolation scan
+/// sees only ordinary expressions. A NUL already present in an argument is
+/// rejected first (it would otherwise be indistinguishable from the marker),
+/// and a placeholder anywhere else in the `validate` map is rejected: only an
+/// argument can name the staged file.
+fn lower_validate_placeholders(
+    type_: &str,
+    with: &BTreeMap<String, Value>,
+    ctx: &str,
+) -> Result<BTreeMap<String, Value>> {
+    if type_ != "file" && type_ != "template" {
+        return Ok(with.clone());
+    }
+    let Some(Value::Map(spec)) = with.get("validate") else {
+        return Ok(with.clone());
+    };
+    let mut spec = spec.clone();
+    for (k, v) in spec.iter() {
+        if k == "args" {
+            continue;
+        }
+        if let Value::Str(s) = v {
+            if lower_staged_placeholders(s).1 > 0 {
+                return Err(SinterError::schema(format!(
+                    "{}: validate.{} may not contain the {{{{ staged }}}} placeholder; only \
+                     validate.args can name the staged file",
+                    ctx, k
+                )));
+            }
+        }
+    }
+    if let Some(Value::List(items)) = spec.get("args") {
+        let mut lowered = Vec::with_capacity(items.len());
+        for item in items {
+            match item {
+                Value::Str(s) => {
+                    if crate::value::has_nul(s) {
+                        return Err(SinterError::schema(format!(
+                            "{}: validate.args may not contain NUL",
+                            ctx
+                        )));
+                    }
+                    lowered.push(Value::Str(lower_staged_placeholders(s).0));
+                }
+                other => lowered.push(other.clone()),
+            }
+        }
+        spec.insert("args".to_string(), Value::List(lowered));
+    }
+    let mut out = with.clone();
+    out.insert("validate".to_string(), Value::Map(spec));
+    Ok(out)
+}
+
 fn expand_resource(canon: &Path, decl: &ResourceDecl, state: &mut LoadState) -> Result<()> {
     let _ = canon;
+    // COM-07: `{{ staged }}` in validate.args is lowered before anything scans
+    // the declaration's interpolations.
+    let lowered_with = lower_validate_placeholders(&decl.type_, &decl.with, &decl.id)?;
+    let decl_with = &lowered_with;
     // Collect register references from `when` and interpolated `with` values at
     // declaration time. This runs even when the loop is empty, so a forbidden
     // reference can never escape validation merely because no instance exists.
@@ -330,7 +448,7 @@ fn expand_resource(canon: &Path, decl: &ResourceDecl, state: &mut LoadState) -> 
         let mut names = BTreeSet::new();
         collect_register_refs(&expr, &mut register_refs, &mut names);
     }
-    for v in decl.with.values() {
+    for v in decl_with.values() {
         collect_value_register_refs(v, &mut register_refs, decl.sensitive, &sensitive_var_names)?;
     }
 
@@ -339,7 +457,7 @@ fn expand_resource(canon: &Path, decl: &ResourceDecl, state: &mut LoadState) -> 
             state.resources.push(RawResource {
                 id: decl.id.clone(),
                 type_: decl.type_.clone(),
-                with: decl.with.clone(),
+                with: decl_with.clone(),
                 when: decl.when.clone(),
                 depends_on: decl.depends_on.clone(),
                 notify: decl.notify.clone(),
@@ -352,7 +470,7 @@ fn expand_resource(canon: &Path, decl: &ResourceDecl, state: &mut LoadState) -> 
             state.declarations.push(Declaration {
                 id: decl.id.clone(),
                 type_: decl.type_.clone(),
-                with: decl.with.clone(),
+                with: decl_with.clone(),
                 depends_on: decl.depends_on.clone(),
                 is_loop: false,
                 instances: 1,
@@ -365,7 +483,7 @@ fn expand_resource(canon: &Path, decl: &ResourceDecl, state: &mut LoadState) -> 
                 state.resources.push(RawResource {
                     id: format!("{}[{}]", decl.id, i),
                     type_: decl.type_.clone(),
-                    with: decl.with.clone(),
+                    with: decl_with.clone(),
                     when: decl.when.clone(),
                     depends_on: decl.depends_on.clone(),
                     notify: decl.notify.clone(),
@@ -379,7 +497,7 @@ fn expand_resource(canon: &Path, decl: &ResourceDecl, state: &mut LoadState) -> 
             state.declarations.push(Declaration {
                 id: decl.id.clone(),
                 type_: decl.type_.clone(),
-                with: decl.with.clone(),
+                with: decl_with.clone(),
                 depends_on: decl.depends_on.clone(),
                 is_loop: true,
                 instances: items.len(),
@@ -2256,13 +2374,10 @@ fn validate_validate_spec(value: &Value, ctx: &str) -> Result<()> {
                     Value::List(items) => {
                         for i in items {
                             match i {
-                                Value::Str(s) if !crate::value::has_nul(s) => {}
-                                Value::Str(_) => {
-                                    return Err(SinterError::schema(format!(
-                                        "{}: validate.args may not contain NUL",
-                                        ctx
-                                    )))
-                                }
+                                // A NUL here is the lowered `{{ staged }}`
+                                // placeholder: a recipe NUL was already
+                                // rejected by `lower_validate_placeholders`.
+                                Value::Str(_) => {}
                                 _ => {
                                     return Err(SinterError::schema(format!(
                                         "{}: validate.args must be a list of strings",

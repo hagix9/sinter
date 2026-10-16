@@ -169,15 +169,48 @@ fn ev_env(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<(BTreeMap<String, 
 /// against the *staged* file before it is published (DESIGN §24.4).
 struct ValidateSpec {
     program: String,
+    /// Evaluated arguments. An argument may carry
+    /// [`crate::model::STAGED_PLACEHOLDER_MARK`] where the recipe wrote
+    /// `{{ staged }}` (COM-07); the marker is replaced by the staged path
+    /// at run time.
     args: Vec<String>,
     timeout_secs: u64,
+}
+
+impl ValidateSpec {
+    /// Whether the recipe placed the staged path itself (`{{ staged }}`).
+    fn places_staged(&self) -> bool {
+        self.args
+            .iter()
+            .any(|a| a.contains(crate::model::STAGED_PLACEHOLDER_MARK))
+    }
+
+    /// The validation argv for `staged`: every placeholder replaced by the
+    /// staged path, or — when the recipe placed none — the staged path
+    /// appended as the last argument (the original contract).
+    fn argv_for(&self, staged: &str) -> Vec<String> {
+        if self.places_staged() {
+            self.args
+                .iter()
+                .map(|a| a.replace(crate::model::STAGED_PLACEHOLDER_MARK, staged))
+                .collect()
+        } else {
+            let mut v = self.args.clone();
+            v.push(staged.to_string());
+            v
+        }
+    }
 }
 
 /// Read and type-check the evaluated `with.validate` map. `None` when the field
 /// is absent or null (no pre-publication validation). The returned `bool` is
 /// the field's sensitivity, so a validation command derived from a secret is
 /// redacted.
-fn ev_validate(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<Option<(ValidateSpec, bool)>> {
+fn ev_validate(
+    m: &BTreeMap<String, EvalVal>,
+    key: &str,
+    raw: Option<&Value>,
+) -> Result<Option<(ValidateSpec, bool)>> {
     let Some(v) = m.get(key) else {
         return Ok(None);
     };
@@ -209,13 +242,35 @@ fn ev_validate(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<Option<(Valid
             if v.sensitive { " (value redacted)" } else { "" }
         )));
     }
+    // The placeholders the recipe itself wrote, per argument (COM-07): the
+    // lowered declaration carries one marker per `{{ staged }}`. An evaluated
+    // argument must carry exactly as many — an interpolated value that
+    // brought a NUL of its own would otherwise forge a placeholder.
+    let raw_marks: Vec<usize> = match raw {
+        Some(Value::Map(r)) => match r.get("args") {
+            Some(Value::List(items)) => items
+                .iter()
+                .map(|i| match i {
+                    Value::Str(s) => s.matches(crate::model::STAGED_PLACEHOLDER_MARK).count(),
+                    _ => 0,
+                })
+                .collect(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
     let mut args = Vec::new();
     match entries.get("args") {
         None | Some(Value::Null) => {}
         Some(Value::List(items)) => {
-            for item in items {
+            for (idx, item) in items.iter().enumerate() {
                 match item {
-                    Value::Str(s) if !s.contains('\0') => args.push(s.clone()),
+                    Value::Str(s)
+                        if s.matches(crate::model::STAGED_PLACEHOLDER_MARK).count()
+                            == raw_marks.get(idx).copied().unwrap_or(0) =>
+                    {
+                        args.push(s.clone())
+                    }
                     _ => {
                         return Err(SinterError::apply(format!(
                             "with.{}.args must be strings without NUL",
@@ -326,10 +381,11 @@ impl Engine {
         }
 
         let content = self.resolve_content(res, &vals)?;
-        let (validate, validate_sensitive) = match ev_validate(&vals, "validate")? {
-            Some((spec, s)) => (Some(spec), s),
-            None => (None, false),
-        };
+        let (validate, validate_sensitive) =
+            match ev_validate(&vals, "validate", res.with.get("validate"))? {
+                Some((spec, s)) => (Some(spec), s),
+                None => (None, false),
+            };
         let content_sensitive = content.sensitive || res.sensitive;
         let effective_content_sensitive = res.sensitive || content_sensitive || validate_sensitive;
         let meta = self.file_meta(res, &vals, stat.kind, effective_content_sensitive)?;
@@ -1628,8 +1684,9 @@ impl Engine {
     /// Run a `file`/`template` resource's pre-publication validation command
     /// against the staged payload file and classify its result (DESIGN §24.4).
     ///
-    /// The command is argv-only (no shell): `program` `args…` then the staged
-    /// file path as the last argument. It never sees the production path. A
+    /// The command is argv-only (no shell): `program` `args…` with the staged
+    /// file path where an argument places `{{ staged }}`, or as the last
+    /// argument when none does. It never sees the production path. A
     /// definite non-success is `Rejected` (nothing is published); a timeout,
     /// lost response or signal is `Unresolved` (nothing is published, and the
     /// staging is left for evidence). A sensitive resource's command output is
@@ -1648,8 +1705,9 @@ impl Engine {
             )));
         }
         let mut req = ExecRequest::new(&spec.program);
-        req.args = spec.args.clone();
-        req.args.push(staged.payload_path());
+        // COM-07: the staged path goes where the recipe placed `{{ staged }}`
+        // (`--config-file={{ staged }}`), or last when it placed none.
+        req.args = spec.argv_for(&staged.payload_path());
         req.env = baseline_env(self.fs.home_env());
         req.sensitive = sensitive;
         req.timeout_secs = spec.timeout_secs;
@@ -2446,10 +2504,11 @@ impl Engine {
             }
         };
 
-        let (validate, validate_sensitive) = match ev_validate(&vals, "validate")? {
-            Some((spec, s)) => (Some(spec), s),
-            None => (None, false),
-        };
+        let (validate, validate_sensitive) =
+            match ev_validate(&vals, "validate", res.with.get("validate"))? {
+                Some((spec, s)) => (Some(spec), s),
+                None => (None, false),
+            };
         let stat = self.observe_stat(res, &path)?;
         let sensitive = res.sensitive || rendered.1 || validate_sensitive;
         let meta = self.file_meta(res, &vals, stat.kind, sensitive)?;
