@@ -151,7 +151,7 @@
         { "name": "connection_limit", "required": false, "type": "integer", "default": null, "description": "-1 (no limit) or more." },
         { "name": "password_verifier", "required": false, "type": "{ secret: <path> }", "default": null, "description": "One SCRAM-SHA-256 verifier kept as an encrypted secret; never a literal, plaintext and md5 are refused. Sent only on psql's standard input after the session's statement logging is silenced and verified. --sudo required." },
         { "name": "os_user", "required": false, "type": "string", "default": "postgres", "description": "OS account that owns the cluster; psql runs as it (peer authentication)." },
-        { "name": "psql", "required": false, "type": "string (absolute path)", "default": "/usr/bin/psql", "description": "psql to run (PGDG: /usr/pgsql-17/bin/psql)." },
+        { "name": "psql", "required": false, "type": "string (absolute path)", "default": "/usr/bin/psql", "description": "/usr/bin/psql or a PGDG /usr/pgsql-<major>/bin/psql; no other path (plan and audit run it)." },
         { "name": "port", "required": false, "type": "integer", "default": null, "description": "Server port when not the default." },
         { "name": "database", "required": false, "type": "string", "default": "postgres", "description": "Database to connect to." }
       ],

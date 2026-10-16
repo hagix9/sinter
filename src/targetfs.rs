@@ -617,7 +617,7 @@ impl TargetFs {
         let query = a.windows(2).find(|w| w[0] == "-c").map(|w| w[1].as_str());
         let is_observation = req.program == SETPRIV
             && req.stdin.is_none()
-            && sep.is_some_and(|i| a.get(i + 1).is_some_and(|p| p.ends_with("/psql")))
+            && sep.is_some_and(|i| a.get(i + 1).is_some_and(|p| crate::pgrole::allowed_psql(p)))
             && query.is_some_and(|q| {
                 q.starts_with("SELECT 'sinter-pgrole-1', ")
                     && !q.contains(';')

@@ -558,7 +558,9 @@ fn schema_rejects_unsafe_declarations() {
         ("      name: app\n      state: absent\n      password_verifier: { secret: secrets/app.age }\n", "cannot be combined with state: absent"),
         ("      name: app\n      superuser: yes please\n", "superuser must be a boolean"),
         ("      name: app\n      connection_limit: -5\n", "connection_limit"),
-        ("      name: app\n      psql: psql\n", "psql must be an absolute path"),
+        ("      name: app\n      psql: psql\n", "psql must be /usr/bin/psql or /usr/pgsql-<major>/bin/psql"),
+        // plan/audit run psql: a recipe or manifest cannot pick the binary
+        ("      name: app\n      psql: /tmp/x/psql\n", "psql must be /usr/bin/psql or /usr/pgsql-<major>/bin/psql"),
         ("      name: app\n      port: 0\n", "port must be"),
         ("      name: app\n      database: \"x;y\"\n", "database must be"),
         ("      name: app\n      password: hunter2\n", "unknown field with.password"),
@@ -571,6 +573,21 @@ fn schema_rejects_unsafe_declarations() {
         assert!(e.message.contains(needle), "{body}: {}", e.message);
         assert!(!e.message.contains("hunter2"));
     }
+}
+
+#[test]
+fn one_resource_per_role_also_across_an_omitted_default_port() {
+    let f = fx("pgrole-conflict-port");
+    let r = f.recipe(
+        "  - id: a\n    type: postgresql_role\n    with:\n      name: app\n  - id: b\n    type: postgresql_role\n    with:\n      name: app\n      port: 5432\n",
+    );
+    let e = load_model(&r).unwrap_err();
+    assert!(e.message.contains("conflicting ownership"), "{}", e.message);
+    // A different port is a different server.
+    let r = f.recipe(
+        "  - id: a\n    type: postgresql_role\n    with:\n      name: app\n  - id: b\n    type: postgresql_role\n    with:\n      name: app\n      port: 5433\n",
+    );
+    load_model(&r).expect("two servers");
 }
 
 #[test]

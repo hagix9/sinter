@@ -112,7 +112,7 @@
         "connection_limit": "-1（無制限）以上。",
         "password_verifier": "SCRAM-SHA-256 の verifier 1 つを暗号化シークレットとして保持。直接は書けず、平文と md5 は拒否。セッションのログ記録を止めて確認した後、psql の標準入力だけで送る。--sudo が必要。",
         "os_user": "クラスタを所有する OS アカウント。psql はこのアカウントで実行（peer 認証）。",
-        "psql": "実行する psql（PGDG は /usr/pgsql-17/bin/psql）。",
+        "psql": "/usr/bin/psql または PGDG の /usr/pgsql-<major>/bin/psql。plan と audit でも実行するので、それ以外は不可。",
         "port": "既定以外のときのサーバーのポート。",
         "database": "接続するデータベース。"
       }

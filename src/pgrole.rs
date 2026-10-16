@@ -109,6 +109,27 @@ pub fn valid_role_name(s: &str) -> bool {
         && !s.starts_with("pg_")
 }
 
+/// The `psql` binaries Sinter runs, as the cluster owner, during plan, apply
+/// and audit: the distribution's `/usr/bin/psql` or a PGDG
+/// `/usr/pgsql-<major>/bin/psql` (both root-owned package paths). A recipe
+/// (or an MCP manifest) can never choose another executable to run while
+/// observing.
+pub fn allowed_psql(p: &str) -> bool {
+    if p == DEFAULT_PSQL {
+        return true;
+    }
+    let Some(major) = p
+        .strip_prefix("/usr/pgsql-")
+        .and_then(|r| r.strip_suffix("/bin/psql"))
+    else {
+        return false;
+    };
+    !major.is_empty()
+        && major.len() <= 3
+        && !major.starts_with('0')
+        && major.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// A database name to connect to: same alphabet as a role name.
 fn valid_database_name(s: &str) -> bool {
     let b = s.as_bytes();
@@ -151,13 +172,11 @@ pub(crate) fn valid_scram_verifier(v: &str) -> bool {
         && iter
             .parse::<u64>()
             .is_ok_and(|n| (4096..=2_147_483_647).contains(&n));
-    iter_ok
-        && b64(salt)
-        && salt.len() <= 256
-        && stored.len() == 44
-        && b64(stored)
-        && server.len() == 44
-        && b64(server)
+    // A 32-byte key is exactly 44 base64 characters ending in a single `=`.
+    // Anything else PostgreSQL does not parse as a verifier and would store
+    // as a *plaintext* password (hashing the verifier text itself).
+    let key32 = |k: &str| k.len() == 44 && b64(k) && k.ends_with('=') && !k.ends_with("==");
+    iter_ok && b64(salt) && salt.len() <= 256 && key32(stored) && key32(server)
 }
 
 /// Read a verifier from decrypted secret bytes: UTF-8, at most one trailing
@@ -249,9 +268,13 @@ pub(crate) fn validate_literals(with: &BTreeMap<String, Value>, ctx: &str) -> Re
     }
     if let Some(v) = with.get("psql") {
         match literal(v) {
-            Some(s) if s.starts_with('/') && !s.contains('\0') => {}
+            Some(s) if allowed_psql(s) => {}
             None if interpolated(v) => {}
-            _ => return Err(schema("psql must be an absolute path".into())),
+            _ => {
+                return Err(schema(
+                    "psql must be /usr/bin/psql or /usr/pgsql-<major>/bin/psql".into(),
+                ))
+            }
         }
     }
     if let Some(v) = with.get("port") {
@@ -408,9 +431,9 @@ pub(crate) fn role_desired(
     let psql = ev_str(vals, "psql")?
         .map(|(s, _)| s)
         .unwrap_or_else(|| DEFAULT_PSQL.to_string());
-    if !psql.starts_with('/') || psql.contains('\0') {
+    if !allowed_psql(&psql) {
         return Err(SinterError::apply(format!(
-            "{}: psql must be an absolute path",
+            "{}: psql must be /usr/bin/psql or /usr/pgsql-<major>/bin/psql",
             res.id
         )));
     }
@@ -644,7 +667,11 @@ fn change_statements(
     verifier: Option<&Zeroizing<String>>,
 ) -> Zeroizing<String> {
     let q = format!("\"{}\"", d.name);
-    let mut sql = Zeroizing::new(String::new());
+    // Reserved up front: growing the buffer after the verifier is in it would
+    // free an unzeroized copy.
+    let mut sql = Zeroizing::new(String::with_capacity(
+        512 + verifier.map(|v| v.len()).unwrap_or(0),
+    ));
     match (&o.role, d.present) {
         (_, false) => sql.push_str(&format!("DROP ROLE {};\n", q)),
         (None, true) => {
@@ -701,7 +728,8 @@ fn change_statements(
 /// The whole psql script: silence and verify server-side statement logging,
 /// then — only when verified — run the change in one transaction.
 pub(crate) fn change_script(statements: &str) -> Zeroizing<String> {
-    let mut s = Zeroizing::new(String::new());
+    // Reserved up front so the buffer holding the statements never regrows.
+    let mut s = Zeroizing::new(String::with_capacity(4096 + statements.len()));
     s.push_str(
         "\\set ON_ERROR_STOP on\n\
          \\set QUIET on\n\
@@ -1072,13 +1100,16 @@ impl Engine {
             r.execution = Execution::Failed;
             r.verification = Verification::Unknown;
             r.change = Change::Possible;
-            if !matches!(out.completion, Completion::Indeterminate { .. }) {
+            // Only a definite psql exit (a statement error rolls the
+            // transaction back) is settled by observing again; a signal or an
+            // unknown completion may have interrupted a COMMIT in flight.
+            if matches!(out.completion, Completion::Exited(_)) {
                 if let Ok(after) = self.pgrole_observe(&d, verifier.is_some(), sensitive) {
                     if compare_role(&d, &after, verifier.as_ref()) == dims {
                         r.change = Change::None;
                     }
                 }
-            } else {
+            } else if matches!(out.completion, Completion::Indeterminate { .. }) {
                 r.execution = Execution::Indeterminate;
             }
             r.reason = Some(format!(
@@ -1156,6 +1187,32 @@ mod tests {
     }
 
     #[test]
+    fn only_package_psql_binaries_are_run() {
+        for ok in [
+            "/usr/bin/psql",
+            "/usr/pgsql-17/bin/psql",
+            "/usr/pgsql-9/bin/psql",
+            "/usr/pgsql-100/bin/psql",
+        ] {
+            assert!(allowed_psql(ok), "{ok}");
+        }
+        for bad in [
+            "/tmp/x/psql",
+            "/usr/local/bin/psql",
+            "psql",
+            "/usr/pgsql-/bin/psql",
+            "/usr/pgsql-17x/bin/psql",
+            "/usr/pgsql-017/bin/psql",
+            "/usr/pgsql-17/../../tmp/bin/psql",
+            "/usr/pgsql-1000/bin/psql",
+            "/usr/bin/psql2",
+            "/opt/pg/bin/psql16",
+        ] {
+            assert!(!allowed_psql(bad), "{bad}");
+        }
+    }
+
+    #[test]
     fn scram_verifiers() {
         assert!(valid_scram_verifier(V));
         for bad in [
@@ -1170,6 +1227,10 @@ mod tests {
             &V.replace("c2FsdHNhbHRzYWx0c2FsdA==", "c2Fsd'Nh"),
             &V.replace(":BBBB", ":BBB"),
             &V.replace("$AAAA", "$AAA="),
+            // 44 characters but not 32 bytes: no `=`, or `==`
+            &V.replace("A=:", "AA:"),
+            &V.replace("B=", "BB"),
+            &V.replace("AA=:", "A==:"),
         ] {
             assert!(!valid_scram_verifier(bad), "{bad}");
         }

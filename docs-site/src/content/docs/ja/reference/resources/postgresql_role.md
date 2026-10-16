@@ -31,7 +31,7 @@ description: ローカルの PostgreSQL サーバーのロールを 1 つ管理�
 | `connection_limit` | いいえ | 整数 | 管理しない | `-1`（無制限）以上。 |
 | `password_verifier` | いいえ | `{ secret: <path> }` | 管理しない | SCRAM-SHA-256 の verifier を 1 つだけ入れた暗号化シークレット。レシピに直接は書けません。 |
 | `os_user` | いいえ | 文字列 | `postgres` | クラスタを所有する OS のアカウント。`psql` はこのアカウントで実行します（peer 認証）。 |
-| `psql` | いいえ | 文字列 | `/usr/bin/psql` | `psql` の絶対パス（PGDG は `/usr/pgsql-17/bin/psql`）。 |
+| `psql` | いいえ | 文字列 | `/usr/bin/psql` | `/usr/bin/psql` または PGDG の `/usr/pgsql-<major>/bin/psql`（例: `/usr/pgsql-17/bin/psql`）。plan と audit でも実行するので、それ以外のパスは受け付けません。 |
 | `port` | いいえ | 整数 | サーバーの既定 | 既定と異なるポートで動くクラスタのポート。 |
 | `database` | いいえ | 文字列 | `postgres` | 接続するデータベース。 |
 
@@ -68,8 +68,9 @@ SCRAM の verifier はパスワードそのものではありませんが、オ�
 
 - 暗号化したシークレット（`password_verifier: { secret: ... }`、
   [sinter secrets](/ja/reference/secrets/) を参照）からだけ受け付け、厳密に
-  `SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>`（4096 回以上、末尾の
-  改行 1 つは可）でなければなりません。平文のパスワードや `md5…` のハッシュは、
+  `SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>`（4096 回以上、鍵は
+  32 バイト、末尾の改行 1 つは可）でなければなりません。PostgreSQL が verifier として
+  解釈しない値は、平文のパスワードとして保存されてしまうので拒否します。平文のパスワードや `md5…` のハッシュは、
   何かを実行する前に固定の文言で拒否します。
 - サーバーには `psql` の**標準入力**だけで渡し、argv、環境変数、一時ファイルには
   載せません。plan、apply、audit の出力にも出しません。

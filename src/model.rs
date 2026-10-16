@@ -1721,7 +1721,8 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                     .get("port")
                     .and_then(|v| v.as_int())
                     .map(|p| p.to_string())
-                    .unwrap_or_default();
+                    // An omitted port is the server default, 5432.
+                    .unwrap_or_else(|| "5432".to_string());
                 if let Some(owner) = account_name_owner.insert(
                     ("postgresql_role".to_string(), format!("{}@{}", name, port)),
                     r.id.clone(),

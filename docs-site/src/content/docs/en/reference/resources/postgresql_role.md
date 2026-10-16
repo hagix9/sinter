@@ -31,7 +31,7 @@ planned, applied and audited like any other resource. New in v1.5.1.
 | `connection_limit` | no | integer | unmanaged | `-1` (no limit) or more. |
 | `password_verifier` | no | `{ secret: <path> }` | unmanaged | An encrypted secret holding exactly one SCRAM-SHA-256 verifier. Never a literal. |
 | `os_user` | no | string | `postgres` | The operating system account that owns the cluster; `psql` runs as it (peer authentication). |
-| `psql` | no | string | `/usr/bin/psql` | Absolute path of `psql` (PGDG: `/usr/pgsql-17/bin/psql`). |
+| `psql` | no | string | `/usr/bin/psql` | `/usr/bin/psql` or a PGDG `/usr/pgsql-<major>/bin/psql` (e.g. `/usr/pgsql-17/bin/psql`); no other path is accepted, because plan and audit run it. |
 | `port` | no | integer | server default | Server port, for a cluster on a non-default port. |
 | `database` | no | string | `postgres` | Database to connect to. |
 
@@ -70,7 +70,9 @@ treated like a password hash:
 - It is accepted only from an encrypted secret (`password_verifier: { secret:
   ... }`, see [sinter secrets](/en/reference/secrets/)) and must be exactly
   `SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>` with at least
-  4096 iterations (one trailing newline is allowed). A plaintext password or an
+  4096 iterations and 32-byte keys (one trailing newline is allowed). A value
+  PostgreSQL would not parse as a verifier is refused, because PostgreSQL
+  would store it as a plaintext password. A plaintext password or an
   `md5…` hash is refused with fixed text before anything runs.
 - It reaches the server only on `psql`'s **standard input**, never in argv, an
   environment variable or a temporary file, and never in plan, apply or audit
