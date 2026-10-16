@@ -587,6 +587,49 @@ Publishing requires explicit human review of, in order:
 No publish until the human confirms all five. The approval covers exactly
 the staged bytes; any change to a staged file voids it.
 
+### Approval set (v1.5.0 onward)
+
+The approval is bound to one digest. Before review, the operator assembles
+the approval set under `evidence/approval-set/` in the staging directory:
+
+```text
+APPROVAL-SET-META.json        version, tag, RC_COMMIT, RC tree, artifact and
+                              executable SHA-256, collector facts
+acceptance/                   byte copies of the three acceptance assets
+collector-record/             runtime harness record; every post-acceptance
+                              collector, its outputs (a failed first result
+                              included), its diff, and their SHA256SUMS
+APPROVAL-SET.sha256           canonical member list (not a member itself)
+```
+
+`APPROVAL-SET.sha256` has one `<sha256>  <path>` line per member, sorted by
+the UTF-8 bytes of the path, and nothing else; it verifies with
+`shasum -a 256 -c`. `APPROVAL_SET_DIGEST` is the SHA-256 of that file. The
+set is frozen once the digest is computed: re-packing the bundle archive
+changes the digest and needs a new approval.
+
+`verify_approval_set.py` checks the set: exactly the listed members, the
+canonical list, consistency with the manifest, the bundle's
+`harness/PROVENANCE.json`, the runtime record, the collector record and the
+RC tree, reproduction of every collector output and bundle log from the
+recorded evidence, and the full-mode checker. Exit 3 means valid but not yet
+approved (`PENDING_OWNER_APPROVAL`, never GO); exit 0 only with
+`--approved-digest` equal to the current digest.
+
+Before review, run it with all of `--rc-repo`, `--evidence`, `--gate-log`
+and `--checker`; a structural run alone cannot detect a consistently forged
+set. Any other exit than 3 before the approval, or than 0 after it, is a STOP.
+
+The Owner records the approval in writing, naming `APPROVAL_SET_DIGEST`,
+`RC_COMMIT`, the artifact SHA-256, and the SHA-256 of the staged
+`SHA256SUMS`, `RELEASE_NOTES.md` and `RELEASE_MANIFEST.md`. The approval
+still covers every staged file reviewed above; the digest additionally binds
+the acceptance evidence and the collector record, so that none of them can be
+replaced after the approval. A matching digest shows which bytes were
+approved, not who approved them: that is established by the written record
+and the channel it came through. A collector's own approval token does not
+replace this record.
+
 ## Steps 14–16 — Publish (tag, GitHub Release, assets)
 
 Only after step-13 human authorization. All steps use read-back verification.
@@ -601,6 +644,13 @@ git remote -v
 cd ~/Downloads/Sinter-v${VERSION}-release-staging
 shasum -a 256 -c SHA256SUMS              # all OK
 shasum -a 256 -c sinter-v${VERSION}-acceptance-SHA256SUMS
+python3 verify_approval_set.py evidence/approval-set --rc-repo <repo> \
+  --evidence <acceptance out> --gate-log <step-4 log> \
+  --checker <repo>/release/check_acceptance_manifest.py \
+  --artifact sinter-v${VERSION}-linux-x86_64.tar.gz \
+  --approved-digest ${APPROVAL_SET_DIGEST}   # exit 0
+(cd evidence/approval-set && sed -n 's|  acceptance/|  ../../|p' APPROVAL-SET.sha256 | shasum -a 256 -c)
+                                         # staged assets == approved copies
 python3 <repo>/release/check_acceptance_manifest.py \
   sinter-v${VERSION}-acceptance-manifest.json \
   --bundle-archive sinter-v${VERSION}-acceptance-evidence.tar.gz \
@@ -657,7 +707,8 @@ git ls-remote --tags <remote> | grep ${TAG}    # tag → RC_COMMIT
 - [ ] Exactly the intended assets, no extras
 - [ ] `SHA256SUMS` downloadable and matches staged copy
 - [ ] Fresh-download each asset and check against `SHA256SUMS` and the
-      acceptance checksums:
+      acceptance checksums, and check each acceptance asset against its
+      `acceptance/` entry in the approved `APPROVAL-SET.sha256`:
 
 ```sh
 gh release download ${TAG} -D /tmp/verify-${TAG} --clobber

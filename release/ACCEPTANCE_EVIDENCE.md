@@ -35,17 +35,34 @@ After publication, a copy of the manifest is committed to `release/evidence/v${V
 sinter-v${VERSION}-acceptance-evidence/
   acceptance-manifest.json      # byte-identical to the published manifest asset
   harness/                      # the exact acceptance harness files that ran
+  harness/PROVENANCE.json       # runtime SHA-256 and bundle form of every harness file (see below)
+  harness/publication-copy/     # redacted copies of executed files that cannot be published verbatim
   logs/<target-label>.log       # one raw, sanitized log per target
   validation/linux-gate.log     # full output of the step-4 Linux validation gate
 ```
 
-The harness files are included verbatim and hashed in the manifest. The run can then be tied to the exact harness code even though the harness lives outside this repository.
+Every harness file that ran is hashed in the manifest and included verbatim, except for the publication copies described under "Harness scope and provenance". The run can then be tied to the exact harness code whether the harness lives outside this repository or in it.
+
+### Harness scope and provenance
+
+Which files belong in `harness/` is decided by what executed, not by what was copied or by an earlier release:
+
+- A file *ran* when steps 7–9 executed it on a target or on the operator host, or read it as an input that decides a verdict (such as an expected check-id list), or when step 9 used it to produce `logs/<label>.log`. The primary evidence is the runtime record: the driver's per-run copy of each harness file with its SHA-256, written at the start of every target run. All runs of one candidate must carry the same record.
+- A file that ran and passes the sensitive-data rules below is included **verbatim**: its bundle SHA-256 equals its runtime SHA-256.
+- A file that ran but contains values this document excludes (cloud project or instance identifiers, machine-specific or home-directory paths, credentials) is included as a **publication copy** under `harness/publication-copy/`. A publication copy replaces each excluded span with `<redacted>` and changes nothing else: same lines, same order, same bytes outside the redacted spans. It is not the executed file and is never presented as one; its SHA-256 differs from the runtime SHA-256.
+- A tool that ran during steps 7–9 outside the repository's harness, such as a tool that records each target's cloud image identity at acceptance time, is a harness file like any other. It is included verbatim when it passes the sensitive-data rules, under `harness/<tool-dir>/`, and listed in `harness/PROVENANCE.json` under `acceptance_time_tools` with the SHA-256 from its own runtime record; its executed bytes are the bundled bytes.
+- Files in the runtime record that did not run, and tools used only after acceptance (evidence collectors, approval helpers), are not placed in `harness/`.
+- `harness/PROVENANCE.json` (schema `sinter-harness-provenance/1`) lists every file of the runtime record with its role, where it executed, its runtime SHA-256, its path at `candidate.source_commit` when the harness is kept in this repository, its bundle form (`verbatim`, `publication-copy` or `not-included`), its bundle path, and for a publication copy its own SHA-256 and the redacted line numbers. When a post-acceptance collector was used, it also records that collector's SHA-256s and results, a failed first result included, and the SHA-256 of the collector record's `SHA256SUMS` (see `RELEASE.md` step 13).
+- `harness.files` lists `harness/PROVENANCE.json` and every bundled harness file. All bundle rules below still apply.
+
+When the harness is kept in this repository, the executed bytes of every harness file can be checked against `candidate.source_commit`, the commit the tag points at. A failed post-acceptance collection is never deleted or rewritten; a corrected collector is recorded as a post-acceptance tool, never as part of the run.
 
 The bundle must be exactly this set, nothing more:
 - Only regular files and directories. No symlinks, hardlinks, devices, FIFOs, sockets, or setuid/setgid files.
 - Every path is relative, normalized, and stays inside the bundle: no absolute paths, drive letters, backslashes, `.` or `..` components, or characters outside `A-Z a-z 0-9 . _ / -`.
 - Every file is referenced by the manifest (harness files, target logs, Linux gate log) or is the manifest copy. An unreferenced file — including a hidden one such as `.env` — is an error.
 - No two paths may be equal ignoring case, and no path may be both a file and a directory.
+- Tar headers carry no user names: owner and group `root`, uid and gid 0, and no extended (pax) headers. Where the archiving tool records the local account by default, set them explicitly (bsdtar: `--uid 0 --gid 0 --uname root --gname root`).
 - The archive has a single top-level directory named after the bundle, and is created with:
 
 ```sh
@@ -173,9 +190,9 @@ The numbers refer to the `RELEASE.md` state machine.
 
 1. **Step 4, Linux gate** — on supported Linux x86_64, at `RC_COMMIT`, run the pinned gate commands. Keep the full output as `validation/linux-gate.log` and record the `linux_validation` fields. Any FAIL stops the release before a build.
 2. **Step 6, freeze** — record the artifact name, size, and SHA-256, and the executable SHA-256.
-3. **Steps 7–9, acceptance** — run the harness against that frozen, extracted artifact on all eight targets. Re-check both hashes on each target first. Capture one raw, sanitized log per target and record the fields above as they are produced.
+3. **Steps 7–9, acceptance** — run the harness against that frozen, extracted artifact on all eight targets. Re-check both hashes on each target first. Capture one raw, sanitized log per target and record the fields above as they are produced, including `image`, observed from the target's boot disk while the acceptance runs (never filled in afterwards).
 4. **Steps 10–11, assemble** — generate the manifest from the recorded values only, never from memory or estimates. Build the bundle directory and archive, and write `sinter-v${VERSION}-acceptance-SHA256SUMS`.
 5. **Step 12, validate** — run the full-mode checker (above) on the exact files to be staged. It must print `OK … (verdict GO)`.
-6. **Step 13, human review** — stage the three acceptance assets with the artifact. The reviewer checks the manifest, its Linux gate record, the checker output, and `RELEASE_MANIFEST.md`.
-7. **Steps 14–16, publish** — upload the three acceptance assets with the artifact and `SHA256SUMS`.
-8. **Step 17, post-publish** — download the acceptance assets, verify `sinter-v${VERSION}-acceptance-SHA256SUMS`, and re-run the full-mode checker on the downloads. Then commit the manifest copy to `release/evidence/v${VERSION}/` in a docs-only commit.
+6. **Step 13, human review** — stage the three acceptance assets with the artifact. The reviewer checks the manifest, its Linux gate record, the checker output, and `RELEASE_MANIFEST.md`. The Owner approves the approval-set digest that covers these assets (`RELEASE.md` step 13).
+7. **Steps 14–16, publish** — re-verify the approval set against the approved digest, then upload the three acceptance assets with the artifact and `SHA256SUMS`.
+8. **Step 17, post-publish** — download the acceptance assets, verify `sinter-v${VERSION}-acceptance-SHA256SUMS`, check that each download's SHA-256 equals its entry in the approved approval set, and re-run the full-mode checker on the downloads. Then commit the manifest copy to `release/evidence/v${VERSION}/` in a docs-only commit.

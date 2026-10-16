@@ -19,7 +19,7 @@ Commands:
 `secrets`サブコマンドについては[sinter secrets](/ja/reference/secrets/)を
 参照してください。
 
-`sinter --version` はバージョンを表示します（例: `sinter 1.4.0`）。
+`sinter --version` はバージョンを表示します（例: `sinter 1.5.0`）。
 
 ## validate
 
