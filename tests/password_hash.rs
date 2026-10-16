@@ -1097,16 +1097,22 @@ fn mcp_refuses_a_password_hash_secret_in_manifest_text() {
         serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
         "protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}),
     );
-    let manifest = "version: 1\nresources:\n  - id: u\n    type: user\n    with:\n      name: app\n      password_hash: { secret: secrets/CANARYREF.age }\n";
-    for (i, tool) in [
-        "sinter_validate_manifest",
-        "sinter_inspect_manifest",
-        "sinter_plan",
-        "sinter_plan_host",
-        "sinter_audit_host",
-    ]
-    .iter()
-    .enumerate()
+    let user = "version: 1\nresources:\n  - id: u\n    type: user\n    with:\n      name: app\n      password_hash: { secret: secrets/CANARYREF.age }\n";
+    // v1.5.1: a postgresql_role verifier is a secret reference too.
+    let role = "version: 1\nresources:\n  - id: r\n    type: postgresql_role\n    with:\n      name: app\n      password_verifier: { secret: secrets/CANARYREF.age }\n";
+    for (i, (manifest, tool)) in [user, role]
+        .iter()
+        .flat_map(|m| {
+            [
+                "sinter_validate_manifest",
+                "sinter_inspect_manifest",
+                "sinter_plan",
+                "sinter_plan_host",
+                "sinter_audit_host",
+            ]
+            .map(move |t| (*m, t))
+        })
+        .enumerate()
     {
         let resp = call(
             serde_json::json!({"jsonrpc":"2.0","id":10 + i,"method":"tools/call","params":{

@@ -354,19 +354,18 @@ fn check_mcp_manifest_authority(doc: &Document) -> Result<(), ToolError> {
                     .to_string(),
             });
         }
-        // Any map-valued `content` or `password_hash` is a secret reference (or
-        // malformed); both are refused. The reference text is not echoed.
-        if matches!(r.with.get("content"), Some(crate::value::Value::Map(_)))
-            || matches!(
-                r.with.get("password_hash"),
-                Some(crate::value::Value::Map(_))
-            )
+        // Any map-valued `content`, `password_hash` or `password_verifier` is a
+        // secret reference (or malformed); all are refused. The reference text
+        // is not echoed.
+        if ["content", "password_hash", "password_verifier"]
+            .iter()
+            .any(|k| matches!(r.with.get(*k), Some(crate::value::Value::Map(_))))
         {
             return Err(ToolError {
                 category: "invalid_manifest",
                 kind: Some("schema"),
                 message: "MCP manifests may not reference encrypted secrets \
-                          (content / password_hash: { secret: … }) — decryption is not permitted over MCP"
+                          (content / password_hash / password_verifier: { secret: … }) — decryption is not permitted over MCP"
                     .to_string(),
             });
         }
