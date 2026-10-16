@@ -393,7 +393,7 @@ fn unreachable_repository_is_named_without_its_url() {
     t.dnf_makecache_output = Some(out(
         Completion::Exited(1),
         "",
-        "Errors during downloading metadata for repository 'v151-broken':\n  - Curl error (7): Couldn't connect to server for http://user:hunter2@10.0.0.1:1/repodata/repomd.xml [Failed to connect to 10.0.0.1 port 1: Connection refused]\nError: Failed to download metadata for repo 'v151-broken': Cannot download repomd.xml: Cannot download repodata/repomd.xml: All mirrors were tried\n",
+        "Errors during downloading metadata for repository 'v151-broken':\n  - Curl error (7): Couldn't connect to server for http://user:hunter2@192.0.2.1:1/repodata/repomd.xml [Failed to connect to 192.0.2.1 port 1: Connection refused]\nError: Failed to download metadata for repo 'v151-broken': Cannot download repomd.xml: Cannot download repodata/repomd.xml: All mirrors were tried\n",
     ));
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     let reason = assert_refused(&r);
@@ -402,7 +402,7 @@ fn unreachable_repository_is_named_without_its_url() {
         "{reason}"
     );
     assert!(!reason.contains("hunter2"), "{reason}");
-    assert!(!reason.contains("10.0.0.1"), "{reason}");
+    assert!(!reason.contains("192.0.2.1"), "{reason}");
     assert!(!reason.contains("http"), "{reason}");
     assert_eq!(
         dnf_calls(&r, "makecache").len(),
