@@ -861,6 +861,25 @@ fn validate_declaration_shape(
                 }
             }
         }
+        "postgresql_role" => {
+            validate_with_fields(&d.with, crate::pgrole::PGROLE_FIELDS, ctx)?;
+            require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
+            if let Some(Value::Str(s)) = d.with.get("name") {
+                if !crate::expressions::has_interpolation(s) && !crate::pgrole::valid_role_name(s) {
+                    return Err(SinterError::schema(format!(
+                        "{}: postgresql_role name {} is not a valid role name ([a-z_][a-z0-9_]*, \
+                         at most 63 bytes, not pg_*)",
+                        ctx,
+                        if field_sensitive("name") {
+                            "(value redacted)".to_string()
+                        } else {
+                            format!("{:?}", s)
+                        }
+                    )));
+                }
+            }
+            crate::pgrole::validate_literals(&d.with, ctx)?;
+        }
         "group" | "user" => {
             let kind = d.type_.as_str();
             validate_with_fields(
@@ -1676,6 +1695,61 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                             "{}: service enabled must be a boolean",
                             resource_ctx
                         )));
+                    }
+                }
+            }
+            "postgresql_role" => {
+                validate_with_fields(&r.with, crate::pgrole::PGROLE_FIELDS, &resource_ctx)?;
+                let name_sensitive = field_sensitive("name");
+                let name =
+                    static_string(&r.with, "name", &scope, &resource_ctx, true, name_sensitive)?;
+                if !crate::pgrole::valid_role_name(&name) {
+                    return Err(SinterError::schema(format!(
+                        "{}: postgresql_role name {} is not a valid role name",
+                        resource_ctx,
+                        if name_sensitive {
+                            "(value redacted)".to_string()
+                        } else {
+                            format!("{:?}", name)
+                        }
+                    )));
+                }
+                crate::pgrole::validate_literals(&r.with, &resource_ctx)?;
+                // One resource per role of one server (port, when literal).
+                let port = r
+                    .with
+                    .get("port")
+                    .and_then(|v| v.as_int())
+                    .map(|p| p.to_string())
+                    .unwrap_or_default();
+                if let Some(owner) = account_name_owner.insert(
+                    ("postgresql_role".to_string(), format!("{}@{}", name, port)),
+                    r.id.clone(),
+                ) {
+                    return Err(SinterError::schema(format!(
+                        "conflicting ownership of PostgreSQL role {} by resources {} and {}",
+                        if name_sensitive {
+                            "(value redacted)"
+                        } else {
+                            name.as_str()
+                        },
+                        owner,
+                        r.id
+                    )));
+                }
+                // `password_verifier: { secret: <path> }`: resolve and confine
+                // the reference. Nothing is decrypted while loading.
+                if let Some(pv) = r.with.get("password_verifier") {
+                    if let Ok(crate::secret_source::ContentShape::Secret(reference)) =
+                        crate::secret_source::content_shape(pv)
+                    {
+                        fr.secret = Some(crate::secret_source::resolve_reference_with(
+                            state.refs,
+                            &r.origin,
+                            reference,
+                            &resource_ctx,
+                            r.sensitive || name_sensitive,
+                        )?);
                     }
                 }
             }

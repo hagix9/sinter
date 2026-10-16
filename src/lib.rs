@@ -19,6 +19,7 @@ pub mod model;
 pub mod output;
 pub mod passwd_hash;
 pub mod paths;
+pub mod pgrole;
 pub mod platform;
 pub mod progress;
 pub mod progress_plain;

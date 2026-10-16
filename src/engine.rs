@@ -89,6 +89,9 @@ pub struct RunReport {
     /// The scripted filesystem at the end of the run (test support). `None`
     /// on a real target.
     pub fake_fs: Option<crate::fakesys::FakeFs>,
+    /// The scripted PostgreSQL server at the end of the run (test support).
+    /// `None` on a real target.
+    pub fake_pg: Option<crate::fakesys::FakePostgres>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,7 +130,8 @@ impl PlannedEffects {
             ("file" | "directory" | "link" | "template", Some(p)) => {
                 self.paths.push((p.clone(), res.id.clone()))
             }
-            ("group", _) => {}
+            // Neither a group nor a database role changes any path.
+            ("group" | "postgresql_role", _) => {}
             _ => {
                 if self.opaque.is_none() {
                     self.opaque = Some(res.id.clone());
@@ -725,6 +729,7 @@ impl Engine {
 
         let commands = self.fs.log();
         let fake_fs = self.fs.fake_fs();
+        let fake_pg = self.fs.fake_pg();
         let manager_reloads = std::mem::take(&mut self.manager.reloads);
         Ok(RunReport {
             resources: out_results,
@@ -736,6 +741,7 @@ impl Engine {
             backup,
             manager_reloads,
             fake_fs,
+            fake_pg,
         })
     }
 
@@ -815,6 +821,7 @@ impl Engine {
             "service" => self.run_service(res, item),
             "group" => self.run_group(res, item),
             "user" => self.run_user(res, item),
+            "postgresql_role" => self.run_postgresql_role(res, item),
             other => Err(SinterError::schema(format!(
                 "{}: unknown resource type {}",
                 res.id, other

@@ -1828,3 +1828,272 @@ impl FakeAccounts {
         out(0, String::new(), String::new())
     }
 }
+
+// ---------------------------------------------------------------------------
+// Scripted PostgreSQL server (`postgresql_role`)
+// ---------------------------------------------------------------------------
+
+/// Every psql invocation the scripted server saw: argv and standard input.
+pub type PsqlLog = std::sync::Arc<std::sync::Mutex<Vec<(Vec<String>, Option<String>)>>>;
+
+/// One role of the scripted server: attributes in the observation column
+/// order (login, superuser, createdb, createrole, inherit, replication,
+/// bypassrls), connection limit and stored password field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FakePgRole {
+    pub attrs: [bool; 7],
+    pub conn_limit: i64,
+    pub password: Option<String>,
+}
+
+impl Default for FakePgRole {
+    /// PostgreSQL's `CREATE ROLE` defaults: NOLOGIN, NOSUPERUSER, ...,
+    /// INHERIT, no limit, no password.
+    fn default() -> Self {
+        FakePgRole {
+            attrs: [false, false, false, false, true, false, false],
+            conn_limit: -1,
+            password: None,
+        }
+    }
+}
+
+/// A local PostgreSQL server as `psql` sees it. It understands only the
+/// observation query and the statements `postgresql_role` generates; any
+/// other input is an error, so a test notices when Sinter sends something
+/// else. Clones share `scripts`, so a test can read what reached psql.
+#[derive(Debug, Clone)]
+pub struct FakePostgres {
+    pub running: bool,
+    pub server_version: u32,
+    /// The uid psql must run as (the cluster owner, peer authentication).
+    pub owner_uid: u32,
+    pub roles: BTreeMap<String, FakePgRole>,
+    /// The session's `current_setting` check answers false (log suppression
+    /// does not take effect): psql takes the `\else` branch.
+    pub quiet_fails: bool,
+    /// The change statement fails (the transaction rolls back).
+    pub fail_change: bool,
+    /// Every psql invocation: argv and standard input (as text).
+    pub scripts: PsqlLog,
+}
+
+impl Default for FakePostgres {
+    fn default() -> Self {
+        FakePostgres {
+            running: false,
+            server_version: 170_000,
+            owner_uid: 26,
+            roles: BTreeMap::new(),
+            quiet_fails: false,
+            fail_change: false,
+            scripts: Default::default(),
+        }
+    }
+}
+
+const PG_ATTR_KEYWORDS: [(&str, &str); 7] = [
+    ("LOGIN", "NOLOGIN"),
+    ("SUPERUSER", "NOSUPERUSER"),
+    ("CREATEDB", "NOCREATEDB"),
+    ("CREATEROLE", "NOCREATEROLE"),
+    ("INHERIT", "NOINHERIT"),
+    ("REPLICATION", "NOREPLICATION"),
+    ("BYPASSRLS", "NOBYPASSRLS"),
+];
+
+impl FakePostgres {
+    /// A running server whose bootstrap superuser `postgres` exists.
+    pub fn running(server_version: u32) -> Self {
+        let mut pg = FakePostgres {
+            running: true,
+            server_version,
+            ..Default::default()
+        };
+        pg.roles.insert(
+            "postgres".to_string(),
+            FakePgRole {
+                attrs: [true, true, true, true, true, true, true],
+                ..Default::default()
+            },
+        );
+        pg
+    }
+
+    fn quoted_name(s: &str) -> Option<(&str, &str)> {
+        let rest = s.strip_prefix('"')?;
+        let (name, tail) = rest.split_once('"')?;
+        Some((name, tail))
+    }
+
+    fn apply_options(role: &mut FakePgRole, opts: &str) -> Result<(), String> {
+        let mut toks = opts.split_whitespace().peekable();
+        while let Some(t) = toks.next() {
+            if t == "CONNECTION" {
+                if toks.next() != Some("LIMIT") {
+                    return Err("syntax error at CONNECTION".into());
+                }
+                let n = toks.next().ok_or("missing limit")?;
+                role.conn_limit = n.parse().map_err(|_| "bad limit".to_string())?;
+                continue;
+            }
+            match PG_ATTR_KEYWORDS
+                .iter()
+                .enumerate()
+                .find(|(_, (on, off))| t == *on || t == *off)
+            {
+                Some((i, (on, _))) => role.attrs[i] = t == *on,
+                None => return Err(format!("syntax error at or near \"{}\"", t)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply one generated statement to `roles`.
+    fn statement(roles: &mut BTreeMap<String, FakePgRole>, stmt: &str) -> Result<(), String> {
+        let stmt = stmt.strip_suffix(';').ok_or("statement without ;")?;
+        let (body, password) = match stmt.find(" PASSWORD '") {
+            Some(i) => {
+                let pw = stmt[i + 11..]
+                    .strip_suffix('\'')
+                    .ok_or("unterminated password")?;
+                if pw.contains('\'') {
+                    return Err("quote inside password literal".into());
+                }
+                (&stmt[..i], Some(pw.to_string()))
+            }
+            None => (stmt, None),
+        };
+        if let Some(rest) = body.strip_prefix("CREATE ROLE ") {
+            let (name, tail) = Self::quoted_name(rest).ok_or("bad role name")?;
+            if roles.contains_key(name) {
+                return Err(format!("role \"{}\" already exists", name));
+            }
+            let mut role = FakePgRole::default();
+            let tail = tail.trim_start();
+            let opts = if tail.is_empty() {
+                ""
+            } else {
+                tail.strip_prefix("WITH").ok_or("expected WITH")?
+            };
+            Self::apply_options(&mut role, opts)?;
+            role.password = password;
+            roles.insert(name.to_string(), role);
+            return Ok(());
+        }
+        if let Some(rest) = body.strip_prefix("ALTER ROLE ") {
+            let (name, tail) = Self::quoted_name(rest).ok_or("bad role name")?;
+            let role = roles
+                .get_mut(name)
+                .ok_or(format!("role \"{}\" does not exist", name))?;
+            let tail = tail.trim_start();
+            if let Some(opts) = tail.strip_prefix("WITH") {
+                Self::apply_options(role, opts)?;
+            } else if !tail.is_empty() {
+                return Err("expected WITH".into());
+            }
+            if password.is_some() {
+                role.password = password;
+            }
+            return Ok(());
+        }
+        if let Some(rest) = body.strip_prefix("DROP ROLE ") {
+            let (name, tail) = Self::quoted_name(rest).ok_or("bad role name")?;
+            if !tail.is_empty() || password.is_some() {
+                return Err("unexpected DROP ROLE syntax".into());
+            }
+            roles
+                .remove(name)
+                .ok_or(format!("role \"{}\" does not exist", name))?;
+            return Ok(());
+        }
+        Err(format!("unexpected statement: {}", body))
+    }
+
+    /// Serve one psql invocation run as `uid`.
+    pub fn psql(&mut self, args: &[String], stdin: Option<&[u8]>, uid: u32) -> Output {
+        let text_in = stdin.map(|b| String::from_utf8_lossy(b).into_owned());
+        if let Ok(mut log) = self.scripts.lock() {
+            log.push((args.to_vec(), text_in.clone()));
+        }
+        let out = |code: i32, o: &str, e: &str| Output {
+            completion: Completion::Exited(code),
+            stdout: o.as_bytes().to_vec(),
+            stderr: e.as_bytes().to_vec(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        };
+        if !self.running {
+            return out(
+                2,
+                "",
+                "psql: error: connection to server on socket \"/run/postgresql/.s.PGSQL.5432\" failed: No such file or directory\n",
+            );
+        }
+        if uid != self.owner_uid {
+            return out(2, "", "psql: error: FATAL:  Peer authentication failed\n");
+        }
+        if let Some(q) = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].clone()) {
+            let Some(name) = q
+                .split_once("r.rolname = '")
+                .and_then(|(_, r)| r.split_once('\''))
+                .map(|(n, _)| n.to_string())
+            else {
+                return out(1, "", "ERROR:  unexpected query\n");
+            };
+            let with_pw = q.contains("coalesce(r.rolpassword, '')");
+            let line = match self.roles.get(&name) {
+                None => format!(
+                    "sinter-pgrole-1|{}|f|||||||||{}\n",
+                    self.server_version,
+                    if with_pw { "|" } else { "" }
+                ),
+                Some(r) => {
+                    let b = |v: bool| if v { "t" } else { "f" };
+                    let attrs: Vec<&str> = r.attrs.iter().map(|a| b(*a)).collect();
+                    let mut l = format!(
+                        "sinter-pgrole-1|{}|t|{}|{}|{}",
+                        self.server_version,
+                        attrs.join("|"),
+                        r.conn_limit,
+                        b(r.password.is_some())
+                    );
+                    if with_pw {
+                        l.push('|');
+                        l.push_str(r.password.as_deref().unwrap_or(""));
+                    }
+                    l.push('\n');
+                    l
+                }
+            };
+            return out(0, &line, "");
+        }
+        let Some(script) = text_in else {
+            return out(1, "", "psql: no input\n");
+        };
+        if self.quiet_fails {
+            return out(0, "sinter-pgrole-unquiet\n", "");
+        }
+        let (Some(b), Some(c)) = (script.find("BEGIN;\n"), script.find("COMMIT;\n")) else {
+            return out(3, "", "psql:<stdin>: ERROR:  unexpected script\n");
+        };
+        if !script[..b].contains("AS sinter_quiet \\gset\n\\if :sinter_quiet\n") {
+            return out(
+                3,
+                "",
+                "psql:<stdin>: ERROR:  change outside the quiet gate\n",
+            );
+        }
+        if self.fail_change {
+            return out(3, "", "psql:<stdin>:40: ERROR:  role change failed\n");
+        }
+        let mut roles = self.roles.clone();
+        for stmt in script[b + 7..c].lines().filter(|l| !l.trim().is_empty()) {
+            if let Err(e) = Self::statement(&mut roles, stmt) {
+                return out(3, "", &format!("psql:<stdin>:40: ERROR:  {}\n", e));
+            }
+        }
+        self.roles = roles;
+        out(0, "sinter-pgrole-applied\n", "")
+    }
+}

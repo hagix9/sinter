@@ -606,6 +606,32 @@ impl TargetFs {
         self.ex.run(req)
     }
 
+    /// The one read-only command channel `postgresql_role` observes a role
+    /// through: `setpriv ... -- <psql> ... -c "SELECT 'sinter-pgrole-1', ..."`
+    /// with no standard input. The request is checked to be exactly that
+    /// shape, so this cannot become a general way around the mutation
+    /// permit: anything else is refused before dispatch (RA-01).
+    pub(crate) fn observe_postgresql(&mut self, req: &ExecRequest) -> Result<Output> {
+        let a = &req.args;
+        let sep = a.iter().position(|x| x == "--");
+        let query = a.windows(2).find(|w| w[0] == "-c").map(|w| w[1].as_str());
+        let is_observation = req.program == SETPRIV
+            && req.stdin.is_none()
+            && sep.is_some_and(|i| a.get(i + 1).is_some_and(|p| p.ends_with("/psql")))
+            && query.is_some_and(|q| {
+                q.starts_with("SELECT 'sinter-pgrole-1', ")
+                    && !q.contains(';')
+                    && q.contains(" FROM (SELECT 1) AS one LEFT JOIN pg_catalog.pg_authid AS r ")
+            })
+            && !a.iter().any(|x| x == "-f");
+        if !is_observation {
+            return Err(SinterError::apply(
+                "internal error: not a PostgreSQL role observation",
+            ));
+        }
+        self.ex.run(req)
+    }
+
     /// The statistics handle of the executor (performance measurement).
     pub fn exec_stats(&self) -> crate::executor::ExecStatsHandle {
         self.ex.stats_handle()
@@ -622,6 +648,9 @@ impl TargetFs {
 
     /// The scripted filesystem as it is now (test support; `None` on a real
     /// target).
+    pub fn fake_pg(&self) -> Option<crate::fakesys::FakePostgres> {
+        self.ex.fake_pg()
+    }
     pub fn fake_fs(&self) -> Option<crate::fakesys::FakeFs> {
         self.ex.fake_fs()
     }

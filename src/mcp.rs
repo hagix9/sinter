@@ -1255,6 +1255,7 @@ mod tests {
             backup: None,
             manager_reloads: vec![],
             fake_fs: None,
+            fake_pg: None,
         };
         // Host boundary: no content, whatever the caller's sensitive flags.
         let host = serde_json::to_string(&plan_report_json(&report, true)).unwrap();
@@ -1307,6 +1308,7 @@ mod tests {
                 mk(true, "MGR_SECRET_REASON_5521"),
             ],
             fake_fs: None,
+            fake_pg: None,
         };
         let v = plan_report_json(&report, true);
         let m = v["manager_reloads"].as_array().unwrap();

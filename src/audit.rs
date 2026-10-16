@@ -384,6 +384,7 @@ fn audit_resource(engine: &mut Engine, res: &FrozenResource) -> AuditResourceRes
         "service" => audit_service(engine, res, item.as_ref(), sensitive),
         "group" => audit_group(engine, res, item.as_ref(), sensitive),
         "user" => audit_user(engine, res, item.as_ref(), sensitive),
+        "postgresql_role" => audit_postgresql_role(engine, res, item.as_ref(), sensitive),
         other => {
             let mut r =
                 AuditResourceResult::base(res, AuditResourceStatus::NotAuditable, sensitive);
@@ -1341,6 +1342,46 @@ fn audit_group(
         Ok(c) => account_audit_result(res, sensitive, c),
         Err(r) => *r,
     }
+}
+
+/// `postgresql_role`: observe the role read-only and compare the declared
+/// attributes and verifier. A password dimension never carries a value.
+fn audit_postgresql_role(
+    engine: &mut Engine,
+    res: &FrozenResource,
+    item: Option<&EvalVal>,
+    sensitive: bool,
+) -> AuditResourceResult {
+    let vals = match obs_or_error(res, sensitive, engine.eval_with(res, item)) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let d = match obs_or_error(res, sensitive, crate::pgrole::role_desired(res, &vals)) {
+        Ok(d) => d,
+        Err(r) => return *r,
+    };
+    let verifier = match obs_or_error(res, sensitive, engine.pgrole_verifier(res)) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let obs = match obs_or_error(
+        res,
+        sensitive,
+        engine.pgrole_observe(&d, verifier.is_some(), sensitive),
+    ) {
+        Ok(o) => o,
+        Err(r) => return *r,
+    };
+    let dims = crate::pgrole::compare_role(&d, &obs, verifier.as_ref());
+    if dims.is_empty() {
+        return AuditResourceResult::base(res, AuditResourceStatus::Compliant, sensitive);
+    }
+    let mut r = AuditResourceResult::base(res, AuditResourceStatus::Drift, sensitive);
+    r.details = dims
+        .into_iter()
+        .map(|x| AuditDriftDetail::new(x.dimension, x.observed, x.desired, sensitive))
+        .collect();
+    r
 }
 
 fn audit_user(

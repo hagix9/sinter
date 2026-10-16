@@ -476,6 +476,15 @@ impl Executor {
         }
     }
 
+    /// The scripted PostgreSQL server as it is now (test support): `None` for
+    /// a real target or when the scripted server is not running.
+    pub fn fake_pg(&self) -> Option<crate::fakesys::FakePostgres> {
+        match self {
+            Executor::Fake(f) if f.target.pg.running => Some(f.target.pg.clone()),
+            _ => None,
+        }
+    }
+
     /// Run a diagnostic command as the connected target user, never through
     /// `sudo`, even when `--sudo` was requested. Used only to settle why the
     /// first command through the wrapper failed (see
@@ -2515,6 +2524,9 @@ pub struct FakeTarget {
     /// Scripted changes of the modeled filesystem that happen *between* two
     /// commands (another account acting concurrently), see [`FsEvent`].
     pub fs_events: Vec<FsEvent>,
+    /// Scripted local PostgreSQL server reached through `psql` (the
+    /// `postgresql_role` resource). Not running unless a test sets it up.
+    pub pg: crate::fakesys::FakePostgres,
 }
 
 /// One change of the scripted filesystem, applied by [`FsEvent`].
@@ -2685,6 +2697,7 @@ impl FakeTarget {
             sudo_failure: None,
             setpriv_missing: false,
             fs_events: Vec::new(),
+            pg: crate::fakesys::FakePostgres::default(),
         }
     }
 
@@ -2749,6 +2762,7 @@ impl FakeTarget {
             sudo_failure: None,
             setpriv_missing: false,
             fs_events: Vec::new(),
+            pg: crate::fakesys::FakePostgres::default(),
         }
     }
 
@@ -2799,6 +2813,7 @@ impl FakeTarget {
             sudo_failure: None,
             setpriv_missing: false,
             fs_events: Vec::new(),
+            pg: crate::fakesys::FakePostgres::default(),
         }
     }
 
@@ -2852,6 +2867,7 @@ impl FakeTarget {
             sudo_failure: None,
             setpriv_missing: false,
             fs_events: Vec::new(),
+            pg: crate::fakesys::FakePostgres::default(),
         }
     }
 
@@ -2899,6 +2915,7 @@ impl FakeTarget {
             sudo_failure: None,
             setpriv_missing: false,
             fs_events: Vec::new(),
+            pg: crate::fakesys::FakePostgres::default(),
         }
     }
 
@@ -3229,6 +3246,16 @@ impl FakeExecutor {
             .next()
             .unwrap_or(&req.program)
             .to_string();
+        // `psql` talks to the scripted PostgreSQL server as the identity it
+        // runs as (peer authentication).
+        if prog == "psql" {
+            let uid = match self.identity_override {
+                Some((u, _)) => u,
+                None if self.sudo => 0,
+                None => self.target.uid,
+            };
+            return self.target.pg.psql(&req.args, req.stdin.as_deref(), uid);
+        }
         // An adversarial override for an observation program wins over the
         // modeled behavior; the queued capture is served verbatim.
         if let Some(path) = req.args.last() {
