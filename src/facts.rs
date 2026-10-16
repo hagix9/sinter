@@ -19,6 +19,17 @@ impl Facts {
             "os.name" => Value::Str(self.os_name.clone()),
             "os.family" => Value::Str(self.os_family.clone()),
             "os.version" => Value::Str(self.os_version.clone()),
+            "os.version_major" => match version_major(&self.os_version) {
+                Some(major) => Value::Int(major),
+                None => {
+                    return Err(ExprError(format!(
+                        "facts.os.version_major is not available: the target's VERSION_ID {:?} \
+                         is not a numeric version (expected digits, optionally followed by \
+                         .<digits> parts)",
+                        crate::diff::sanitize_line(&self.os_version)
+                    )));
+                }
+            },
             "arch" => Value::Str(self.arch.clone()),
             other => {
                 return Err(ExprError(format!("unknown fact: facts.{}", other)));
@@ -26,6 +37,25 @@ impl Facts {
         };
         Ok(EvalVal::known(v))
     }
+}
+
+/// The major version of an os-release `VERSION_ID`: the integer before the
+/// first `.` (`8.10` -> 8, `24.04` -> 24, `12` -> 12). Only a plain numeric
+/// version is accepted — one or more `.`-separated runs of ASCII digits, the
+/// major part at most four digits and without a leading zero — so a value the
+/// target did not print as a version (`""`, `9-stream`, `rolling`, `08`,
+/// `1.`, `٨`) is not silently mapped to a number a recipe would branch on.
+pub fn version_major(version: &str) -> Option<i64> {
+    let mut parts = version.split('.');
+    let major = parts.next()?;
+    let plain = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+    if !plain(major) || major.len() > 4 || (major.len() > 1 && major.starts_with('0')) {
+        return None;
+    }
+    if !parts.all(plain) {
+        return None;
+    }
+    major.parse().ok()
 }
 
 /// Derive the os family from an os-release ID / ID_LIKE.
@@ -116,6 +146,69 @@ pub fn normalize_arch(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn facts_with_version(v: &str) -> Facts {
+        Facts {
+            hostname: "h".into(),
+            os_name: "Rocky Linux".into(),
+            os_family: "redhat".into(),
+            os_version: v.into(),
+            arch: "x86_64".into(),
+        }
+    }
+
+    #[test]
+    fn version_major_of_real_version_ids() {
+        // VERSION_ID values the supported platforms print.
+        assert_eq!(version_major("8.10"), Some(8));
+        assert_eq!(version_major("9.8"), Some(9));
+        assert_eq!(version_major("10.2"), Some(10));
+        assert_eq!(version_major("10"), Some(10));
+        assert_eq!(version_major("24.04"), Some(24));
+        assert_eq!(version_major("26.04"), Some(26));
+        assert_eq!(version_major("12"), Some(12));
+    }
+
+    #[test]
+    fn version_major_rejects_values_that_are_not_plain_versions() {
+        for v in [
+            "", ".", "8.", ".8", "8..1", "9-stream", "rolling", "08", "8.x", "+8", "-8", " 8",
+            "8 ", "8,1", "١٠", "99999", "8.1a",
+        ] {
+            assert_eq!(version_major(v), None, "{:?}", v);
+        }
+        assert_eq!(version_major("0"), Some(0));
+    }
+
+    #[test]
+    fn version_major_fact_is_an_integer() {
+        let f = facts_with_version("8.10");
+        let v = f
+            .lookup(&["os".to_string(), "version_major".to_string()])
+            .unwrap();
+        assert!(matches!(v.val, Some(Value::Int(8))));
+        assert!(!v.sensitive);
+        // `os.version` keeps its string form.
+        let s = f
+            .lookup(&["os".to_string(), "version".to_string()])
+            .unwrap();
+        assert!(matches!(s.val, Some(Value::Str(ref x)) if x == "8.10"));
+    }
+
+    #[test]
+    fn version_major_fact_fails_closed_for_an_unknown_version() {
+        for v in ["", "rolling", "9-stream"] {
+            let f = facts_with_version(v);
+            let e = f
+                .lookup(&["os".to_string(), "version_major".to_string()])
+                .unwrap_err();
+            assert!(
+                e.0.contains("facts.os.version_major is not available"),
+                "{}",
+                e
+            );
+        }
+    }
 
     #[test]
     fn family_ubuntu() {
