@@ -510,8 +510,13 @@ pub(crate) fn parse_observation(stdout: &[u8], with_verifier: bool) -> Option<Ro
     let server_version: u32 = f[1].parse().ok()?;
     let exists = parse_bool(f[2])?;
     if !exists {
-        // Every role column of a missing role is NULL (printed empty).
-        if f[3..].iter().any(|c| !c.is_empty()) {
+        // Every role column of a missing role is NULL (printed empty), except
+        // `rolpassword IS NOT NULL`, which is false — not NULL — for the NULL
+        // row of the outer join (measured on PostgreSQL 10).
+        if f[3..11].iter().any(|c| !c.is_empty()) || f[11] != "f" {
+            return None;
+        }
+        if with_verifier && !f[12].is_empty() {
             return None;
         }
         return Some(RoleObserved {
@@ -1173,12 +1178,33 @@ mod tests {
         assert!(parse_verifier_secret(b"hunter2\n").is_err());
     }
 
+    /// The columns after the tag and version for a missing role: `f`, eight
+    /// empty role columns, then the `rolpassword IS NOT NULL` value (and an
+    /// empty password column when the verifier is read).
+    fn absent_cols(has_pw: &str, with_verifier: bool) -> String {
+        let mut v = vec!["f"];
+        v.extend([""; 8]);
+        v.push(has_pw);
+        if with_verifier {
+            v.push("");
+        }
+        v.join("|")
+    }
+
     #[test]
     fn observation_parses_exactly() {
-        let absent = format!("{OBS_TAG}|170011|f|||||||||\n");
+        let absent = format!("{OBS_TAG}|170011|{}\n", absent_cols("f", false));
         let o = parse_observation(absent.as_bytes(), false).unwrap();
         assert!(o.role.is_none());
         assert_eq!(o.server_version, 170011);
+        // The verifier variant of a missing role: an empty password column.
+        let absent_v = format!("{OBS_TAG}|100023|{}\n", absent_cols("f", true));
+        assert!(parse_observation(absent_v.as_bytes(), true)
+            .unwrap()
+            .role
+            .is_none());
+        let absent_v_bad = format!("{OBS_TAG}|100023|{}x\n", absent_cols("f", true));
+        assert!(parse_observation(absent_v_bad.as_bytes(), true).is_none());
         let present = format!("{OBS_TAG}|100023|t|t|f|f|f|t|f|f|-1|t\n");
         let o = parse_observation(present.as_bytes(), false).unwrap();
         let r = o.role.unwrap();
@@ -1189,11 +1215,14 @@ mod tests {
         assert_eq!(o.role.unwrap().verifier.unwrap().as_str(), V);
         for bad in [
             String::new(),
-            format!("{OBS_TAG}|170011|f|||||||||"),
-            format!("{OBS_TAG}|170011|f|||||||||\nextra\n"),
-            "other|170011|f|||||||||\n".to_string(),
+            format!("{OBS_TAG}|170011|{}", absent_cols("f", false)),
+            format!("{OBS_TAG}|170011|{}\nextra\n", absent_cols("f", false)),
+            format!("other|170011|{}\n", absent_cols("f", false)),
+            // the NULL row's password test must read false, not empty / true
+            format!("{OBS_TAG}|170011|{}\n", absent_cols("", false)),
+            format!("{OBS_TAG}|170011|{}\n", absent_cols("t", false)),
             format!("{OBS_TAG}|17x|f||||||||||\n"),
-            format!("{OBS_TAG}|170011|f|t||||||||\n"),
+            format!("{OBS_TAG}|170011|f|t|{}|f\n", [""; 7].join("|")),
             format!("{OBS_TAG}|170011|t|t|f|f|f|t|f|f|-2|t\n"),
             format!("{OBS_TAG}|170011|t|t|f|f|f|t|f|yes|-1|t\n"),
             format!("{OBS_TAG}|170011|t|t|f|f|f|t|f|f|-1|t|x|y\n"),

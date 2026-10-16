@@ -2043,8 +2043,10 @@ impl FakePostgres {
             };
             let with_pw = q.contains("coalesce(r.rolpassword, '')");
             let line = match self.roles.get(&name) {
+                // As PostgreSQL prints it: the outer join's NULL row makes
+                // every column empty except `rolpassword IS NOT NULL` (false).
                 None => format!(
-                    "sinter-pgrole-1|{}|f|||||||||{}\n",
+                    "sinter-pgrole-1|{}|f|||||||||f{}\n",
                     self.server_version,
                     if with_pw { "|" } else { "" }
                 ),
