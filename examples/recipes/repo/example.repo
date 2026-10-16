@@ -1,0 +1,9 @@
+# Managed by Sinter (examples/recipes/signed-repo.yaml). Replace the URL with
+# your repository; keep gpgcheck on.
+[example]
+name=Example signed repository
+baseurl=https://repo.example.com/el$releasever/$basearch/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=0
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-example

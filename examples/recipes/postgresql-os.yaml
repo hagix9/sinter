@@ -1,0 +1,138 @@
+# PostgreSQL from the operating system's own repositories, one recipe for
+# Rocky Linux / RHEL 8, 9 and 10 (facts.os.version_major).
+#
+# What each release provides (measured on Rocky Linux 8.10, 9.8 and 10.2):
+#   EL8  default stream postgresql:10 (upstream end of life 2022-11);
+#        streams 12, 13, 15, 16 can be enabled.
+#   EL9  default (non-modular) 13 (upstream end of life 2025-11);
+#        streams 15, 16, 18 can be enabled.
+#   EL10 16 (non-modular).
+# This recipe installs PostgreSQL 16 everywhere (upstream support until
+# 2028-11): on EL8/EL9 by enabling the postgresql:16 module stream first.
+# The distribution's own support of each stream follows its Application
+# Streams lifecycle; check it for production.
+#
+# Secrets: secrets/app-verifier.age holds the SCRAM-SHA-256 verifier of the
+# `app` role (see the postgresql_role reference for how to produce one; never
+# a plaintext password).
+#
+#   sinter apply examples/recipes/postgresql-os.yaml --host <host> --sudo
+version: 1
+
+vars:
+  datadir: { value: /var/lib/pgsql/data }
+  port: { value: 5432 }
+
+resources:
+  # EL8/EL9: select the supported stream before the package is installed (dnf
+  # would otherwise enable the default stream). A read-only check first
+  # (`module list --enabled postgresql:16` exits 0 when it is enabled, 1 when
+  # not; it never reports a change), then the enable step only when needed, so
+  # a second apply reports no change. A file guard cannot be used here:
+  # /etc/dnf/modules.d/postgresql.module also exists after `module reset`.
+  # On EL10 both conditions are false. The package below does not list these
+  # steps in depends_on (a skipped dependency blocks its dependents) and relies
+  # on order: they are declared first, and a failure stops the run.
+  - id: pg_stream_state
+    type: command
+    when: "facts.os.version_major < 10"
+    with:
+      program: /usr/bin/dnf
+      args: ["-q", "-C", "module", "list", "--enabled", "postgresql:16"]
+      success_codes: [0, 1]
+      register: pg_stream_state
+      changed_when: "false"
+
+  - id: pg_stream
+    type: command
+    depends_on: [pg_stream_state]
+    # The first operand keeps EL10 from reading the register of a check that
+    # did not run (an error, not false).
+    when: "facts.os.version_major < 10 && registers.pg_stream_state.exit_code == 1"
+    with:
+      program: /usr/bin/dnf
+      args: ["-y", "module", "enable", "postgresql:16"]
+
+  - id: pg_pkg
+    type: package
+    with: { name: postgresql-server, state: present }
+
+  # `postgresql-setup --initdb` refuses a non-empty data directory, and the
+  # guard skips it once PG_VERSION exists: an existing cluster is never
+  # re-initialized.
+  - id: pg_initdb
+    type: command
+    depends_on: [pg_pkg]
+    with:
+      program: /usr/bin/postgresql-setup
+      args: ["--initdb"]
+      creates: /var/lib/pgsql/data/PG_VERSION
+
+  - id: pg_confd
+    type: directory
+    depends_on: [pg_initdb]
+    with: { path: /var/lib/pgsql/data/conf.d, owner: postgres, group: postgres, mode: "0700" }
+
+  - id: pg_conf
+    type: template
+    # include_dir points at conf.d, which must exist for the file to validate.
+    depends_on: [pg_confd]
+    notify: [restart_pg]
+    with:
+      path: /var/lib/pgsql/data/postgresql.conf
+      source: postgresql/postgresql.conf.tmpl
+      owner: postgres
+      group: postgres
+      mode: "0600"
+      # The staged file is checked by the server binary itself before it is
+      # published (-C must be the first argument when run as root).
+      validate:
+        program: /usr/bin/postgres
+        args: ["-C", "port", "-D", "/var/lib/pgsql/data", "--config-file={{ staged }}"]
+
+  - id: pg_site
+    type: file
+    depends_on: [pg_confd]
+    notify: [reload_pg]
+    with:
+      path: /var/lib/pgsql/data/conf.d/90-site.conf
+      source: postgresql/90-site.conf
+      owner: postgres
+      group: postgres
+      mode: "0600"
+      validate:
+        program: /usr/bin/postgres
+        args: ["-C", "log_min_duration_statement", "-D", "/var/lib/pgsql/data", "--config-file={{ staged }}"]
+
+  - id: pg_hba
+    type: file
+    depends_on: [pg_initdb]
+    notify: [reload_pg]
+    with:
+      path: /var/lib/pgsql/data/pg_hba.conf
+      source: postgresql/pg_hba.conf
+      owner: postgres
+      group: postgres
+      mode: "0600"
+
+  - id: pg_service
+    type: service
+    depends_on: [pg_conf, pg_site, pg_hba]
+    with: { name: postgresql, state: running, enabled: true }
+
+  # A login role with a SCRAM verifier; nothing else is granted.
+  - id: app_role
+    type: postgresql_role
+    depends_on: [pg_service]
+    with:
+      name: app
+      login: true
+      password_verifier: { secret: secrets/app-verifier.age }
+
+handlers:
+  - id: restart_pg
+    service: postgresql
+    action: restart
+  - id: reload_pg
+    service: postgresql
+    action: reload

@@ -1,0 +1,36 @@
+# Any signed RPM repository: pin its public key, declare the repository as a
+# file with gpgcheck on, then install a package from it.
+#
+# dnf checks every package signature against the key (an unsigned package or
+# one signed by another key is refused: "GPG check FAILED"). Both files are
+# managed and audited; a second apply reports no change.
+#
+#   1. put the repository's public key in repo/RPM-GPG-KEY-example (check its
+#      fingerprint first) and its URL in repo/example.repo
+#   2. sinter apply examples/recipes/signed-repo.yaml --host <host> --sudo
+version: 1
+
+resources:
+  - id: repo_key
+    type: file
+    with:
+      path: /etc/pki/rpm-gpg/RPM-GPG-KEY-example
+      source: repo/RPM-GPG-KEY-example
+      owner: root
+      group: root
+      mode: "0644"
+
+  - id: repo
+    type: file
+    depends_on: [repo_key]
+    with:
+      path: /etc/yum.repos.d/example.repo
+      source: repo/example.repo
+      owner: root
+      group: root
+      mode: "0644"
+
+  - id: app_pkg
+    type: package
+    depends_on: [repo]
+    with: { name: example-app, state: present }

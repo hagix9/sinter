@@ -1,0 +1,133 @@
+# PostgreSQL 17 from the PostgreSQL project's own repository (PGDG), for
+# Rocky Linux / RHEL 8, 9 and 10. PostgreSQL 17 is supported upstream until
+# 2029-11.
+#
+# The repository is declared as files, not by installing the repo RPM from a
+# URL: dnf does not verify the signature of a local/URL RPM by default
+# (localpkg_gpgcheck=0), so `dnf install <repo RPM URL>` trusts only HTTPS.
+# Here the signing key is pinned in the recipe (pgdg/PGDG-RPM-GPG-KEY-RHEL,
+# fingerprint D4BF 08AE 67A0 B4C7 A1DB  CCD2 40BC A2B4 08B4 0D20, compared with
+# https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-RHEL),
+# only the two repositories needed are defined, and gpgcheck / repo_gpgcheck
+# stay on. Both files are audited like any other managed file.
+#
+# Secrets: secrets/app-verifier.age (SCRAM-SHA-256 verifier of `app`).
+#
+#   sinter apply examples/recipes/postgresql-pgdg17.yaml --host <host> --sudo
+version: 1
+
+vars:
+  datadir: { value: /var/lib/pgsql/17/data }
+  port: { value: 5432 }
+
+resources:
+  - id: pgdg_key
+    type: file
+    with:
+      path: /etc/pki/rpm-gpg/PGDG-RPM-GPG-KEY-RHEL
+      source: pgdg/PGDG-RPM-GPG-KEY-RHEL
+      owner: root
+      group: root
+      mode: "0644"
+
+  - id: pgdg_repo
+    type: file
+    depends_on: [pgdg_key]
+    with:
+      path: /etc/yum.repos.d/pgdg-17.repo
+      source: pgdg/pgdg-17.repo
+      owner: root
+      group: root
+      mode: "0644"
+
+  # EL8/EL9: the distribution's postgresql module would shadow the PGDG
+  # packages; disable it. A read-only check first (`module list --disabled`
+  # exits 0 when the module is disabled, 1 when not; never a change), then the
+  # disable step only when needed. On EL10 there are no modules. Ordered by
+  # declaration (a skipped dependency would block the package), and a failure
+  # stops the run.
+  - id: pg_module_state
+    type: command
+    when: "facts.os.version_major < 10"
+    with:
+      program: /usr/bin/dnf
+      args: ["-q", "-C", "module", "list", "--disabled", "postgresql"]
+      success_codes: [0, 1]
+      register: pg_module_state
+      changed_when: "false"
+
+  - id: pg_module_off
+    type: command
+    depends_on: [pg_module_state]
+    # The first operand keeps EL10 from reading the register of a check that
+    # did not run (an error, not false).
+    when: "facts.os.version_major < 10 && registers.pg_module_state.exit_code == 1"
+    with:
+      program: /usr/bin/dnf
+      args: ["-qy", "module", "disable", "postgresql"]
+
+  - id: pg_pkg
+    type: package
+    depends_on: [pgdg_repo]
+    with: { name: postgresql17-server, state: present }
+
+  - id: pg_initdb
+    type: command
+    depends_on: [pg_pkg]
+    with:
+      program: /usr/pgsql-17/bin/postgresql-17-setup
+      args: ["initdb"]
+      creates: /var/lib/pgsql/17/data/PG_VERSION
+
+  - id: pg_confd
+    type: directory
+    depends_on: [pg_initdb]
+    with: { path: /var/lib/pgsql/17/data/conf.d, owner: postgres, group: postgres, mode: "0700" }
+
+  - id: pg_conf
+    type: template
+    # include_dir points at conf.d, which must exist for the file to validate.
+    depends_on: [pg_confd]
+    notify: [restart_pg]
+    with:
+      path: /var/lib/pgsql/17/data/postgresql.conf
+      source: pgdg/postgresql.conf.tmpl
+      owner: postgres
+      group: postgres
+      mode: "0600"
+      validate:
+        program: /usr/pgsql-17/bin/postgres
+        args: ["-C", "port", "-D", "/var/lib/pgsql/17/data", "--config-file={{ staged }}"]
+
+  - id: pg_hba
+    type: file
+    depends_on: [pg_initdb]
+    notify: [reload_pg]
+    with:
+      path: /var/lib/pgsql/17/data/pg_hba.conf
+      source: pgdg/pg_hba.conf
+      owner: postgres
+      group: postgres
+      mode: "0600"
+
+  - id: pg_service
+    type: service
+    depends_on: [pg_conf, pg_confd, pg_hba]
+    with: { name: postgresql-17, state: running, enabled: true }
+
+  - id: app_role
+    type: postgresql_role
+    depends_on: [pg_service]
+    with:
+      name: app
+      login: true
+      psql: /usr/pgsql-17/bin/psql
+      password_verifier: { secret: secrets/app-verifier.age }
+
+handlers:
+  - id: restart_pg
+    service: postgresql-17
+    action: restart
+  - id: reload_pg
+    service: postgresql-17
+    action: reload

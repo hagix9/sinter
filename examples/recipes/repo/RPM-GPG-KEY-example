@@ -1,0 +1,3 @@
+REPLACE THIS FILE with the repository's ASCII-armored public key, after checking
+its fingerprint against one the repository publishes out of band. Until then
+dnf cannot import a key from this file and refuses every package (fail closed).

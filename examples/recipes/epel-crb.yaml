@@ -1,0 +1,74 @@
+# EPEL plus the CodeReady Builder repository (PowerTools on EL8, CRB on EL9 and
+# EL10), then packages from each, on Rocky Linux 8 / 9 / 10.
+#
+# epel-release comes from the distribution's own (signed) extras repository on
+# Rocky Linux; on RHEL install it from the EPEL project instead. Its key is
+# imported by dnf on first use from the file epel-release installs.
+#
+# Enabling a repository has no file Sinter could guard on, so it is done in
+# two steps: a read-only check (`changed_when: "false"`, it never reports a
+# change) and the enable command, which only runs when the check found the
+# repository disabled. A second apply therefore reports no change. Command
+# resources are not audited: the repository's state itself is not part of
+# `sinter audit` (the packages are).
+#
+#   sinter apply examples/recipes/epel-crb.yaml --host <host> --sudo
+version: 1
+
+resources:
+  - id: epel
+    type: package
+    with: { name: epel-release, state: present }
+
+  # EL8: PowerTools
+  - id: powertools_state
+    type: command
+    when: "facts.os.version_major == 8"
+    with:
+      program: /usr/bin/dnf
+      args: ["-q", "-C", "repolist", "--enabled", "powertools"]
+      register: powertools_state
+      changed_when: "false"
+  - id: powertools
+    type: command
+    depends_on: [powertools_state]
+    # The first operand keeps other releases from reading the register of a
+    # check that did not run (an error, not false).
+    when: "facts.os.version_major == 8 && registers.powertools_state.stdout == ''"
+    with:
+      program: /usr/bin/dnf
+      args: ["config-manager", "--set-enabled", "powertools"]
+
+  # EL9/EL10: CRB
+  - id: crb_state
+    type: command
+    when: "facts.os.version_major >= 9"
+    with:
+      program: /usr/bin/dnf
+      args: ["-q", "-C", "repolist", "--enabled", "crb"]
+      register: crb_state
+      changed_when: "false"
+  - id: crb
+    type: command
+    depends_on: [crb_state]
+    when: "facts.os.version_major >= 9 && registers.crb_state.stdout == ''"
+    with:
+      program: /usr/bin/dnf
+      args: ["config-manager", "--set-enabled", "crb"]
+
+  # Packages are declared after the enable steps (declaration order; a failure
+  # stops the run). They do not list the conditional steps in depends_on: a
+  # skipped step would block them.
+  - id: ninja
+    type: package
+    with: { name: ninja-build, state: present }   # CRB / PowerTools only
+
+  - id: htop
+    type: package
+    depends_on: [epel]
+    with: { name: htop, state: present }          # EPEL
+
+  - id: lua_devel
+    type: package
+    depends_on: [epel]
+    with: { name: lua-devel, state: present }     # CRB / PowerTools
