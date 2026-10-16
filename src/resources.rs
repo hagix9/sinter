@@ -750,6 +750,28 @@ impl Engine {
         }
     }
 
+    /// COM-04: in plan, an owner/group that does not exist yet while an
+    /// earlier resource (typically the package whose scriptlet creates the
+    /// account) is still to be applied gets a pointer to the supported way:
+    /// declare the account first. The error itself is unchanged.
+    fn package_account_hint(&self, e: SinterError, kind: &str) -> SinterError {
+        if self.opts.mode != Mode::Plan
+            || self.planned.opaque.is_none()
+            || !e.message.starts_with(&format!("unknown {}", kind))
+        {
+            return e;
+        }
+        SinterError {
+            message: format!(
+                "{} (plan cannot see an account that an earlier resource such as a package \
+                 creates; declare the {} with a {} resource before that resource, using the \
+                 attributes the package uses)",
+                e.message, kind, kind
+            ),
+            ..e
+        }
+    }
+
     /// Resolve a file `owner` name to a uid. In plan, an account that an
     /// explicit direct dependency creates is deferred (Unknown) instead of
     /// being an error; everywhere else an unknown account stays an error.
@@ -763,7 +785,7 @@ impl Engine {
                 Err(if sensitive {
                     redact_msg(&res.id, "unknown user", "resolution failed")
                 } else {
-                    e
+                    self.package_account_hint(e, "user")
                 })
             }
         }
@@ -785,7 +807,7 @@ impl Engine {
                 Err(if sensitive {
                     redact_msg(&res.id, "unknown group", "resolution failed")
                 } else {
-                    e
+                    self.package_account_hint(e, "group")
                 })
             }
         }
