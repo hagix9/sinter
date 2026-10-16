@@ -2,6 +2,52 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **`postgresql_role`: manage a role of a local PostgreSQL server.** Existence,
+  the declared attributes only (`login`, `superuser`, `createdb`,
+  `createrole`, `inherit`, `replication`, `bypassrls`, `connection_limit`) and
+  a SCRAM-SHA-256 verifier read from an encrypted secret
+  (`password_verifier: { secret: … }`; plaintext and md5 are refused). `psql`
+  runs as the cluster owner (peer authentication, root required); the
+  verifier travels only on standard input, and the change runs only after the
+  session's statement logging (`log_statement`, `log_min_error_statement`,
+  `log_min_messages`, duration/sampling/debug logging, `pg_stat_statements`,
+  `pgaudit`) has been silenced and read back. Nothing is granted implicitly;
+  `absent` is `DROP ROLE` without `CASCADE`. Planned from observation and
+  audited per dimension without values. Verified on PostgreSQL 10, 13, 16 and
+  17.
+- **`validate.args` can place the staged file inside an argument** with
+  `{{ staged }}` (`--config-file={{ staged }}` for `postgres -C`,
+  `Include {{ staged }}` for `httpd -t -c`). Without a placeholder the staged
+  path is still appended last.
+- **`facts.os.version_major`**: the integer major release (`8.10` → `8`), for
+  branching recipes per EL release; only a plain numeric `VERSION_ID` yields a
+  value.
+- **RHEL-family recipes** in `examples/recipes/`: Python on EL8, PostgreSQL 16
+  from the OS and 17 from PGDG (pinned key, repository files), EPEL +
+  CRB/PowerTools, any signed RPM repository, Apache with htpasswd.
+
+### Fixed
+
+- **A name dnf only reaches through provides is refused before installing.**
+  `name: python3` on EL8 used to install `python36`, then report Failed and
+  never converge. Sinter now checks that the dry-run transaction installs the
+  requested name itself (or that dnf's "nothing to do" is not caused by
+  another installed package) and otherwise fails with no change, naming the
+  real package (`name: python36`).
+- **dnf refusals name their cause** instead of "repository metadata not
+  locally complete": no such package, a missing dependency (with the
+  capability), `GPG check FAILED`, an unreachable repository (by id), a failed
+  download. Only fixed text and validated names are shown; unknown output is
+  reported by size and still fails closed.
+- **Plan explains package-created accounts.** An owner/group that a package's
+  scriptlet will create is still unknown in plan; the error now says to
+  declare the account (with the package's attributes) before the package,
+  which makes plan defer instead of fail.
+
 ## [1.5.0] - 2026-10-16
 
 ### Changed

@@ -111,6 +111,7 @@ export default defineConfig({
                 { slug: 'reference/resources/service' },
                 { slug: 'reference/resources/group' },
                 { slug: 'reference/resources/user' },
+                { slug: 'reference/resources/postgresql_role' },
               ],
             },
             {

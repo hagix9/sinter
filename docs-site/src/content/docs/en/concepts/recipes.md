@@ -88,7 +88,8 @@ A deliberately small expression language is used in `when` and
 `changed_when`:
 
 - Namespaces: `vars.<name>`, `facts.hostname`, `facts.os.name`,
-  `facts.os.family`, `facts.os.version`, `facts.arch`,
+  `facts.os.family`, `facts.os.version`, `facts.os.version_major` (integer),
+  `facts.arch`,
   `registers.<name>.<field>`, `item` (inside loops), `result.<field>` (inside
   `changed_when`). Bare names are not allowed.
 - Operators: `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`, parentheses.

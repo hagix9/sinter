@@ -144,6 +144,40 @@ mistaken for the transaction payloads. Snapshot residues should not persist
 after runs — if any remain,
 [report it as a bug](/en/contributing/#reporting-bugs).
 
+**Why did dnf refuse the install?** (v1.5.1)
+
+The reason names the cause dnf reported, and nothing was installed:
+
+| Reason | What to do |
+|--------|------------|
+| `… is not a package name: dnf resolves it through a provides match to package X` | Declare `name: X` (on EL8: `python36` for `python3`, `python3.11` for `python311`). |
+| `no package named … is installed, but dnf reports the request already satisfied by installed package X` | The name is provided by `X`, which is installed; declare `name: X`. |
+| `dnf found no package named …` | Check the name and that the repository providing it is enabled. |
+| `dnf cannot resolve the dependencies of …: nothing provides …` | Enable the repository that provides the dependency (often CRB / PowerTools for EPEL packages). |
+| `dnf refused a package signature … (GPG check FAILED …)` | The package is unsigned or its repository's `gpgkey` does not match; fix the key file, do not turn `gpgcheck` off. |
+| `dnf could not download the metadata of repository <id> …` | That repository is unreachable or misconfigured; every enabled repository must work. |
+| `… bytes of unrecognized dnf error output withheld` | Run the same install with plain `dnf` on the target to see the message. |
+
+See [package § Why dnf refused](/en/reference/resources/package/#why-dnf-refused-dnf).
+
+**`unknown group: apache` (or user) in plan**
+
+The account is created by a package's scriptlet, so it does not exist while
+plan runs. Declare the `group`/`user` before the package, with the attributes
+the package uses (`apache`: uid/gid 48, home `/usr/share/httpd`, shell
+`/sbin/nologin`); plan then defers what depends on it, and the scriptlet keeps
+the declared account. See `examples/recipes/apache-htpasswd.yaml`.
+
+**`postgresql_role` fails**
+
+- `postgresql_role needs root` → use `--sudo` (psql runs as the cluster owner).
+- `cannot observe PostgreSQL role …: psql exited 2` → the server is not
+  running, or `psql`/`port` points elsewhere (PGDG: `psql:
+  /usr/pgsql-17/bin/psql`).
+- `could not be verified to keep statements out of the server log … not sent`
+  → the session could not set or confirm the logging parameters; nothing
+  carrying the password verifier was sent.
+
 ## Getting more detail
 
 - `--verbose` for per-resource detail

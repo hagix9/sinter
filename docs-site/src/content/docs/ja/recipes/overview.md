@@ -167,6 +167,22 @@ resources:
 完全なスキーマは[レシピフォーマット リファレンス](/ja/reference/recipe-format/)と
 [リソースリファレンス](/ja/reference/resources/)を参照してください。
 
+## RHEL 系のレシピ（v1.5.1）
+
+Rocky Linux / RHEL 8、9、10 向けの完成したレシピは、リポジトリの
+`examples/recipes/` にあります。各ファイルの冒頭に説明があります。リリースごとの
+分岐には `facts.os.version_major` を使い、v1.5.1 の開発中に Rocky Linux 8.10、9.8、
+10.2 で実測しました。
+
+| ファイル | 内容 |
+|----------|------|
+| `python-el8.yaml` | EL8 の Python 3.6、3.11（+ pip）、3.12 を実際のパッケージ名で導入 |
+| `postgresql-os.yaml` | OS の PostgreSQL 16（EL8 / EL9 は stream `postgresql:16`）、検証付きの `postgresql.conf` / drop-in（`--config-file={{ staged }}`）、SCRAM の `pg_hba.conf`、`postgresql_role` |
+| `postgresql-pgdg17.yaml` | PGDG の PostgreSQL 17。指紋を照合して固定した鍵と、リポジトリのファイル（`gpgcheck` / `repo_gpgcheck` を有効） |
+| `epel-crb.yaml` | EPEL と CRB / PowerTools、それぞれのパッケージ。2 回目の apply は変更なし |
+| `signed-repo.yaml` | 任意の署名付き RPM リポジトリ（鍵のファイル、リポジトリのファイル、パッケージ） |
+| `apache-htpasswd.yaml` | Basic 認証付きの httpd。パッケージが作る `apache` アカウントを先に宣言し、htpasswd はシークレット、設定ファイルは `httpd -t` で検証 |
+
 :::note[公式レシピコレクション]
 キュレーションされたレシピコレクション（例えば `linux-baseline`
 セット）は将来のプロダクト改善であり、まだ存在しません。このページは

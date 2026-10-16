@@ -6,8 +6,8 @@ description: 標準の age 形式でシークレットファイルを暗号化�
 :::note
 `sinter secrets`（`secrets list --recipe` を含む）とレシピのフィールド
 `file.content: { secret: … }` は v1.2.0 で追加されました。
-レシピでシークレットを使えるのは今のところ `file` リソース（`content`）と
-`user` リソース（`password_hash`）だけです。MCP での利用はできません。
+レシピでシークレットを使えるのは今のところ `file` リソース（`content`）、
+`user` リソース（`password_hash`）、`postgresql_role` リソース（`password_verifier`、v1.5.1）だけです。MCP での利用はできません。
 :::
 
 **目的:** シークレットファイル（SSH 鍵、`.env`、トークン、パスワードハッシュ、
@@ -245,7 +245,7 @@ identity は自分だけが読めて（`chmod 600`）自分の所有である必
   以下のいずれかの要素がシンボリックリンクであるものは拒否されます。対象は、正しい age
   ヘッダーを持つ通常ファイルでなければなりません。値は厳密に `{ secret: <path> }` で
   なければならず、`content` と `source` は引き続き排他です。シークレット参照を受け付けるのは
-  `file.content` と `user.password_hash` だけです。
+  `file.content`、`user.password_hash`、`postgresql_role.password_verifier` だけです。
 - **方式はレシピに書きません。** パスフレーズで開くか identity で開くかは age の
   ヘッダが示し、Sinter はそれに従います。
 - **シークレットを持つリソースは常に sensitive** です。差分は伏せられ、新規ファイルの

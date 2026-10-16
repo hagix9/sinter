@@ -96,6 +96,26 @@
         "system": "システムユーザーとして作成。作成時のみ。",
         "password_hash": "パスワードのハッシュ（パスワード自体ではない）。暗号化シークレットとして保持し、$y$ または $6$ のハッシュ 1 つ。--sudo が必要。常に sensitive で、chpasswd -e の標準入力で設定する。"
       }
+    },
+    "postgresql_role": {
+      "summary": "ローカルの PostgreSQL サーバーのロールを 1 つ管理する（存在、宣言した属性、暗号化シークレットの SCRAM-SHA-256 verifier）。",
+      "parameters": {
+        "name": "ロール名（[a-z_][a-z0-9_]*、最大 63 バイト、pg_* は不可）。",
+        "state": "present または absent（CASCADE なしの DROP ROLE）。",
+        "login": "LOGIN / NOLOGIN。省略時は管理しない。",
+        "superuser": "SUPERUSER / NOSUPERUSER。宣言しない限り付与しない。",
+        "createdb": "CREATEDB / NOCREATEDB。",
+        "createrole": "CREATEROLE / NOCREATEROLE。",
+        "inherit": "INHERIT / NOINHERIT。",
+        "replication": "REPLICATION / NOREPLICATION。",
+        "bypassrls": "BYPASSRLS / NOBYPASSRLS。",
+        "connection_limit": "-1（無制限）以上。",
+        "password_verifier": "SCRAM-SHA-256 の verifier 1 つを暗号化シークレットとして保持。直接は書けず、平文と md5 は拒否。セッションのログ記録を止めて確認した後、psql の標準入力だけで送る。--sudo が必要。",
+        "os_user": "クラスタを所有する OS アカウント。psql はこのアカウントで実行（peer 認証）。",
+        "psql": "実行する psql（PGDG は /usr/pgsql-17/bin/psql）。",
+        "port": "既定以外のときのサーバーのポート。",
+        "database": "接続するデータベース。"
+      }
     }
   }
 }

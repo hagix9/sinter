@@ -178,8 +178,17 @@ When a whole field is one `{{ ... }}` token, the typed value is preserved
 Used in `when`, `changed_when`, and interpolation:
 
 - Inputs: `vars.<name>`, `facts.hostname`, `facts.os.name`,
-  `facts.os.family`, `facts.os.version`, `facts.arch`,
-  `registers.<name>.<field>`, `item`, `result.<field>` (in `changed_when`).
+  `facts.os.family`, `facts.os.version`, `facts.os.version_major`,
+  `facts.arch`, `registers.<name>.<field>`, `item`, `result.<field>` (in
+  `changed_when`).
+- `facts.os.version_major` (v1.5.1) is an **integer**: the part of
+  `VERSION_ID` before the first `.` (`8.10` → `8`, `24.04` → `24`). It exists
+  only when `VERSION_ID` is a plain numeric version; otherwise using it is an
+  error (never a guessed number). Combine it with the family:
+  `when: "facts.os.family == 'redhat' && facts.os.version_major < 10"`.
+- A `when` that reads `registers.<name>` of a producer that was skipped by its
+  own `when` is an error; guard it with the same condition first (`&&` and
+  `||` short-circuit).
 - Operators: `==` `!=` `<` `<=` `>` `>=` `&&` `||` `!` and parentheses.
 - No user-defined functions; no bare identifiers.
 - `when`/`changed_when` must produce a boolean — no truthiness coercion.

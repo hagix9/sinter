@@ -3,7 +3,7 @@ title: リソースリファレンス
 description: v1.5.0 に実装されているすべての Sinter リソースタイプ。
 ---
 
-Sinter v1.5.0 は 9 つのリソースタイプを実装しています。以下の
+Sinter v1.5.0 は 9 つのリソースタイプを実装しています（v1.5.1 で `postgresql_role` を追加）。以下の
 パラメータはサポートされる完全なセットであり、未知の `with`
 フィールドはスキーマエラーです。
 
@@ -18,6 +18,7 @@ Sinter v1.5.0 は 9 つのリソースタイプを実装しています。以下
 | [service](/ja/reference/resources/service/) | systemd の状態と有効化 | `name`、`state`、`enabled` |
 | [group](/ja/reference/resources/group/) | ローカル Linux グループ | `name`、`state`、`gid`、`system` |
 | [user](/ja/reference/resources/user/) | ローカル Linux ユーザー | `name`、`state`、`uid`、`group`、`groups`、`shell`、`home`、`create_home`、`system`、`password_hash` |
+| [postgresql_role](/ja/reference/resources/postgresql_role/) | ローカルの PostgreSQL サーバーのロール（v1.5.1） | `name`、`state`、`login`、`superuser`、…、`connection_limit`、`password_verifier` |
 
 ## 共通の規約
 

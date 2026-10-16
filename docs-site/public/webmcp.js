@@ -236,6 +236,7 @@ function register() {
             'service',
             'group',
             'user',
+            'postgresql_role',
           ],
         },
         locale: localeProp,

@@ -36,7 +36,7 @@ hostname = {{ facts.hostname }}
 | `owner` | いいえ | string | — | 所有者名。 |
 | `group` | いいえ | string | — | グループ名。 |
 | `mode` | いいえ | string | — | 引用符付きの 4 桁 8 進数。 |
-| `validate` | いいえ | map | — | 公開前に staging ファイルへ実行する検証コマンド（`program`、`args`、`timeout_seconds`）。 |
+| `validate` | いいえ | map | — | 公開前に staging ファイルへ実行する検証コマンド（`program`、`args`、`timeout_seconds`）。（`{{ staged }}` で staging ファイルのパスを引数の中に置ける） |
 
 ## 期待される動作
 

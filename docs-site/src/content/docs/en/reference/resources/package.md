@@ -47,7 +47,7 @@ not configure a persistent host-wide environment.
   identity — recipes stay platform-neutral.
 - `present` on Ubuntu → `apt`; on RHEL-family targets (Rocky Linux, RHEL,
   AlmaLinux, Oracle Linux) → `dnf`.
-- No version pinning in v1.5.0.
+- No version pinning.
 - On dnf targets, installs run through a private cache snapshot — see
   [Execution Model](/en/concepts/execution-model/) and the
   [Rocky guide](/en/guides/rocky-linux/).
@@ -82,11 +82,54 @@ removes or copies the live cache. The
 package identity query (`rpm -qp`) ignores an untrusted-signature warning;
 whether a signature is trusted is still decided by dnf and the payload digest.
 
+## Package names and provides (dnf)
+
+Declare a package by its **own name**. dnf also accepts a name that some other
+package only *provides* (on RHEL-family 8, `python3` is provided by
+`python36`, and `python311` by `python3.11`), but Sinter verifies the result by
+that exact name, so it could never confirm such an install. Before installing
+anything, Sinter checks that the dry-run transaction installs the requested
+name itself. When dnf resolved it to another package — or reports nothing to do
+because an installed package already provides it — the resource fails with
+**no change** and names the real package:
+
+```text
+python3 is not a package name: dnf resolves it through a provides match to
+package python36; nothing was changed. Declare the package by its own name
+(name: python36) so the result can be verified
+```
+
+`plan` does not run dnf's resolver, so it reports such a name as an install;
+`apply` then refuses it without changing the host.
+
+## Why dnf refused (dnf)
+
+When dnf refuses an install, the reason names the cause dnf reported,
+measured on dnf 4.7 (EL8), 4.14 (EL9) and 4.20 (EL10). Nothing is installed in
+any of these cases:
+
+| Cause | Reason starts with |
+|-------|--------------------|
+| No package of that name (or providing it) in the enabled repositories | `dnf found no package named …` |
+| The name is only a provides match | `… is not a package name: dnf resolves it …` / `no package named … is installed, but dnf reports …` |
+| A dependency is missing (often a repository such as CRB/PowerTools is not enabled) | `dnf cannot resolve the dependencies of …: nothing provides <capability>` |
+| A package is unsigned or signed by a key its repository does not trust | `dnf refused a package signature … (GPG check FAILED …)` |
+| An enabled repository cannot be reached | `dnf could not download the metadata of repository <id> …` |
+| The package download failed for another reason | `dnf could not download the packages required for …` |
+| Repository metadata is not usable from the local cache after the bounded refresh | `dnf repository metadata not locally complete (…)` |
+
+Only fixed text and validated tokens (package names, repository ids,
+capabilities) are shown — never dnf's raw output, which can contain repository
+URLs. Output Sinter does not recognize is reported by size only
+(`… bytes of unrecognized dnf error output withheld`) and still fails closed.
+For a sensitive resource every name is redacted.
+
 ## Platform notes
 
 | Platform | Backend |
 |----------|---------|
 | Ubuntu 24.04 / 26.04 LTS | apt |
+| Rocky Linux 8 (SSH target only) | dnf |
 | Rocky Linux 9 / 10 | dnf |
 | RHEL 9 / 10 | dnf |
 | AlmaLinux 9 / 10 | dnf |

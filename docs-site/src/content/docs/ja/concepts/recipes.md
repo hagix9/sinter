@@ -87,7 +87,7 @@ reload は restart ではありません。
 `when` と `changed_when` では意図的に小さな式言語が使われます:
 
 - 名前空間: `vars.<name>`、`facts.hostname`、`facts.os.name`、
-  `facts.os.family`、`facts.os.version`、`facts.arch`、
+  `facts.os.family`、`facts.os.version`、`facts.os.version_major`（整数）、`facts.arch`、
   `registers.<name>.<field>`、`item`（loop 内）、`result.<field>`
   （`changed_when` 内）。名前空間なしの裸の名前は許可されません。
 - 演算子: `==`、`!=`、`<`、`<=`、`>`、`>=`、`&&`、`||`、`!`、括弧。

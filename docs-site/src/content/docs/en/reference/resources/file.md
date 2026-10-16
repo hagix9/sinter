@@ -30,7 +30,7 @@ and mode — or is absent.
 | `owner` | no | string | — | Owner name. |
 | `group` | no | string | — | Group name. |
 | `mode` | no | string | — | Quoted four-digit octal, e.g. `"0644"`. |
-| `validate` | no | map | — | Command run against the staged file before publication (`program`, `args`, `timeout_seconds`). |
+| `validate` | no | map | — | Command run against the staged file before publication (`program`, `args`, `timeout_seconds`). (`{{ staged }}` places the staged path inside an argument) |
 
 ## Expected behavior
 
@@ -85,6 +85,33 @@ non-applying syntax check:
   resource sensitive, and the validation command's output is then never shown.
 - Without `validate`, the file is published exactly as before.
 
+### Placing the staged file inside an argument (`{{ staged }}`)
+
+Some checkers need the file path as part of an argument rather than as a
+separate last argument — `postgres` only accepts `--config-file=PATH`. Write
+`{{ staged }}` (blanks inside the braces are allowed) where the staged path
+belongs; it is replaced by the staged file's path, and the path is then **not**
+appended at the end:
+
+```yaml
+    validate:
+      program: /usr/bin/postgres
+      # -C must be the first argument when postgres runs as root
+      args: ["-C", "port", "-D", "/var/lib/pgsql/data", "--config-file={{ staged }}"]
+```
+
+- Only `validate.args` may contain `{{ staged }}`; it may appear in several
+  arguments. In `program` it is a load error, and anywhere else it is not a
+  placeholder (`staged` is not a variable).
+- The command is still argv-only; the placeholder never introduces a shell.
+  `\{{ staged }}` is the literal text `{{ staged }}`.
+- A value interpolated into an argument cannot create a placeholder.
+
+| Software | `validate` |
+|----------|-----------|
+| PostgreSQL (`postgresql.conf` or a `conf.d` drop-in) | `program: /usr/bin/postgres`, `args: ["-C", "port", "-D", "<data dir>", "--config-file={{ staged }}"]` (PGDG: `/usr/pgsql-17/bin/postgres`) |
+| Apache httpd (a `conf.d` file, checked with the full configuration) | `program: /usr/sbin/httpd`, `args: ["-t", "-c", "Include {{ staged }}"]` |
+
 ## Secret content
 
 ```yaml
@@ -109,7 +136,8 @@ contract (identity discovery, passphrases, limits) is on
   empty component, a backslash, a control character, `{{ }}` interpolation, any
   symbolic link below that directory, a target that is not a regular file, or a
   value that is not exactly `{ secret: <path> }`. `content` and `source` stay
-  mutually exclusive. Only `file.content` and `user.password_hash` accept one.
+  mutually exclusive. Only `file.content`, `user.password_hash` and
+  `postgresql_role.password_verifier` accept one.
 - **`validate`** checks the reference and that the file is a well-formed age
   file. It never decrypts and needs no key.
 - **`plan`, `apply`, `audit`** decrypt the secret in memory, compare it with the

@@ -179,9 +179,16 @@ content: "listen = {{ vars.port }}"
 `when`、`changed_when`、補間で使われます:
 
 - 入力: `vars.<name>`、`facts.hostname`、`facts.os.name`、
-  `facts.os.family`、`facts.os.version`、`facts.arch`、
-  `registers.<name>.<field>`、`item`、`result.<field>`
+  `facts.os.family`、`facts.os.version`、`facts.os.version_major`、
+  `facts.arch`、`registers.<name>.<field>`、`item`、`result.<field>`
   （`changed_when` 内）。
+- `facts.os.version_major`（v1.5.1）は**整数**です。`VERSION_ID` の最初の `.` より
+  前の部分です（`8.10` → `8`、`24.04` → `24`）。`VERSION_ID` が数字だけの版の
+  ときにだけ存在し、そうでなければ使うとエラーになります（推測した数値には
+  なりません）。family と組み合わせて使ってください:
+  `when: "facts.os.family == 'redhat' && facts.os.version_major < 10"`。
+- 自分の `when` で飛ばされたリソースの `registers.<name>` を `when` で読むと
+  エラーになります。同じ条件で先に守ってください（`&&` と `||` は短絡評価です）。
 - 演算子: `==` `!=` `<` `<=` `>` `>=` `&&` `||` `!` と括弧。
 - ユーザ定義関数なし。裸の識別子なし。
 - `when`/`changed_when` は boolean を生成する必要があります。

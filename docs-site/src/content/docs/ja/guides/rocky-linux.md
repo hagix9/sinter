@@ -77,6 +77,46 @@ dnf のインストールでは、変更を行う `dnf` プロセスがメタデ
 ペイロードの完全性またはidentityを証明できない場合、変更の前に
 フェイルクローズします。
 
+## Rocky Linux / RHEL 8 を SSH の接続先にする（v1.5.1）
+
+Sinter 自体は EL8 では動きません（Linux 版は glibc 2.34 が必要です）。しかし、
+対応する controller（EL9 / EL10、Ubuntu。macOS はソースからのビルドのみ）から SSH で EL8 のホストを
+**管理**できます。v1.5.1 の開発中に Rocky Linux 8.10（dnf 4.7.0）で実測しました
+（リリースの受入としての主張ではまだありません）。
+
+- **前提:** `attr` パッケージ（`getfattr`）。最小構成やクラウドのイメージには
+  入っていないことが多く、その場合 `file` / `directory` / `template` は、その旨を
+  示して fail-closed になります。先に導入してください（`attr` を `package`
+  リソースで入れられます）。
+- **Python:** 実際のパッケージ名で宣言してください。`python36`（module stream
+  `python36:3.6`、自動で有効になります）、`python3.11`、`python3.12`、
+  `python3.11-pip`、`python39`、`python38`。EL8 の `python3` と `python311` は
+  パッケージ名ではなく provides なので、Sinter は導入の前に拒否し、実際の
+  パッケージ名を案内します。`examples/recipes/python-el8.yaml` を参照してください。
+- **module stream:** module の既定の stream を有効にしながらの導入は動作します
+  （取引に `Enabling module streams:` が出る場合）。既定以外の stream を使うときは
+  先に有効にしてください。`examples/recipes/postgresql-os.yaml` を参照してください。
+
+## PostgreSQL、EPEL / CRB、その他のリポジトリ
+
+- **OS の PostgreSQL:** 既定は EL8 が 10、EL9 が 13 で、どちらも upstream の
+  サポートが終了しています。EL10 は 16 です。`examples/recipes/postgresql-os.yaml`
+  は 3 つとも 16 を導入し（EL8 / EL9 は module stream `postgresql:16`）、検証付きの
+  `postgresql.conf`、`pg_hba.conf`、
+  [`postgresql_role`](/ja/reference/resources/postgresql_role/) を設定します。
+- **PGDG の PostgreSQL 17:** `examples/recipes/postgresql-pgdg17.yaml` は、指紋を
+  照合して固定した鍵と、`gpgcheck` / `repo_gpgcheck` を有効にした PGDG の
+  リポジトリをファイルとして宣言します。PGDG の repo RPM を URL から導入する
+  方法は推奨しません。dnf は既定ではローカル / URL の RPM の署名を検証しません
+  （`localpkg_gpgcheck=0`）。
+- **EPEL と CRB / PowerTools:** `examples/recipes/epel-crb.yaml`。dnf は初回の
+  利用時に、リポジトリの `gpgkey` のファイルから鍵を取り込みます。信頼の起点は
+  その鍵のファイルなので、サードパーティのリポジトリでは鍵を固定して（ファイル
+  として管理して）ください。
+- **任意の署名付きリポジトリ:** `examples/recipes/signed-repo.yaml`（鍵のファイル
+  + リポジトリのファイル + パッケージ）。署名の無いパッケージや別の鍵で署名
+  されたパッケージは拒否されます（`GPG check FAILED`）。
+
 ## プラットフォーム検出
 
 `/etc/os-release` の `ID=rocky`（RHEL ファミリ）が dnf バックエンドを

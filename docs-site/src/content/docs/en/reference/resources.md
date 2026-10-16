@@ -3,7 +3,7 @@ title: Resource Reference
 description: All Sinter resource types implemented in v1.5.0.
 ---
 
-Sinter v1.5.0 implements nine resource types. Parameters below are the
+Sinter v1.5.0 implements nine resource types; v1.5.1 adds `postgresql_role`. Parameters below are the
 complete supported set — unknown `with` fields are schema errors.
 
 | Type | Purpose | Key parameters |
@@ -17,6 +17,7 @@ complete supported set — unknown `with` fields are schema errors.
 | [service](/en/reference/resources/service/) | systemd state + enablement | `name`, `state`, `enabled` |
 | [group](/en/reference/resources/group/) | Local Linux group | `name`, `state`, `gid`, `system` |
 | [user](/en/reference/resources/user/) | Local Linux user | `name`, `state`, `uid`, `group`, `groups`, `shell`, `home`, `create_home`, `system`, `password_hash` |
+| [postgresql_role](/en/reference/resources/postgresql_role/) | Role of a local PostgreSQL server (v1.5.1) | `name`, `state`, `login`, `superuser`, …, `connection_limit`, `password_verifier` |
 
 ## Shared conventions
 

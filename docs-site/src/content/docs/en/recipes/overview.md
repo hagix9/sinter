@@ -167,6 +167,22 @@ resources:
 See the [Recipe Format reference](/en/reference/recipe-format/) and the
 [Resource Reference](/en/reference/resources/) for the full schema.
 
+## RHEL-family recipes (v1.5.1)
+
+Complete recipes for Rocky Linux / RHEL 8, 9 and 10 live in
+`examples/recipes/` of the repository; each file explains itself. They use
+`facts.os.version_major` to branch per release and were measured on Rocky Linux
+8.10, 9.8 and 10.2 during v1.5.1 development.
+
+| File | What it sets up |
+|------|-----------------|
+| `python-el8.yaml` | Python 3.6, 3.11 (+ pip) and 3.12 on EL8 by their real package names |
+| `postgresql-os.yaml` | PostgreSQL 16 from the OS (stream `postgresql:16` on EL8/EL9), validated `postgresql.conf` / drop-in (`--config-file={{ staged }}`), `pg_hba.conf` with SCRAM, a `postgresql_role` |
+| `postgresql-pgdg17.yaml` | PostgreSQL 17 from PGDG with a pinned, fingerprint-checked key and repository files (`gpgcheck`/`repo_gpgcheck` on) |
+| `epel-crb.yaml` | EPEL + CRB/PowerTools and packages from each, with a second apply reporting no change |
+| `signed-repo.yaml` | Any signed RPM repository: key file, repository file, package |
+| `apache-htpasswd.yaml` | httpd with Basic authentication: the package-created `apache` account declared first, a secret htpasswd file, a config file validated by `httpd -t` |
+
 :::note[Official recipe collections]
 Curated recipe collections (for example a `linux-baseline` set) are a future
 product improvement and do not exist yet — this page documents only what

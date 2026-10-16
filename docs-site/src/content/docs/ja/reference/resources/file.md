@@ -30,7 +30,7 @@ description: 通常ファイルの内容とメタデータを管理する。
 | `owner` | いいえ | string | — | 所有者名。 |
 | `group` | いいえ | string | — | グループ名。 |
 | `mode` | いいえ | string | — | 引用符付きの 4 桁 8 進数。例: `"0644"`。 |
-| `validate` | いいえ | map | — | 公開前に staging ファイルへ実行する検証コマンド（`program`、`args`、`timeout_seconds`）。 |
+| `validate` | いいえ | map | — | 公開前に staging ファイルへ実行する検証コマンド（`program`、`args`、`timeout_seconds`）。（`{{ staged }}` で staging ファイルのパスを引数の中に置ける） |
 
 ## 期待される動作
 
@@ -87,6 +87,32 @@ description: 通常ファイルの内容とメタデータを管理する。
   sensitive になり、検証コマンドの出力は表示されません。
 - `validate` を書かなければ、従来どおり公開されます。
 
+### staging ファイルを引数の中に置く（`{{ staged }}`）
+
+検証ツールによっては、ファイルのパスを最後の別の引数ではなく、引数の一部として
+渡す必要があります（`postgres` は `--config-file=PATH` の形しか受け付けません）。
+staging ファイルのパスを置きたい場所に `{{ staged }}`（中括弧の内側の空白は可）と
+書くと、そこが staging ファイルのパスに置き換わり、末尾にはパスを**付けません**。
+
+```yaml
+    validate:
+      program: /usr/bin/postgres
+      # root で postgres を実行するときは -C を第 1 引数にする
+      args: ["-C", "port", "-D", "/var/lib/pgsql/data", "--config-file={{ staged }}"]
+```
+
+- `{{ staged }}` を書けるのは `validate.args` だけで、複数の引数に書けます。
+  `program` に書くと読み込みのエラーになり、それ以外の場所ではプレースホルダー
+  になりません（`staged` は変数ではありません）。
+- コマンドは引き続き argv だけで実行され、プレースホルダーがシェルを持ち込むことは
+  ありません。`\{{ staged }}` は `{{ staged }}` という文字列そのものです。
+- 引数に補間した値がプレースホルダーを作り出すことはできません。
+
+| ソフトウェア | `validate` |
+|--------------|-----------|
+| PostgreSQL（`postgresql.conf` または `conf.d` の drop-in） | `program: /usr/bin/postgres`, `args: ["-C", "port", "-D", "<データディレクトリ>", "--config-file={{ staged }}"]`（PGDG は `/usr/pgsql-17/bin/postgres`） |
+| Apache httpd（`conf.d` のファイルを、設定全体と合わせて検証） | `program: /usr/sbin/httpd`, `args: ["-t", "-c", "Include {{ staged }}"]` |
+
 ## シークレットの内容
 
 ```yaml
@@ -110,7 +136,7 @@ description: 通常ファイルの内容とメタデータを管理する。
   なりません。拒否されるもの: 絶対パス、`.`・`..`・空の要素、バックスラッシュ、制御文字、
   `{{ }}` 補間、そのディレクトリ以下のシンボリックリンク、通常ファイルではない対象、厳密に
   `{ secret: <path> }` ではない値。`content` と `source` は引き続き排他です。参照を
-  受け付けるのは `file.content` と `user.password_hash` だけです。
+  受け付けるのは `file.content`、`user.password_hash`、`postgresql_role.password_verifier` だけです。
 - **`validate`** は、参照と、ファイルが正しい age ファイルであることだけを確認します。
   復号はせず、鍵も要りません。
 - **`plan`、`apply`、`audit`** はシークレットをメモリ上で復号し、ターゲットと SHA-256 で

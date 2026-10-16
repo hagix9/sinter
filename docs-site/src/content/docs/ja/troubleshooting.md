@@ -149,6 +149,40 @@ live cache にダウンロード済みのパッケージをトランザクショ
 なりました。スナップショットの残骸は実行後に残らないはずです。
 残っている場合は [バグとして報告](/ja/contributing/#バグの報告)してください。
 
+**dnf が導入を拒否した理由**（v1.5.1）
+
+理由には dnf が報告した原因が表示され、何も導入されていません。
+
+| 理由 | 対処 |
+|------|------|
+| `… is not a package name: dnf resolves it through a provides match to package X` | `name: X` と宣言してください（EL8 では `python3` → `python36`、`python311` → `python3.11`）。 |
+| `no package named … is installed, but dnf reports the request already satisfied by installed package X` | その名前は導入済みの `X` が provides しています。`name: X` と宣言してください。 |
+| `dnf found no package named …` | 名前と、そのパッケージを提供するリポジトリが有効かを確認してください。 |
+| `dnf cannot resolve the dependencies of …: nothing provides …` | 依存を提供するリポジトリを有効にしてください（EPEL のパッケージでは CRB / PowerTools が多い）。 |
+| `dnf refused a package signature … (GPG check FAILED …)` | 署名が無い、またはリポジトリの `gpgkey` が一致しません。鍵のファイルを直してください。`gpgcheck` を無効にしないでください。 |
+| `dnf could not download the metadata of repository <id> …` | そのリポジトリに到達できないか、設定が誤っています。有効なリポジトリはすべて使える必要があります。 |
+| `… bytes of unrecognized dnf error output withheld` | ターゲットで同じ導入を素の `dnf` で実行し、メッセージを確認してください。 |
+
+[package の「dnf が拒否した理由」](/ja/reference/resources/package/#dnf-が拒否した理由dnf) も参照してください。
+
+**plan で `unknown group: apache`（またはユーザー）**
+
+そのアカウントはパッケージの scriptlet が作るので、plan の時点では存在しません。
+パッケージより前に、パッケージと同じ属性（`apache` は uid / gid 48、home
+`/usr/share/httpd`、shell `/sbin/nologin`）で `group` / `user` を宣言してください。
+plan はそれに依存するものを遅延として扱い、scriptlet は宣言したアカウントを
+そのまま使います。`examples/recipes/apache-htpasswd.yaml` を参照してください。
+
+**`postgresql_role` が失敗する**
+
+- `postgresql_role needs root` → `--sudo` を使ってください（psql はクラスタの
+  所有者として実行します）。
+- `cannot observe PostgreSQL role …: psql exited 2` → サーバーが動いていないか、
+  `psql` / `port` が別のものを指しています（PGDG では `psql: /usr/pgsql-17/bin/psql`）。
+- `could not be verified to keep statements out of the server log … not sent` →
+  セッションでログの設定を変更または確認できませんでした。パスワードの verifier を
+  含むものは何も送っていません。
+
 ## 詳細を得るには
 
 - `--verbose` でリソースごとの詳細

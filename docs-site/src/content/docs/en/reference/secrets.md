@@ -6,8 +6,9 @@ description: Encrypt, decrypt and list secret files in the standard age format.
 :::note
 `sinter secrets` (including `secrets list --recipe`) and the recipe field
 `file.content: { secret: … }` are new in v1.2.0. The `file` resource
-(`content`) and the `user` resource (`password_hash`) are the only recipe
-uses of a secret so far; MCP use is not available.
+(`content`), the `user` resource (`password_hash`) and the `postgresql_role`
+resource (`password_verifier`, v1.5.1) are the only recipe uses of a secret so
+far; MCP use is not available.
 :::
 
 **Purpose:** keep secret files (SSH keys, `.env` files, tokens, password hashes,
@@ -256,8 +257,9 @@ literal or a controller file:
   interpolation), or an empty, `.` or `..` component, or if any component below
   that directory is a symbolic link; the target must be a regular file holding a
   well-formed age header. The value must be exactly `{ secret: <path> }`;
-  `content` and `source` stay mutually exclusive. Only `file.content` and
-  `user.password_hash` accept a secret reference.
+  `content` and `source` stay mutually exclusive. Only `file.content`,
+  `user.password_hash` and `postgresql_role.password_verifier` accept a secret
+  reference.
 - **The method is not in the recipe.** The age header says whether the file
   opens with a passphrase or an identity; Sinter follows it.
 - **A secret-holding resource is always sensitive**: its diff is redacted, a
