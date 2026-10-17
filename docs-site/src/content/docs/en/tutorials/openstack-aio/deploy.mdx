@@ -1,0 +1,217 @@
+---
+title: Configure, plan, apply, audit
+description: Step 4 of the OpenStack AIO tutorial. Edit site.yaml, generate the secrets, and build OpenStack 2026.1 with sinter validate, plan, apply and audit.
+sidebar:
+  label: 4. Configure, plan, apply, audit
+---
+
+import { Aside, Badge, LinkCard } from '@astrojs/starlight/components';
+
+Step 4 of 5 of [Build OpenStack 2026.1 with Sinter](/en/tutorials/openstack-aio/overview/).
+Run Sinter from the builder against the AIO node to build OpenStack. Every command in this step runs on the builder.
+
+## 4-1. Edit site.yaml <Badge text="Run in acceptance" variant="success" />
+
+`site.yaml` holds the non-secret settings. For the all-in-one layout, change these three:
+
+| Variable | Value | Default (example) |
+|---|---|---|
+| `mgmt_ip` | the AIO node's internal IPv4 address | `10.0.0.10` |
+| `controller_ip` | the same as `mgmt_ip` for the all-in-one layout | `10.0.0.10` |
+| `os_hostname` | the AIO node's `hostname -s` | `osdemo1` |
+
+Replace them with the values from `~/sinter-os.env` (step 2).
+
+```sh title="Builder"
+cd ~/sinter/examples/openstack
+. ~/sinter-os.env
+sed -i "s/value: \"10.0.0.10\"/value: \"$AIO_IP\"/; s/value: \"osdemo1\"/value: \"$AIO_HOSTNAME\"/" site.yaml
+grep -A1 -E '^  (mgmt_ip|controller_ip|os_hostname):' site.yaml | grep 'value:'
+```
+
+```text title="Success (shows your values)"
+    value: "10.0.0.10"
+    value: "10.0.0.10"
+    value: "osdemo1"             #       OVN chassis name are both set to it; they must match for ports to bind.
+```
+
+- Keep `virt_type` at `kvm` (it needs `/dev/kvm`).
+- The other values (the provider network `192.0.2.0/24` and so on) also stayed at their defaults in the acceptance.
+  The provider network is not attached to a real NIC, so guests are reachable only from inside the AIO node (step 5).
+
+## 4-2. Generate the secrets <Badge text="Run in acceptance" variant="success" />
+
+This generates 14 random secrets: the database, RabbitMQ, service and admin passwords and so on.
+
+```sh title="Builder"
+cd ~/sinter/examples/openstack
+sh tools/gen-secrets.sh
+ls -l secrets
+grep -c 'value: ""' secrets/controller.yaml
+```
+
+```text title="Success"
+wrote /home/<you>/sinter/examples/openstack/secrets/controller.yaml and /home/<you>/sinter/examples/openstack/secrets/compute.yaml (mode 0600)
+total 8
+-rw-------. 1 <you> <you> ... compute.yaml
+-rw-------. 1 <you> <you> ... controller.yaml
+0
+```
+
+The final `0` means no value is empty.
+
+- `gen-secrets.sh` needs `openssl`. When `openssl` is missing or fails, or a value is not 32 characters of A-Za-z0-9,
+  it stops with exit code 1 and writes neither file (`gen-secrets: openssl is required …` or
+  `gen-secrets: could not generate a secret with openssl; nothing was written`).
+  Check `command -v openssl` (if it is missing, `sudo dnf -y install openssl`) and run it again.
+- No secret value is printed on the screen or in a log.
+- The script was fixed after the acceptance; local tests cover it, but it has not run on a real host
+  (the acceptance ran the earlier version, with `openssl` present).
+
+<Aside type="danger" title="Handling the secrets">
+- `secrets/` is outside Git. **Do not commit it, share it, or paste it into a chat or an issue.**
+- `secrets.example/` holds synthetic values for CI. **Do not copy it.**
+- Keep `secrets/` for as long as you manage the AIO node. If you generate new ones, the new passwords go into the configuration files
+  while existing passwords (database users and so on) are not overwritten, so they no longer match.
+  Store it somewhere safe before you delete the builder.
+- If `secrets/controller.yaml` or `secrets/compute.yaml` already exists, the script stops and overwrites nothing (`secrets/controller.yaml exists; not overwritten` and similar). A lone `compute.yaml` is left by a run that was killed part way: check it, delete it and run again.
+</Aside>
+
+## 4-3. Validate the recipe <Badge text="Run in acceptance" variant="success" />
+
+```sh title="Builder"
+cd ~/sinter/examples/openstack
+sinter validate all-in-one.yaml
+```
+
+```text title="Success"
+ok: 172 resource(s), 12 handler(s), 40 var(s)
+```
+
+`cannot resolve …/secrets/controller.yaml` means that 4-2 has not been run.
+
+## 4-4. Check with plan <Badge text="Run in acceptance" variant="success" />
+
+`plan` changes nothing. It observes the AIO node and shows what would change.
+
+```sh title="Builder"
+cd ~/sinter/examples/openstack
+. ~/sinter-os.env
+sinter plan all-in-one.yaml --host "$AIO_IP" --user "$USER" --identity "$SSH_KEY" --sudo 2>&1 | tee ~/os-plan.log
+grep -c '^?' ~/os-plan.log
+```
+
+```text title="Success (end of the output)"
+?  wait_compute_up [command] unknown/normal dependency svc_nova_compute is unknown (...)
+?  nova_discover_hosts [command] unknown/normal dependency wait_compute_up is unknown (...)
+...
+summary: 11 changed, 0 possible, 0 failed, 0 indeterminate, 172 total
+status: success
+160
+```
+
+**How to tell it worked**: `status: success`.
+About 160 of the 172 resources are `?` (Unknown), and **that is correct**.
+Plan never runs commands, so on a new host it cannot predict resources that depend on a command's result
+(the repository check, database creation and so on).
+
+| Option | Meaning |
+|---|---|
+| `--host "$AIO_IP"` | the SSH destination |
+| `--user "$USER"` | the SSH user (the same name as on the builder) |
+| `--identity "$SSH_KEY"` | the key from step 2 |
+| `--sudo` | run the operations on the AIO node as root through passwordless `sudo -n` |
+
+## 4-5. First apply <Badge text="Run in acceptance" variant="success" />
+
+This builds OpenStack. It took about 21 minutes in the acceptance. Run it inside `tmux` (`tmux attach -t sinter` returns to the session of step 3; if there is none, `tmux new -s sinter`).
+
+```sh title="Builder (inside tmux)"
+cd ~/sinter/examples/openstack
+. ~/sinter-os.env
+sinter apply all-in-one.yaml --host "$AIO_IP" --user "$USER" --identity "$SSH_KEY" --sudo 2>&1 | tee ~/os-apply1.log
+```
+
+```text title="Success (end of the output; the acceptance's values)"
+handlers:
+  Succeeded  reload_httpd -> reload <redacted>
+  Succeeded  restart_httpd -> restart httpd
+  ...
+  Succeeded  restart_nova_compute -> restart <redacted>
+
+manager reloads (systemd daemon-reload):
+  CHANGED  resource trigger=pending_input causes=[repo_server_unit] consumer=svc_repo_local execution=succeeded change=changed verification=verified
+  CHANGED  resource trigger=pending_input causes=[httpd_dashboard_writepath] consumer=svc_mariadb execution=succeeded change=changed verification=verified
+
+summary: 141 changed, 0 possible, 0 failed, 0 indeterminate, 172 total
+status: success
+```
+
+With `| tee` there is no progress display and the result appears at the end. To follow the progress, prefix the command, as in `SINTER_PROGRESS=plain sinter apply …` (not used in the acceptance).
+
+**How to tell it worked**: `status: success`, `0 failed` and `0 indeterminate`. If the next command prints nothing, no resource failed.
+
+```sh title="Builder"
+grep -E '^(FAILED|INDET|blocked)' ~/os-apply1.log
+```
+
+- The acceptance reported **141 changed / 0 failed**. The published recipe reports the Keystone key steps as changes,
+  so expect **about 143 changed** (that change has not been run on a real host). The number also depends on the environment.
+- `<redacted>` is Sinter hiding the details of a resource that may contain secrets.
+- If it fails, read the line of the failed resource and the message below it first.
+  An apply that fails after changing a configuration file does not run the service restarts (handlers).
+  See [OpenStack services do not start](/en/tutorials/openstack-aio/troubleshooting/#openstack-services-do-not-start).
+
+## 4-6. Second apply (idempotency) <Badge text="Run in acceptance" variant="success" />
+
+Run the same command again. Everything is already in the desired state, so nothing should change.
+
+```sh title="Builder"
+cd ~/sinter/examples/openstack
+. ~/sinter-os.env
+sinter apply all-in-one.yaml --host "$AIO_IP" --user "$USER" --identity "$SSH_KEY" --sudo 2>&1 | tee ~/os-apply2.log
+```
+
+```text title="Success (end of the output)"
+ok    svc_nova_compute [service] known/normal service already matches desired state
+ok    wait_compute_up [command] known/normal
+ok    nova_discover_hosts [command] known/normal
+
+summary: 0 changed, 0 possible, 0 failed, 0 indeterminate, 172 total
+status: success
+```
+
+**How to tell it worked**: `0 changed`. If changes remain, see
+[Changes remain on re-apply](/en/tutorials/openstack-aio/troubleshooting/#changes-remain-on-re-apply).
+
+## 4-7. Audit <Badge text="Run in acceptance" variant="success" />
+
+`audit` changes nothing; it checks whether the actual state matches the recipe.
+
+```sh title="Builder"
+cd ~/sinter/examples/openstack
+. ~/sinter-os.env
+sinter audit all-in-one.yaml --host "$AIO_IP" --user "$USER" --identity "$SSH_KEY" --sudo 2>&1 | tee ~/os-audit1.log
+echo "exit=${PIPESTATUS[0]}"
+```
+
+```text title="Success (end of the output)"
+PASS svc_nova_compute [service]
+    reason: service matches desired state
+NOT_AUDITABLE wait_compute_up [command]
+    reason: command resources are not executed during audit
+NOT_AUDITABLE nova_discover_hosts [command]
+    reason: command resources are not executed during audit
+summary: 172 total, 81 compliant, 0 drifted, 91 not_auditable, 0 not_applicable, 0 errors
+status: no_drift
+exit=0
+```
+
+**How to tell it worked**: `status: no_drift`, `0 drifted`, `0 errors`, and `exit=0` (the exit code of `sinter`).
+
+- The acceptance reported **81 compliant / 0 drifted / 91 not_auditable**.
+- The 91 not_auditable resources are all `command` resources. Audit does not run commands, so it cannot check them.
+  They are **not counted as compliant**. This is not a failure.
+- With drift it prints `exit=7` and the `DRIFT` lines show the differences. Behind `| tee` the exit code is not visible by itself, so `${PIPESTATUS[0]}` prints it.
+
+<LinkCard title="Next: 5. Verify and reboot" href="/en/tutorials/openstack-aio/verify/" />

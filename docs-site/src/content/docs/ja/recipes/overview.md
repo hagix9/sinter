@@ -189,6 +189,13 @@ Rocky Linux / RHEL 8、9、10 向けの完成したレシピは、リポジト�
 | `signed-repo.yaml` | 任意の署名付き RPM リポジトリ（鍵のファイル、リポジトリのファイル、パッケージ） |
 | `apache-htpasswd.yaml` | Basic 認証付きの httpd。パッケージが作る `apache` アカウントを先に宣言し、htpasswd はシークレット、設定ファイルは `httpd -t` で検証 |
 
+## OpenStack 2026.1 All-in-One
+
+[`examples/openstack/`](https://github.com/hagix9/sinter/tree/main/examples/openstack) は、1 台の Rocky Linux 10.2 に
+OpenStack 2026.1 を構築します（検証・デモ用の構成で、本番向けの安全強化はしていません）。
+[OpenStack のチュートリアル](/ja/tutorials/openstack-aio/overview/)で、2026-10-17 の実機受入のコマンドを使って
+手順ごとに説明しています。
+
 :::note[公式レシピコレクション]
 キュレーションされたレシピコレクション（例えば `linux-baseline`
 セット）は将来のプロダクト改善であり、まだ存在しません。このページは

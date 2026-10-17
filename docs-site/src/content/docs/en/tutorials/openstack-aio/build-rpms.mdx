@@ -1,0 +1,148 @@
+---
+title: Build and stage the RPMs
+description: Step 3 of the OpenStack AIO tutorial. Build the OpenStack 2026.1 RPMs with builder.yaml, stage them on the all-in-one node and verify SHA-256.
+sidebar:
+  label: 3. Build and stage the RPMs
+---
+
+import { Aside, Badge, LinkCard } from '@astrojs/starlight/components';
+
+Step 3 of 5 of [Build OpenStack 2026.1 with Sinter](/en/tutorials/openstack-aio/overview/).
+Build the OpenStack 2026.1 RPMs on the builder ("method B" in the README) and stage them on the AIO node.
+Nobody distributes these RPMs, so this step is required.
+
+<Aside type="caution" title="Keep the builder disposable">
+`builder.yaml` installs build dependencies as root and rewrites repository settings.
+Never run it on an OpenStack node (the AIO node).
+</Aside>
+
+## 3-1. Validate the recipe <Badge text="Run in acceptance" variant="success" />
+
+```sh title="Builder"
+cd ~/sinter/examples/openstack
+sinter validate builder.yaml
+```
+
+```text title="Success"
+ok: 20 resource(s), 0 handler(s), 3 var(s)
+```
+
+## 3-2. Build the RPMs <Badge text="Run in acceptance" variant="success" />
+
+The build takes 40–60 minutes (about 41 minutes in the acceptance). Run it inside `tmux` so that a dropped SSH connection does not stop it.
+
+```sh title="Builder"
+tmux new -s sinter
+```
+
+Inside `tmux`, run the following. `builder.yaml` is applied to the builder itself, as root (no `--host`).
+
+```sh title="Builder (inside tmux)"
+cd ~/sinter/examples/openstack
+sudo env HOME=/root /usr/local/bin/sinter apply builder.yaml 2>&1 | tee ~/builder-apply.log
+```
+
+If SSH disconnects, log in to the builder again and return with `tmux attach -t sinter`.
+
+With `| tee` the output is not a terminal, so Sinter shows no progress and prints the result at the end; nothing appears on the screen until then.
+To follow the progress, set `SINTER_PROGRESS=plain` inside the `env`, as in `sudo env HOME=/root SINTER_PROGRESS=plain /usr/local/bin/sinter apply builder.yaml 2>&1 | tee ~/builder-apply.log`, to get plain progress lines (in front of `sudo` it has no effect, because `sudo` clears the environment; see the [CLI reference](/en/reference/cli/#sinter_progress); not used in the acceptance).
+
+The acceptance ran the same `sinter apply builder.yaml` as root, with `systemd-run` instead of `tmux`.
+
+```text title="Success (end of the output; synthetic host name)"
+== Sinter APPLY ==
+target facts: hostname=rpm-builder os=Rocky Linux family=redhat version=10.2 arch=x86_64
+
+ok    preflight_os [command] known/normal
+CHANGED  pkg_epel_release [package] known/normal
+...
+CHANGED  build_rpms [command] known/normal
+CHANGED  repo_fixup [command] known/normal
+
+summary: 13 changed, 0 possible, 0 failed, 0 indeterminate, 20 total
+status: success
+```
+
+**How to tell it worked**: the last line is `status: success` and the summary says `0 failed`.
+The number of changed resources depends on the packages already in the image.
+
+If `build_rpms` fails, see [The RPM build fails](/en/tutorials/openstack-aio/troubleshooting/#the-rpm-build-fails).
+
+## 3-3. Check the build <Badge text="Run in acceptance" variant="success" />
+
+Never use an incomplete build. Check all of these (the last line is the hagistack commit the build used):
+
+```sh title="Builder"
+sudo test -f /var/lib/hagistack-build/build.ok && echo build-ok
+sudo test -s /root/rpmbuild/RPMS/repodata/repomd.xml && echo repodata-ok
+sudo sh -c 'ls /root/rpmbuild/RPMS/noarch/*.rpm | wc -l'
+sudo sh -c 'cd /root/rpmbuild/RPMS && bad=0; for f in noarch/*.rpm; do rpm -K --nosignature "$f" >/dev/null 2>&1 || { bad=$((bad+1)); echo "BAD $f"; }; done; echo "rpmK_bad=$bad"'
+sudo git -C /opt/hagistack-src rev-parse HEAD
+```
+
+```text title="Success (the RPM count is the acceptance's)"
+build-ok
+repodata-ok
+195
+rpmK_bad=0
+8225c50c0b283bcdce960d64f7f7dfe32f5afc1c
+```
+
+- `build-ok` is a stamp written only when the build script finished every pass and found the core packages.
+  A failed build can still leave a repository behind, so judge by this stamp.
+- `rpm -K --nosignature` checks the RPM digests. It is **not a signature check** (the RPMs are unsigned).
+- The last line is the hagistack commit the build used; it equals the value the recipe pins.
+
+## 3-4. Record the SHA-256 list <Badge text="Substituted" variant="caution" />
+
+Record the builder's SHA-256 list so that you can check the staged copy.
+
+```sh title="Builder"
+sudo sh -c 'cd /root/rpmbuild/RPMS && sha256sum noarch/*.rpm repodata/*' > ~/rpm-sha256.txt
+wc -l < ~/rpm-sha256.txt
+```
+
+```text title="Sample output (199 lines in the acceptance: 195 RPMs plus repodata)"
+199
+```
+
+The acceptance wrote the same list to a temporary file. This tutorial keeps it in the home directory, which is easier to use later.
+
+## 3-5. Stage the RPMs on the AIO node <Badge text="Run in acceptance" variant="success" />
+
+`tools/stage-rpm-repo.sh` reads `/root/rpmbuild/RPMS` on the builder over SSH and unpacks it into `/opt/hagistack-repo` on the AIO node.
+The builder names itself as `localhost` (that is why step 2 set up SSH to `localhost`).
+
+```sh title="Builder"
+cd ~/sinter/examples/openstack
+. ~/sinter-os.env
+bash tools/stage-rpm-repo.sh --from-builder localhost --host "$AIO_IP" --identity "$SSH_KEY"
+```
+
+```text title="Success (synthetic IP)"
+streaming localhost:/root/rpmbuild/RPMS -> 10.0.0.10:/opt/hagistack-repo ...
+repository in place: 195 RPMs, repodata present
+done. Next: edit site.yaml, run tools/gen-secrets.sh, then sinter validate / plan / apply all-in-one.yaml
+```
+
+This path has no integrity check of its own. Always run the next step.
+
+## 3-6. Verify SHA-256 on the AIO node <Badge text="Run in acceptance" variant="success" />
+
+```sh title="Builder"
+. ~/sinter-os.env
+scp -i "$SSH_KEY" ~/rpm-sha256.txt "$AIO_IP":rpm-sha256.txt
+ssh -i "$SSH_KEY" "$AIO_IP" 'cd /opt/hagistack-repo && sudo sha256sum -c ~/rpm-sha256.txt | grep -c ": OK$"; sudo sha256sum --quiet -c ~/rpm-sha256.txt && echo ALL-OK'
+```
+
+```text title="Success (the acceptance's count)"
+199
+ALL-OK
+```
+
+**How to tell it worked**: the first line equals the line count from 3-4, and `ALL-OK` is printed.
+A file that does not match is listed with `FAILED`, and `ALL-OK` is not printed. Then start again from 3-5.
+
+In the acceptance, all 199 entries of the same list matched on the AIO node (the `--quiet` check was added by this tutorial).
+
+<LinkCard title="Next: 4. Configure, plan, apply, audit" href="/en/tutorials/openstack-aio/deploy/" />

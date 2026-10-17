@@ -1,0 +1,280 @@
+---
+title: 動作確認と再起動
+description: OpenStack AIO チュートリアルの手順 5。Keystone、Nova、Neutron / OVN、Glance、Horizon の確認、CirrOS の起動と疎通、再起動後の再適用。
+sidebar:
+  label: 5. 動作確認と再起動
+---
+
+import { Aside, Badge, LinkCard } from '@astrojs/starlight/components';
+
+[SinterでOpenStack 2026.1を構築する](/ja/tutorials/openstack-aio/overview/) の手順 5 / 5 です。
+構築した OpenStack が動くことを確認し、AIO サーバーを再起動しても元に戻ることを確かめます。
+
+## 5-1. AIO サーバーで root のシェルを開く
+
+ビルダーから AIO サーバーにログインし、root になって管理者の認証情報を読み込みます。
+（操作端末から直接ログインしてもかまいません。）
+
+```sh title="ビルダー"
+. ~/sinter-os.env
+ssh -i "$SSH_KEY" "$AIO_IP"
+```
+
+```sh title="AIO サーバー"
+sudo -i
+```
+
+```sh title="AIO サーバー（root）"
+source /etc/sinter-openstack/admin-openrc
+```
+
+`/etc/sinter-openstack/admin-openrc` には admin のパスワードが含まれます（root だけが読めます）。中身を表示したり、コピーしたりしないでください。
+
+## 5-2. OpenStack のサービスを確認する <Badge text="受入で実行" variant="success" />
+
+```sh title="AIO サーバー（root）"
+openstack token issue -f value -c expires
+openstack endpoint list -f value -c "Service Name" -c Interface | sort
+openstack compute service list -f value -c Binary -c State -c Status
+openstack hypervisor list -f value -c "Hypervisor Type" -c State
+openstack network agent list -f value -c "Agent Type" -c Alive -c State
+ovn-sbctl list Chassis | grep -c '^name '
+openstack image list -f value -c Name -c Status
+openstack network list -f value -c Name
+```
+
+```text title="成功時の出力（受入時の値。時刻は合成値）"
+2026-10-17T14:30:00+0000
+glance admin
+glance internal
+glance public
+keystone admin
+keystone internal
+keystone public
+neutron admin
+neutron internal
+neutron public
+nova admin
+nova internal
+nova public
+placement admin
+placement internal
+placement public
+nova-conductor enabled up
+nova-scheduler enabled up
+nova-compute enabled up
+QEMU up
+OVN Metadata agent True True
+OVN Controller Gateway agent True True
+1
+cirros-0.6.3-x86_64 active
+hagistack-provider
+hagistack-tenant
+```
+
+| 確認項目 | 成功の判断 |
+|---|---|
+| Keystone の認証 | token の有効期限が表示される（token そのものは表示しない） |
+| API | 5 つのサービス × admin / internal / public の 15 行 |
+| Nova | conductor、scheduler、compute が `enabled up` |
+| ハイパーバイザー | 1 台が `up`（libvirt はタイプを `QEMU` と表示します。KVM で動いているかは 5-4 で確認します） |
+| Neutron / OVN | 2 つのエージェントが `True True`、OVN の chassis が 1 |
+| Glance | `cirros-0.6.3-x86_64` が `active`（レシピが SHA-256 を照合してから登録したもの） |
+| ネットワーク | `hagistack-provider` と `hagistack-tenant`（レシピが作成） |
+
+token の有効期限だけを表示する形は、このチュートリアルで加えたものです（受入では成否だけを記録しました）。
+
+## 5-3. Horizon を確認する
+
+### サーバーの内側から <Badge text="受入で実行" variant="success" />
+
+```sh title="AIO サーバー（root）"
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost/dashboard/auth/login/
+```
+
+```text title="成功時の出力"
+200
+```
+
+受入では、このログインページの取得に加えて、admin でのログイン（`302` で `/dashboard/` へ）と、
+ログイン後の「Overview - OpenStack Dashboard」の表示（`200`）を確認しました。
+
+### ブラウザから（SSH トンネル経由） <Badge text="未検証" variant="danger" />
+
+Horizon はインターネットに公開しません。ブラウザで見るときは、操作端末から SSH のポート転送を使います。
+
+```sh title="操作端末"
+ssh -N -L 8080:localhost:80 "<ユーザー名>@<AIO サーバーのアドレス>"
+```
+
+接続したまま、操作端末のブラウザで `http://localhost:8080/dashboard/` を開き、ユーザー名 `admin` と admin のパスワードでログインします。
+admin のパスワードは、AIO サーバーの root だけが読めるファイルにあります。
+
+```sh title="AIO サーバー（root）"
+grep '^ADMIN_PASSWORD=' /etc/sinter-openstack/secrets.env
+```
+
+<Aside type="caution">
+パスワードはブラウザへの入力にだけ使い、ほかの場所に貼らないでください。表示した値は端末のスクロールバックや `tmux` の履歴に残るため、表示した後は端末を閉じるか履歴を消してください。
+ブラウザからのアクセスは実機受入では確認していません。受入で確認したのは、サーバーの内側からの HTTP でのログインです。
+</Aside>
+
+## 5-4. CirrOS の仮想マシンを起動する <Badge text="受入で実行" variant="success" />
+
+レシピが作成したフレーバー `m1.tiny`、イメージ、テナントネットワーク、キーペア `hagistack-key` を使います。
+
+```sh title="AIO サーバー（root）"
+openstack server create --flavor m1.tiny --image cirros-0.6.3-x86_64 \
+  --network hagistack-tenant --key-name hagistack-key --wait demo-cirros
+openstack server show demo-cirros -f value -c status
+INST=$(openstack server show demo-cirros -f value -c OS-EXT-SRV-ATTR:instance_name)
+virsh dumpxml "$INST" | grep -o "domain type='[a-z]*'" | head -1
+```
+
+```text title="成功時の出力（最後の 2 行）"
+ACTIVE
+domain type='kvm'
+```
+
+**成功の判断**: `ACTIVE` で、`domain type='kvm'`（ソフトウェアエミュレーションではない）こと。
+`ACTIVE` にならないときは、[CirrOS が ACTIVE にならない](/ja/tutorials/openstack-aio/troubleshooting/#cirros-が-active-にならない)を見てください。
+
+受入では、仮想マシンの名前だけが違います。
+
+## 5-5. ping と SSH で疎通を確認する <Badge text="受入で実行" variant="success" />
+
+このレシピのプロバイダネットワークは実際の NIC につながっていないため、仮想マシンへは外から届きません。
+AIO サーバーの OVN メタデータ用のネットワーク名前空間から確認します。
+
+```sh title="AIO サーバー（root）"
+IP=$(openstack server show demo-cirros -f json -c addresses | python3 -c 'import json,sys; a=json.load(sys.stdin)["addresses"]; print([x for v in a.values() for x in v][0])')
+NS=$(ip netns list | awk '/^ovnmeta-/{print $1; exit}')
+echo "$IP $NS"
+ip netns exec "$NS" ping -c 3 -W 2 "$IP"
+```
+
+```text title="成功時の出力（最後の部分）"
+3 packets transmitted, 3 received, 0% packet loss, time 2003ms
+```
+
+SSH では、仮想マシンのコンソールに出たホスト鍵を使って、ホスト鍵を厳格に検査します。
+
+```sh title="AIO サーバー（root）"
+for i in $(seq 1 36); do openstack console log show demo-cirros | grep -q "BEGIN SSH HOST KEY KEYS" && break; sleep 5; done
+KH=$(mktemp)
+openstack console log show demo-cirros | sed -n '/BEGIN SSH HOST KEY KEYS/,/END SSH HOST KEY KEYS/p' | grep -E '^(ssh-|ecdsa-)' | sed "s/^/$IP /" > "$KH"
+ip netns exec "$NS" ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$KH" -o ConnectTimeout=10 \
+  -i /etc/sinter-openstack/hagistack-key cirros@"$IP" 'uname -sr; grep -m1 PRETTY /etc/os-release'
+rm -f "$KH"
+```
+
+```text title="成功時の出力"
+Linux 5.15.0-117-generic
+PRETTY_NAME="CirrOS 0.6.3"
+```
+
+`/etc/sinter-openstack/hagistack-key` は、レシピがキーペアを作ったときに保存した秘密鍵です（root だけが読めます）。
+
+## 5-6. AIO サーバーを再起動する <Badge text="受入で実行" variant="success" />
+
+```sh title="AIO サーバー"
+sudo systemctl reboot
+```
+
+数分待ってからログインし直し、サービスが戻ったことを確認します（受入では、再起動の要求から起動まで約 6 分かかりました）。
+
+```sh title="AIO サーバー"
+systemctl is-system-running
+systemctl --failed --no-legend | wc -l
+for s in sinter-openstack-repo mariadb rabbitmq-server memcached httpd openstack-glance-api \
+  openstack-nova-conductor openstack-nova-scheduler openstack-nova-compute \
+  neutron-rpc-server neutron-periodic-workers neutron-ovn-maintenance-worker \
+  openvswitch ovn-northd ovn-controller neutron-ovn-metadata-agent virtqemud.socket; do
+  printf '%-34s %s\n' "$s" "$(systemctl is-active "$s")"
+done
+```
+
+```text title="成功時の出力（抜粋）"
+running
+0
+sinter-openstack-repo              active
+mariadb                            active
+...
+virtqemud.socket                   active
+```
+
+**成功の判断**: `running`、失敗したユニットが `0`、すべて `active` であること。
+起動の直後は `starting` と表示されることがあります（受入でも 1 回目は `starting`、約 2 分後に `running`）。少し待ってからもう一度実行してください。
+
+## 5-7. 再起動後の CirrOS <Badge text="受入で実行" variant="success" />
+
+再起動でログインし直したので、もう一度 root になります。
+
+```sh title="AIO サーバー"
+sudo -i
+```
+
+```sh title="AIO サーバー（root）"
+source /etc/sinter-openstack/admin-openrc
+openstack server show demo-cirros -f value -c status
+```
+
+`SHUTOFF` と表示されたときは起動します（`ACTIVE` のときは不要です）。
+
+```sh title="AIO サーバー（root）"
+openstack server start demo-cirros
+```
+
+`ACTIVE` になったら、5-5 の ping と SSH をもう一度実行します（5-5 の最初のブロックが `IP` と `NS` を設定し直すので、最初のブロックから実行してください）。受入では、再起動後も `domain type='kvm'`、ping 0% loss、SSH 成功でした。
+（受入では、起動の前の状態は記録していません。）
+
+## 5-8. 再起動後の再 apply と audit <Badge text="受入で実行" variant="success" />
+
+ビルダーに戻り、もう一度 `apply` と `audit` を実行します。
+
+```sh title="ビルダー"
+cd ~/sinter/examples/openstack
+. ~/sinter-os.env
+sinter apply all-in-one.yaml --host "$AIO_IP" --user "$USER" --identity "$SSH_KEY" --sudo 2>&1 | tee ~/os-apply3.log
+sinter audit all-in-one.yaml --host "$AIO_IP" --user "$USER" --identity "$SSH_KEY" --sudo 2>&1 | tee ~/os-audit2.log
+```
+
+```text title="成功時の出力（各コマンドの最後の部分）"
+summary: 0 changed, 0 possible, 0 failed, 0 indeterminate, 172 total
+status: success
+...
+summary: 172 total, 81 compliant, 0 drifted, 91 not_auditable, 0 not_applicable, 0 errors
+status: no_drift
+```
+
+受入では、再起動の後も **0 changed** で、audit は `no_drift` でした。
+再起動で状態が戻らない設定（Open vSwitch の `system-id`、libvirt のモジュール型デーモンなど）は、受入の過程で見つけてレシピで修正済みです。
+
+## 後片付け
+
+- 仮想マシンが不要になったら削除します: `openstack server delete demo-cirros`（AIO サーバーの root で）。
+- ビルダーは使い捨てです。AIO サーバーを Sinter で管理し続けるときは、削除する前に `~/sinter/examples/openstack/secrets/` と、編集した `site.yaml` を安全な場所へ保管してください。
+  ほかの Linux ホストを Sinter の実行ホストにするときも、同じ `secrets/`、`site.yaml`、レシピの版（`b058d66`）を使います。
+- ビルダーを削除した後は、AIO サーバーの `authorized_keys` から、このチュートリアル用の鍵（コメントが `sinter-openstack` の行）を削除します（受入では VM ごと削除したため、このコマンドは実行していません）。
+
+```sh title="AIO サーバー"
+sed -i '/ sinter-openstack$/d' ~/.ssh/authorized_keys
+```
+- クラウドの課金を止めるには、クラウド側でサーバーを停止または削除してください。
+
+## ここまでで確認したこと
+
+| 項目 | 受入時の結果 |
+|---|---|
+| `builder.yaml` | 13 changed / 0 failed（約 41 分）、RPM 195 個、SHA-256 が 199 件一致 |
+| 初回 `apply` | 141 changed / 0 failed / 0 indeterminate（172 リソース、約 21 分） |
+| 2 回目の `apply` | 0 changed |
+| `audit` | 81 compliant / 0 drifted / 91 not_auditable |
+| 再起動後 | サービスが自動で復帰、`apply` 0 changed、`audit` no_drift |
+| OpenStack | Keystone、API 15 件、Nova、OVN、Glance、Horizon のログイン |
+| 仮想マシン | CirrOS 0.6.3 が KVM で `ACTIVE`、ping と SSH が成功（再起動後も） |
+
+まだ検証していないこと: controller と compute を別のホストに分けた構成、SELinux Enforcing、署名付きのリポジトリ、
+外部から届く仮想マシン（floating IP）、アップグレード、リリース版のバイナリ、外部のリポジトリが後日も同じ結果になるか。
+
+<LinkCard title="うまくいかないとき: 6. トラブルシューティング" href="/ja/tutorials/openstack-aio/troubleshooting/" />

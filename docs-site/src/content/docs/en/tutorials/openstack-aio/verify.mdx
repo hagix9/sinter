@@ -1,0 +1,280 @@
+---
+title: Verify and reboot
+description: Step 5 of the OpenStack AIO tutorial. Check Keystone, Nova, Neutron/OVN, Glance and Horizon, boot and reach CirrOS, reboot and re-apply.
+sidebar:
+  label: 5. Verify and reboot
+---
+
+import { Aside, Badge, LinkCard } from '@astrojs/starlight/components';
+
+Step 5 of 5 of [Build OpenStack 2026.1 with Sinter](/en/tutorials/openstack-aio/overview/).
+Check that the OpenStack you built works, and that it comes back after the AIO node reboots.
+
+## 5-1. Open a root shell on the AIO node
+
+Log in to the AIO node from the builder, become root and load the admin credentials.
+(Logging in directly from your terminal works too.)
+
+```sh title="Builder"
+. ~/sinter-os.env
+ssh -i "$SSH_KEY" "$AIO_IP"
+```
+
+```sh title="AIO node"
+sudo -i
+```
+
+```sh title="AIO node (root)"
+source /etc/sinter-openstack/admin-openrc
+```
+
+`/etc/sinter-openstack/admin-openrc` contains the admin password (readable by root only). Do not print or copy its content.
+
+## 5-2. Check the OpenStack services <Badge text="Run in acceptance" variant="success" />
+
+```sh title="AIO node (root)"
+openstack token issue -f value -c expires
+openstack endpoint list -f value -c "Service Name" -c Interface | sort
+openstack compute service list -f value -c Binary -c State -c Status
+openstack hypervisor list -f value -c "Hypervisor Type" -c State
+openstack network agent list -f value -c "Agent Type" -c Alive -c State
+ovn-sbctl list Chassis | grep -c '^name '
+openstack image list -f value -c Name -c Status
+openstack network list -f value -c Name
+```
+
+```text title="Success (the acceptance's values; synthetic time)"
+2026-10-17T14:30:00+0000
+glance admin
+glance internal
+glance public
+keystone admin
+keystone internal
+keystone public
+neutron admin
+neutron internal
+neutron public
+nova admin
+nova internal
+nova public
+placement admin
+placement internal
+placement public
+nova-conductor enabled up
+nova-scheduler enabled up
+nova-compute enabled up
+QEMU up
+OVN Metadata agent True True
+OVN Controller Gateway agent True True
+1
+cirros-0.6.3-x86_64 active
+hagistack-provider
+hagistack-tenant
+```
+
+| Check | How to tell it worked |
+|---|---|
+| Keystone authentication | the token's expiry is printed (the token itself is not) |
+| APIs | 15 lines: 5 services × admin / internal / public |
+| Nova | conductor, scheduler and compute are `enabled up` |
+| Hypervisor | one is `up` (libvirt reports the type as `QEMU`; 5-4 checks that it runs under KVM) |
+| Neutron / OVN | both agents `True True`, 1 OVN chassis |
+| Glance | `cirros-0.6.3-x86_64` is `active` (the recipe checked its SHA-256 before uploading it) |
+| Networks | `hagistack-provider` and `hagistack-tenant` (created by the recipe) |
+
+Printing only the token's expiry was added by this tutorial (the acceptance recorded only success or failure).
+
+## 5-3. Check Horizon
+
+### From inside the server <Badge text="Run in acceptance" variant="success" />
+
+```sh title="AIO node (root)"
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost/dashboard/auth/login/
+```
+
+```text title="Success"
+200
+```
+
+Besides loading this login page, the acceptance logged in as admin (`302` to `/dashboard/`)
+and loaded "Overview - OpenStack Dashboard" after the login (`200`).
+
+### From a browser (through an SSH tunnel) <Badge text="Unverified" variant="danger" />
+
+Horizon is not exposed to the internet. To see it in a browser, use SSH port forwarding from your terminal.
+
+```sh title="Your terminal"
+ssh -N -L 8080:localhost:80 "<user>@<AIO node address>"
+```
+
+While it is connected, open `http://localhost:8080/dashboard/` in your terminal's browser and log in as user `admin` with the admin password.
+The admin password is in a file only root can read on the AIO node:
+
+```sh title="AIO node (root)"
+grep '^ADMIN_PASSWORD=' /etc/sinter-openstack/secrets.env
+```
+
+<Aside type="caution">
+Use the password only to type it into the browser; do not paste it anywhere else. The printed value stays in the terminal's scrollback and in `tmux` history, so close the terminal or clear the history afterwards.
+Browser access was not checked in the real-host acceptance. The acceptance checked the HTTP login from inside the server.
+</Aside>
+
+## 5-4. Boot a CirrOS guest <Badge text="Run in acceptance" variant="success" />
+
+This uses the flavor `m1.tiny`, the image, the tenant network and the key pair `hagistack-key`, all created by the recipe.
+
+```sh title="AIO node (root)"
+openstack server create --flavor m1.tiny --image cirros-0.6.3-x86_64 \
+  --network hagistack-tenant --key-name hagistack-key --wait demo-cirros
+openstack server show demo-cirros -f value -c status
+INST=$(openstack server show demo-cirros -f value -c OS-EXT-SRV-ATTR:instance_name)
+virsh dumpxml "$INST" | grep -o "domain type='[a-z]*'" | head -1
+```
+
+```text title="Success (last two lines)"
+ACTIVE
+domain type='kvm'
+```
+
+**How to tell it worked**: `ACTIVE` and `domain type='kvm'` (not software emulation).
+If it does not become `ACTIVE`, see [CirrOS does not become ACTIVE](/en/tutorials/openstack-aio/troubleshooting/#cirros-does-not-become-active).
+
+Only the guest's name differs from the acceptance.
+
+## 5-5. Reach the guest with ping and SSH <Badge text="Run in acceptance" variant="success" />
+
+The provider network of these recipes is not attached to a real NIC, so the guest is not reachable from outside.
+Check it from the OVN metadata network namespace on the AIO node.
+
+```sh title="AIO node (root)"
+IP=$(openstack server show demo-cirros -f json -c addresses | python3 -c 'import json,sys; a=json.load(sys.stdin)["addresses"]; print([x for v in a.values() for x in v][0])')
+NS=$(ip netns list | awk '/^ovnmeta-/{print $1; exit}')
+echo "$IP $NS"
+ip netns exec "$NS" ping -c 3 -W 2 "$IP"
+```
+
+```text title="Success (end of the output)"
+3 packets transmitted, 3 received, 0% packet loss, time 2003ms
+```
+
+For SSH, check the host key strictly against the keys the guest printed on its console.
+
+```sh title="AIO node (root)"
+for i in $(seq 1 36); do openstack console log show demo-cirros | grep -q "BEGIN SSH HOST KEY KEYS" && break; sleep 5; done
+KH=$(mktemp)
+openstack console log show demo-cirros | sed -n '/BEGIN SSH HOST KEY KEYS/,/END SSH HOST KEY KEYS/p' | grep -E '^(ssh-|ecdsa-)' | sed "s/^/$IP /" > "$KH"
+ip netns exec "$NS" ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$KH" -o ConnectTimeout=10 \
+  -i /etc/sinter-openstack/hagistack-key cirros@"$IP" 'uname -sr; grep -m1 PRETTY /etc/os-release'
+rm -f "$KH"
+```
+
+```text title="Success"
+Linux 5.15.0-117-generic
+PRETTY_NAME="CirrOS 0.6.3"
+```
+
+`/etc/sinter-openstack/hagistack-key` is the private key the recipe saved when it created the key pair (readable by root only).
+
+## 5-6. Reboot the AIO node <Badge text="Run in acceptance" variant="success" />
+
+```sh title="AIO node"
+sudo systemctl reboot
+```
+
+Wait a few minutes, log in again and check that the services came back (in the acceptance, the boot finished about 6 minutes after the reboot request).
+
+```sh title="AIO node"
+systemctl is-system-running
+systemctl --failed --no-legend | wc -l
+for s in sinter-openstack-repo mariadb rabbitmq-server memcached httpd openstack-glance-api \
+  openstack-nova-conductor openstack-nova-scheduler openstack-nova-compute \
+  neutron-rpc-server neutron-periodic-workers neutron-ovn-maintenance-worker \
+  openvswitch ovn-northd ovn-controller neutron-ovn-metadata-agent virtqemud.socket; do
+  printf '%-34s %s\n' "$s" "$(systemctl is-active "$s")"
+done
+```
+
+```text title="Success (excerpt)"
+running
+0
+sinter-openstack-repo              active
+mariadb                            active
+...
+virtqemud.socket                   active
+```
+
+**How to tell it worked**: `running`, `0` failed units, and every unit `active`.
+Right after the boot it can say `starting` (in the acceptance the first check said `starting` and the one about two minutes later `running`). Wait a little and run it again.
+
+## 5-7. CirrOS after the reboot <Badge text="Run in acceptance" variant="success" />
+
+You logged in again after the reboot, so become root again:
+
+```sh title="AIO node"
+sudo -i
+```
+
+```sh title="AIO node (root)"
+source /etc/sinter-openstack/admin-openrc
+openstack server show demo-cirros -f value -c status
+```
+
+If it says `SHUTOFF`, start it (not needed when it is `ACTIVE`):
+
+```sh title="AIO node (root)"
+openstack server start demo-cirros
+```
+
+Once it is `ACTIVE`, run the ping and SSH of 5-5 again (start with its first block, which sets `IP` and `NS` again). In the acceptance, after the reboot it was still `domain type='kvm'`, ping 0% loss and SSH succeeded.
+(The acceptance did not record the state before starting it.)
+
+## 5-8. Re-apply and audit after the reboot <Badge text="Run in acceptance" variant="success" />
+
+Back on the builder, run `apply` and `audit` again.
+
+```sh title="Builder"
+cd ~/sinter/examples/openstack
+. ~/sinter-os.env
+sinter apply all-in-one.yaml --host "$AIO_IP" --user "$USER" --identity "$SSH_KEY" --sudo 2>&1 | tee ~/os-apply3.log
+sinter audit all-in-one.yaml --host "$AIO_IP" --user "$USER" --identity "$SSH_KEY" --sudo 2>&1 | tee ~/os-audit2.log
+```
+
+```text title="Success (end of each command's output)"
+summary: 0 changed, 0 possible, 0 failed, 0 indeterminate, 172 total
+status: success
+...
+summary: 172 total, 81 compliant, 0 drifted, 91 not_auditable, 0 not_applicable, 0 errors
+status: no_drift
+```
+
+In the acceptance it was still **0 changed** after the reboot, and audit reported `no_drift`.
+Settings that did not survive a reboot (the Open vSwitch `system-id`, libvirt's modular daemons and others) were found during the acceptance work and fixed in the recipes.
+
+## Cleaning up
+
+- Delete the guest when you no longer need it: `openstack server delete demo-cirros` (as root on the AIO node).
+- The builder is disposable. If you keep managing the AIO node with Sinter, store `~/sinter/examples/openstack/secrets/` and your edited `site.yaml` somewhere safe before you delete it.
+  Another Linux host can become the Sinter controller with the same `secrets/`, `site.yaml` and recipe version (`b058d66`).
+- After deleting the builder, remove this tutorial's key (the line whose comment is `sinter-openstack`) from `authorized_keys` on the AIO node (not run in the acceptance, which deleted the VMs):
+
+```sh title="AIO node"
+sed -i '/ sinter-openstack$/d' ~/.ssh/authorized_keys
+```
+- To stop paying for the servers, stop or delete them on your cloud.
+
+## What you have checked
+
+| Item | Acceptance result |
+|---|---|
+| `builder.yaml` | 13 changed / 0 failed (about 41 minutes), 195 RPMs, 199 SHA-256 entries matched |
+| First `apply` | 141 changed / 0 failed / 0 indeterminate (172 resources, about 21 minutes) |
+| Second `apply` | 0 changed |
+| `audit` | 81 compliant / 0 drifted / 91 not_auditable |
+| After a reboot | services back on their own, `apply` 0 changed, `audit` no_drift |
+| OpenStack | Keystone, 15 API endpoints, Nova, OVN, Glance, Horizon login |
+| Guest | CirrOS 0.6.3 `ACTIVE` under KVM, ping and SSH succeed (also after the reboot) |
+
+Not verified yet: controller and compute on separate hosts, SELinux Enforcing, signed repositories,
+externally reachable guests (floating IPs), upgrades, the release binary, and whether the external repositories give the same result later.
+
+<LinkCard title="If something fails: 6. Troubleshooting" href="/en/tutorials/openstack-aio/troubleshooting/" />

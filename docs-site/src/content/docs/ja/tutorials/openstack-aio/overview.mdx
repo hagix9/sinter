@@ -1,0 +1,174 @@
+---
+title: SinterでOpenStack 2026.1を構築する
+description: Sinter の公式レシピで、Rocky Linux 10.2 に OpenStack 2026.1 All-in-One を構築する実践チュートリアル。完成イメージ、構成図、必要な環境、全体の流れ。
+sidebar:
+  label: 1. 完成イメージと構成
+---
+
+import { Aside, Badge, LinkCard, Steps } from '@astrojs/starlight/components';
+import OpenStackTopology from '../../../../../components/tutorial/OpenStackTopology.astro';
+
+このチュートリアルでは、Sinter の公式レシピ
+[`examples/openstack/`](https://github.com/hagix9/sinter/tree/main/examples/openstack) を使い、
+Rocky Linux 10.2 の 1 台のサーバーに **OpenStack 2026.1（Gazpacho）の All-in-One（AIO）** を構築します。
+コマンドは、上から順にコピーして実行できる形で載せています。
+
+<Aside type="caution" title="検証・デモ用の構成です">
+このレシピは Sinter を実際のワークロードで評価するためのもので、本番運用向けの安全強化はしていません。
+SELinux は permissive、RPM は無署名で `gpgcheck=0` です。
+OpenStack の API と Horizon をインターネットに公開しないでください。
+詳しくは[セキュリティ上の制限](#セキュリティ上の制限)を読んでから始めてください。
+</Aside>
+
+## 完成イメージ
+
+最後まで進めると、次の状態になります。
+
+- **Keystone で認証できる**: `openstack token issue` が成功する。
+- **Nova、Neutron（OVN）、Glance、Placement、Keystone の API が動く**: エンドポイントが 15 件（各サービスの admin、internal、public）。
+- **KVM の上で仮想マシンが動く**: CirrOS 0.6.3 が `ACTIVE` になり、libvirt の domain type が `kvm`。
+- **仮想マシンに届く**: ping が 0% loss、SSH でログインできる（ホスト鍵を検査）。
+- **Horizon で管理できる**: ログインページが表示され、admin でログインできる。
+- **Sinter で管理し続けられる**: 2 回目の `apply` が 0 changed、`audit` が `no_drift`。再起動後も同じ。
+
+確認のしかたは手順 5 で説明します。
+
+いずれも 2026-10-17 に実機（GCE、Rocky Linux 10.2）で確認した結果です。
+Horizon の画面のスクリーンショットは保存していないため、このチュートリアルには載せていません。
+
+## 構成図
+
+<OpenStackTopology locale="ja" />
+
+- **操作端末（あなたの PC）**: ビルダーと AIO サーバーに SSH でログインして作業します。Sinter を入れる必要はありません。
+- **RPM ビルダー兼 Sinter 実行ホスト**: 使い捨ての Rocky Linux 10.2 です。
+  - `sinter apply builder.yaml` を自分自身に（ローカルで、root として）実行し、OpenStack の RPM をビルドします。
+  - ① `tools/stage-rpm-repo.sh` で、RPM を SSH 経由で AIO サーバーの `/opt/hagistack-repo` へ転送します。
+  - ② `sinter plan / apply / audit all-in-one.yaml` を、SSH と `sudo` で AIO サーバーに実行します。生成した秘密情報（`secrets/`）もここに置きます。
+- **OpenStack AIO サーバー**: OpenStack のすべてのサービスが動きます。
+  転送された RPM は `127.0.0.1:8088` のローカルリポジトリとして配信され、そこからインストールされます。
+  CirrOS の仮想マシンは KVM の上でテナントネットワークにつながります。
+- **インターネット**: ビルダーはソースと依存パッケージを、AIO サーバーは Rocky、EPEL、NFV SIG、RDO のパッケージと CirrOS のイメージを取得します。
+
+この配置（ビルダーが Sinter の実行ホストを兼ねる）は、実機受入で使った構成と同じです。
+
+## 必要な環境
+
+### サーバー
+
+**AIO サーバー**
+
+- OS: **Rocky Linux 10.2 x86_64（必須）**
+- CPU / メモリ / ディスク: 4 vCPU / 16 GB / 空き約 50 GB 以上（最低限の目安）
+- 仮想化: **`/dev/kvm` が使えること（必須）**。クラウドでは nested virtualization を有効にする
+- ネットワーク: インターネットへの外向き通信、ビルダーからの SSH
+- その他: `dnf-plugins-core`、`attr`（`getfattr`）、パスワードなしの `sudo`
+
+**RPM ビルダー**
+
+- OS: **Rocky Linux 10.2 x86_64（必須）**
+- CPU / メモリ / ディスク: AIO サーバーと同程度
+- 仮想化: 不要
+- ネットワーク: インターネットへの外向き通信
+- その他: パスワードなしの `sudo`、`openssl`（秘密の生成）。**使い捨てにする**（OpenStack のノードと兼用しない）
+
+- 受入では、両方とも GCE の `n2-standard-4`（4 vCPU / 16 GB）と 60 GB の balanced ディスクを使いました。AIO サーバーは nested virtualization を有効にしました。
+- メモリとディスクの量は、レシピの事前チェック（preflight）では検査しません。足りないと途中で失敗します。
+- このチュートリアルでは、**ビルダーと AIO サーバーに同じユーザー名でログインできる**ことを前提にします（受入と同じ）。
+
+### 事前チェックで確認される項目（必須）
+
+AIO サーバーへの `apply` は、何かを変更する前に次を確認し、1 つでも合わなければ止まります。
+
+- OS が Rocky Linux 10.x の x86_64 であること
+- `hostname -s` が、設定ファイルの `os_hostname` と同じであること
+- 設定ファイルの `mgmt_ip` が、AIO サーバーのいずれかのインターフェースに付いていること
+- `/dev/kvm` が読めること（`virt_type: kvm` のとき）
+- `dnf-plugins-core` が入っていること
+
+### ネットワーク
+
+- **操作端末 → ビルダー、AIO サーバー（SSH）**: 作業とログイン。
+- **ビルダー → AIO サーバー（SSH、TCP 22、内部ネットワーク）**: RPM の転送と Sinter の実行。
+- **ビルダー → インターネット（HTTPS）**: GitHub（hagistack と Sinter）、Rust のツールチェーンと crate、OpenStack のソース、RDO、EPEL、Rocky のリポジトリ。
+- **AIO サーバー → インターネット（HTTPS）**: Rocky、EPEL、CentOS Stream NFV SIG、RDO のリポジトリ、CirrOS のイメージ。
+
+OpenStack の API と Horizon への接続は、インターネットから受け付けないでください。
+受入でも、クラウド側のファイアウォールは SSH、ICMP、VPC 内部の通信だけを許可し、確認はサーバーの内側から行いました。
+
+### Sinter
+
+レシピが使う機能の上では Sinter v1.5.0 以降が必要です。
+このチュートリアルでは、受入と同じソースからビルドする方法を主に説明します（手順 2）。
+
+## 全体の流れ
+
+<Steps>
+
+1. **完成イメージと構成**（このページ）: 完成した状態、構成、必要な環境、安全上の制限を確認します。
+2. **[ホストと Sinter の準備](/ja/tutorials/openstack-aio/prepare/)**: サーバーを確認し、ビルダーに Sinter を入れ、SSH の鍵を用意します。
+3. **[RPM のビルドと転送](/ja/tutorials/openstack-aio/build-rpms/)**: `builder.yaml` で RPM をビルドし（約 40〜60 分）、AIO サーバーへ転送して SHA-256 を照合します。
+4. **[設定と plan / apply / audit](/ja/tutorials/openstack-aio/deploy/)**: 設定と秘密情報を用意し、OpenStack を構築します（初回 apply は約 21 分）。
+5. **[動作確認と再起動](/ja/tutorials/openstack-aio/verify/)**: OpenStack と CirrOS の動作を確認し、再起動後に再適用します。
+6. **[トラブルシューティング](/ja/tutorials/openstack-aio/troubleshooting/)**: うまくいかないときの確認方法です。
+
+</Steps>
+
+## 表示の見方
+
+各コードブロックの見出しは、**そのコマンドを実行するホスト**を表します。
+
+| 見出し | 実行する場所 |
+|---|---|
+| `操作端末` | あなたの PC |
+| `ビルダー` | RPM ビルダー兼 Sinter 実行ホスト（一般ユーザー。`sudo` が付いたものだけ root で動く） |
+| `AIO サーバー` | OpenStack AIO サーバー（一般ユーザー） |
+| `AIO サーバー（root）` | AIO サーバーで `sudo -i` した root のシェル |
+
+各手順の見出しの横のラベルは、そのコマンドの根拠を表します。
+
+| ラベル | 意味 |
+|---|---|
+| <Badge text="受入で実行" variant="success" /> | 2026-10-17 の実機受入で、同等のコマンドを実行して成功した（IP、ユーザー名、鍵と known_hosts のパス、ログの保存先などは置き換えている） |
+| <Badge text="置き換え" variant="caution" /> | 受入で使ったクラウド専用の操作を、一般的な手順に置き換えた。実機受入では、この形では実行していない |
+| <Badge text="レシピの記載" variant="note" /> | 公開レシピとその README から確認できる手順 |
+| <Badge text="未検証" variant="danger" /> | 実機で確認していない |
+
+出力例は受入時の値で、ホスト名、IP アドレス、時刻は合成値に置き換えています。
+件数（RPM の数や changed の数）は参考値で、どの環境でも同じになるとは限りません。
+
+## 受入した版と、このチュートリアルの版
+
+| 項目 | 値 |
+|---|---|
+| チュートリアルが使う版 | Sinter リポジトリの commit `b058d663ad329b85e52f3d86bb0d096d7b63585c`（OpenStack レシピの公開 commit `c5fe8aa` に、秘密生成スクリプトの修正を加えたもの） |
+| 実機受入で使った Sinter | `3643945`（v1.5.1 の後の main。`b058d66` と製品のソースは同じ） |
+| 実機受入で使ったレシピ | 公開前の `0558b7b` |
+| 違い | 2 か所あり、どちらもテストで確認していますが、**実機では実行していません**。(1) Keystone の鍵を作るステップの出力の扱い（`files/ensure.sh`）。初回 apply の changed の数が受入時より 2 件多くなる見込みです。(2) 秘密を生成する `tools/gen-secrets.sh` が、空や不完全な秘密を書かないようにしました（ビルダーで動くもので、AIO サーバーへの適用内容は変わりません） |
+
+## セキュリティ上の制限
+
+このレシピは移植元の hagistack の選択をそのまま引き継いでおり、本番向けの安全な既定値ではありません。
+
+- **SELinux を permissive にします**（実行時と起動時）。Enforcing では検証していません。
+- **OpenStack の RPM は無署名**で、自前ビルド、NFV SIG、RDO のリポジトリは `gpgcheck=0` です。
+  `rpm -K --nosignature` はダイジェストの検査であり、**署名の検証ではありません**。
+  ビルダーと AIO サーバーの間の整合性は SHA-256 で確認します（手順 3）。
+- **firewalld はイメージの既定のまま**にします。受入に使ったクラウドのイメージでは既定のゾーンが `trusted` で、
+  ホストのファイアウォールはすべてのポートを受け付けていました。
+- **すべてのサービスが管理ネットワークで待ち受けます**。同じ VPC のほかのホストなど、管理アドレスに届くものからは
+  MariaDB、RabbitMQ、API、Horizon に到達できます。AIO サーバーは隔離されたネットワークに置いてください。
+- ローカルの RPM リポジトリ（127.0.0.1）など、一部のローカルの待ち受けには認証がありません。
+- **秘密情報**はビルダーの `secrets/`（Git の管理外）に生成し、AIO サーバーでは root だけが読めるファイルに書きます。
+  `secrets.example/` は CI 用の合成値で、**絶対に使わないでください**。
+- 本番運用に必要な TLS、ファイアウォール、アクセス制御、冗長化は含みません。
+
+## RPM の扱い
+
+OpenStack 2026.1 の EL10 向け RPM はどこからも配布されておらず、**このプロジェクトも RPM を配布しません**。
+手順 3 で、使い捨てのビルダーで公開ソースから自分でビルドします（README の「方式 B」）。
+ビルドした RPM には、それぞれのライセンスで同梱される第三者のコードが含まれます。
+ライセンスを確認しないまま再配布しないでください。
+取得元とライセンスの詳細は、レシピの [README](https://github.com/hagix9/sinter/blob/main/examples/openstack/README.md#sources-and-licenses) を参照してください。
+
+<LinkCard title="次へ: 2. ホストと Sinter の準備" href="/ja/tutorials/openstack-aio/prepare/" />

@@ -188,6 +188,13 @@ Complete recipes for Rocky Linux / RHEL 8, 9 and 10 live in
 | `signed-repo.yaml` | Any signed RPM repository: key file, repository file, package |
 | `apache-htpasswd.yaml` | httpd with Basic authentication: the package-created `apache` account declared first, a secret htpasswd file, a config file validated by `httpd -t` |
 
+## OpenStack 2026.1 all-in-one
+
+[`examples/openstack/`](https://github.com/hagix9/sinter/tree/main/examples/openstack) builds OpenStack 2026.1
+on one Rocky Linux 10.2 host (a verification and demo setup, not hardened for production). The
+[OpenStack tutorial](/en/tutorials/openstack-aio/overview/) walks through it step by step, with the commands
+of the 2026-10-17 real-host acceptance.
+
 :::note[Official recipe collections]
 Curated recipe collections (for example a `linux-baseline` set) are a future
 product improvement and do not exist yet — this page documents only what

@@ -1,0 +1,210 @@
+---
+title: Prepare hosts and Sinter
+description: Step 2 of the OpenStack AIO tutorial. Check the all-in-one node, install Sinter on the builder, set up the SSH key and known_hosts.
+sidebar:
+  label: 2. Prepare hosts and Sinter
+---
+
+import { Aside, Badge, LinkCard, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Step 2 of 5 of [Build OpenStack 2026.1 with Sinter](/en/tutorials/openstack-aio/overview/).
+Here you check the two servers, install Sinter on the builder and make the builder able to reach the AIO node over SSH.
+
+## 2-1. Create the servers <Badge text="Substituted" variant="caution" />
+
+Create two Rocky Linux 10.2 x86_64 servers on your cloud or virtualization platform.
+How to do that depends on the platform, so only the conditions are given here (see [Requirements](/en/tutorials/openstack-aio/overview/#requirements)).
+
+- **AIO node**: 4 vCPUs / 16 GB / about 50 GB free or more. **Enable nested virtualization.**
+- **Builder**: about the same size; something you can delete afterwards.
+- On both, you can log in over SSH with **the same user name**, and that user can use `sudo` without a password.
+- SSH (TCP 22) from the builder reaches the AIO node on the internal network.
+- Both have outbound internet access.
+
+The acceptance created them on GCE (`n2-standard-4`, the Rocky Linux 10.2 image, a 60 GB disk, nested virtualization on the AIO node).
+
+## 2-2. Check the AIO node <Badge text="Run in acceptance" variant="success" />
+
+Log in to the AIO node from your terminal and run:
+
+```sh title="AIO node"
+hostname -s
+ip -4 -o addr show
+grep PRETTY /etc/os-release; uname -m
+ls -l /dev/kvm; grep -cE 'vmx|svm' /proc/cpuinfo
+rpm -q dnf-plugins-core
+test -x /usr/bin/getfattr && echo getfattr-ok
+sudo -n true && echo sudo-ok
+```
+
+```text title="Sample output (synthetic host name and IP)"
+osdemo1
+1: lo    inet 127.0.0.1/8 scope host lo ...
+2: eth0    inet 10.0.0.10/32 ... scope global dynamic eth0 ...
+PRETTY_NAME="Rocky Linux 10.2 (Red Quartz)"
+x86_64
+crw-rw-rw-. 1 root kvm 10, 232 ... /dev/kvm
+4
+dnf-plugins-core-...
+getfattr-ok
+sudo-ok
+```
+
+The `ip`, `getfattr` and `sudo` checks were added by this tutorial (the acceptance checked these in other ways).
+
+- Note **the value of `hostname -s`** (for example `osdemo1`) and **the internal IPv4 address** (for example `10.0.0.10`). Step 4 writes them into the settings file.
+- If `/dev/kvm` is missing or the `vmx|svm` count is 0, nested virtualization is not enabled.
+  See [Troubleshooting](/en/tutorials/openstack-aio/troubleshooting/#devkvm-is-not-available).
+- Without `dnf-plugins-core`, run `sudo dnf -y install dnf-plugins-core`; without `getfattr-ok`, run
+  `sudo dnf -y install attr` (`attr` is a [Sinter requirement](/en/getting-started/installation/#managed-host-requirements)).
+
+## 2-3. Create a settings file on the builder <Badge text="Substituted" variant="caution" />
+
+From here on, log in to the **builder** from your terminal.
+Put the values the later steps use into one file.
+**Replace `AIO_IP` and `AIO_HOSTNAME` with the values you noted in 2-2.**
+
+```sh title="Builder"
+cat > ~/sinter-os.env <<'EOF'
+AIO_IP=10.0.0.10  # the AIO node's internal IPv4 address (replace)
+AIO_HOSTNAME=osdemo1  # the AIO node's hostname -s (replace)
+SSH_KEY="$HOME/.ssh/sinter_os_ed25519"
+EOF
+vi ~/sinter-os.env
+. ~/sinter-os.env && echo "$AIO_IP $AIO_HOSTNAME $SSH_KEY"
+```
+
+In every new shell, run `. ~/sinter-os.env` first.
+
+## 2-4. Get the Sinter source <Badge text="Substituted" variant="caution" />
+
+The recipes are part of the Sinter repository. Check out the commit this tutorial is written for.
+
+```sh title="Builder"
+sudo dnf -y install git tar tmux attr openssl
+git clone https://github.com/hagix9/sinter.git ~/sinter
+cd ~/sinter
+git checkout --detach b058d663ad329b85e52f3d86bb0d096d7b63585c
+git log -1 --format='%H %s'
+```
+
+```text title="Success (last line)"
+b058d663ad329b85e52f3d86bb0d096d7b63585c examples(openstack): gen-secrets never writes empty or partial secrets
+```
+
+Instead of `git clone`, the acceptance copied a tar of the source with the accepted recipe (`0558b7b`); its product source (`src/` and so on) is the same as `b058d66`'s. `tmux` keeps long commands running if SSH disconnects (the acceptance used another method). `attr` (`getfattr`) is a Sinter requirement for applying `builder.yaml` to the builder itself; `openssl` generates the secrets in step 4 (the acceptance image had both).
+
+## 2-5. Install Sinter
+
+<Tabs>
+<TabItem label="Build from source (as accepted)">
+
+<Badge text="Run in acceptance" variant="success" /> Build the `b058d66` source with Rust 1.98.1. The acceptance built the same product source the same way (about 1 minute 20 seconds).
+
+```sh title="Builder"
+sudo dnf -y install gcc openssl-devel
+curl -sSf https://sh.rustup.rs -o /tmp/rustup.sh
+sh /tmp/rustup.sh -y -q --profile minimal --default-toolchain 1.98.1
+. "$HOME/.cargo/env"
+cd ~/sinter
+cargo build --locked --release
+sudo install -m 0755 target/release/sinter /usr/local/bin/sinter
+sinter --version
+```
+
+```text title="Success (last line)"
+sinter 1.5.1
+```
+
+</TabItem>
+<TabItem label="Release binary (unverified)">
+
+<Badge text="Unverified" variant="danger" /> Install the v1.5.1 binary with the official installer.
+It meets the recipes' requirement (v1.5.0 or later), but **these recipes have not been applied to a real host with the v1.5.1 release binary**.
+For the installer, see [Installation](/en/getting-started/installation/).
+
+```sh title="Builder"
+curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
+sudo install -m 0755 "$HOME/.local/bin/sinter" /usr/local/bin/sinter
+sinter --version
+```
+
+</TabItem>
+</Tabs>
+
+`builder.yaml` runs as root, so the binary goes to `/usr/local/bin/sinter`, which `sudo` can always call by its full path
+(Rocky Linux's `sudo` does not include `/usr/local/bin` in its `PATH`).
+
+## 2-6. Create the SSH key <Badge text="Run in acceptance" variant="success" />
+
+Create a key for this tutorial on the builder. It is used to connect from the builder to the AIO node, and to the builder
+itself when the RPMs are staged.
+
+```sh title="Builder"
+. ~/sinter-os.env
+test -f "$SSH_KEY" || ssh-keygen -q -t ed25519 -N "" -C sinter-openstack -f "$SSH_KEY"
+(umask 077; cat "$SSH_KEY.pub" >> ~/.ssh/authorized_keys)
+cat "$SSH_KEY.pub"
+```
+
+Step 2-7 registers the line printed last (`ssh-ed25519 AAAA… sinter-openstack`) on the AIO node.
+
+## 2-7. Register the public key on the AIO node <Badge text="Substituted" variant="caution" />
+
+Log in to the AIO node from your terminal and add the line printed in 2-6 to `authorized_keys`:
+
+```sh title="AIO node"
+umask 077; mkdir -p ~/.ssh
+echo '<the public key line printed on the builder>' >> ~/.ssh/authorized_keys
+```
+
+<Aside type="note">
+The acceptance appended the same line through the cloud's SSH tooling.
+If your cloud manages keys with something other than `authorized_keys` (OS Login, for example), register the public key that way.
+</Aside>
+
+## 2-8. Register the host keys <Badge text="Substituted" variant="caution" />
+
+Sinter refuses unknown host keys and never adds them by itself.
+Add the host keys of the AIO node and of the builder itself (`localhost`) to `~/.ssh/known_hosts` on the builder.
+Check the AIO node's fingerprint before you add its key.
+
+```sh title="Builder"
+. ~/sinter-os.env
+ssh-keyscan -t ed25519 "$AIO_IP" 2>/dev/null > ~/aio-hostkey.txt
+ssh-keygen -lf ~/aio-hostkey.txt
+```
+
+```sh title="AIO node"
+ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+```
+
+Add the key only if the two `SHA256:…` values match. If they do not, do not add it; check what you are connecting to.
+
+```sh title="Builder"
+cat ~/aio-hostkey.txt >> ~/.ssh/known_hosts
+ssh-keyscan -t ed25519 localhost 2>/dev/null >> ~/.ssh/known_hosts
+rm ~/aio-hostkey.txt
+```
+
+The acceptance added the keys fetched with `ssh-keyscan`. The fingerprint check is an addition of this tutorial.
+
+## 2-9. Check the connections <Badge text="Run in acceptance" variant="success" />
+
+```sh title="Builder"
+. ~/sinter-os.env
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$SSH_KEY" "$AIO_IP" 'hostname -s; sudo -n true && echo sudo-ok'
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$SSH_KEY" localhost 'sudo -n true && echo sudo-ok'
+```
+
+```text title="Success"
+osdemo1
+sudo-ok
+sudo-ok
+```
+
+The first line is the AIO node's host name and should equal `AIO_HOSTNAME`.
+If you are asked for a password, see `Host key verification failed`, or get no `sudo-ok`, see
+[Troubleshooting](/en/tutorials/openstack-aio/troubleshooting/#ssh-connection-fails).
+
+<LinkCard title="Next: 3. Build and stage the RPMs" href="/en/tutorials/openstack-aio/build-rpms/" />

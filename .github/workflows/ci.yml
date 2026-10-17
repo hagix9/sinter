@@ -38,6 +38,9 @@ jobs:
           fi
 
       - uses: actions/checkout@v5
+        with:
+          # the OpenStack tutorial check compares the commit the tutorial pins with this one
+          fetch-depth: 0
 
       - name: Install Rust
         run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt,clippy
@@ -71,4 +74,12 @@ jobs:
       # nothing on the host (a temporary directory and a stand-in openssl), so it runs here;
       # /bin/sh is dash on this runner.
       - run: cargo test --locked --all-features --test openstack_gen_secrets
+      # The OpenStack tutorial's shell commands: bash syntax, en/ja parity, and
+      # every recipe file, option, object name, path and unit they use exists
+      # (node built-ins only); the sample `sinter validate` counts are checked
+      # against this build. The tests first prove each check rejects a mistake.
+      - run: node --test docs-site/scripts/check-tutorial-commands.test.mjs
+      # TUTORIAL_REQUIRE_PIN: the commit the tutorial checks out must be in the history (hence
+      # fetch-depth 0) and carry the same examples/openstack as this commit.
+      - run: SINTER_BIN="$PWD/target/debug/sinter" TUTORIAL_REQUIRE_PIN=1 node docs-site/scripts/check-tutorial-commands.mjs
       - run: cargo test --manifest-path gateway/Cargo.toml --locked --all-targets --all-features

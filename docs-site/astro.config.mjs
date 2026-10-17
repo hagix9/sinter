@@ -64,6 +64,24 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Tutorials',
+          translations: { ja: 'チュートリアル' },
+          items: [
+            {
+              label: 'OpenStack 2026.1 AIO',
+              translations: { ja: 'OpenStack 2026.1 AIO' },
+              items: [
+                { slug: 'tutorials/openstack-aio/overview' },
+                { slug: 'tutorials/openstack-aio/prepare' },
+                { slug: 'tutorials/openstack-aio/build-rpms' },
+                { slug: 'tutorials/openstack-aio/deploy' },
+                { slug: 'tutorials/openstack-aio/verify' },
+                { slug: 'tutorials/openstack-aio/troubleshooting' },
+              ],
+            },
+          ],
+        },
+        {
           label: 'Concepts',
           translations: { ja: '概念' },
           items: [

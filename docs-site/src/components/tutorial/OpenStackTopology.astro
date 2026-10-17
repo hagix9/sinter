@@ -1,0 +1,232 @@
+---
+// Topology of the OpenStack 2026.1 all-in-one tutorial: where each step runs.
+// It matches the layout of the 2026-10-17 real-host acceptance: the disposable
+// RPM builder also runs Sinter and drives the all-in-one node over SSH.
+// Plain inline SVG (no script); colours follow the Starlight theme variables.
+interface Props {
+  locale: 'en' | 'ja';
+}
+const { locale } = Astro.props;
+
+const t = {
+  en: {
+    label:
+      'Topology: your terminal logs in to the builder and the all-in-one node over SSH. The builder builds the RPMs with sinter apply builder.yaml, stages them on the all-in-one node over SSH, and runs sinter plan, apply and audit against it over SSH with sudo. The all-in-one node runs the OpenStack services and a CirrOS guest under KVM. Both servers download packages from the internet.',
+    terminal: 'Your terminal',
+    terminalSub: 'SSH login · SSH tunnel',
+    internet: 'Internet',
+    internetSub: 'packages and sources',
+    builder: 'RPM builder = Sinter controller',
+    builderSub: 'Rocky Linux 10.2 x86_64 · disposable',
+    b1: 'sinter apply builder.yaml (local, root)',
+    b2: 'RPM repository /root/rpmbuild/RPMS',
+    b3: 'sinter plan / apply / audit all-in-one.yaml',
+    b4: 'secrets/ (generated, never committed)',
+    rpm: '① RPM staging',
+    rpmSub: 'stage-rpm-repo.sh · SSH',
+    sinter: '② Sinter runs',
+    sinterSub: 'SSH + sudo',
+    aio: 'OpenStack all-in-one node',
+    aioSub: 'Rocky Linux 10.2 x86_64 · /dev/kvm',
+    repo: 'local RPM repo 127.0.0.1:8088',
+    infra: 'MariaDB · RabbitMQ · Memcached',
+    httpd1: 'httpd: Keystone · Placement · Nova API',
+    httpd2: 'httpd: Neutron API · Horizon',
+    glance: 'Glance',
+    nova: 'Nova conductor · scheduler · compute',
+    ovn: 'Open vSwitch · OVN',
+    kvm: 'libvirt / KVM',
+    guest: 'CirrOS guest',
+    guestSub: 'tenant network',
+  },
+  ja: {
+    label:
+      '構成図: 操作端末から SSH でビルダーと AIO サーバーにログインします。ビルダーは sinter apply builder.yaml で RPM をビルドし、SSH で AIO サーバーへ転送し、SSH と sudo で AIO サーバーに sinter plan、apply、audit を実行します。AIO サーバーでは OpenStack の各サービスと、KVM 上の CirrOS が動きます。どちらのサーバーもインターネットからパッケージを取得します。',
+    terminal: '操作端末（あなたの PC）',
+    terminalSub: 'SSH ログイン · SSH トンネル',
+    internet: 'インターネット',
+    internetSub: 'パッケージとソースの取得',
+    builder: 'RPM ビルダー 兼 Sinter 実行ホスト',
+    builderSub: 'Rocky Linux 10.2 x86_64 · 使い捨て',
+    b1: 'sinter apply builder.yaml（ローカル、root）',
+    b2: 'RPM リポジトリ /root/rpmbuild/RPMS',
+    b3: 'sinter plan / apply / audit all-in-one.yaml',
+    b4: 'secrets/（生成した秘密。commit しない）',
+    rpm: '① RPM の転送',
+    rpmSub: 'stage-rpm-repo.sh · SSH',
+    sinter: '② Sinter の実行',
+    sinterSub: 'SSH + sudo',
+    aio: 'OpenStack AIO サーバー',
+    aioSub: 'Rocky Linux 10.2 x86_64 · /dev/kvm',
+    repo: 'ローカル RPM リポジトリ 127.0.0.1:8088',
+    infra: 'MariaDB · RabbitMQ · Memcached',
+    httpd1: 'httpd: Keystone · Placement · Nova API',
+    httpd2: 'httpd: Neutron API · Horizon',
+    glance: 'Glance',
+    nova: 'Nova conductor · scheduler · compute',
+    ovn: 'Open vSwitch · OVN',
+    kvm: 'libvirt / KVM',
+    guest: 'CirrOS 仮想マシン',
+    guestSub: 'テナントネットワーク',
+  },
+}[locale];
+---
+
+<figure class="os-topology">
+  <svg viewBox="0 0 640 948" role="img" aria-label={t.label} xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="os-topo-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0 0 L10 5 L0 10 z" class="head"></path>
+      </marker>
+    </defs>
+
+    <!-- terminal and internet -->
+    <rect class="box" x="16" y="16" width="314" height="80" rx="10"></rect>
+    <text class="title" x="173" y="50" text-anchor="middle">{t.terminal}</text>
+    <text class="small" x="173" y="78" text-anchor="middle">{t.terminalSub}</text>
+    <rect class="net" x="350" y="16" width="274" height="80" rx="10"></rect>
+    <text class="title" x="487" y="50" text-anchor="middle">{t.internet}</text>
+    <text class="small" x="487" y="78" text-anchor="middle">{t.internetSub}</text>
+
+    <!-- SSH logins from the terminal -->
+    <line class="ssh" x1="110" y1="96" x2="110" y2="148" marker-end="url(#os-topo-arrow)"></line>
+    <text class="tiny" x="118" y="128">SSH</text>
+    <path class="ssh" d="M 32 96 L 32 566 L 54 566" fill="none" marker-end="url(#os-topo-arrow)"></path>
+
+    <!-- downloads -->
+    <line class="dl" x1="487" y1="96" x2="487" y2="148" marker-end="url(#os-topo-arrow)"></line>
+    <path class="dl" d="M 606 96 L 606 518" fill="none" marker-end="url(#os-topo-arrow)"></path>
+
+    <!-- builder -->
+    <rect class="box accent" x="48" y="150" width="536" height="250" rx="12"></rect>
+    <text class="title" x="68" y="184">{t.builder}</text>
+    <text class="small" x="68" y="208">{t.builderSub}</text>
+    <rect class="item" x="68" y="222" width="496" height="34" rx="6"></rect>
+    <text class="mono" x="80" y="245">{t.b1}</text>
+    <rect class="item" x="68" y="262" width="496" height="34" rx="6"></rect>
+    <text class="mono" x="80" y="285">{t.b2}</text>
+    <rect class="item" x="68" y="302" width="496" height="34" rx="6"></rect>
+    <text class="mono" x="80" y="325">{t.b3}</text>
+    <rect class="item" x="68" y="342" width="496" height="34" rx="6"></rect>
+    <text class="mono" x="80" y="365">{t.b4}</text>
+
+    <!-- builder -> aio -->
+    <line class="flow" x1="150" y1="400" x2="150" y2="518" marker-end="url(#os-topo-arrow)"></line>
+    <text class="label" x="162" y="446">{t.rpm}</text>
+    <text class="monosmall" x="162" y="470">{t.rpmSub}</text>
+    <line class="flow" x1="420" y1="400" x2="420" y2="518" marker-end="url(#os-topo-arrow)"></line>
+    <text class="label" x="432" y="446">{t.sinter}</text>
+    <text class="monosmall" x="432" y="470">{t.sinterSub}</text>
+
+    <!-- aio -->
+    <rect class="box accent" x="56" y="520" width="568" height="412" rx="12"></rect>
+    <text class="title" x="76" y="554">{t.aio}</text>
+    <text class="small" x="76" y="578">{t.aioSub}</text>
+    <rect class="item" x="76" y="592" width="528" height="34" rx="6"></rect>
+    <text class="mono" x="88" y="615">{t.repo}</text>
+    <rect class="item" x="76" y="632" width="528" height="34" rx="6"></rect>
+    <text class="svc" x="88" y="655">{t.infra}</text>
+    <rect class="item" x="76" y="672" width="528" height="34" rx="6"></rect>
+    <text class="svc" x="88" y="695">{t.httpd1}</text>
+    <rect class="item" x="76" y="712" width="528" height="34" rx="6"></rect>
+    <text class="svc" x="88" y="735">{t.httpd2}</text>
+    <rect class="item" x="76" y="752" width="150" height="34" rx="6"></rect>
+    <text class="svc" x="88" y="775">{t.glance}</text>
+    <rect class="item" x="234" y="752" width="370" height="34" rx="6"></rect>
+    <text class="svc" x="246" y="775">{t.nova}</text>
+    <rect class="item" x="76" y="792" width="260" height="34" rx="6"></rect>
+    <text class="svc" x="88" y="815">{t.ovn}</text>
+    <rect class="item" x="344" y="792" width="260" height="34" rx="6"></rect>
+    <text class="svc" x="356" y="815">{t.kvm}</text>
+
+    <line class="flow" x1="474" y1="826" x2="474" y2="850" marker-end="url(#os-topo-arrow)"></line>
+    <rect class="guest" x="344" y="852" width="260" height="64" rx="10"></rect>
+    <text class="title" x="474" y="880" text-anchor="middle">{t.guest}</text>
+    <text class="small" x="474" y="905" text-anchor="middle">{t.guestSub}</text>
+  </svg>
+</figure>
+
+<style>
+  .os-topology {
+    margin: 1.5rem 0;
+  }
+  .os-topology svg {
+    display: block;
+    width: 100%;
+    max-width: 44rem;
+    height: auto;
+    margin-inline: auto;
+  }
+  .os-topology .box {
+    fill: var(--sl-color-gray-6);
+    stroke: var(--sl-color-gray-4);
+    stroke-width: 1.5;
+  }
+  .os-topology .box.accent {
+    stroke: var(--sl-color-accent);
+    stroke-width: 2;
+  }
+  .os-topology .item {
+    fill: var(--sl-color-bg);
+    stroke: var(--sl-color-gray-5);
+  }
+  .os-topology .net {
+    fill: none;
+    stroke: var(--sl-color-gray-3);
+    stroke-dasharray: 6 4;
+  }
+  .os-topology .guest {
+    fill: var(--sl-color-accent-low);
+    stroke: var(--sl-color-accent);
+    stroke-width: 1.5;
+  }
+  .os-topology text {
+    fill: var(--sl-color-white);
+    font-family: var(--sl-font);
+  }
+  .os-topology .title {
+    font-size: 21px;
+    font-weight: 600;
+  }
+  .os-topology .small {
+    font-size: 16px;
+    fill: var(--sl-color-gray-2);
+  }
+  .os-topology .tiny {
+    font-size: 15px;
+    fill: var(--sl-color-gray-2);
+  }
+  .os-topology .label {
+    font-size: 17px;
+    font-weight: 600;
+    fill: var(--sl-color-text-accent);
+  }
+  .os-topology .svc {
+    font-size: 17px;
+  }
+  .os-topology .mono {
+    font-size: 16px;
+    font-family: var(--sl-font-mono);
+  }
+  .os-topology .monosmall {
+    font-size: 15px;
+    font-family: var(--sl-font-mono);
+    fill: var(--sl-color-gray-2);
+  }
+  .os-topology .flow {
+    stroke: var(--sl-color-accent);
+    stroke-width: 2.5;
+  }
+  .os-topology .ssh {
+    stroke: var(--sl-color-gray-3);
+    stroke-width: 2;
+  }
+  .os-topology .dl {
+    stroke: var(--sl-color-gray-4);
+    stroke-width: 1.5;
+    stroke-dasharray: 5 4;
+  }
+  .os-topology .head {
+    fill: var(--sl-color-gray-3);
+  }
+</style>

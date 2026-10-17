@@ -1,0 +1,217 @@
+---
+title: 設定と plan / apply / audit
+description: OpenStack AIO チュートリアルの手順 4。site.yaml の設定、秘密情報の生成、sinter validate / plan / apply / audit で OpenStack 2026.1 を構築する。
+sidebar:
+  label: 4. 設定と plan / apply / audit
+---
+
+import { Aside, Badge, LinkCard } from '@astrojs/starlight/components';
+
+[SinterでOpenStack 2026.1を構築する](/ja/tutorials/openstack-aio/overview/) の手順 4 / 5 です。
+ビルダーから AIO サーバーへ Sinter を実行し、OpenStack を構築します。この手順のコマンドは、すべてビルダーで実行します。
+
+## 4-1. site.yaml を設定する <Badge text="受入で実行" variant="success" />
+
+`site.yaml` は秘密でない設定です。AIO の構成で書き換えるのは次の 3 つです。
+
+| 変数 | 設定する値 | 既定値（例） |
+|---|---|---|
+| `mgmt_ip` | AIO サーバーの内部 IPv4 アドレス | `10.0.0.10` |
+| `controller_ip` | AIO では `mgmt_ip` と同じ | `10.0.0.10` |
+| `os_hostname` | AIO サーバーの `hostname -s` | `osdemo1` |
+
+手順 2 で作った `~/sinter-os.env` の値で置き換えます。
+
+```sh title="ビルダー"
+cd ~/sinter/examples/openstack
+. ~/sinter-os.env
+sed -i "s/value: \"10.0.0.10\"/value: \"$AIO_IP\"/; s/value: \"osdemo1\"/value: \"$AIO_HOSTNAME\"/" site.yaml
+grep -A1 -E '^  (mgmt_ip|controller_ip|os_hostname):' site.yaml | grep 'value:'
+```
+
+```text title="成功時の出力（あなたの値が表示される）"
+    value: "10.0.0.10"
+    value: "10.0.0.10"
+    value: "osdemo1"             #       OVN chassis name are both set to it; they must match for ports to bind.
+```
+
+- `virt_type` は `kvm` のままにします（`/dev/kvm` が必要です）。
+- ほかの値（プロバイダネットワークの `192.0.2.0/24` など）は、受入でも既定値のままでした。
+  プロバイダネットワークは実際の NIC につながっていないため、仮想マシンへは AIO サーバーの内側からだけ届きます（手順 5）。
+
+## 4-2. 秘密情報を生成する <Badge text="受入で実行" variant="success" />
+
+データベース、RabbitMQ、各サービス、admin のパスワードなど 14 個の秘密を、ランダムに生成します。
+
+```sh title="ビルダー"
+cd ~/sinter/examples/openstack
+sh tools/gen-secrets.sh
+ls -l secrets
+grep -c 'value: ""' secrets/controller.yaml
+```
+
+```text title="成功時の出力"
+wrote /home/<you>/sinter/examples/openstack/secrets/controller.yaml and /home/<you>/sinter/examples/openstack/secrets/compute.yaml (mode 0600)
+total 8
+-rw-------. 1 <you> <you> ... compute.yaml
+-rw-------. 1 <you> <you> ... controller.yaml
+0
+```
+
+最後の `0` は、空の値が 1 つも無いことを表します。
+
+- `gen-secrets.sh` には `openssl` が必要です。`openssl` が無い、失敗した、または 32 文字の英数字にならない値があったときは、
+  どちらのファイルも作らずに終了コード 1 で止まります（`gen-secrets: openssl is required …` または
+  `gen-secrets: could not generate a secret with openssl; nothing was written`）。
+  `command -v openssl` を確認し（無ければ `sudo dnf -y install openssl`）、もう一度実行してください。
+- 秘密の値は画面にもログにも表示されません。
+- このスクリプトは受入の後に直したもので、ローカルのテストで確認していますが、実機では実行していません
+  （受入では修正前の版を、`openssl` がある状態で実行しました）。
+
+<Aside type="danger" title="秘密情報の扱い">
+- `secrets/` は Git の管理外です。**commit しない、共有しない、チャットや issue に貼らない**でください。
+- `secrets.example/` は CI 用の合成値です。**コピーして使わないでください**。
+- `secrets/` は、AIO サーバーを管理し続ける間は残してください。作り直すと、新しいパスワードが設定ファイルに書かれる一方で、
+  データベースのユーザーなどの既存のパスワードは上書きされないため、一致しなくなります。
+  ビルダーを削除する前に、安全な場所へ保管してください。
+- すでに `secrets/controller.yaml` か `secrets/compute.yaml` があると、スクリプトは何も上書きせずに終了します（`secrets/controller.yaml exists; not overwritten` など）。`compute.yaml` だけがあるのは、途中で強制終了した実行の跡です。中身を確かめてから削除し、もう一度実行してください。
+</Aside>
+
+## 4-3. レシピを検証する <Badge text="受入で実行" variant="success" />
+
+```sh title="ビルダー"
+cd ~/sinter/examples/openstack
+sinter validate all-in-one.yaml
+```
+
+```text title="成功時の出力"
+ok: 172 resource(s), 12 handler(s), 40 var(s)
+```
+
+`cannot resolve …/secrets/controller.yaml` と表示されたときは、4-2 を実行していません。
+
+## 4-4. plan で確認する <Badge text="受入で実行" variant="success" />
+
+`plan` は何も変更せず、AIO サーバーを観察して変更予定を表示します。
+
+```sh title="ビルダー"
+cd ~/sinter/examples/openstack
+. ~/sinter-os.env
+sinter plan all-in-one.yaml --host "$AIO_IP" --user "$USER" --identity "$SSH_KEY" --sudo 2>&1 | tee ~/os-plan.log
+grep -c '^?' ~/os-plan.log
+```
+
+```text title="成功時の出力（最後の部分）"
+?  wait_compute_up [command] unknown/normal dependency svc_nova_compute is unknown (...)
+?  nova_discover_hosts [command] unknown/normal dependency wait_compute_up is unknown (...)
+...
+summary: 11 changed, 0 possible, 0 failed, 0 indeterminate, 172 total
+status: success
+160
+```
+
+**成功の判断**: `status: success` であること。
+172 個のうち約 160 個が `?`（Unknown）になりますが、**これは正常です**。
+plan はコマンドを実行しないため、コマンドの結果に依存するリソース（リポジトリの確認、データベースの作成など）は、
+新しいホストでは結果を予測できません。
+
+| オプション | 意味 |
+|---|---|
+| `--host "$AIO_IP"` | SSH の接続先 |
+| `--user "$USER"` | SSH のユーザー（ビルダーと同じユーザー名） |
+| `--identity "$SSH_KEY"` | 手順 2 で作った鍵 |
+| `--sudo` | AIO サーバーでの操作を、パスワードなしの `sudo -n` で root として実行する |
+
+## 4-5. 初回の apply <Badge text="受入で実行" variant="success" />
+
+OpenStack を構築します。受入では約 21 分かかりました。`tmux` の中で実行してください（手順 3 のセッションに戻るには `tmux attach -t sinter`、無ければ `tmux new -s sinter`）。
+
+```sh title="ビルダー（tmux の中）"
+cd ~/sinter/examples/openstack
+. ~/sinter-os.env
+sinter apply all-in-one.yaml --host "$AIO_IP" --user "$USER" --identity "$SSH_KEY" --sudo 2>&1 | tee ~/os-apply1.log
+```
+
+```text title="成功時の出力（最後の部分。受入時の値）"
+handlers:
+  Succeeded  reload_httpd -> reload <redacted>
+  Succeeded  restart_httpd -> restart httpd
+  ...
+  Succeeded  restart_nova_compute -> restart <redacted>
+
+manager reloads (systemd daemon-reload):
+  CHANGED  resource trigger=pending_input causes=[repo_server_unit] consumer=svc_repo_local execution=succeeded change=changed verification=verified
+  CHANGED  resource trigger=pending_input causes=[httpd_dashboard_writepath] consumer=svc_mariadb execution=succeeded change=changed verification=verified
+
+summary: 141 changed, 0 possible, 0 failed, 0 indeterminate, 172 total
+status: success
+```
+
+`| tee` では進捗が表示されず、結果は最後にまとめて表示されます。途中経過を見たいときは、`SINTER_PROGRESS=plain sinter apply …` のように先頭に付けてください（受入では使っていません）。
+
+**成功の判断**: `status: success`、`0 failed`、`0 indeterminate` であること。次のコマンドで何も表示されなければ、失敗したリソースはありません。
+
+```sh title="ビルダー"
+grep -E '^(FAILED|INDET|blocked)' ~/os-apply1.log
+```
+
+- 受入では **141 changed / 0 failed** でした。公開版のレシピは Keystone の鍵を作るステップを変更として報告するように直したため、
+  **143 changed 前後**になる見込みです（この修正は実機では未実行）。changed の数は環境によっても変わります。
+- `<redacted>` は、秘密を含みうるリソースの詳細を Sinter が伏せている表示です。
+- 失敗したときは、まず失敗したリソースの行とその下のメッセージを確認してください。
+  設定ファイルを変更した後に失敗した apply では、サービスの再起動（handler）が実行されません。
+  [サービスが起動しない](/ja/tutorials/openstack-aio/troubleshooting/#openstack-のサービスが起動しない)を見てください。
+
+## 4-6. 2 回目の apply（冪等性の確認） <Badge text="受入で実行" variant="success" />
+
+同じコマンドをもう一度実行します。すでに望む状態なので、何も変更されないはずです。
+
+```sh title="ビルダー"
+cd ~/sinter/examples/openstack
+. ~/sinter-os.env
+sinter apply all-in-one.yaml --host "$AIO_IP" --user "$USER" --identity "$SSH_KEY" --sudo 2>&1 | tee ~/os-apply2.log
+```
+
+```text title="成功時の出力（最後の部分）"
+ok    svc_nova_compute [service] known/normal service already matches desired state
+ok    wait_compute_up [command] known/normal
+ok    nova_discover_hosts [command] known/normal
+
+summary: 0 changed, 0 possible, 0 failed, 0 indeterminate, 172 total
+status: success
+```
+
+**成功の判断**: `0 changed` であること。変更が残るときは
+[再 apply で変更が残る](/ja/tutorials/openstack-aio/troubleshooting/#再-apply-で変更が残る)を見てください。
+
+## 4-7. audit <Badge text="受入で実行" variant="success" />
+
+`audit` は、何も変更せずに、実際の状態がレシピどおりかを調べます。
+
+```sh title="ビルダー"
+cd ~/sinter/examples/openstack
+. ~/sinter-os.env
+sinter audit all-in-one.yaml --host "$AIO_IP" --user "$USER" --identity "$SSH_KEY" --sudo 2>&1 | tee ~/os-audit1.log
+echo "exit=${PIPESTATUS[0]}"
+```
+
+```text title="成功時の出力（最後の部分）"
+PASS svc_nova_compute [service]
+    reason: service matches desired state
+NOT_AUDITABLE wait_compute_up [command]
+    reason: command resources are not executed during audit
+NOT_AUDITABLE nova_discover_hosts [command]
+    reason: command resources are not executed during audit
+summary: 172 total, 81 compliant, 0 drifted, 91 not_auditable, 0 not_applicable, 0 errors
+status: no_drift
+exit=0
+```
+
+**成功の判断**: `status: no_drift`、`0 drifted`、`0 errors` で、`exit=0`（`sinter` の終了コード）であること。
+
+- 受入時は **81 compliant / 0 drifted / 91 not_auditable** でした。
+- `not_auditable` の 91 件は、すべて `command` リソースです。audit はコマンドを実行しないため、確認できません。
+  **compliant には数えていません**。これは失敗ではありません。
+- drift があると `exit=7` になり、`DRIFT` の行に違いが表示されます。`| tee` を通すと終了コードはそのままでは見えないため、`${PIPESTATUS[0]}` で表示しています。
+
+<LinkCard title="次へ: 5. 動作確認と再起動" href="/ja/tutorials/openstack-aio/verify/" />

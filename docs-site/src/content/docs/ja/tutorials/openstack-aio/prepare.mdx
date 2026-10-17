@@ -1,0 +1,210 @@
+---
+title: ホストと Sinter の準備
+description: OpenStack AIO チュートリアルの手順 2。AIO サーバーの確認、ビルダーへの Sinter のインストール、SSH の鍵と known_hosts の準備。
+sidebar:
+  label: 2. ホストと Sinter の準備
+---
+
+import { Aside, Badge, LinkCard, Tabs, TabItem } from '@astrojs/starlight/components';
+
+[SinterでOpenStack 2026.1を構築する](/ja/tutorials/openstack-aio/overview/) の手順 2 / 5 です。
+ここでは 2 台のサーバーを確認し、ビルダーに Sinter を入れ、ビルダーから AIO サーバーへ SSH でつながるようにします。
+
+## 2-1. サーバーを用意する <Badge text="置き換え" variant="caution" />
+
+クラウドや仮想化基盤で、Rocky Linux 10.2 x86_64 のサーバーを 2 台作ります。
+作り方は基盤ごとに違うため、ここでは条件だけを示します（[必要な環境](/ja/tutorials/openstack-aio/overview/#必要な環境)）。
+
+- **AIO サーバー**: 4 vCPU / 16 GB / 空き約 50 GB 以上。**nested virtualization を有効にする**。
+- **ビルダー**: 同程度の大きさ。後で削除してよいもの。
+- 2 台とも、**同じユーザー名**で SSH ログインでき、そのユーザーがパスワードなしで `sudo` を使えること。
+- ビルダーから AIO サーバーへ、内部ネットワークで SSH（TCP 22）が届くこと。
+- 2 台とも、インターネットへ外向きに通信できること。
+
+受入では GCE で作成しました（`n2-standard-4`、Rocky Linux 10.2 のイメージ、60 GB のディスク、AIO サーバーは nested virtualization を有効）。
+
+## 2-2. AIO サーバーを確認する <Badge text="受入で実行" variant="success" />
+
+操作端末から AIO サーバーに SSH でログインし、次を実行します。
+
+```sh title="AIO サーバー"
+hostname -s
+ip -4 -o addr show
+grep PRETTY /etc/os-release; uname -m
+ls -l /dev/kvm; grep -cE 'vmx|svm' /proc/cpuinfo
+rpm -q dnf-plugins-core
+test -x /usr/bin/getfattr && echo getfattr-ok
+sudo -n true && echo sudo-ok
+```
+
+```text title="出力例（ホスト名と IP は合成値）"
+osdemo1
+1: lo    inet 127.0.0.1/8 scope host lo ...
+2: eth0    inet 10.0.0.10/32 ... scope global dynamic eth0 ...
+PRETTY_NAME="Rocky Linux 10.2 (Red Quartz)"
+x86_64
+crw-rw-rw-. 1 root kvm 10, 232 ... /dev/kvm
+4
+dnf-plugins-core-...
+getfattr-ok
+sudo-ok
+```
+
+`ip`、`getfattr`、`sudo` の確認は、このチュートリアルで加えたものです（受入では別の手順で確認しました）。
+
+- **`hostname -s` の値**（例: `osdemo1`）と、**内部 IPv4 アドレス**（例: `10.0.0.10`）を控えてください。手順 4 で設定ファイルに書きます。
+- `/dev/kvm` が無い、または `vmx|svm` の数が 0 のときは、nested virtualization が有効になっていません。
+  [トラブルシューティング](/ja/tutorials/openstack-aio/troubleshooting/#devkvm-が使えない)を見てください。
+- `dnf-plugins-core` が無いときは `sudo dnf -y install dnf-plugins-core`、`getfattr-ok` が出ないときは
+  `sudo dnf -y install attr` で入れてください（`attr` は [Sinter の要件](/ja/getting-started/installation/#管理対象ホストの要件)です）。
+
+## 2-3. ビルダーに設定ファイルを作る <Badge text="置き換え" variant="caution" />
+
+ここからは、操作端末から **ビルダー** に SSH でログインして作業します。
+後の手順で使う値を 1 つのファイルにまとめておきます。
+**`AIO_IP` と `AIO_HOSTNAME` は、2-2 で控えた値に書き換えてください。**
+
+```sh title="ビルダー"
+cat > ~/sinter-os.env <<'EOF'
+AIO_IP=10.0.0.10  # AIO サーバーの内部 IPv4 アドレス（書き換える）
+AIO_HOSTNAME=osdemo1  # AIO サーバーの hostname -s（書き換える）
+SSH_KEY="$HOME/.ssh/sinter_os_ed25519"
+EOF
+vi ~/sinter-os.env
+. ~/sinter-os.env && echo "$AIO_IP $AIO_HOSTNAME $SSH_KEY"
+```
+
+新しいシェルを開いたときは、最初に `. ~/sinter-os.env` を実行してください。
+
+## 2-4. Sinter のソースを取得する <Badge text="置き換え" variant="caution" />
+
+レシピは Sinter のリポジトリに含まれています。このチュートリアルが対象とする commit を取得します。
+
+```sh title="ビルダー"
+sudo dnf -y install git tar tmux attr openssl
+git clone https://github.com/hagix9/sinter.git ~/sinter
+cd ~/sinter
+git checkout --detach b058d663ad329b85e52f3d86bb0d096d7b63585c
+git log -1 --format='%H %s'
+```
+
+```text title="成功時の出力（最後の行）"
+b058d663ad329b85e52f3d86bb0d096d7b63585c examples(openstack): gen-secrets never writes empty or partial secrets
+```
+
+受入では `git clone` の代わりに、受入対象のレシピ（`0558b7b`）を含むソースを tar で転送しました。その製品のソース（`src/` など）は `b058d66` と同じです。`tmux` は、長時間のコマンドを SSH の切断から守るために使います（受入では別の方法を使いました）。`attr`（`getfattr`）は、ビルダー自身に `builder.yaml` を適用するための Sinter の要件です。`openssl` は手順 4 の秘密の生成に使います（どちらも受入のイメージには入っていました）。
+
+## 2-5. Sinter をインストールする
+
+<Tabs>
+<TabItem label="ソースからビルド（受入と同じ）">
+
+<Badge text="受入で実行" variant="success" /> Rust 1.98.1 で `b058d66` のソースからビルドします。受入でも、同じ製品のソースを同じ手順でビルドしました（約 1 分 20 秒）。
+
+```sh title="ビルダー"
+sudo dnf -y install gcc openssl-devel
+curl -sSf https://sh.rustup.rs -o /tmp/rustup.sh
+sh /tmp/rustup.sh -y -q --profile minimal --default-toolchain 1.98.1
+. "$HOME/.cargo/env"
+cd ~/sinter
+cargo build --locked --release
+sudo install -m 0755 target/release/sinter /usr/local/bin/sinter
+sinter --version
+```
+
+```text title="成功時の出力（最後の行）"
+sinter 1.5.1
+```
+
+</TabItem>
+<TabItem label="リリース版のバイナリ（未検証）">
+
+<Badge text="未検証" variant="danger" /> 公式のインストーラで v1.5.1 のバイナリを入れる方法です。
+レシピの要件（v1.5.0 以降）は満たしますが、**このレシピを v1.5.1 のリリース版バイナリで実機に適用したことはありません**。
+インストーラの詳細は[インストール](/ja/getting-started/installation/)を参照してください。
+
+```sh title="ビルダー"
+curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
+sudo install -m 0755 "$HOME/.local/bin/sinter" /usr/local/bin/sinter
+sinter --version
+```
+
+</TabItem>
+</Tabs>
+
+`builder.yaml` は root で実行するため、`sudo` から確実に呼べる `/usr/local/bin/sinter` に置きます
+（Rocky Linux の `sudo` は `/usr/local/bin` を `PATH` に含みません）。
+
+## 2-6. SSH の鍵を作る <Badge text="受入で実行" variant="success" />
+
+ビルダーで、このチュートリアル専用の鍵を作ります。この鍵は、ビルダーから AIO サーバーへの接続と、
+RPM の転送でビルダー自身への接続に使います。
+
+```sh title="ビルダー"
+. ~/sinter-os.env
+test -f "$SSH_KEY" || ssh-keygen -q -t ed25519 -N "" -C sinter-openstack -f "$SSH_KEY"
+(umask 077; cat "$SSH_KEY.pub" >> ~/.ssh/authorized_keys)
+cat "$SSH_KEY.pub"
+```
+
+最後に表示された 1 行（`ssh-ed25519 AAAA… sinter-openstack`）を、次の 2-7 で AIO サーバーに登録します。
+
+## 2-7. AIO サーバーに公開鍵を登録する <Badge text="置き換え" variant="caution" />
+
+操作端末から AIO サーバーにログインして、2-6 で表示された 1 行を `authorized_keys` に追加します。
+
+```sh title="AIO サーバー"
+umask 077; mkdir -p ~/.ssh
+echo '<ビルダーで表示された公開鍵の 1 行>' >> ~/.ssh/authorized_keys
+```
+
+<Aside type="note">
+受入では、クラウドの SSH 機能を使って同じ内容を追記しました。
+クラウドが OS Login など `authorized_keys` 以外の仕組みで鍵を管理している場合は、その方法で公開鍵を登録してください。
+</Aside>
+
+## 2-8. ホスト鍵を登録する <Badge text="置き換え" variant="caution" />
+
+Sinter は未知のホスト鍵を拒否し、自動では登録しません。
+ビルダーの `~/.ssh/known_hosts` に、AIO サーバーとビルダー自身（`localhost`）のホスト鍵を登録します。
+AIO サーバーの鍵は、指紋を確かめてから登録してください。
+
+```sh title="ビルダー"
+. ~/sinter-os.env
+ssh-keyscan -t ed25519 "$AIO_IP" 2>/dev/null > ~/aio-hostkey.txt
+ssh-keygen -lf ~/aio-hostkey.txt
+```
+
+```sh title="AIO サーバー"
+ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+```
+
+2 つの `SHA256:…` が一致したら登録します。一致しないときは登録せず、接続先を確認してください。
+
+```sh title="ビルダー"
+cat ~/aio-hostkey.txt >> ~/.ssh/known_hosts
+ssh-keyscan -t ed25519 localhost 2>/dev/null >> ~/.ssh/known_hosts
+rm ~/aio-hostkey.txt
+```
+
+受入では `ssh-keyscan` で取得した鍵を登録しました。指紋の照合は、このチュートリアルで加えた確認です。
+
+## 2-9. 接続を確認する <Badge text="受入で実行" variant="success" />
+
+```sh title="ビルダー"
+. ~/sinter-os.env
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$SSH_KEY" "$AIO_IP" 'hostname -s; sudo -n true && echo sudo-ok'
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$SSH_KEY" localhost 'sudo -n true && echo sudo-ok'
+```
+
+```text title="成功時の出力"
+osdemo1
+sudo-ok
+sudo-ok
+```
+
+1 行目は AIO サーバーのホスト名で、`AIO_HOSTNAME` と同じはずです。
+パスワードを聞かれる、`Host key verification failed` になる、`sudo-ok` が出ないときは、
+[トラブルシューティング](/ja/tutorials/openstack-aio/troubleshooting/#ssh-で接続できない)を見てください。
+
+<LinkCard title="次へ: 3. RPM のビルドと転送" href="/ja/tutorials/openstack-aio/build-rpms/" />

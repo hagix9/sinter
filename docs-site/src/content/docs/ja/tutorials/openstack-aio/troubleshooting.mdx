@@ -1,0 +1,191 @@
+---
+title: トラブルシューティング
+description: OpenStack AIO チュートリアルでうまくいかないときの原因と確認方法。/dev/kvm、RPM のビルド、依存関係、SSH、sudo、秘密情報、サービス、Horizon、CirrOS、再 apply、audit。
+sidebar:
+  label: 6. トラブルシューティング
+---
+
+import { Aside, LinkCard } from '@astrojs/starlight/components';
+
+[SinterでOpenStack 2026.1を構築する](/ja/tutorials/openstack-aio/overview/) でうまくいかないときの、原因と確認方法です。
+Sinter 全般のエラーは[トラブルシューティング](/ja/troubleshooting/)、終了コードは[CLI リファレンス](/ja/reference/cli/#終了コード)を参照してください。
+
+<Aside type="tip" title="まず見るところ">
+Sinter の出力では、失敗したリソースの行が `FAILED`（不確定なら `INDET`）で始まり、その下に理由が表示されます。
+`grep -E '^(FAILED|INDET|blocked)' ~/os-apply1.log` で探せます。`blocked` は、依存先が失敗したために実行されなかったリソースです。
+</Aside>
+
+## /dev/kvm が使えない
+
+**症状**: `apply` が最初の `preflight_kvm` で失敗する。または `ls -l /dev/kvm` が `No such file or directory`。
+
+**原因**: AIO サーバーで nested virtualization が有効になっていない。
+
+**確認方法**（AIO サーバー）:
+
+```sh title="AIO サーバー"
+ls -l /dev/kvm
+grep -cE 'vmx|svm' /proc/cpuinfo
+```
+
+`/dev/kvm` が無い、または 2 行目が `0` なら、クラウドや仮想化基盤の設定で nested virtualization を有効にしてサーバーを作り直してください
+（受入では GCE の nested virtualization を有効にしました）。
+
+`site.yaml` には `virt_type: qemu`（ソフトウェアエミュレーション、10〜50 倍遅い）の設定もありますが、**実機では検証していません**。
+
+## RPM のビルドが失敗する
+
+**症状**: `sinter apply builder.yaml` で `build_rpms` が `FAILED` になる。または `/var/lib/hagistack-build/build.ok` が無い。
+
+**確認方法**（ビルダー）:
+
+```sh title="ビルダー"
+sudo ls /var/lib/hagistack-build
+sudo grep '^  FAIL ' /var/lib/hagistack-build/pass1.log
+sudo tail -n 30 /var/lib/hagistack-build/pass2.log
+df -h / /var/lib
+```
+
+- ビルドは 2 回のパスで行います。1 回目で失敗したパッケージだけを 2 回目で作り直し、2 回目でも失敗するとビルド全体が失敗します。
+  ログは `/var/lib/hagistack-build` の `pass1.log`、`pass2.log`（2 回目を実行したときだけ）と `logs/` ディレクトリにあります。
+- ビルドが途中で失敗しても、リポジトリ（`/root/rpmbuild/RPMS`）は作られることがあります。**`build.ok` が無い結果は使わないでください。**
+- ディスクの不足、ネットワークの切断、外部リポジトリ（RDO の trunk、EPEL）の一時的な問題で失敗することがあります。
+  RDO のリポジトリ設定は常に最新を指すため、後日のビルドでは受入時と異なる内容になる場合があります。
+- 原因を取り除いてから、同じ `apply` をもう一度実行します。`build.ok` が無い限り、ビルドはやり直されます。
+
+## リポジトリの依存関係エラー
+
+**症状**: AIO サーバーへの `apply` で、`package` リソースが依存関係のエラーで失敗する。
+
+**確認方法**（AIO サーバー）:
+
+```sh title="AIO サーバー"
+systemctl is-active sinter-openstack-repo
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8088/repodata/repomd.xml
+ls /opt/hagistack-repo/noarch | wc -l
+dnf repolist --enabled
+```
+
+- `sinter-openstack-repo` が `active`、`repomd.xml` が `200` でなければ、ローカルの RPM リポジトリが配信されていません。
+  手順 3 の転送と SHA-256 の照合からやり直してください。
+- RPM は `/opt/hagistack-repo` に置き、レシピが `127.0.0.1:8088` で HTTP 配信します。
+  **`file://` のリポジトリは Sinter の `package` リソースでは使えません。**
+- AIO サーバーは Rocky、EPEL、CentOS Stream NFV SIG、RDO のリポジトリも使います。これらは外部の内容なので、後日に変わることがあります（未検証）。
+
+## SSH で接続できない
+
+**症状**: `Host key verification failed`、`unknown host key`、`host key changed`、`Permission denied (publickey)`。
+
+**確認方法**（ビルダー）:
+
+```sh title="ビルダー"
+. ~/sinter-os.env
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$SSH_KEY" "$AIO_IP" 'hostname -s'
+grep -c "$AIO_IP" ~/.ssh/known_hosts
+```
+
+- **ホスト鍵のエラー**: Sinter は未知のホスト鍵や変わったホスト鍵を拒否し、自動では登録しません。
+  手順 2-8 のとおり、指紋を確かめてから `~/.ssh/known_hosts` に登録してください。サーバーを作り直した場合は、古い行を削除してから登録し直します。
+- **`Permission denied (publickey)`**: AIO サーバーの `~/.ssh/authorized_keys` に公開鍵が登録されていません（手順 2-7）。
+  ユーザー名がビルダーと AIO サーバーで違う場合も失敗します。
+- **`stage-rpm-repo.sh` だけが失敗する**: ビルダー自身（`localhost`）への SSH が必要です。
+  `ssh -o BatchMode=yes -i "$SSH_KEY" localhost true` が成功するか確認してください。
+
+## sudo の権限が足りない
+
+**症状**: `sudo-ok` が表示されない。Sinter が接続時に sudo のエラーを表示する。
+
+**確認方法**:
+
+```sh title="AIO サーバー"
+sudo -n true && echo sudo-ok
+```
+
+`--sudo` は、すべての操作を非対話の `sudo -n -u root` で実行します。パスワードを求める sudo では動きません。
+SSH のユーザーにパスワードなしの sudo を許可してください。詳しくは[権限昇格](/ja/troubleshooting/#権限昇格)を参照してください。
+
+## 秘密情報の設定が足りない
+
+**症状**: `sinter validate` が `cannot resolve …/secrets/controller.yaml: No such file or directory` で終了する（終了コード 2）。
+
+**原因と対処**:
+
+- `sh tools/gen-secrets.sh` を、`~/sinter/examples/openstack` で実行していません（手順 4-2）。
+- `secrets/controller.yaml exists; not overwritten` は正常な保護です。既存の秘密を作り直すと、既存のデータベースのパスワードと一致しなくなります。
+  **AIO サーバーをまだ構築していない場合に限り**、`secrets/` を削除して作り直してかまいません。
+- `gen-secrets: openssl is required …` / `gen-secrets: could not generate a secret with openssl; nothing was written`:
+  `openssl` が無いか、失敗しました。ファイルは作られていません。`command -v openssl` を確認し（無ければ `sudo dnf -y install openssl`）、もう一度実行してください。
+- `secrets/compute.yaml exists without secrets/controller.yaml …`: 前の実行が途中で強制終了しました。`compute.yaml` を確かめてから削除し、もう一度実行してください。
+- `gen-secrets: warning: secrets/.gen-secrets.… is left from an interrupted run …`: 前の実行が強制終了し、一時ディレクトリが残っています。生成した値を含むことがあります（`secrets/` の中にあり、モード 0700、Git の管理外）。中身を使わずに削除してください。
+- `secrets.example/` の値は使わないでください。CI 用の合成値です。
+
+## OpenStack のサービスが起動しない
+
+**確認方法**（AIO サーバー）:
+
+```sh title="AIO サーバー"
+systemctl --failed
+systemctl status openstack-nova-compute
+sudo journalctl -u openstack-nova-compute -n 50 --no-pager
+```
+
+ユニット名は、手順 5-6 の一覧を参照してください。
+
+- **apply が途中で失敗した後**: handler（サービスの再起動）は、apply が成功したときにだけ最後に実行されます。
+  設定ファイルを変えた後で apply が失敗すると、次の apply では設定ファイルがすでに正しいため再起動が実行されず、
+  サービスは古い設定のまま動き続けます（実機の mariadb で再現済み）。この場合は、影響するサービスを手で再起動してください。
+  例: `sudo systemctl restart openstack-nova-compute`
+- **メモリやディスクの不足**: レシピの事前チェックは、メモリとディスクの量を検査しません。`free -g`、`df -h /` で確認してください。
+
+## Horizon に接続できない
+
+**確認方法**（AIO サーバー）:
+
+```sh title="AIO サーバー"
+systemctl is-active httpd memcached
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost/dashboard/auth/login/
+```
+
+- サーバーの内側で `200` が返るなら、Horizon は動いています。ブラウザから見えないのは、ネットワークの経路の問題です。
+- このチュートリアルでは Horizon をインターネットに公開しません。手順 5-3 の SSH トンネルを使ってください（ブラウザでの確認は未検証です）。
+- URL は `/dashboard/` です（`http://localhost:8080/dashboard/`）。
+
+## CirrOS が ACTIVE にならない
+
+**確認方法**（AIO サーバーの root、`admin-openrc` を読み込んだ状態）:
+
+```sh title="AIO サーバー（root）"
+openstack server show demo-cirros
+openstack compute service list
+openstack hypervisor list
+openstack network agent list
+sudo journalctl -u openstack-nova-compute -n 50 --no-pager
+```
+
+- `nova-compute` が `up` でない、ハイパーバイザーが無い場合は、[サービスが起動しない](#openstack-のサービスが起動しない)を見てください。
+- 状態が `ERROR` の場合は、`openstack server show` の `fault` の欄に理由が表示されます。`openstack server delete demo-cirros` で削除してから作り直せます。
+- `/dev/kvm` が使えないと KVM で起動できません（[/dev/kvm が使えない](#devkvm-が使えない)）。
+- 再起動の後は `SHUTOFF` のことがあります。`openstack server start demo-cirros` で起動します。
+
+## 再 apply で変更が残る
+
+**症状**: 2 回目の `apply` で `0 changed` にならない。
+
+**確認方法**（ビルダー）:
+
+```sh title="ビルダー"
+grep -E '^CHANGED' ~/os-apply2.log
+```
+
+- 1 回目の apply が失敗していた場合は、残りの変更が 2 回目で適用されます。もう一度 apply を実行し、`0 changed` になるか確認してください。
+- 同じリソースが毎回 `CHANGED` になる場合は、Sinter の外（手作業や別のツール）でそのファイルやサービスを変えていないか確認してください。
+- 受入では、2 回目も再起動後も `0 changed` でした。それでも変更が残り続ける場合は、そのリソース名と出力を添えて報告してください（秘密を含めないこと）。
+
+## audit の not_auditable
+
+**症状**: `audit` で約 91 件が `NOT_AUDITABLE` になる。
+
+**これは正常です**。`command` リソースは audit で実行しないため、状態を確認できません（`reason: command resources are not executed during audit`）。
+not_auditable は compliant にも drift にも数えません。`status: no_drift` で `0 drifted`、`0 errors` なら、audit で確認できる範囲（ファイル、ディレクトリ、パッケージ、サービス、テンプレートなど）はレシピどおりです。
+
+<LinkCard title="最初に戻る: 1. 完成イメージと構成" href="/ja/tutorials/openstack-aio/overview/" />

@@ -38,6 +38,8 @@ jobs:
 
       - run: npm run webmcp:check
 
+      - run: npm run tutorial:check
+
       - run: npm run build
 
       - uses: actions/configure-pages@v5

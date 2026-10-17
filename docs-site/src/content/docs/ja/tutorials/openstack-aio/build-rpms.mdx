@@ -1,0 +1,148 @@
+---
+title: RPM のビルドと転送
+description: OpenStack AIO チュートリアルの手順 3。builder.yaml で OpenStack 2026.1 の RPM をビルドし、AIO サーバーへ転送して SHA-256 を照合する。
+sidebar:
+  label: 3. RPM のビルドと転送
+---
+
+import { Aside, Badge, LinkCard } from '@astrojs/starlight/components';
+
+[SinterでOpenStack 2026.1を構築する](/ja/tutorials/openstack-aio/overview/) の手順 3 / 5 です。
+ビルダーで OpenStack 2026.1 の RPM をビルドし（README の「方式 B」）、AIO サーバーへ転送します。
+RPM はどこからも配布されていないため、この手順は必須です。
+
+<Aside type="caution" title="ビルダーは使い捨てにする">
+`builder.yaml` はビルドに必要なパッケージを root でインストールし、リポジトリの設定を書き換えます。
+OpenStack のノード（AIO サーバー）では絶対に実行しないでください。
+</Aside>
+
+## 3-1. レシピを検証する <Badge text="受入で実行" variant="success" />
+
+```sh title="ビルダー"
+cd ~/sinter/examples/openstack
+sinter validate builder.yaml
+```
+
+```text title="成功時の出力"
+ok: 20 resource(s), 0 handler(s), 3 var(s)
+```
+
+## 3-2. RPM をビルドする <Badge text="受入で実行" variant="success" />
+
+ビルドには 40〜60 分かかります（受入では約 41 分）。SSH が切れても止まらないように、`tmux` の中で実行します。
+
+```sh title="ビルダー"
+tmux new -s sinter
+```
+
+開いた `tmux` の中で、次を実行します。`builder.yaml` はビルダー自身に対して root で適用します（`--host` は付けません）。
+
+```sh title="ビルダー（tmux の中）"
+cd ~/sinter/examples/openstack
+sudo env HOME=/root /usr/local/bin/sinter apply builder.yaml 2>&1 | tee ~/builder-apply.log
+```
+
+SSH が切れたときは、ビルダーにログインし直して `tmux attach -t sinter` で戻れます。
+
+`| tee` で出力を記録すると、端末ではないため Sinter の進捗表示は出ず、結果は最後にまとめて表示されます。その間、画面には何も表示されません。
+途中経過を見たいときは、`sudo env HOME=/root SINTER_PROGRESS=plain /usr/local/bin/sinter apply builder.yaml 2>&1 | tee ~/builder-apply.log` のように `env` の中で `SINTER_PROGRESS=plain` を指定すると、進捗がプレーンな行で表示されます（`sudo` の前に置くと `sudo` が環境変数を消すため効きません。[CLI リファレンス](/ja/reference/cli/#sinter_progress)。受入では使っていません）。
+
+受入では、同じ `sinter apply builder.yaml` を root で、`tmux` の代わりに `systemd-run` を使って実行しました。
+
+```text title="成功時の出力（最後の部分。ホスト名は合成値）"
+== Sinter APPLY ==
+target facts: hostname=rpm-builder os=Rocky Linux family=redhat version=10.2 arch=x86_64
+
+ok    preflight_os [command] known/normal
+CHANGED  pkg_epel_release [package] known/normal
+...
+CHANGED  build_rpms [command] known/normal
+CHANGED  repo_fixup [command] known/normal
+
+summary: 13 changed, 0 possible, 0 failed, 0 indeterminate, 20 total
+status: success
+```
+
+**成功の判断**: 最後が `status: success` で、`0 failed` であること。
+changed の数は、イメージにすでに入っているパッケージによって変わります。
+
+`build_rpms` が失敗したときは、[RPM のビルドが失敗する](/ja/tutorials/openstack-aio/troubleshooting/#rpm-のビルドが失敗する)を見てください。
+
+## 3-3. ビルド結果を確認する <Badge text="受入で実行" variant="success" />
+
+不完全なビルド結果は使いません。次をすべて確認します（最後の行は、ビルドに使った hagistack の commit です）。
+
+```sh title="ビルダー"
+sudo test -f /var/lib/hagistack-build/build.ok && echo build-ok
+sudo test -s /root/rpmbuild/RPMS/repodata/repomd.xml && echo repodata-ok
+sudo sh -c 'ls /root/rpmbuild/RPMS/noarch/*.rpm | wc -l'
+sudo sh -c 'cd /root/rpmbuild/RPMS && bad=0; for f in noarch/*.rpm; do rpm -K --nosignature "$f" >/dev/null 2>&1 || { bad=$((bad+1)); echo "BAD $f"; }; done; echo "rpmK_bad=$bad"'
+sudo git -C /opt/hagistack-src rev-parse HEAD
+```
+
+```text title="成功時の出力（RPM の数は受入時の値）"
+build-ok
+repodata-ok
+195
+rpmK_bad=0
+8225c50c0b283bcdce960d64f7f7dfe32f5afc1c
+```
+
+- `build-ok` は、ビルドスクリプトがすべてのパスを終え、主要なパッケージを確認したときだけ作られる印です。
+  ビルドが途中で失敗しても、リポジトリ自体は作られることがあるため、この印で判断します。
+- `rpm -K --nosignature` は RPM のダイジェストの検査です。**署名の検証ではありません**（RPM は無署名です）。
+- 最後の行は、ビルドに使った hagistack の commit で、レシピが固定している値と同じになります。
+
+## 3-4. SHA-256 の一覧を作る <Badge text="置き換え" variant="caution" />
+
+転送の後で照合するため、ビルダー側の SHA-256 の一覧を作ります。
+
+```sh title="ビルダー"
+sudo sh -c 'cd /root/rpmbuild/RPMS && sha256sum noarch/*.rpm repodata/*' > ~/rpm-sha256.txt
+wc -l < ~/rpm-sha256.txt
+```
+
+```text title="出力例（受入時は RPM 195 個と repodata で 199 行）"
+199
+```
+
+受入では同じ一覧を一時ファイルに作りました。ここでは、後で使いやすいようにホームディレクトリに置きます。
+
+## 3-5. AIO サーバーへ転送する <Badge text="受入で実行" variant="success" />
+
+`tools/stage-rpm-repo.sh` は、ビルダーの `/root/rpmbuild/RPMS` を SSH で読み出し、AIO サーバーの `/opt/hagistack-repo` に展開します。
+ここでは、ビルダー自身を `localhost` として指定します（手順 2 で `localhost` への SSH を準備したのはこのためです）。
+
+```sh title="ビルダー"
+cd ~/sinter/examples/openstack
+. ~/sinter-os.env
+bash tools/stage-rpm-repo.sh --from-builder localhost --host "$AIO_IP" --identity "$SSH_KEY"
+```
+
+```text title="成功時の出力（IP は合成値）"
+streaming localhost:/root/rpmbuild/RPMS -> 10.0.0.10:/opt/hagistack-repo ...
+repository in place: 195 RPMs, repodata present
+done. Next: edit site.yaml, run tools/gen-secrets.sh, then sinter validate / plan / apply all-in-one.yaml
+```
+
+この転送経路には、スクリプト自身の整合性検査がありません。次の手順で必ず照合してください。
+
+## 3-6. AIO サーバーで SHA-256 を照合する <Badge text="受入で実行" variant="success" />
+
+```sh title="ビルダー"
+. ~/sinter-os.env
+scp -i "$SSH_KEY" ~/rpm-sha256.txt "$AIO_IP":rpm-sha256.txt
+ssh -i "$SSH_KEY" "$AIO_IP" 'cd /opt/hagistack-repo && sudo sha256sum -c ~/rpm-sha256.txt | grep -c ": OK$"; sudo sha256sum --quiet -c ~/rpm-sha256.txt && echo ALL-OK'
+```
+
+```text title="成功時の出力（受入時の件数）"
+199
+ALL-OK
+```
+
+**成功の判断**: 1 行目が 3-4 の行数と同じで、`ALL-OK` が出ること。
+一致しないファイルがあると、そのファイル名と `FAILED` が表示され、`ALL-OK` は出ません。その場合は 3-5 からやり直してください。
+
+受入では、同じ一覧で AIO サーバー上の 199 件すべてが一致しました（`--quiet` での確認は、このチュートリアルで加えたものです）。
+
+<LinkCard title="次へ: 4. 設定と plan / apply / audit" href="/ja/tutorials/openstack-aio/deploy/" />

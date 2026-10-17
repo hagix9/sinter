@@ -1,0 +1,174 @@
+---
+title: Build OpenStack 2026.1 with Sinter
+description: A hands-on tutorial that builds an OpenStack 2026.1 all-in-one node on Rocky Linux 10.2 with Sinter's official recipes. The result, the topology, the requirements and the overall flow.
+sidebar:
+  label: 1. Result and topology
+---
+
+import { Aside, Badge, LinkCard, Steps } from '@astrojs/starlight/components';
+import OpenStackTopology from '../../../../../components/tutorial/OpenStackTopology.astro';
+
+This tutorial uses Sinter's official recipes,
+[`examples/openstack/`](https://github.com/hagix9/sinter/tree/main/examples/openstack), to build an
+**OpenStack 2026.1 (Gazpacho) all-in-one (AIO)** node on one Rocky Linux 10.2 server.
+The commands are written so that you can copy and run them from top to bottom.
+
+<Aside type="caution" title="A verification and demo setup">
+These recipes exist to evaluate Sinter on a real workload. They are not hardened for production.
+SELinux is permissive, the RPMs are unsigned and `gpgcheck=0` is used.
+Do not expose the OpenStack APIs or Horizon to the internet.
+Read [Security limitations](#security-limitations) before you start.
+</Aside>
+
+## The result
+
+At the end you have:
+
+- **Keystone authentication**: `openstack token issue` succeeds.
+- **The Nova, Neutron (OVN), Glance, Placement and Keystone APIs**: 15 endpoints (admin, internal and public of each service).
+- **Virtual machines under KVM**: CirrOS 0.6.3 is `ACTIVE` and the libvirt domain type is `kvm`.
+- **Reaching the guest**: ping with 0% loss, SSH login with the host key checked.
+- **Management in Horizon**: the login page loads and admin can log in.
+- **Ongoing management with Sinter**: a second `apply` reports 0 changed and `audit` reports `no_drift`, also after a reboot.
+
+Step 5 shows how to check each of them.
+
+All of these were checked on a real host (GCE, Rocky Linux 10.2) on 2026-10-17.
+No Horizon screenshot was kept, so this tutorial shows none.
+
+## Topology
+
+<OpenStackTopology locale="en" />
+
+- **Your terminal (your PC)**: you log in to the builder and the AIO node over SSH. It does not need Sinter.
+- **RPM builder = Sinter controller**: a disposable Rocky Linux 10.2 host.
+  - It runs `sinter apply builder.yaml` against itself (locally, as root) to build the OpenStack RPMs.
+  - ① `tools/stage-rpm-repo.sh` streams the RPMs over SSH to `/opt/hagistack-repo` on the AIO node.
+  - ② It runs `sinter plan / apply / audit all-in-one.yaml` against the AIO node over SSH with `sudo`. The generated secrets (`secrets/`) live here too.
+- **OpenStack AIO node**: runs every OpenStack service.
+  The staged RPMs are served as a local repository on `127.0.0.1:8088` and installed from there.
+  The CirrOS guest runs under KVM on the tenant network.
+- **Internet**: the builder downloads sources and dependencies; the AIO node downloads packages from Rocky, EPEL, the NFV SIG and RDO, and the CirrOS image.
+
+This layout (the builder doubles as the Sinter controller) is the one used in the real-host acceptance.
+
+## Requirements
+
+### Servers
+
+**AIO node**
+
+- OS: **Rocky Linux 10.2 x86_64 (required)**
+- CPU / memory / disk: 4 vCPUs / 16 GB / about 50 GB free or more (minimum guideline)
+- Virtualization: **`/dev/kvm` available (required)**; enable nested virtualization on a cloud VM
+- Network: outbound internet access, SSH from the builder
+- Other: `dnf-plugins-core`, `attr` (`getfattr`), passwordless `sudo`
+
+**RPM builder**
+
+- OS: **Rocky Linux 10.2 x86_64 (required)**
+- CPU / memory / disk: about the same as the AIO node
+- Virtualization: not needed
+- Network: outbound internet access
+- Other: passwordless `sudo`, `openssl` (secret generation); **disposable** (never an OpenStack node)
+
+- The acceptance used a GCE `n2-standard-4` (4 vCPUs / 16 GB) with a 60 GB balanced disk for both; the AIO node had nested virtualization enabled.
+- The recipe's preflight checks do not check memory or disk. Too little of either makes the run fail part way.
+- This tutorial assumes that **you log in to the builder and the AIO node with the same user name** (as in the acceptance).
+
+### What the preflight checks (required)
+
+Before anything changes, `apply` on the AIO node checks the following and stops if any of them fails:
+
+- the OS is Rocky Linux 10.x on x86_64
+- `hostname -s` equals `os_hostname` in the settings file
+- `mgmt_ip` from the settings file is on one of the node's interfaces
+- `/dev/kvm` is readable (with `virt_type: kvm`)
+- `dnf-plugins-core` is installed
+
+### Network
+
+- **Your terminal → builder, AIO node (SSH)**: working and logging in.
+- **Builder → AIO node (SSH, TCP 22, internal network)**: staging the RPMs and running Sinter.
+- **Builder → internet (HTTPS)**: GitHub (hagistack and Sinter), the Rust toolchain and crates, the OpenStack sources, RDO, EPEL, Rocky repositories.
+- **AIO node → internet (HTTPS)**: Rocky, EPEL, CentOS Stream NFV SIG and RDO repositories, the CirrOS image.
+
+Do not accept connections to the OpenStack APIs or Horizon from the internet.
+In the acceptance, the cloud firewall allowed only SSH, ICMP and VPC-internal traffic, and the checks ran from inside the servers.
+
+### Sinter
+
+The features the recipes use need Sinter v1.5.0 or later.
+This tutorial mainly describes building it from the same source as the acceptance (step 2).
+
+## The flow
+
+<Steps>
+
+1. **Result and topology** (this page): what you get, the layout, the requirements and the security limits.
+2. **[Prepare hosts and Sinter](/en/tutorials/openstack-aio/prepare/)**: check the servers, install Sinter on the builder, set up the SSH key.
+3. **[Build and stage the RPMs](/en/tutorials/openstack-aio/build-rpms/)**: build the RPMs with `builder.yaml` (40–60 minutes), stage them on the AIO node and verify SHA-256.
+4. **[Configure, plan, apply, audit](/en/tutorials/openstack-aio/deploy/)**: prepare the settings and secrets, then build OpenStack (the first apply takes about 21 minutes).
+5. **[Verify and reboot](/en/tutorials/openstack-aio/verify/)**: check OpenStack and CirrOS, reboot and re-apply.
+6. **[Troubleshooting](/en/tutorials/openstack-aio/troubleshooting/)**: what to check when something fails.
+
+</Steps>
+
+## How to read this tutorial
+
+The title of each code block names **the host where you run it**.
+
+| Title | Where |
+|---|---|
+| `Your terminal` | your PC |
+| `Builder` | the RPM builder = Sinter controller (as a normal user; only commands with `sudo` run as root) |
+| `AIO node` | the OpenStack AIO node (as a normal user) |
+| `AIO node (root)` | a root shell on the AIO node, after `sudo -i` |
+
+The label next to each step's heading tells you where the command comes from.
+
+| Label | Meaning |
+|---|---|
+| <Badge text="Run in acceptance" variant="success" /> | an equivalent command ran successfully in the 2026-10-17 real-host acceptance (IP, user name, key and known_hosts paths, log locations and the like replaced) |
+| <Badge text="Substituted" variant="caution" /> | a cloud-specific operation of the acceptance replaced by a generic step; not run in this form in the acceptance |
+| <Badge text="From the recipe" variant="note" /> | a step documented by the published recipe and its README |
+| <Badge text="Unverified" variant="danger" /> | not checked on a real host |
+
+The sample outputs are the acceptance's, with host names, IP addresses and times replaced by synthetic values.
+Counts (number of RPMs, number of changed resources) are reference values; they are not guaranteed to be the same in every environment.
+
+## The accepted version and this tutorial's version
+
+| Item | Value |
+|---|---|
+| Version used by this tutorial | commit `b058d663ad329b85e52f3d86bb0d096d7b63585c` of the Sinter repository (the OpenStack recipes as published in `c5fe8aa`, plus the fix to the secret generator) |
+| Sinter in the real-host acceptance | `3643945` (`main` after v1.5.1; the same product source as `b058d66`) |
+| Recipe in the real-host acceptance | `0558b7b`, before publication |
+| Difference | Two places, both covered by tests and **not run on a real host**: (1) how the Keystone key steps handle their output (`files/ensure.sh`); the first apply is expected to report 2 more changed resources than the acceptance did. (2) `tools/gen-secrets.sh` no longer writes empty or partial secrets (it runs on the builder; what is applied to the AIO node does not change) |
+
+## Security limitations
+
+The recipes keep the choices of hagistack, the installer they port. These are not safe defaults for production.
+
+- **SELinux is set to permissive** (now and at boot). Enforcing is not verified.
+- **The OpenStack RPMs are unsigned**, and the self-built, NFV SIG and RDO repositories use `gpgcheck=0`.
+  `rpm -K --nosignature` checks digests only; it is **not a signature check**.
+  Integrity between the builder and the AIO node is checked with SHA-256 (step 3).
+- **firewalld is left as the image ships it.** In the cloud image used for the acceptance the default zone was `trusted`,
+  so the host firewall accepted every port.
+- **Every service listens on the management network.** Anything that can reach the management address (for example other hosts in
+  the same VPC) can reach MariaDB, RabbitMQ, the APIs and Horizon. Keep the AIO node on an isolated network.
+- Some local listeners, such as the local RPM repository (127.0.0.1), have no authentication.
+- **Secrets** are generated into `secrets/` on the builder (outside Git) and written to root-only files on the AIO node.
+  `secrets.example/` holds synthetic values for CI; **never use it**.
+- TLS, firewalling, access control and redundancy for production are not included.
+
+## About the RPMs
+
+Nobody distributes OpenStack 2026.1 RPMs for EL10, and **this project distributes none**.
+In step 3 you build them yourself from the public sources on a disposable builder ("method B" in the README).
+The built RPMs contain bundled third-party code under its own licenses.
+Do not redistribute them without checking those licenses.
+For the sources and licenses, see the recipe [README](https://github.com/hagix9/sinter/blob/main/examples/openstack/README.md#sources-and-licenses).
+
+<LinkCard title="Next: 2. Prepare hosts and Sinter" href="/en/tutorials/openstack-aio/prepare/" />

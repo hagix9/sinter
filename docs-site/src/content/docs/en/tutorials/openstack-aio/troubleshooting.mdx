@@ -1,0 +1,191 @@
+---
+title: Troubleshooting
+description: Causes and checks when the OpenStack AIO tutorial fails. /dev/kvm, the RPM build, repository dependencies, SSH, sudo, secrets, services, Horizon, CirrOS, re-apply, audit.
+sidebar:
+  label: 6. Troubleshooting
+---
+
+import { Aside, LinkCard } from '@astrojs/starlight/components';
+
+Causes and checks for when [Build OpenStack 2026.1 with Sinter](/en/tutorials/openstack-aio/overview/) does not work.
+For Sinter errors in general see [Troubleshooting](/en/troubleshooting/); for exit codes see the [CLI reference](/en/reference/cli/#exit-codes).
+
+<Aside type="tip" title="Where to look first">
+In Sinter's output, the line of a failed resource starts with `FAILED` (`INDET` when indeterminate), with the reason below it.
+`grep -E '^(FAILED|INDET|blocked)' ~/os-apply1.log` finds them. `blocked` is a resource that did not run because something it depends on failed.
+</Aside>
+
+## /dev/kvm is not available
+
+**Symptom**: `apply` fails at the first `preflight_kvm`, or `ls -l /dev/kvm` says `No such file or directory`.
+
+**Cause**: nested virtualization is not enabled on the AIO node.
+
+**Check** (AIO node):
+
+```sh title="AIO node"
+ls -l /dev/kvm
+grep -cE 'vmx|svm' /proc/cpuinfo
+```
+
+If `/dev/kvm` is missing or the second line is `0`, enable nested virtualization in your cloud or virtualization platform and create the server again
+(the acceptance enabled GCE's nested virtualization).
+
+`site.yaml` also has a `virt_type: qemu` setting (software emulation, 10–50 times slower), but it is **not verified on a real host**.
+
+## The RPM build fails
+
+**Symptom**: `build_rpms` is `FAILED` in `sinter apply builder.yaml`, or `/var/lib/hagistack-build/build.ok` is missing.
+
+**Check** (builder):
+
+```sh title="Builder"
+sudo ls /var/lib/hagistack-build
+sudo grep '^  FAIL ' /var/lib/hagistack-build/pass1.log
+sudo tail -n 30 /var/lib/hagistack-build/pass2.log
+df -h / /var/lib
+```
+
+- The build runs in two passes. The second pass rebuilds only the packages that failed in the first; if one fails again, the whole build fails.
+  The logs are `pass1.log`, `pass2.log` (only when a second pass ran) and the `logs/` directory under `/var/lib/hagistack-build`.
+- A failed build can still leave a repository (`/root/rpmbuild/RPMS`) behind. **Never use a result without `build.ok`.**
+- Running out of disk, a network interruption or a temporary problem of an external repository (RDO trunk, EPEL) can make it fail.
+  The RDO repository files always point to the latest trees, so a later build can see different content from the acceptance.
+- Remove the cause and run the same `apply` again. As long as `build.ok` is missing, the build runs again.
+
+## Repository dependency errors
+
+**Symptom**: on the AIO node, a `package` resource of `apply` fails with a dependency error.
+
+**Check** (AIO node):
+
+```sh title="AIO node"
+systemctl is-active sinter-openstack-repo
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8088/repodata/repomd.xml
+ls /opt/hagistack-repo/noarch | wc -l
+dnf repolist --enabled
+```
+
+- Unless `sinter-openstack-repo` is `active` and `repomd.xml` returns `200`, the local RPM repository is not being served.
+  Start again from staging and the SHA-256 check in step 3.
+- The RPMs live in `/opt/hagistack-repo`, and the recipe serves them over HTTP on `127.0.0.1:8088`.
+  **`file://` repositories do not work with Sinter's `package` resource.**
+- The AIO node also uses the Rocky, EPEL, CentOS Stream NFV SIG and RDO repositories. Their content is external and can change later (unverified).
+
+## SSH connection fails
+
+**Symptom**: `Host key verification failed`, `unknown host key`, `host key changed`, `Permission denied (publickey)`.
+
+**Check** (builder):
+
+```sh title="Builder"
+. ~/sinter-os.env
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$SSH_KEY" "$AIO_IP" 'hostname -s'
+grep -c "$AIO_IP" ~/.ssh/known_hosts
+```
+
+- **Host key errors**: Sinter refuses unknown or changed host keys and never adds them by itself.
+  Check the fingerprint and add the key to `~/.ssh/known_hosts` as in step 2-8. If you recreated the server, delete the old line before adding the new key.
+- **`Permission denied (publickey)`**: the public key is not in `~/.ssh/authorized_keys` on the AIO node (step 2-7).
+  It also fails when the user name differs between the builder and the AIO node.
+- **Only `stage-rpm-repo.sh` fails**: it needs SSH to the builder itself (`localhost`).
+  Check that `ssh -o BatchMode=yes -i "$SSH_KEY" localhost true` succeeds.
+
+## sudo permission is missing
+
+**Symptom**: no `sudo-ok`; Sinter reports a sudo error when it connects.
+
+**Check**:
+
+```sh title="AIO node"
+sudo -n true && echo sudo-ok
+```
+
+`--sudo` runs every operation through non-interactive `sudo -n -u root`. A sudo that asks for a password does not work.
+Allow the SSH user passwordless sudo. See [Privilege escalation](/en/troubleshooting/#privilege-escalation).
+
+## Secrets are missing
+
+**Symptom**: `sinter validate` stops with `cannot resolve …/secrets/controller.yaml: No such file or directory` (exit code 2).
+
+**Cause and fix**:
+
+- `sh tools/gen-secrets.sh` has not been run in `~/sinter/examples/openstack` (step 4-2).
+- `secrets/controller.yaml exists; not overwritten` is a deliberate protection. New secrets would not match the existing database passwords.
+  **Only if the AIO node has not been built yet** may you delete `secrets/` and generate it again.
+- `gen-secrets: openssl is required …` / `gen-secrets: could not generate a secret with openssl; nothing was written`:
+  `openssl` is missing or failed, and no file was written. Check `command -v openssl` (if it is missing, `sudo dnf -y install openssl`) and run it again.
+- `secrets/compute.yaml exists without secrets/controller.yaml …`: an earlier run was killed part way. Check `compute.yaml`, delete it and run again.
+- `gen-secrets: warning: secrets/.gen-secrets.… is left from an interrupted run …`: an earlier run was killed and left its temporary directory, which may hold generated values (inside `secrets/`, mode 0700, outside Git). Delete it without using it.
+- Do not use the values in `secrets.example/`. They are synthetic values for CI.
+
+## OpenStack services do not start
+
+**Check** (AIO node):
+
+```sh title="AIO node"
+systemctl --failed
+systemctl status openstack-nova-compute
+sudo journalctl -u openstack-nova-compute -n 50 --no-pager
+```
+
+For the unit names, see the list in step 5-6.
+
+- **After a failed apply**: handlers (service restarts) run at the end of an apply only when it succeeds.
+  If an apply changes a configuration file and then fails, the next apply finds the file already right, so the restart does not run,
+  and the service keeps running with the old configuration (reproduced on a real host with mariadb). Restart the affected services by hand.
+  Example: `sudo systemctl restart openstack-nova-compute`
+- **Too little memory or disk**: the recipe's preflight checks do not check memory or disk. Check with `free -g` and `df -h /`.
+
+## Horizon is not reachable
+
+**Check** (AIO node):
+
+```sh title="AIO node"
+systemctl is-active httpd memcached
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost/dashboard/auth/login/
+```
+
+- If this returns `200` inside the server, Horizon is running; a browser that cannot see it has a network path problem.
+- This tutorial does not expose Horizon to the internet. Use the SSH tunnel of step 5-3 (browser access is unverified).
+- The URL is `/dashboard/` (`http://localhost:8080/dashboard/`).
+
+## CirrOS does not become ACTIVE
+
+**Check** (root on the AIO node, with `admin-openrc` loaded):
+
+```sh title="AIO node (root)"
+openstack server show demo-cirros
+openstack compute service list
+openstack hypervisor list
+openstack network agent list
+sudo journalctl -u openstack-nova-compute -n 50 --no-pager
+```
+
+- If `nova-compute` is not `up` or there is no hypervisor, see [OpenStack services do not start](#openstack-services-do-not-start).
+- When the status is `ERROR`, the `fault` field of `openstack server show` gives the reason. Delete the guest with `openstack server delete demo-cirros` and create it again.
+- Without `/dev/kvm` it cannot boot under KVM ([/dev/kvm is not available](#devkvm-is-not-available)).
+- After a reboot it can be `SHUTOFF`; start it with `openstack server start demo-cirros`.
+
+## Changes remain on re-apply
+
+**Symptom**: the second `apply` does not report `0 changed`.
+
+**Check** (builder):
+
+```sh title="Builder"
+grep -E '^CHANGED' ~/os-apply2.log
+```
+
+- If the first apply failed, the second applies the remaining changes. Run apply again and check that it reports `0 changed`.
+- If the same resource is `CHANGED` every time, check whether something outside Sinter (manual work, another tool) changes that file or service.
+- In the acceptance, the second apply and the one after the reboot both reported `0 changed`. If changes keep remaining, report the resource name and the output (without any secret).
+
+## not_auditable in audit
+
+**Symptom**: about 91 resources are `NOT_AUDITABLE` in `audit`.
+
+**This is expected.** Audit does not run `command` resources, so it cannot check their state (`reason: command resources are not executed during audit`).
+not_auditable is counted neither as compliant nor as drift. With `status: no_drift`, `0 drifted` and `0 errors`, everything audit can check (files, directories, packages, services, templates and so on) matches the recipe.
+
+<LinkCard title="Back to the start: 1. Result and topology" href="/en/tutorials/openstack-aio/overview/" />
