@@ -3127,11 +3127,14 @@ impl Engine {
                     r.change = Change::Possible;
                     r.verification = Verification::Unknown;
                     // Package-manager stderr can echo the package name; never
-                    // include it for a sensitive resource (DESIGN §31).
+                    // include it for a sensitive resource (DESIGN §31). It can
+                    // also carry a repository URL with credentials (R-8): dnf's
+                    // is reduced to a recognized cause or withheld, apt's has
+                    // URL credentials redacted.
                     let stderr_note = if sensitive {
                         String::new()
                     } else {
-                        format!(": {}", String::from_utf8_lossy(&out.stderr).trim())
+                        package_failure_note(backend, &out, pkg_disp)
                     };
                     r.reason = Some(format!(
                         "{} {} {} failed with exit code {}{}",
@@ -6680,6 +6683,77 @@ fn is_wrapped_header_continuation(t: &str) -> bool {
         && f[3] == "Size"
 }
 
+/// The detail a failed package mutation may show (R-8). dnf: a cause dnf
+/// reported in a recognized form (`GPG check FAILED`, an unreachable
+/// repository), otherwise only the size of the withheld output. apt: its
+/// stderr, single-line, at most 300 characters, with any URL credentials
+/// (`scheme://user:pass@host`) redacted.
+fn package_failure_note(
+    backend: crate::platform::PackageBackend,
+    out: &Output,
+    pkg_disp: &str,
+) -> String {
+    match backend {
+        crate::platform::PackageBackend::Dnf => {
+            let refusal = if out.stderr_truncated {
+                None
+            } else {
+                match classify_dnf_download_failure(&out.stderr) {
+                    DnfRefusal::PayloadDownload => None,
+                    r => Some(r),
+                }
+            };
+            match refusal {
+                Some(r) => format!(": {}", r.render(pkg_disp, false)),
+                None => format!(
+                    " ({} bytes of dnf output withheld; run the same dnf command on the target \
+                     to see it)",
+                    out.stdout.len() + out.stderr.len()
+                ),
+            }
+        }
+        crate::platform::PackageBackend::Apt => {
+            let text = String::from_utf8_lossy(&out.stderr);
+            let line = crate::diff::sanitize_line(text.trim());
+            let line = redact_url_credentials(&line);
+            let line = if line.chars().count() > 300 {
+                format!("{}…", line.chars().take(300).collect::<String>())
+            } else {
+                line
+            };
+            if line.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", line)
+            }
+        }
+    }
+}
+
+/// Replace the userinfo of every `scheme://userinfo@host` in `s` with
+/// `[redacted]`. A `://` followed by an `@` before the next `/`, whitespace
+/// or end of text marks userinfo.
+fn redact_url_credentials(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("://") {
+        let (head, tail) = rest.split_at(i + 3);
+        out.push_str(head);
+        let end = tail
+            .find(|c: char| c == '/' || c.is_whitespace())
+            .unwrap_or(tail.len());
+        match tail[..end].rfind('@') {
+            Some(at) => {
+                out.push_str("[redacted]");
+                rest = &tail[at..];
+            }
+            None => rest = tail,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Why dnf refused an install before any change, for a cause dnf reported in
 /// a recognized form (DNF-01, DNF-09). Every token carried here was extracted
 /// from dnf output by a fixed grammar and domain-validated (a package name, a
@@ -7662,6 +7736,21 @@ mod package_tests {
              {}\n",
             body, summary
         )
+    }
+
+    #[test]
+    fn url_credentials_are_redacted() {
+        assert_eq!(
+            redact_url_credentials("E: fetch https://u:p@h.example/x and http://h2/y"),
+            "E: fetch https://[redacted]@h.example/x and http://h2/y"
+        );
+        assert_eq!(
+            redact_url_credentials("ftp://a@b c://d@e"),
+            "ftp://[redacted]@b c://[redacted]@e"
+        );
+        assert_eq!(redact_url_credentials("no url here @x"), "no url here @x");
+        assert_eq!(redact_url_credentials("https://h/p@q"), "https://h/p@q");
+        assert_eq!(redact_url_credentials("x://"), "x://");
     }
 
     #[test]

@@ -2392,6 +2392,9 @@ pub struct FakeTarget {
     /// Forced dnf/apt-get mutation completion, overriding the state
     /// transition. Does not apply to the dnf metadata-cache probe.
     pub manager_completion: Option<Completion>,
+    /// Forced dnf/apt-get mutation output as a whole (completion, stdout,
+    /// stderr). Wins over `manager_completion`.
+    pub manager_output: Option<Output>,
     /// Forced completion for the `dnf -C repoquery` metadata-snapshot
     /// usability check; `None` derives the outcome from `dnf_repos`
     /// (DESIGN §27 fail-closed path tests).
@@ -2661,6 +2664,7 @@ impl FakeTarget {
             packages: std::collections::BTreeSet::new(),
             services: BTreeMap::new(),
             manager_completion: None,
+            manager_output: None,
             probe_completion: None,
             dnf_probe_output: None,
             query_completion: None,
@@ -2726,6 +2730,7 @@ impl FakeTarget {
             packages: std::collections::BTreeSet::new(),
             services: BTreeMap::new(),
             manager_completion: None,
+            manager_output: None,
             probe_completion: None,
             dnf_probe_output: None,
             query_completion: None,
@@ -2782,6 +2787,7 @@ impl FakeTarget {
             packages: std::collections::BTreeSet::new(),
             services: BTreeMap::new(),
             manager_completion: None,
+            manager_output: None,
             probe_completion: None,
             dnf_probe_output: None,
             query_completion: None,
@@ -2836,6 +2842,7 @@ impl FakeTarget {
             packages: std::collections::BTreeSet::new(),
             services: BTreeMap::new(),
             manager_completion: None,
+            manager_output: None,
             probe_completion: None,
             dnf_probe_output: None,
             query_completion: None,
@@ -2884,6 +2891,7 @@ impl FakeTarget {
             packages: std::collections::BTreeSet::new(),
             services: BTreeMap::new(),
             manager_completion: None,
+            manager_output: None,
             probe_completion: None,
             dnf_probe_output: None,
             query_completion: None,
@@ -3968,6 +3976,9 @@ impl FakeExecutor {
                 }
             }
             return Self::exited(0, String::new(), String::new());
+        }
+        if let Some(o) = &self.target.manager_output {
+            return o.clone();
         }
         if let Some(c) = &self.target.manager_completion {
             return Output {

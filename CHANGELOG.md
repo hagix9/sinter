@@ -30,8 +30,18 @@ All notable changes to Sinter are documented in this file.
   from the OS and 17 from PGDG (pinned key, repository files), EPEL +
   CRB/PowerTools, any signed RPM repository, Apache with htpasswd.
 
+- **`validate` warns about `{{ … }}` in `template.vars`.** Template vars are
+  passed as written, so such text was rendered literally; the behavior is
+  unchanged, and the warning (stderr, and `warnings` in JSON) points to
+  `vars.*` / `facts.*` in the template body.
+
 ### Fixed
 
+- **A failed package mutation no longer echoes raw package-manager output that
+  could contain repository credentials.** dnf: a recognized cause (`GPG check
+  FAILED`, an unreachable repository) is named, otherwise only the size of the
+  withheld output is shown. apt: the message is kept, single-line and bounded,
+  with `scheme://user:pass@` credentials redacted.
 - **A name dnf only reaches through provides is refused before installing.**
   `name: python3` on EL8 used to install `python36`, then report Failed and
   never converge. Sinter now checks that the dry-run transaction installs the

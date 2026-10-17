@@ -520,3 +520,75 @@ fn plan_does_not_resolve_and_apply_then_refuses() {
     let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
     assert_refused(&r);
 }
+
+// ---------------------------------------------------------------------------
+// R-8: output of a failed package mutation
+// ---------------------------------------------------------------------------
+
+/// A dnf mutation that fails for a reason Sinter does not recognize shows no
+/// raw dnf output — it could carry a repository URL with credentials — only
+/// its size, and the result stays a possible change.
+#[test]
+fn an_unrecognized_dnf_mutation_failure_withholds_the_output() {
+    let dir = trusted_root("r8-dnf-unknown");
+    let recipe = pkg_recipe(&dir, "nano");
+    let mut t = FakeTarget::rocky9();
+    t.manager_output = Some(out(
+        Completion::Exited(1),
+        "Running transaction check\n",
+        "Error: Transaction test error:\n  file /usr/bin/x from install of nano conflicts with https://user:hunter2@repo.example.com/el9/\n",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let p = find(&r, "p");
+    assert_eq!(p.execution, Execution::Failed);
+    assert_eq!(p.change, Change::Possible);
+    let reason = p.reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains("dnf install nano failed with exit code 1"),
+        "{reason}"
+    );
+    assert!(reason.contains("bytes of dnf output withheld"), "{reason}");
+    for leak in ["hunter2", "repo.example.com", "conflicts", "https://"] {
+        assert!(!reason.contains(leak), "{leak} leaked: {reason}");
+    }
+}
+
+/// A recognized cause at the mutation is named (fixed text only).
+#[test]
+fn a_signature_failure_at_the_mutation_is_named() {
+    let dir = trusted_root("r8-dnf-gpg");
+    let recipe = pkg_recipe(&dir, "nano");
+    let mut t = FakeTarget::rocky9();
+    t.manager_output = Some(out(
+        Completion::Exited(1),
+        "",
+        "Public key for nano-1.0-1.el9.x86_64.rpm is not installed. Failing package is: nano-1.0-1.el9.x86_64\n GPG Keys are configured as: file:///etc/pki/rpm-gpg/KEY\nError: GPG check FAILED\n",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let reason = find(&r, "p").reason.clone().unwrap_or_default();
+    assert!(reason.contains("GPG check FAILED"), "{reason}");
+    assert!(!reason.contains("file://"), "{reason}");
+}
+
+/// apt keeps its (useful) message, without URL credentials.
+#[test]
+fn an_apt_mutation_failure_redacts_url_credentials() {
+    let dir = trusted_root("r8-apt");
+    let recipe = pkg_recipe(&dir, "nano");
+    let mut t = FakeTarget::ubuntu2404();
+    t.manager_output = Some(out(
+        Completion::Exited(100),
+        "",
+        "E: Failed to fetch https://deploy:s3cr3t@apt.example.com/pool/n/nano.deb  401  Unauthorized\n",
+    ));
+    let r = run_recipe_fake(&recipe, Mode::Apply, false, t);
+    let reason = find(&r, "p").reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains("E: Failed to fetch https://[redacted]@apt.example.com/pool"),
+        "{reason}"
+    );
+    assert!(
+        !reason.contains("s3cr3t") && !reason.contains("deploy:"),
+        "{reason}"
+    );
+}
