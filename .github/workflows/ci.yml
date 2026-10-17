@@ -67,4 +67,8 @@ jobs:
       # self-test first proves that an invalid recipe makes the check fail.
       - run: .github/scripts/validate-examples.sh target/debug/sinter --self-test
       - run: .github/scripts/validate-examples.sh target/debug/sinter
+      # The OpenStack example's tools/gen-secrets.sh. Unlike the root suite this test changes
+      # nothing on the host (a temporary directory and a stand-in openssl), so it runs here;
+      # /bin/sh is dash on this runner.
+      - run: cargo test --locked --all-features --test openstack_gen_secrets
       - run: cargo test --manifest-path gateway/Cargo.toml --locked --all-targets --all-features

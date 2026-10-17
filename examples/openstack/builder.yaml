@@ -10,8 +10,9 @@
 #
 #   sinter apply builder.yaml           (on the builder, as root)
 #
-# A real GCE n2-standard-4 Rocky 10.2 builder produced the 195 RPMs on 2026-10-13 (about 50 minutes). The recipe was
-# edited afterwards (quality fixes); this final form of builder.yaml has not been run again on a real host.
+# A real GCE n2-standard-4 Rocky 10.2 builder produced the 195 RPMs on 2026-10-13 (about 50 minutes). After the
+# quality fixes, this form of builder.yaml (no `dnf makecache` commands) ran on a fresh GCE builder on 2026-10-17:
+# 13 changed, 0 failed, about 41 minutes, 195 RPMs. Later changes to this file are not covered by that run.
 version: 1
 
 vars:

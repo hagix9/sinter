@@ -6,6 +6,10 @@ A port of [hagistack](https://github.com/hagix9/hagistack)'s `rocky10.2/` instal
 > **Demonstration setup, not a production recommendation.** It installs a working OpenStack for evaluating Sinter
 > on a real workload; it does not make a hardened deployment. Read "Security limitations" before you run it.
 
+**Step-by-step tutorial:** [Build OpenStack 2026.1 with Sinter](https://sinter.fulltrust.co.jp/en/tutorials/openstack-aio/overview/)
+([日本語](https://sinter.fulltrust.co.jp/ja/tutorials/openstack-aio/overview/)) walks through these recipes on a builder and
+an all-in-one node, with the commands of the real-host acceptance. This README stays the technical reference.
+
 ## Requirements
 
 * **Target:** one Rocky Linux 10.2 x86_64 host for the all-in-one layout (the only layout accepted on a real host),
@@ -108,7 +112,7 @@ through a provides match does not apply.
 | `components/*.yaml` | one file per hagistack phase; included by the entry points |
 | `templates/*.tpl` | configuration files rendered by Sinter (`template` resources) |
 | `files/ensure.sh` | the imperative steps no resource type can express (DB/user creation, schema sync, Keystone/Nova/Neutron objects, OVS/OVN settings); each prints `changed`/`unchanged` |
-| `tools/gen-secrets.sh` | generates `secrets/controller.yaml` and `secrets/compute.yaml` (gitignored) |
+| `tools/gen-secrets.sh` | generates `secrets/controller.yaml` and `secrets/compute.yaml` (gitignored); needs `openssl`, checks every value and writes neither file when a value cannot be generated or a file already exists |
 | `tools/stage-rpm-repo.sh` | verifies an archive you kept (Method A) or streams the builder's repository (Method B) and puts it in `/opt/hagistack-repo` on the target |
 
 `all-in-one.yaml` is `controller.yaml` ∪ `compute.yaml` (plus `wait_compute_up`, `nova_discover_hosts`, minus `compute_reach_controller`) with no resource managed twice (tested).
@@ -178,11 +182,17 @@ all-in-one node over SSH with `--sudo` from that Linux host.
 | OpenStack | Keystone token, all API endpoints, Nova conductor/scheduler/compute up, OVN agents and chassis, Glance image active, Horizon login |
 | Guest | CirrOS 0.6.3 `ACTIVE` under KVM, ping 0% loss and SSH (host key checked) from the metadata namespace, also after the reboot |
 
-The published recipe differs from the accepted one in one place: the Keystone key steps (`keystone-manage
-fernet_setup` / `credential_setup` in `files/ensure.sh`) now run through the helper's logged runner, so their own
-output no longer hides a real change (the accepted run reported them as unchanged although it created the keys), and
-on a failure the output is shown only on stderr, shortened. That change is covered by a test but has **not** been run
-on a real host.
+The published recipe differs from the accepted one in two places, both covered by tests and **not** run on a real
+host:
+
+* The Keystone key steps (`keystone-manage fernet_setup` / `credential_setup` in `files/ensure.sh`) now run through
+  the helper's logged runner, so their own output no longer hides a real change (the accepted run reported them as
+  unchanged although it created the keys), and on a failure the output is shown only on stderr, shortened.
+* `tools/gen-secrets.sh` (run on the controller, not on the target) now stops with an error and writes no file when
+  `openssl` is missing or fails, or a value is not 32 characters of A-Za-z0-9; the earlier version could write empty
+  values. It also refuses an existing `secrets/compute.yaml` or symbolic link, places the files only when both are
+  complete, and never replaces a file (see the comment at the top of the script). The accepted run used the earlier
+  version, with `openssl` present.
 
 ## Still unverified
 
