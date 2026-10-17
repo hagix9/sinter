@@ -73,10 +73,9 @@ sinter apply --host server.example.com --sudo recipe.yaml
 sinter audit --host server.example.com --sudo recipe.yaml
 ```
 
-This repository implements **Sinter v0.2** as specified by `GOALS.md` and
-`DESIGN.md`, which are the authoritative specification; v0.2 extends the v0.1
-contract with RHEL-family platform support (Rocky Linux, RHEL, AlmaLinux —
-`dnf`). The
+This repository implements Sinter as specified by `GOALS.md` and `DESIGN.md`,
+which are the authoritative specification. It manages Ubuntu (`apt`) and
+RHEL-family (Rocky Linux, RHEL, AlmaLinux — `dnf`) targets. The
 implementation still adds no roles, plugins, orchestration, or embedded
 scripting. Multiple hosts are handled by a deliberately small, fail-closed
 inventory (hosts, flat groups, explicit per-recipe `targets`) — see
@@ -222,12 +221,13 @@ desired state, ChangeSets, and execution behavior.
 
 Top-level fields: `version`, `vars`, `include`, `resources`, `handlers`.
 
-Resource types in v0.2: `file`, `directory`, `template`, `link`, `command`,
+Resource types: `file`, `directory`, `template`, `link`, `command`,
 `package`, `service`. Handlers are delayed `restart`/`reload` service actions.
 Since v1.2.0 Sinter also has two local
 account types, `group` and `user`: order by declaration and `depends_on`, local database only,
-no renumbering, additive supplementary groups, `absent` without `-r`/`-f`. See
-the resource reference.
+no renumbering, additive supplementary groups, `absent` without `-r`/`-f`. The
+development version (v1.5.1, not yet released) adds `postgresql_role`. See the
+resource reference.
 
 Also since v1.2.0: `sinter secrets encrypt | decrypt | list`
 encrypts secret files in the standard age format (recipients or a terminal-only

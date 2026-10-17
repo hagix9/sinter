@@ -92,6 +92,50 @@ if (resources) {
   }
 }
 
+// 6.1b resources.json parameters match the recipe schema ---------------------
+// Every resource type's parameter names must equal the `with` fields the
+// loader accepts (`*_FIELDS` in src/model.rs, `PGROLE_FIELDS` in
+// src/pgrole.rs), so a new field cannot be left out of the WebMCP data again.
+
+{
+  const FIELD_CONSTS = {
+    file: ['src/model.rs', 'FILE_FIELDS'],
+    directory: ['src/model.rs', 'DIR_FIELDS'],
+    link: ['src/model.rs', 'LINK_FIELDS'],
+    template: ['src/model.rs', 'TEMPLATE_FIELDS'],
+    command: ['src/model.rs', 'COMMAND_FIELDS'],
+    package: ['src/model.rs', 'PACKAGE_FIELDS'],
+    service: ['src/model.rs', 'SERVICE_FIELDS'],
+    group: ['src/model.rs', 'GROUP_FIELDS'],
+    user: ['src/model.rs', 'USER_FIELDS'],
+    postgresql_role: ['src/pgrole.rs', 'PGROLE_FIELDS'],
+  };
+  const fieldsOf = (file, name) => {
+    const text = readFileSync(join(root, '..', file), 'utf8');
+    const m = text.match(new RegExp(`pub const ${name}: &\\[&str\\] = &\\[([^\\]]*)\\]`));
+    if (!m) return null;
+    return [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]).sort();
+  };
+  const types = (resources?.resourceTypes ?? []).map((r) => r.type).sort();
+  const expected = Object.keys(FIELD_CONSTS).sort();
+  if (JSON.stringify(types) !== JSON.stringify(expected)) {
+    fail(`resources.json: resource types ${JSON.stringify(types)} != schema ${JSON.stringify(expected)}`);
+  }
+  let mismatches = 0;
+  for (const r of resources?.resourceTypes ?? []) {
+    const spec = FIELD_CONSTS[r.type];
+    if (!spec) continue;
+    const want = fieldsOf(...spec);
+    if (!want) { fail(`schema: cannot read ${spec[1]} from ${spec[0]}`); mismatches++; continue; }
+    const have = (r.parameters ?? []).map((p) => p.name).sort();
+    if (JSON.stringify(have) !== JSON.stringify(want)) {
+      fail(`resources.json: ${r.type} parameters ${JSON.stringify(have)} != ${spec[1]} ${JSON.stringify(want)}`);
+      mismatches++;
+    }
+  }
+  if (mismatches === 0) ok(`resources.json: parameters match the recipe schema for ${types.length} resource types`);
+}
+
 if (resourcesJa) {
   if (resourcesJa.locale !== 'ja') fail('resources.ja.json: "locale" must be "ja"');
   if (typeof resourcesJa.resourceTypes !== 'object' || resourcesJa.resourceTypes === null || Array.isArray(resourcesJa.resourceTypes)) {

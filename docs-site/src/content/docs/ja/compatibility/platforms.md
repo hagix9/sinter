@@ -16,6 +16,7 @@ description: プラットフォーム、アーキテクチャ、パッケージ�
 | AlmaLinux 9 | x86_64 | dnf | サポート、受入検証済み |
 | AlmaLinux 10 | x86_64 | dnf | サポート、受入検証済み |
 | Oracle Linux | x86_64 | dnf | 互換性見込み — 受入検証は未実施 |
+| Rocky Linux / RHEL / AlmaLinux 8 | x86_64 | dnf | SSH の接続先としてのみ。v1.5.1 の開発中に Rocky Linux 8.10 で検証（未リリース、受入マトリクス外） |
 
 Oracle LinuxはRHEL系platformとして認識され、SinterのDNF backendを
 使用します。対応するRHEL系実装と互換性があると見込まれますが、現在
@@ -102,7 +103,9 @@ sudo dnf install attr          # RHEL 系（Rocky など）
 コントローラ（`sinter` を実行する側）は macOS、Ubuntu 24.04 LTS、
 Ubuntu 26.04 LTS、Rocky Linux 9、Rocky Linux 10、RHEL 9、RHEL 10、
 AlmaLinux 9、AlmaLinux 10、その他バイナリがビルドできる x86_64 Linux
-環境でサポートされます。Sinter のリリースバイナリは単一の Linux x86_64
+環境でサポートされます。Linux 版のリリースバイナリは glibc 2.34 以降
+（`GLIBC_2.34`）が必要なので、EL8（glibc 2.28）では動きません。Sinter は対応する
+コントローラで実行し、EL8 のホストは SSH で管理してください。Sinter のリリースバイナリは単一の Linux x86_64
 アーティファクトです。公開済み v0.2.1 は
 ディストリビューション別アセットを維持します
 （[インストール](/ja/getting-started/installation/)を参照）。
@@ -191,8 +194,10 @@ GLIBC の最大バージョンは `GLIBC_2.34` です。使用前に 8 ターゲ
 
 ## 明示的に非対応のもの
 
-- その他のディストリビューション / リリース（バックエンドを推測する
-  代わりに capability エラーでフェイルクローズ）。
+- その他のディストリビューション（バックエンドを推測する代わりに capability
+  エラーでフェイルクローズ）。バックエンドは版ではなく系統で選びます（Debian /
+  Ubuntu → apt、Red Hat 系 → dnf）。対応する系統の別の版も同じバックエンドで
+  動かしますが、上の表に無い版はサポート対象外です。
 - aarch64 のアーティファクトは検証されていません — ビルドが存在しても
   サポートを意味しません。
 

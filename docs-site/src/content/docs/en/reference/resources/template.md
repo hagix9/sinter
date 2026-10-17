@@ -32,7 +32,7 @@ hostname = {{ facts.hostname }}
 | `path` | yes | string (absolute path) | — | Destination on the target. |
 | `source` | yes | string | — | Controller-side template, resolved relative to the recipe file. |
 | `state` | no | string | `present` | `present` or `absent`. |
-| `vars` | no | map | — | Template-local values, exposed as `template.<name>`. |
+| `vars` | no | map | — | Template-local values, exposed as `template.<name>`. Passed **as written**: a `{{ ... }}` inside a value is not evaluated and is rendered literally (`validate` warns about it, v1.5.1); reference `vars.*` or `facts.*` in the template body instead. |
 | `owner` | no | string | — | Owner name. |
 | `group` | no | string | — | Group name. |
 | `mode` | no | string | — | Quoted four-digit octal. |

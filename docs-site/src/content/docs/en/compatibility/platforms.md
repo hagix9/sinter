@@ -16,6 +16,7 @@ description: Platform, architecture, and package-backend support matrix.
 | AlmaLinux 9 | x86_64 | dnf | Supported, acceptance-tested |
 | AlmaLinux 10 | x86_64 | dnf | Supported, acceptance-tested |
 | Oracle Linux | x86_64 | dnf | Expected compatible — not acceptance-tested |
+| Rocky Linux / RHEL / AlmaLinux 8 | x86_64 | dnf | SSH target only; verified on Rocky Linux 8.10 during v1.5.1 development (not released, not in the acceptance matrix) |
 
 Oracle Linux is recognized as a Red Hat-family platform and uses Sinter's
 DNF backend. It is expected to be compatible with the corresponding Red
@@ -105,7 +106,9 @@ Do not assume image defaults: install `attr` only if the required tool is missin
 The controller (where `sinter` runs) is supported on macOS, Ubuntu 24.04 LTS,
 Ubuntu 26.04 LTS, Rocky Linux 9, Rocky Linux 10, RHEL 9, RHEL 10,
 AlmaLinux 9, AlmaLinux 10, and other x86_64 Linux environments where the
-binary builds. Sinter release binaries use a single Linux x86_64 artifact;
+binary builds. The Linux release binary needs glibc 2.34 or later
+(`GLIBC_2.34`), so it does not run on EL8 (glibc 2.28): run Sinter on a
+supported controller and manage an EL8 host over SSH. Sinter release binaries use a single Linux x86_64 artifact;
 published v0.2.1 retains distro-specific assets (see
 [Installation](/en/getting-started/installation/)).
 
@@ -191,8 +194,11 @@ Limits of this record, stated rather than implied:
 
 ## Explicitly not supported
 
-- Other distributions / releases (fail closed with a capability error rather
-  than guessing a backend).
+- Other distributions (fail closed with a capability error rather than
+  guessing a backend). The backend is chosen by family (Debian/Ubuntu → apt,
+  Red Hat family → dnf), not by release: another release of a supported
+  family is driven with the same backend but is not supported unless listed
+  above.
 - aarch64 artifacts are not validated — presence of a build does not imply
   support.
 

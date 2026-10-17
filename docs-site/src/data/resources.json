@@ -12,7 +12,8 @@
         { "name": "source", "required": false, "type": "string", "default": null, "description": "Controller-side file copied to path. Mutually exclusive with content." },
         { "name": "owner", "required": false, "type": "string", "default": null, "description": "File owner name." },
         { "name": "group", "required": false, "type": "string", "default": null, "description": "File group name." },
-        { "name": "mode", "required": false, "type": "string", "default": null, "description": "Quoted four-digit octal string, e.g. \"0644\"." }
+        { "name": "mode", "required": false, "type": "string", "default": null, "description": "Quoted four-digit octal string, e.g. \"0644\"." },
+        { "name": "validate", "required": false, "type": "map", "default": null, "description": "Command run against the staged file before publication: program (absolute path), args (list; {{ staged }} places the staged path inside an argument — v1.5.1 — otherwise it is appended last), timeout_seconds (1–86400, default 300). Publishes only on exit 0; never sees the production path." }
       ],
       "platforms": ["ubuntu", "rocky", "rhel", "almalinux"],
       "example": "resources:\n  - id: motd\n    type: file\n    with:\n      path: /etc/motd\n      content: \"managed by sinter\\n\"\n      mode: \"0644\"\n      owner: root\n      group: root"
@@ -54,7 +55,8 @@
         { "name": "vars", "required": false, "type": "map", "default": null, "description": "Template-local values exposed as template.<name>." },
         { "name": "owner", "required": false, "type": "string", "default": null, "description": "File owner name." },
         { "name": "group", "required": false, "type": "string", "default": null, "description": "File group name." },
-        { "name": "mode", "required": false, "type": "string", "default": null, "description": "Quoted four-digit octal string." }
+        { "name": "mode", "required": false, "type": "string", "default": null, "description": "Quoted four-digit octal string." },
+        { "name": "validate", "required": false, "type": "map", "default": null, "description": "Command run against the staged file before publication: program (absolute path), args (list; {{ staged }} places the staged path inside an argument — v1.5.1 — otherwise it is appended last), timeout_seconds (1–86400, default 300). Publishes only on exit 0; never sees the production path." }
       ],
       "platforms": ["ubuntu", "rocky", "rhel", "almalinux"],
       "example": "resources:\n  - id: app_conf\n    type: template\n    with:\n      path: /etc/myapp/config.ini\n      source: templates/config.ini\n      mode: \"0640\"\n      vars:\n        listen_port: 8080"

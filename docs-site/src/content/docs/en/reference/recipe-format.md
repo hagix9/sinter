@@ -186,9 +186,8 @@ Used in `when`, `changed_when`, and interpolation:
   only when `VERSION_ID` is a plain numeric version; otherwise using it is an
   error (never a guessed number). Combine it with the family:
   `when: "facts.os.family == 'redhat' && facts.os.version_major < 10"`.
-- A `when` that reads `registers.<name>` of a producer that was skipped by its
-  own `when` is an error; guard it with the same condition first (`&&` and
-  `||` short-circuit).
+- `&&` and `||` short-circuit: the right operand is not evaluated when the
+  left one decides the result.
 - Operators: `==` `!=` `<` `<=` `>` `>=` `&&` `||` `!` and parentheses.
 - No user-defined functions; no bare identifiers.
 - `when`/`changed_when` must produce a boolean — no truthiness coercion.
@@ -196,6 +195,30 @@ Used in `when`, `changed_when`, and interpolation:
   same-type operands (int/float may compare numerically).
 - Comparison against an unknown value yields unknown — the resource becomes
   indeterminate rather than guessed.
+
+## Conditions, registers and dependencies
+
+How `when`, `register` and `depends_on` combine (the behavior is unchanged in
+v1.5.1; this section states it in one place):
+
+| Situation | Result |
+|-----------|--------|
+| `when` is false | The resource is `skipped_by_condition`. Its own condition is evaluated before its dependencies. |
+| A dependency was skipped by its `when` | The dependent is **blocked** (a skipped resource does not satisfy `depends_on`), unless the dependent's own `when` is false first. |
+| A `command` skipped by its `creates`/`removes` guard | Counts as **satisfied** for dependents; its `register` holds a not-executed result (`executed: false`, `exit_code: null`). |
+| A `when` reads `registers.<name>` of a producer skipped by its own `when` | **Error** (`undefined register`): apply fails that resource and stops; plan exits with a plan error. |
+| Plan | Commands do not run, so a `when` that reads a register is Unknown and the resource is reported unknown. |
+
+Safe per-release branching (for example a step that exists only on EL8/EL9):
+
+- Put the release-specific `command` steps **before** the resources that need
+  them and do not list them in `depends_on` (a skipped step would block its
+  dependents); declaration order and fail-fast keep them in order — a failure
+  stops the run.
+- Guard every `when` that reads such a step's register with the same release
+  condition first, so the register is only read when the step ran:
+  `when: "facts.os.version_major < 10 && registers.state.exit_code == 1"`.
+- See `examples/recipes/postgresql-os.yaml` and `epel-crb.yaml`.
 
 ## Strictness
 

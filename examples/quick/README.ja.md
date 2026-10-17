@@ -29,9 +29,10 @@ sinter validate examples/quick/packages.yaml
 ターゲットへ適用します（2 回目は変更なしになるはずです）。
 
 ```sh
-sinter apply examples/quick/packages.yaml --ssh user@host
-sinter apply examples/quick/packages.yaml --ssh user@host   # 冪等
+sinter apply examples/quick/packages.yaml --host host.example.com --user admin --sudo
+sinter apply examples/quick/packages.yaml --host host.example.com --user admin --sudo   # 冪等
 ```
 
-複数ロールの例は `examples/multihost/` にあります。OpenStack の応用レシピは
-エンドツーエンドの例として別途維持します。
+複数ロールの例は `examples/multihost/` にあります。RHEL 系の完成したレシピ
+（Python、PostgreSQL、EPEL / CRB、署名付きリポジトリ、Apache）は
+`examples/recipes/` にあります。

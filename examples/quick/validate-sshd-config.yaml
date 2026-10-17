@@ -8,12 +8,15 @@
 # destination exactly as it was.
 #
 # Use each tool's non-applying syntax check:
-#   sshd:    sshd -t -f            (checks the whole configuration, no reload)
+#   sshd:    sshd -t -f            (checks this file as a configuration on its
+#                                   own, not the main sshd_config that
+#                                   includes it; no reload)
 #   sudo:    visudo -cf
 #   rsyslog: rsyslogd -N1 -f
 #   samba:   testparm -s
 # The staged file path is appended as the last argument, so `args` lists only
-# the flags.
+# the flags. (Development version v1.5.1: `{{ staged }}` in an argument places
+# the path there instead, e.g. `--config-file={{ staged }}`.)
 version: 1
 
 resources:

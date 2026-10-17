@@ -98,8 +98,10 @@ Two interactions with the commands above:
 - On `plan`, `apply` and `audit`, `--identity` is an **SSH** private key and is
   never used for secrets; secrets use `SINTER_IDENTITY`, the default identity
   file, or a repository `identity.age`.
-- A `user` resource with `password_hash` needs `--sudo` (`/etc/shadow` is
-  readable only by root).
+- A `user` resource with `password_hash` needs root: a root login, or `--sudo`
+  (`/etc/shadow` is readable only by root). The same holds for
+  `postgresql_role` (v1.5.1, not yet released), whose `psql` runs as the
+  cluster owner through `setpriv`.
 
 ## Target options
 
@@ -114,7 +116,7 @@ Accepted by `validate`, `plan`, `apply` and `audit`; `validate` ignores them.
 | `--known-hosts <PATH>` | inventory, ssh_config `UserKnownHostsFile`, else `~/.ssh/known_hosts` | Host-key database (strict). |
 | `--identity <PATH>` | inventory, ssh_config `IdentityFile`, else `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa` | SSH identity file; repeatable; replaces the inherited list. Never used for [secrets](/en/reference/secrets/#identities-private-keys-and-where-they-live). |
 | `--no-ssh-config` | off | Do not consult the OpenSSH client configuration. |
-| `--sudo` | off | Run target-side operations via `sudo -n`. Required by a `user` resource with `password_hash`. |
+| `--sudo` | off | Run target-side operations via `sudo -n -u root`. A target user that is already root runs directly, without sudo. A `user` resource with `password_hash` needs root (a root login or `--sudo`). |
 | `--verbose` | off | Verbose output. |
 | `--format` | `text` | `text` or `json`. |
 

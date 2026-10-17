@@ -4,8 +4,11 @@ description: Sinter v1.5.0 がサポートする機能で構成されたレシ�
 ---
 
 以下の例はすべて v1.5.0 に実装されたリソースタイプとフィールドのみを
-使います。すべてのレシピはプラットフォーム中立で、同じ YAML が Ubuntu
-と RHEL 系の両方のターゲットに適用できます。
+使います（最後の節は、開発中の版 v1.5.1 のレシピの一覧です）。
+リソースタイプはプラットフォーム中立で、Sinter はターゲットに応じて `apt` か `dnf` を
+選びます。ただし、パッケージ名やサービス名は Ubuntu と RHEL 系で同じとは限りません
+（例: `apache2` / `httpd`）。そのようなリソースは、プラットフォーム条件付きの例のように、
+`facts.os.family` の `when` で選んでください。
 
 ## パッケージ + サービスのベースライン
 
@@ -146,6 +149,8 @@ resources:
 ## register されたコマンド結果
 
 ```yaml
+version: 1
+
 resources:
   - id: probe
     type: command
@@ -158,6 +163,7 @@ resources:
 
   - id: follow_up
     type: file
+    depends_on: [probe]   # register を読めるのは直接依存するリソースだけ
     when: "registers.probe_result.exit_code == 0"
     with:
       path: /etc/myapp/confirmed

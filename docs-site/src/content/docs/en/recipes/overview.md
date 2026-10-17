@@ -3,9 +3,12 @@ title: Recipe Overview
 description: Recipe examples built from functionality supported by Sinter v1.5.0.
 ---
 
-All examples below use only resource types and fields implemented in v1.5.0.
-Every recipe is platform-neutral — the same YAML applies to Ubuntu and RHEL-family
-targets.
+All examples below use only resource types and fields implemented in v1.5.0
+(the last section lists recipes for the development version v1.5.1).
+The resource types are platform-neutral: Sinter picks `apt` or `dnf` from the
+target. Package and service names are not always the same on Ubuntu and
+RHEL-family targets (for example `apache2` / `httpd`); select such resources
+with `when` on `facts.os.family`, as in the platform-conditional example.
 
 ## Package + service baseline
 
@@ -146,6 +149,8 @@ resources:
 ## Registered command results
 
 ```yaml
+version: 1
+
 resources:
   - id: probe
     type: command
@@ -158,6 +163,7 @@ resources:
 
   - id: follow_up
     type: file
+    depends_on: [probe]   # a register is read only by a direct dependent
     when: "registers.probe_result.exit_code == 0"
     with:
       path: /etc/myapp/confirmed

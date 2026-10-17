@@ -74,10 +74,9 @@ sinter apply --host server.example.com --sudo recipe.yaml
 sinter audit --host server.example.com --sudo recipe.yaml
 ```
 
-このリポジトリは、`GOALS.md`と`DESIGN.md`で定義された
-**Sinter v0.2**を実装しています。これら2ファイルが正式な仕様であり、
-v0.2はv0.1のcontractにRHEL系platform対応（Rocky Linux、RHEL、
-AlmaLinux — `dnf`）を追加しています。roles、plugins、orchestration、
+このリポジトリは、`GOALS.md`と`DESIGN.md`で定義された Sinter を実装しています。
+これら2ファイルが正式な仕様です。Ubuntu（`apt`）と RHEL 系（Rocky Linux、RHEL、
+AlmaLinux — `dnf`）のターゲットを管理します。roles、plugins、orchestration、
 embedded scriptingは依然として実装対象に含めません。複数ホストは、意図的に
 小さくフェイルクローズなinventory（ホスト、フラットなグループ、レシピごとの
 明示的な `targets`）で扱います（[複数ホスト](#複数ホストバンドルバックアップ)参照）。
@@ -222,13 +221,14 @@ desired state、ChangeSet、実行動作が同等になります。
 トップレベルのフィールドは`version`、`vars`、`include`、`resources`、
 `handlers`です。
 
-v0.2のresource typeは`file`、`directory`、`template`、`link`、
+resource typeは`file`、`directory`、`template`、`link`、
 `command`、`package`、`service`です。
 handlerは遅延実行されるserviceの`restart` / `reload`アクションです。
 v1.2.0以降、ローカルアカウント用の`group`と`user`の2種類があります。
 宣言順と`depends_on`による順序、ローカルデータベースのみ、番号の振り直しなし、補助グループは
-追加のみ、`absent`は`-r` / `-f`なし、という契約です。リソースリファレンスを参照して
-ください。
+追加のみ、`absent`は`-r` / `-f`なし、という契約です。開発中の版（v1.5.1。まだ
+リリースしていません）では `postgresql_role` が加わります。リソースリファレンスを
+参照してください。
 
 また、v1.2.0以降は`sinter secrets encrypt | decrypt | list`があり、
 標準のage形式でシークレットファイルを暗号化します（受信者、または端末からのみ入力する

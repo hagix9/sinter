@@ -115,6 +115,16 @@ not yet a release acceptance claim:
   repository file + package). Unsigned packages and packages signed by another
   key are refused (`GPG check FAILED`).
 
+**How to manage repositories (recommended).** Declare a third-party
+repository as files — the pinned key and the `.repo` file — with `gpgcheck`
+on. Both files are planned, applied and **audited** like any managed file, and
+a second apply reports no change. There is no dedicated repository resource.
+A repository that ships with the OS but is disabled (CRB, PowerTools) has no
+file of its own to manage; enable it with a read-only check first and the
+enable command only when the check finds it disabled (`epel-crb.yaml`). The
+packages are audited, but the repository's enabled state that the command
+changed is **not** part of `sinter audit` (command resources are not audited).
+
 ## Platform detection
 
 `/etc/os-release` `ID=rocky` (RHEL family) selects the dnf backend. Unknown or

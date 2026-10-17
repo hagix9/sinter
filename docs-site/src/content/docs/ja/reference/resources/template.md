@@ -32,7 +32,7 @@ hostname = {{ facts.hostname }}
 | `path` | はい | string（絶対パス） | — | ターゲット上の配置先。 |
 | `source` | はい | string | — | コントローラ側テンプレート。レシピファイルからの相対パスで解決。 |
 | `state` | いいえ | string | `present` | `present` または `absent`。 |
-| `vars` | いいえ | map | — | テンプレートローカルな値。`template.<name>` として参照可能。 |
+| `vars` | いいえ | map | — | テンプレートローカルな値。`template.<name>` として参照可能。値は**書いたとおりに**渡します。値の中の `{{ ... }}` は評価されず、文字列のまま出力されます（v1.5.1 では `validate` が警告します）。テンプレートの本文で `vars.*` や `facts.*` を参照してください。 |
 | `owner` | いいえ | string | — | 所有者名。 |
 | `group` | いいえ | string | — | グループ名。 |
 | `mode` | いいえ | string | — | 引用符付きの 4 桁 8 進数。 |

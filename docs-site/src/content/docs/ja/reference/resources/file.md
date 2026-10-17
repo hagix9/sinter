@@ -79,6 +79,12 @@ description: 通常ファイルの内容とメタデータを管理する。
 | rsyslog | `program: /usr/sbin/rsyslogd`, `args: ["-N1", "-f"]` |
 | Samba | `program: /usr/bin/testparm`, `args: ["-s"]` |
 
+これらのコマンドは、staging ファイルを**単体の設定として**検査します。設定全体ではない
+drop-in（`sshd_config.d/*.conf`、`rsyslog.d/*.conf`）では、drop-in が解釈できることは
+示せますが、それを含む設定全体が正しいことまでは示せません。ツールが主設定と staging
+ファイルをまとめて検査できるなら、そちらを使ってください（例: 下の
+`httpd -t -c "Include {{ staged }}"`）。
+
 - 非ゼロ終了・シグナル・タイムアウトのときは内容を**公開しません**。宛先は
   そのままです。タイムアウトや応答不明は indeterminate として報告されます
   （ファイルは変わりません）。

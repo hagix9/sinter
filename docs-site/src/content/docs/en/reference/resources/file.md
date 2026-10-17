@@ -77,6 +77,13 @@ non-applying syntax check:
 | rsyslog | `program: /usr/sbin/rsyslogd`, `args: ["-N1", "-f"]` |
 | Samba | `program: /usr/bin/testparm`, `args: ["-s"]` |
 
+These commands check the staged file **as a configuration on its own**. For a
+drop-in (`sshd_config.d/*.conf`, `rsyslog.d/*.conf`) that is not the whole
+configuration: the check proves the drop-in parses, not that the full
+configuration that includes it is valid. Where the tool can check the main
+configuration together with the staged file, prefer that (for example
+`httpd -t -c "Include {{ staged }}"` below).
+
 - On a non-zero exit, a signal, or a timeout the content is **not published**
   and the destination is left exactly as it was; a timeout or lost response is
   reported as indeterminate (the file is still unchanged).

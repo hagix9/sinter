@@ -54,9 +54,22 @@ does not provision keys. (This is separate from the host-key checks above.)
 
 **`sudo` failures**
 
-`--sudo` uses non-interactive `sudo -n`. Ensure the target user has
-passwordless sudo (`sudo -n true`). Sinter never retries a permission failure
-by escalating — failures stay failures.
+`--sudo` sends every command as non-interactive `sudo -n -u root -- …`. Ensure
+the target user may run commands as root without a password (`sudo -n -u root
+true`). A target user that is already root runs directly; no `sudo` is needed.
+When the first command fails under sudo, the connect error says which case it
+is: sudo is not installed, a password is required (sudo 1.9 also says this for
+a user without a rule, or a rule that does not allow root), sudoers refuses the
+user, or a cause Sinter could not identify. Sinter never retries a permission
+failure by escalating — failures stay failures.
+
+**`needs root` in plan**
+
+When the target user is not root and `--sudo` was not given, plan adds a
+`needs root:` note to a planned change that only root can make (packages,
+users, groups, files outside the user's own tree). It is a note only: plan
+neither runs sudo nor probes for it, and the status does not change; apply then
+fails unless you connect as root or add `--sudo`.
 
 ## Platform detection
 
@@ -140,9 +153,14 @@ metadata cache once (only absent metadata; present metadata is left alone) and
 re-verifies the snapshot, so no manual preparation step is needed. If the
 metadata still cannot be established the resource fails closed before any
 package mutation. Packages already downloaded in the live cache are no longer
-mistaken for the transaction payloads. Snapshot residues should not persist
-after runs — if any remain,
-[report it as a bug](/en/contributing/#reporting-bugs).
+mistaken for the transaction payloads. The snapshot is removed after every
+definite outcome, including failures. One case keeps it on purpose: when the
+completion of the install itself is unknown (a timeout or a lost connection,
+reported as `indeterminate`), Sinter sends nothing more to the target — dnf may
+still be running — and leaves `/var/tmp/sinter-dnf.*` in place. Check that no
+`dnf` process is running, then remove that directory and apply again. A
+snapshot left after any other outcome is a bug:
+[report it](/en/contributing/#reporting-bugs).
 
 **Why did dnf refuse the install?** (v1.5.1)
 

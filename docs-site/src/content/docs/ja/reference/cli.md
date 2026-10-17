@@ -101,8 +101,10 @@ sinter secrets list    [--format text|json] [--recipe <FILE>...] [<PATH>...]
 - `plan`、`apply`、`audit` の `--identity` は **SSH** 秘密鍵であり、シークレットには
   使われません。シークレットは `SINTER_IDENTITY`、既定の identity ファイル、
   リポジトリの `identity.age` を使います。
-- `password_hash` を持つ `user` リソースには `--sudo` が必要です（`/etc/shadow` は
-  root だけが読めるため）。
+- `password_hash` を持つ `user` リソースには root が必要です。root でログインするか、
+  `--sudo` を使ってください（`/etc/shadow` は root だけが読めるため）。`postgresql_role`
+  （v1.5.1、まだリリースしていません）も同じで、`psql` を `setpriv` でクラスタの所有者と
+  して実行します。
 
 ## ターゲットオプション
 
@@ -117,7 +119,7 @@ sinter secrets list    [--format text|json] [--recipe <FILE>...] [<PATH>...]
 | `--known-hosts <PATH>` | インベントリ、ssh_config の `UserKnownHostsFile`、なければ `~/.ssh/known_hosts` | ホスト鍵データベース（厳格）。 |
 | `--identity <PATH>` | インベントリ、ssh_config の `IdentityFile`、なければ `~/.ssh/id_ed25519`、`id_ecdsa`、`id_rsa` | SSH 秘密鍵ファイル。複数回指定可能。引き継いだ一覧を置き換えます。[シークレット](/ja/reference/secrets/)には使われません。 |
 | `--no-ssh-config` | off | OpenSSH クライアント設定を参照しない。 |
-| `--sudo` | off | ターゲット側操作を `sudo -n` 経由で実行。`password_hash` を持つ `user` リソースでは必須。 |
+| `--sudo` | off | ターゲット側操作を `sudo -n -u root` 経由で実行。ターゲットのユーザーがすでに root なら sudo を使わずに実行します。`password_hash` を持つ `user` リソースには root が必要です（root のログインか `--sudo`）。 |
 | `--verbose` | off | 詳細な出力。 |
 | `--format` | `text` | `text` または `json`。 |
 

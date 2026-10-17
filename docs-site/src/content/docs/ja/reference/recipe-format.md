@@ -187,8 +187,7 @@ content: "listen = {{ vars.port }}"
   ときにだけ存在し、そうでなければ使うとエラーになります（推測した数値には
   なりません）。family と組み合わせて使ってください:
   `when: "facts.os.family == 'redhat' && facts.os.version_major < 10"`。
-- 自分の `when` で飛ばされたリソースの `registers.<name>` を `when` で読むと
-  エラーになります。同じ条件で先に守ってください（`&&` と `||` は短絡評価です）。
+- `&&` と `||` は短絡評価です。左のオペランドで結果が決まるとき、右は評価しません。
 - 演算子: `==` `!=` `<` `<=` `>` `>=` `&&` `||` `!` と括弧。
 - ユーザ定義関数なし。裸の識別子なし。
 - `when`/`changed_when` は boolean を生成する必要があります。
@@ -197,6 +196,29 @@ content: "listen = {{ vars.port }}"
   オペランドが必要です（int/float は数値として比較可能）。
 - 未知の値との比較は unknown を返します。リソースは推測されるのでは
   なく indeterminate になります。
+
+## 条件、register、依存
+
+`when`、`register`、`depends_on` の組み合わせの挙動です（v1.5.1 でも挙動は
+変わりません。この節は 1 か所にまとめて示すためのものです）。
+
+| 状況 | 結果 |
+|------|------|
+| `when` が false | リソースは `skipped_by_condition`。自分の条件は依存より先に評価します。 |
+| 依存先が自分の `when` で飛ばされた | 依存するリソースは **blocked** になります（飛ばされたリソースは `depends_on` を満たしません）。ただし、依存するリソース自身の `when` が先に false になる場合は除きます。 |
+| `creates` / `removes` の guard で実行されなかった `command` | 依存先からは**満たした**ものとして扱います。`register` には未実行の結果（`executed: false`、`exit_code: null`）が入ります。 |
+| 自分の `when` で飛ばされたリソースの `registers.<name>` を `when` で読む | **エラー**（`undefined register`）。apply ではそのリソースが失敗して止まり、plan はプランのエラーで終わります。 |
+| plan | command は実行しないので、register を読む `when` は Unknown になり、リソースは unknown と報告されます。 |
+
+リリースごとの安全な分岐（例: EL8 / EL9 にだけある手順）:
+
+- リリース固有の `command` の手順は、それを必要とするリソースより**前**に宣言し、
+  `depends_on` には書かないでください（飛ばされた手順は依存するものを blocked に
+  します）。宣言順と fail-fast で順序が保たれ、失敗すれば実行が止まります。
+- その手順の register を読む `when` は、まず同じリリースの条件で守り、手順が実行
+  されたときだけ register を読むようにします:
+  `when: "facts.os.version_major < 10 && registers.state.exit_code == 1"`。
+- `examples/recipes/postgresql-os.yaml` と `epel-crb.yaml` を参照してください。
 
 ## 厳格性
 

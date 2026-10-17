@@ -29,9 +29,10 @@ sinter validate examples/quick/packages.yaml
 Apply to a target (read the output; a second apply should report no change):
 
 ```sh
-sinter apply examples/quick/packages.yaml --ssh user@host
-sinter apply examples/quick/packages.yaml --ssh user@host   # idempotent
+sinter apply examples/quick/packages.yaml --host host.example.com --user admin --sudo
+sinter apply examples/quick/packages.yaml --host host.example.com --user admin --sudo   # idempotent
 ```
 
-The larger, multi-role example lives in `examples/multihost/`; the OpenStack
-application recipe is kept separately as a full end-to-end example.
+The larger, multi-role example lives in `examples/multihost/`. Complete
+RHEL-family recipes (Python, PostgreSQL, EPEL/CRB, signed repositories, Apache)
+live in `examples/recipes/`.
