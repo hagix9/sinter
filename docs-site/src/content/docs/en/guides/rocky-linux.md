@@ -49,6 +49,8 @@ for current downloads.
 on Rocky:
 
 ```yaml
+version: 1
+
 resources:
   - id: nano
     type: package

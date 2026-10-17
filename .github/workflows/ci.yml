@@ -1,8 +1,9 @@
 name: CI
 
 # Per-commit checks that do not change the host: formatting, clippy, building
-# the root test binaries without running them, the gateway tests, and the
-# installer and release-checker tests. The root test suite changes the host it
+# the root test binaries without running them, the gateway tests, the
+# installer and release-checker tests, the public-tree guard, and schema
+# validation of the examples and the docs' recipes. The root test suite changes the host it
 # runs on (apt, systemd units, the host's SSH service) and runs only in the
 # release gate (RELEASE.md step 4) on a dedicated, disposable Linux host.
 # Failures are fixed forward; nothing is retried automatically.
@@ -23,7 +24,7 @@ env:
 
 jobs:
   checks:
-    name: fmt, clippy, root test build, gateway tests, installer and release tests
+    name: fmt, clippy, root test build, gateway tests, installer and release tests, examples
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -58,4 +59,12 @@ jobs:
       # explicitly.
       - name: Build the sinter binary for the gateway tests
         run: cargo build --locked --all-features
+      # The public tree: no local work product is committable and no tracked
+      # file matches an ignore rule.
+      - run: .github/scripts/check-public-tree.sh
+      # Every example recipe and every complete recipe in the docs validates
+      # against the schema (no target, no network, placeholder secrets). The
+      # self-test first proves that an invalid recipe makes the check fail.
+      - run: .github/scripts/validate-examples.sh target/debug/sinter --self-test
+      - run: .github/scripts/validate-examples.sh target/debug/sinter
       - run: cargo test --manifest-path gateway/Cargo.toml --locked --all-targets --all-features

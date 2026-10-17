@@ -42,6 +42,8 @@ Debian パッケージ名である必要があります。`state` は `present` 
 `absent` です。
 
 ```yaml
+version: 1
+
 resources:
   - id: nginx
     type: package

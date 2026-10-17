@@ -31,6 +31,8 @@ for every other minor release.
 dnf on RHEL:
 
 ```yaml
+version: 1
+
 resources:
   - id: nano
     type: package

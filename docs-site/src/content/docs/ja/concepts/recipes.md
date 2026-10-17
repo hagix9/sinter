@@ -48,7 +48,14 @@ sensitive な内容についてはハッシュとサイズも隠されます。
 ## リソース
 
 ```yaml
+version: 1
+
 resources:
+  - id: other_id             # 下の depends_on が指すリソース
+    type: directory
+    with:
+      path: /etc/example.d
+
   - id: unique_name          # 必須、一意な識別子
     type: file               # リソースタイプのいずれか
     sensitive: false         # このリソースの値を出力でマスクする
@@ -57,6 +64,11 @@ resources:
     notify: [handler_id]
     with:                    # タイプ固有のパラメータ
       path: /etc/example
+
+handlers:
+  - id: handler_id           # notify が指すハンドラ
+    service: example
+    action: restart
 ```
 
 共通フィールド: `id`、`type`、`with`、`when`、`loop`、`depends_on`、

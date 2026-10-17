@@ -48,7 +48,14 @@ and include cycles are rejected.
 ## Resources
 
 ```yaml
+version: 1
+
 resources:
+  - id: other_id             # the dependency named below
+    type: directory
+    with:
+      path: /etc/example.d
+
   - id: unique_name          # required, unique identifier
     type: file               # one of the resource types
     sensitive: false         # redact this resource's values in output
@@ -57,6 +64,11 @@ resources:
     notify: [handler_id]
     with:                    # per-type parameters
       path: /etc/example
+
+handlers:
+  - id: handler_id           # the handler named in notify
+    service: example
+    action: restart
 ```
 
 Common fields: `id`, `type`, `with`, `when`, `loop`, `depends_on`, `notify`,

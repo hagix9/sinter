@@ -27,6 +27,8 @@ A resource with `loop` is expanded once per item, with `{{ item }}` available
 in its fields:
 
 ```yaml
+version: 1
+
 resources:
   - id: tool
     type: package

@@ -30,6 +30,8 @@ evidence for every other minor release.
 dnf on AlmaLinux:
 
 ```yaml
+version: 1
+
 resources:
   - id: nano
     type: package

@@ -41,6 +41,8 @@ for current downloads.
 package names; `state` is `present` or `absent`.
 
 ```yaml
+version: 1
+
 resources:
   - id: nginx
     type: package

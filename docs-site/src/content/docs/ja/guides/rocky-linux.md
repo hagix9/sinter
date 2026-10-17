@@ -49,6 +49,8 @@ AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64、264チェック通過・失�
 Rocky 上では dnf で実行されます:
 
 ```yaml
+version: 1
+
 resources:
   - id: nano
     type: package

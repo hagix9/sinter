@@ -28,6 +28,8 @@ description: リソースモデル — 共通フィールド、順序、依存�
 `{{ item }}` が使えます:
 
 ```yaml
+version: 1
+
 resources:
   - id: tool
     type: package

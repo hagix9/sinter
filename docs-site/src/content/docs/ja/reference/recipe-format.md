@@ -38,6 +38,8 @@ env: { NAME: value }          # 省略可。package/command の既定環境変�
 一度だけ書くためにあります。
 
 ```yaml
+version: 1
+
 env:
   HTTP_PROXY: "http://proxy.example.com:3128"
   HTTPS_PROXY: "http://proxy.example.com:3128"

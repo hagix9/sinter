@@ -30,6 +30,8 @@ AlmaLinux 9/10 は対応するversion lineであり、9.8 と 10.2 が検証済�
 AlmaLinux 上では dnf で実行されます:
 
 ```yaml
+version: 1
+
 resources:
   - id: nano
     type: package

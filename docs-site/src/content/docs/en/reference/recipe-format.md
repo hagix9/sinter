@@ -38,6 +38,8 @@ A map of environment variables given by default to every `package` and
 them — most often an HTTP(S) proxy — is written once.
 
 ```yaml
+version: 1
+
 env:
   HTTP_PROXY: "http://proxy.example.com:3128"
   HTTPS_PROXY: "http://proxy.example.com:3128"
