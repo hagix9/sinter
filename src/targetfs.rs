@@ -1267,7 +1267,40 @@ impl TargetFs {
                 path.to_string(),
             ],
         )?;
-        interpret_stat(&out, path)
+        interpret_stat(&out, path).map_err(|e| {
+            // Only a completed, failing `stat`: a capture that did not complete
+            // or was signalled keeps its own message and error kind.
+            if matches!(out.completion, Completion::Exited(c) if c != 0)
+                && is_permission_denied(&out, path, "/usr/bin/stat")
+            {
+                SinterError::apply(self.permission_denied_message(path))
+            } else {
+                e
+            }
+        })
+    }
+
+    /// LED-025: `stat` refused with exactly the coreutils "Permission denied"
+    /// record. Still an observation error (fail closed, same kind), but said
+    /// in words, with the privilege it ran with: a hint to use root only when
+    /// the observation did not already run as root.
+    fn permission_denied_message(&self, path: &str) -> String {
+        if self.runs_as_root() {
+            format!(
+                "cannot inspect {}: permission denied even with root privilege (for example a \
+                 network filesystem that maps root to an unprivileged user); nothing was assumed \
+                 about this path",
+                path
+            )
+        } else {
+            format!(
+                "cannot inspect {}: permission denied: the target user (uid {}) cannot look up \
+                 this path, usually because a parent directory is not searchable by it; nothing \
+                 was assumed about this path. If it is meant to be managed with root privilege, \
+                 connect as root or use --sudo",
+                path, self.target_uid
+            )
+        }
     }
 
     /// Strict `readlink -n` observation contract (IA-01):
@@ -3151,6 +3184,45 @@ pub(crate) fn classify_absence(out: &Output, path: &str, program: &str) -> Absen
         }
     }
     AbsenceVerdict::Ambiguous
+}
+
+/// LED-025: the capture is exactly one complete coreutils record saying that
+/// `program` was refused access to `path` (`Permission denied`, EACCES), in
+/// the same strict form [`classify_absence`] requires for absence: complete
+/// capture, empty stdout, one line, the dispatched program, the exact subject
+/// for the path. Only used to word the observation error; it never turns a
+/// failure into a result.
+fn is_permission_denied(out: &Output, path: &str, program: &str) -> bool {
+    if out.stdout_truncated || out.stderr_truncated || !out.stdout.is_empty() {
+        return false;
+    }
+    let Ok(text) = std::str::from_utf8(&out.stderr) else {
+        return false;
+    };
+    let Some(line) = text.strip_suffix('\n') else {
+        return false;
+    };
+    if line.is_empty() || line.contains('\n') || line.contains('\r') {
+        return false;
+    }
+    let Some((program_field, rest)) = line.split_once(": ") else {
+        return false;
+    };
+    let basename = program.rsplit('/').next().unwrap_or(program);
+    if program_field != program && program_field != basename {
+        return false;
+    }
+    let subjects: &[String] = match basename {
+        "stat" => &[
+            format!("cannot statx {}", q(path)),
+            format!("cannot stat {}", q(path)),
+        ],
+        _ => return false,
+    };
+    subjects.iter().any(|subject| {
+        rest == format!("{}: Permission denied", subject)
+            || rest == format!("{}: Permission denied (os error 13)", subject)
+    })
 }
 
 /// Render an uninterpretable diagnostic stream for an error message without

@@ -125,6 +125,13 @@ pub fn audit_report_json(report: &AuditReport) -> serde_json::Value {
     })
 }
 
+/// A plan note that says the change needs root privilege the run does not
+/// have (FS-0d). Every such note starts with `needs root:`; they are only
+/// produced in plan, and only when the run is neither root nor `--sudo`.
+pub(crate) fn is_privilege_note(note: &str) -> bool {
+    note.starts_with("needs root:")
+}
+
 fn render_text(
     report: &RunReport,
     opts: &RenderOptions,
@@ -188,13 +195,22 @@ fn render_text(
                 }
             }
         }
-        if opts.verbose {
-            for n in &r.notes {
-                if r.sensitive {
-                    writeln!(out, "    note: <redacted>")?;
+        for n in &r.notes {
+            // LED-024: a `needs root` note is shown without --verbose; it is
+            // what explains a plan whose apply would fail for lack of
+            // privilege. Other notes stay verbose-only.
+            let privilege = is_privilege_note(n);
+            if !opts.verbose && !privilege {
+                continue;
+            }
+            if r.sensitive {
+                if privilege {
+                    writeln!(out, "    note: needs root (details redacted)")?;
                 } else {
-                    writeln!(out, "    note: {}", sanitize_line(n))?;
+                    writeln!(out, "    note: <redacted>")?;
                 }
+            } else {
+                writeln!(out, "    note: {}", sanitize_line(n))?;
             }
         }
     }

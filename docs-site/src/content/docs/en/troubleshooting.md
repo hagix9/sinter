@@ -69,7 +69,21 @@ When the target user is not root and `--sudo` was not given, plan adds a
 `needs root:` note to a planned change that only root can make (packages,
 users, groups, files outside the user's own tree). It is a note only: plan
 neither runs sudo nor probes for it, and the status does not change; apply then
-fails unless you connect as root or add `--sudo`.
+fails unless you connect as root or add `--sudo`. A root login or `--sudo`
+never gets this note. After v1.5.1 (unreleased) the note is shown in the
+default text output; in v1.5.1 and earlier it appears only with `--verbose` and
+in `--format json` (`notes`). For a sensitive resource the text output says
+`needs root (details redacted)`.
+
+**`cannot inspect PATH: permission denied`** (after v1.5.1, unreleased)
+
+The target user could not look up the path, usually because a parent directory
+is not searchable by it. Nothing is assumed about the path: plan, apply and
+audit fail for it instead. Connect as root or use `--sudo` if the path is meant
+to be managed with root privilege. As root the message says `permission denied
+even with root privilege` (for example a network filesystem that maps root to
+an unprivileged user). v1.5.1 and earlier report the same case as `the capture
+carried an unrecognized diagnostic: "… Permission denied"`.
 
 ## Platform detection
 
@@ -191,7 +205,8 @@ the declared account. See `examples/recipes/apache-htpasswd.yaml`.
 
 **`postgresql_role` fails**
 
-- `postgresql_role needs root` → use `--sudo` (psql runs as the cluster owner).
+- `postgresql_role needs root` → connect as root or use `--sudo` (psql runs as
+  the cluster owner).
 - `cannot observe PostgreSQL role …: psql exited 2` → the server is not
   running, or `psql`/`port` points elsewhere (PGDG: `psql:
   /usr/pgsql-17/bin/psql`).

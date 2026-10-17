@@ -21,6 +21,18 @@ All notable changes to Sinter are documented in this file.
   `mkdir` that applies the mode only after creating the directory), so the
   commands and checks are otherwise unchanged.
 
+### Changed
+
+- **`needs root` is shown in the default plan output.** The plan note that a
+  change needs root (a run that is neither root nor `--sudo`) used to appear
+  only with `--verbose` and in JSON. Other notes stay verbose-only; a sensitive
+  resource shows `needs root (details redacted)`; JSON is unchanged.
+- **"Permission denied" while inspecting a path is said in words.** A `stat`
+  refused with exactly the coreutils "Permission denied" record was reported as
+  "the capture carried an unrecognized diagnostic". It is still an error
+  (nothing is assumed about the path), now `permission denied`, with a hint to
+  connect as root or use `--sudo` only when the run is not root.
+
 ## [1.5.1] - 2026-10-17
 
 ### Added

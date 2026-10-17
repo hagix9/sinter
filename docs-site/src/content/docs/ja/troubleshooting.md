@@ -74,6 +74,20 @@ Sinter はパーミッション失敗を昇格してリトライすることは�
 できない変更（パッケージ、ユーザー、グループ、ユーザー自身の領域の外のファイル）に
 `needs root:` の注記を付けます。注記だけです。plan は sudo を実行も確認もせず、
 状態も変わりません。apply は、root で接続するか `--sudo` を加えない限り失敗します。
+root ログインと `--sudo` では、この注記は付きません。v1.5.1 の次のリリース（未リリース）
+からは既定のテキスト出力に表示します。v1.5.1 以前は `--verbose` と `--format json`
+（`notes`）でだけ表示されます。sensitive なリソースでは、テキスト出力は
+`needs root (details redacted)` とだけ表示します。
+
+**`cannot inspect PATH: permission denied`**（v1.5.1 の次のリリース、未リリース）
+
+ターゲットユーザがそのパスを参照できませんでした。多くの場合、親ディレクトリを
+そのユーザが検索（x）できないことが原因です。パスについて何も仮定せず、plan、apply、
+audit はそのリソースで失敗します。root 権限で管理するパスなら、root で接続するか
+`--sudo` を使ってください。root で実行しているときは `permission denied even with
+root privilege` と表示します（例: root を非特権ユーザーに対応付けるネットワーク
+ファイルシステム）。v1.5.1 以前は、同じ場合を `the capture carried an unrecognized
+diagnostic: "… Permission denied"` と表示します。
 
 ## プラットフォーム検出
 
@@ -196,8 +210,8 @@ plan はそれに依存するものを遅延として扱い、scriptlet は宣�
 
 **`postgresql_role` が失敗する**
 
-- `postgresql_role needs root` → `--sudo` を使ってください（psql はクラスタの
-  所有者として実行します）。
+- `postgresql_role needs root` → root で接続するか `--sudo` を使ってください
+  （psql はクラスタの所有者として実行します）。
 - `cannot observe PostgreSQL role …: psql exited 2` → サーバーが動いていないか、
   `psql` / `port` が別のものを指しています（PGDG では `psql: /usr/pgsql-17/bin/psql`）。
 - `could not be verified to keep statements out of the server log … not sent` →
