@@ -83,8 +83,8 @@ inventory (hosts, flat groups, explicit per-recipe `targets`) — see
 
 ## Install
 
-Sinter **v1.5.0** ships one
-`sinter-v1.5.0-linux-x86_64.tar.gz` artifact covering every supported Linux
+Sinter **v1.5.1** is prepared for release as one
+`sinter-v1.5.1-linux-x86_64.tar.gz` artifact covering every supported Linux
 x86_64 platform line: Ubuntu, Rocky Linux, RHEL 9 / 10, and AlmaLinux 9 / 10.
 
 ```sh
@@ -226,8 +226,8 @@ Resource types: `file`, `directory`, `template`, `link`, `command`,
 `package`, `service`. Handlers are delayed `restart`/`reload` service actions.
 Since v1.2.0 Sinter also has two local
 account types, `group` and `user`: order by declaration and `depends_on`, local database only,
-no renumbering, additive supplementary groups, `absent` without `-r`/`-f`. The
-development version (v1.5.1, not yet released) adds `postgresql_role`. See the
+no renumbering, additive supplementary groups, `absent` without `-r`/`-f`.
+v1.5.1 adds `postgresql_role`. See the
 resource reference.
 
 Also since v1.2.0: `sinter secrets encrypt | decrypt | list`
