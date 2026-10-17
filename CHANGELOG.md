@@ -58,6 +58,14 @@ All notable changes to Sinter are documented in this file.
   declare the account (with the package's attributes) before the package,
   which makes plan defer instead of fail.
 
+### Security
+
+- **Gateway: rustls 0.23.46** (from 0.23.45) for RUSTSEC-2026-0346,
+  RUSTSEC-2026-0347, RUSTSEC-2026-0348 and RUSTSEC-2026-0349, in
+  `gateway/Cargo.lock` only; the yanked `yoke-derive` 0.8.3 is replaced by
+  0.8.4. The `sinter` binary does not use rustls and is unaffected. The
+  gateway's API, configuration and TLS client settings are unchanged.
+
 ## [1.5.0] - 2026-10-16
 
 ### Changed
