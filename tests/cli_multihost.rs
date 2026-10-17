@@ -51,13 +51,33 @@ fn bin() -> &'static str {
 
 struct Fx {
     dir: tempfile::TempDir,
+    closed: std::cell::OnceCell<common::ClosedPorts>,
 }
 
 impl Fx {
     fn new() -> Self {
         Fx {
             dir: tempfile::tempdir().unwrap(),
+            closed: std::cell::OnceCell::new(),
         }
+    }
+
+    /// `n` (at most 3) distinct loopback ports that refuse connections, held
+    /// for the life of the fixture. They come from `common::ClosedPorts`
+    /// (privileged ports that are probed, never bound): ports from `bind(0)`
+    /// whose listeners were closed again could still be listening in a child
+    /// another thread was forking, which made a test expecting "cannot
+    /// connect" see an SSH banner failure instead.
+    fn closed_ports(&self, n: usize) -> Vec<u16> {
+        assert!(n <= 3, "the fixture reserves three closed ports");
+        self.closed
+            .get_or_init(|| common::ClosedPorts::reserve(3))
+            .ports()[..n]
+            .to_vec()
+    }
+
+    fn closed_port(&self) -> u16 {
+        self.closed_ports(1)[0]
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -86,7 +106,7 @@ impl Fx {
     fn inventory(&self) -> String {
         let kh = self.write("known_hosts", "");
         let mut body = String::from("hosts:\n");
-        for (h, port) in ["web01", "web02", "db01"].iter().zip(closed_ports(3)) {
+        for (h, port) in ["web01", "web02", "db01"].iter().zip(self.closed_ports(3)) {
             body.push_str(&format!(
                 "  {h}:\n    address: 127.0.0.1\n    port: {port}\n    user: inv-{h}\n    known_hosts: {kh}\n"
             ));
@@ -146,19 +166,6 @@ fn stdout(o: &Output) -> String {
 
 fn stderr(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).to_string()
-}
-
-/// `n` distinct loopback ports with nothing listening: all listeners are
-/// held until every port is chosen, so the ports cannot repeat.
-fn closed_ports(n: usize) -> Vec<u16> {
-    let ls: Vec<_> = (0..n)
-        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
-        .collect();
-    ls.iter().map(|l| l.local_addr().unwrap().port()).collect()
-}
-
-fn closed_port() -> u16 {
-    closed_ports(1)[0]
 }
 
 fn assert_no_ansi(bytes: &[u8], ctx: &str) {
@@ -564,7 +571,7 @@ fn skipped_hosts_are_never_resolved() {
     );
     f.fake_ssh(&format!(
         "hostname 127.0.0.1\nport {}\nuser u\n",
-        closed_port()
+        f.closed_port()
     ));
     let o = f.run(&["plan", &r, "--hosts", &inv]);
     assert_eq!(o.status.code(), Some(3), "{o:?}");
@@ -755,7 +762,7 @@ fn bundle_on_one_explicit_host_runs_each_recipe_there() {
     f.recipe("a.yaml", "");
     f.recipe("b.yaml", WEB);
     let b = f.write("stack.yaml", "version: 1\nrecipes: [a.yaml, b.yaml]\n");
-    let port = closed_port().to_string();
+    let port = f.closed_port().to_string();
     let o = f.run(&[
         "plan",
         &b,
@@ -788,7 +795,7 @@ fn single_host_keeps_the_single_document_contract() {
     // `targets` only matter with an inventory; an explicit --host is the
     // operator's explicit choice and keeps its established behavior.
     let r = f.recipe("r.yaml", "targets:\n  groups: [db]\n");
-    let port = closed_port().to_string();
+    let port = f.closed_port().to_string();
     let o = f.run(&[
         "plan",
         &r,
@@ -822,7 +829,7 @@ fn single_host_keeps_the_single_document_contract() {
 fn ssh_config_supplies_hostname_port_user() {
     let f = Fx::new();
     let r = f.recipe("r.yaml", "");
-    let port = closed_port();
+    let port = f.closed_port();
     f.fake_ssh(&format!(
         "user configuser\nhostname 127.0.0.1\nport {port}\n"
     ));
@@ -840,7 +847,7 @@ fn ssh_config_supplies_hostname_port_user() {
 fn precedence_cli_over_inventory_over_ssh_config() {
     let f = Fx::new();
     let r = f.recipe("r.yaml", "targets:\n  hosts: [a, b]\n");
-    let (pa, pb) = match closed_ports(2)[..] {
+    let (pa, pb) = match f.closed_ports(2)[..] {
         [a, b] => (a, b),
         _ => unreachable!(),
     };
@@ -901,7 +908,7 @@ fn no_ssh_config_skips_openssh() {
     let f = Fx::new();
     let r = f.recipe("r.yaml", "");
     f.fake_ssh("hostname 10.255.255.1\n");
-    let port = closed_port();
+    let port = f.closed_port();
     let o = f.run(&[
         "plan",
         &r,
