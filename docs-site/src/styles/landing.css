@@ -284,6 +284,29 @@
   color: inherit;
 }
 
+/* the OpenStack tutorial card under the recipe copy (same surface as the AI cards) */
+.recipe-tutorial {
+  margin-top: 1.5rem;
+  border: 1px solid var(--l-border);
+  border-radius: 0.75rem;
+  padding: 1.1rem 1.25rem;
+  background: var(--l-surface);
+}
+.recipe-tutorial h3 {
+  font-size: 1.05rem;
+  margin-bottom: 0.5rem;
+}
+.recipe-tutorial p {
+  margin: 0;
+  color: var(--l-muted);
+}
+.recipe-tutorial p + p {
+  margin-top: 0.75rem;
+}
+.recipe-tutorial a {
+  font-weight: 600;
+}
+
 /* ---------- Sinter flow diagram ---------- */
 
 .flow {

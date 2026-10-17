@@ -17,6 +17,9 @@ export interface LandingStrings {
   recipeTitle: string;
   recipeNote: string;
   recipeCta: string;
+  tutorialTitle: string;
+  tutorialNote: string;
+  tutorialCta: string;
   flowTitle: string;
   flowNote: string;
   flowRecipeSub: string;
@@ -89,6 +92,10 @@ export const strings: Record<'en' | 'ja', LandingStrings> = {
     recipeNote:
       'Declare the state. Sinter handles observation and convergence — no agent or runtime on the managed host.',
     recipeCta: 'Recipe format reference',
+    tutorialTitle: 'Build OpenStack 2026.1 All-in-One with Sinter',
+    tutorialNote:
+      'Follow a practical tutorial covering RPM preparation, deployment, and virtual machine verification on Rocky Linux 10.2 — a verification and demo setup, based on a real-host run.',
+    tutorialCta: 'View tutorial',
     flowTitle: 'How Sinter works',
     flowNote:
       'Sinter loads the recipe, observes the target over SSH, and reports or converges. Nothing runs on the target permanently.',
@@ -178,6 +185,10 @@ export const strings: Record<'en' | 'ja', LandingStrings> = {
     recipeNote:
       '状態を宣言するだけ。観測と収束は Sinter が処理します — 管理対象ホストにエージェントもランタイムも不要。',
     recipeCta: 'レシピ形式リファレンス',
+    tutorialTitle: 'OpenStack 2026.1 All-in-One を構築する',
+    tutorialNote:
+      'Sinter を使って、Rocky Linux 10.2 上に OpenStack を構築します。RPM の準備から仮想マシンの起動まで、実機検証に基づく手順を紹介します（検証・デモ用の構成）。',
+    tutorialCta: 'チュートリアルを見る',
     flowTitle: 'Sinter の仕組み',
     flowNote:
       'Sinter はレシピを読み込み、SSH 経由でターゲットを観測し、報告または収束します。ターゲットに常駐するものはありません。',

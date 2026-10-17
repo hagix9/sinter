@@ -62,6 +62,11 @@ const doc = (p: string) => `${base}${locale}/${p}/`;
         <h2>{t.recipeTitle}</h2>
         <p class="landing-lead">{t.recipeNote}</p>
         <p><a href={doc('reference/recipe-format')}>{t.recipeCta}</a></p>
+        <div class="recipe-tutorial">
+          <h3>{t.tutorialTitle}</h3>
+          <p>{t.tutorialNote}</p>
+          <p><a href={doc('tutorials/openstack-aio/overview')}>{t.tutorialCta} <span aria-hidden="true">→</span></a></p>
+        </div>
       </div>
       <pre class="landing-recipe"><code>version: 1
 resources:
