@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================================
-# GO gate  --  HARNESS-FIX COPY (NOT an official acceptance artifact)
-# Records GO only when collect-evidence-fixed.py returns GO, which requires:
+# GO gate (release acceptance). Needs SINTER_RC_COMMIT and SINTER_EXP_ART.
+# Records GO only when collect-evidence.py returns GO, which requires:
 #   all 8 labels PASS with re-verified evidence, no non-PASS run anywhere, and
 #   an Owner-approval file that is HMAC-verified against a key the Owner holds,
 #   binds the RC + frozen artifact + the exact evidence_digest, and is current.
@@ -17,7 +17,7 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
-COLLECT="$(cd "$(dirname "$0")" && pwd)/collect-evidence-fixed.py"
+COLLECT="$(cd "$(dirname "$0")" && pwd)/collect-evidence.py"
 ARGS=("$OUT")
 [ -n "$APPROVAL" ] && ARGS+=(--owner-approval "$APPROVAL")
 [ -n "$KEY" ] && ARGS+=(--approval-key "$KEY")

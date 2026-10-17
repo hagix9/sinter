@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # ============================================================================
-# Owner approval helper  --  HARNESS-FIX COPY
+# Owner approval helper (release acceptance)
 # Produces an HMAC-signed approval binding {owner, RC, artifact, exact evidence
 # set, time}. The signing key is supplied out of band and is NEVER written here.
-# A bare text "GO" is not a valid approval; collect-evidence-fixed.py verifies
+# A bare text "GO" is not a valid approval; collect-evidence.py verifies
 # the signature, the evidence_digest and the timestamp.
 #
 # Usage:
-#   approve-fixed.py <out-dir> --key FILE --owner NAME --out FILE [--decision GO]
+#   approve.py <out-dir> --key FILE --owner NAME --out FILE [--decision GO]
 # ============================================================================
 import argparse
 import glob
@@ -15,13 +15,24 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sys
 import time
 
-LABELS = ["ubuntu2404", "ubuntu2604", "rocky9", "rocky10",
-          "rhel9", "rhel10", "alma9", "alma10"]
-RC_COMMIT = "0fa75e47e82f2f9b0d74371fbdf4bd2ebea05e87"
-EXP_ART = "8abe3a83db0a459f6df5f94435300cf50f6a8251f5189dc7fd58dbbf5ef9da71"
+DEFAULT_LABELS = ["ubuntu2404", "ubuntu2604", "rocky9", "rocky10",
+                  "rhel9", "rhel10", "alma9", "alma10"]
+
+def required_env():
+    """RC commit and artifact SHA-256 of the release under test, from the
+    environment only (no defaults: a missing or malformed value stops)."""
+    rc = os.environ.get("SINTER_RC_COMMIT", "")
+    art = os.environ.get("SINTER_EXP_ART", "")
+    if not re.fullmatch(r"[0-9a-f]{40}", rc) or not re.fullmatch(r"[0-9a-f]{64}", art):
+        sys.stderr.write("SINTER_RC_COMMIT (40 hex) and SINTER_EXP_ART (64 hex) are required\n")
+        sys.exit(64)
+    labels = os.environ.get("SINTER_LABELS", " ".join(DEFAULT_LABELS)).split()
+    return rc, art, labels
+
 CANON_FIELDS = ["decision", "owner", "rc_commit", "artifact_sha256", "evidence_digest", "approved_at"]
 
 
@@ -45,6 +56,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--decision", default="GO")
     a = ap.parse_args()
+    RC_COMMIT, EXP_ART, LABELS = required_env()
 
     accepted = {}
     for path in sorted(glob.glob(os.path.join(a.outdir, "runs", "*", "run.json"))):

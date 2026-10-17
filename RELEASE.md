@@ -492,6 +492,12 @@ Minimum matrix per target:
 
 Step 9: keep one raw, sanitized log per target, named by its label.
 
+The driver for these steps is `release/acceptance-harness/` (see its
+README): it is configured only through the environment, refuses to start
+without every required value, records each target's boot image, and stops a
+target on a tarball or raw-log hash mismatch, a failed preparation step or a
+failed metadata refresh.
+
 Report ends with an explicit `GO` or `NO-GO`. Do not remediate during
 acceptance — reproduce, preserve evidence, report, stop. Any target FAIL
 ends this candidate; a fix is a new candidate from step 1.

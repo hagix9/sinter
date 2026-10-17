@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # ============================================================================
-# Sinter Step 7-9 evidence collector / GO gate  --  HARNESS-FIX COPY (F1-F3)
-# (NOT an official acceptance artifact. See reports/.)
+# Sinter release acceptance — evidence collector / GO gate (RELEASE.md
+# steps 7-9). The RC commit and artifact SHA-256 come from SINTER_RC_COMMIT
+# and SINTER_EXP_ART (required); the target labels default to the release
+# acceptance matrix and may be overridden with SINTER_LABELS.
 #
 # F2: never trust run.json's own "PASS" string. Re-derive the truth from the
 #     evidence bytes:
@@ -22,7 +24,7 @@
 # signature and current digest the verdict is PENDING_OWNER_APPROVAL.
 #
 # Usage:
-#   collect-evidence-fixed.py <out-dir> [--approval-key FILE] [--owner-approval FILE]
+#   collect-evidence.py <out-dir> [--approval-key FILE] [--owner-approval FILE]
 #                            [--expected-ids FILE] [--write-verdict]
 # ============================================================================
 import glob
@@ -37,11 +39,21 @@ import time
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-LABELS = ["ubuntu2404", "ubuntu2604", "rocky9", "rocky10",
-          "rhel9", "rhel10", "alma9", "alma10"]
-RC_COMMIT = "0fa75e47e82f2f9b0d74371fbdf4bd2ebea05e87"
-EXP_ART = "8abe3a83db0a459f6df5f94435300cf50f6a8251f5189dc7fd58dbbf5ef9da71"
+DEFAULT_LABELS = ["ubuntu2404", "ubuntu2604", "rocky9", "rocky10",
+                  "rhel9", "rhel10", "alma9", "alma10"]
 SKEW_SECONDS = 300
+
+def required_env():
+    """RC commit and artifact SHA-256 of the release under test, from the
+    environment only (no defaults: a missing or malformed value stops)."""
+    rc = os.environ.get("SINTER_RC_COMMIT", "")
+    art = os.environ.get("SINTER_EXP_ART", "")
+    if not re.fullmatch(r"[0-9a-f]{40}", rc) or not re.fullmatch(r"[0-9a-f]{64}", art):
+        sys.stderr.write("SINTER_RC_COMMIT (40 hex) and SINTER_EXP_ART (64 hex) are required\n")
+        sys.exit(64)
+    labels = os.environ.get("SINTER_LABELS", " ".join(DEFAULT_LABELS)).split()
+    return rc, art, labels
+
 
 CANON_FIELDS = ["decision", "owner", "rc_commit", "artifact_sha256", "evidence_digest", "approved_at"]
 
@@ -152,8 +164,10 @@ def main():
         else:
             out = a; i += 1
     if not out:
-        print("usage: collect-evidence-fixed.py <out-dir> [--approval-key FILE] [--owner-approval FILE]", file=sys.stderr)
+        print("usage: collect-evidence.py <out-dir> [--approval-key FILE] [--owner-approval FILE]", file=sys.stderr)
         return 2
+    global RC_COMMIT, EXP_ART, LABELS
+    RC_COMMIT, EXP_ART, LABELS = required_env()
 
     runs = []
     seen_ids = set()
@@ -168,7 +182,7 @@ def main():
         meta["_dup_id"] = dup
         runs.append(meta)
 
-    lines = ["# Sinter v1.5.0 acceptance — collected runs (fixed harness)", ""]
+    lines = ["# Sinter %s acceptance — collected runs" % os.environ.get("SINTER_EXP_VER", "(version unset)"), ""]
     lines.append("label\trun_id\tverdict\tfile_verdict\tsha_ok\tscripts_ok\tacceptance_end")
     problems = []
     accepted = {}

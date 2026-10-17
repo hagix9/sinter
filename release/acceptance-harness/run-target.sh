@@ -1,7 +1,21 @@
 #!/bin/bash
 # ============================================================================
-# Sinter Step 7-9 target acceptance driver  --  HARNESS-FIX COPY (F1-F3,A1-A3,B1-B3)
-# (NOT an official acceptance artifact. See reports/.)
+# Sinter release acceptance — one-target driver (RELEASE.md steps 7-9).
+#
+# Configuration comes only from the environment; there are no defaults for
+# anything environment- or release-specific, and a missing value stops the run
+# before any cloud call (exit 64). See harness.env.example:
+#   SINTER_PROJECT SINTER_ZONE           the GCP project/zone of the targets
+#   SINTER_ARTIFACT                      local release tarball
+#                                        (sinter-v<version>-linux-x86_64.tar.gz)
+#   SINTER_RC_COMMIT                     the release-candidate commit
+#   SINTER_EXP_ART SINTER_EXP_EXE        expected tarball / executable SHA-256
+#   SINTER_EXP_VER                       expected `sinter --version` line
+# The tarball is verified locally before upload and again on the target; the
+# target's boot-disk image (sourceImage + sourceImageId) is recorded; a raw log
+# whose SHA-256 differs from the one computed on the target, a stale or
+# non-zero prep.rc, and a failed metadata refresh all stop the run (non-PASS).
+# Nothing is retried by a loop above this driver.
 #
 # B1: every non-complete / non-save-ok / non-cleanup path exits NON-ZERO; only a
 #     fully verified PASS exits 0. The EXIT trap forces non-zero when it records
@@ -26,17 +40,35 @@ if ! printf '%s' "$RUN_ID" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$'; then
   echo "INVALID RUN_ID (charset/length): $RUN_ID" >&2; exit 65
 fi
 
-PROJ=${SINTER_PROJECT:-sinter-508914}
-ZONE=${SINTER_ZONE:-asia-northeast1-a}
+# ---- required configuration (fail closed, before any cloud call) ----------
+missing=""
+for v in SINTER_PROJECT SINTER_ZONE SINTER_ARTIFACT SINTER_RC_COMMIT SINTER_EXP_ART SINTER_EXP_EXE SINTER_EXP_VER; do
+  [ -n "${!v:-}" ] || missing="$missing $v"
+done
+if [ -n "$missing" ]; then echo "MISSING REQUIRED CONFIGURATION:$missing (see harness.env.example)" >&2; exit 64; fi
+PROJ=$SINTER_PROJECT
+ZONE=$SINTER_ZONE
 GCLOUD=${GCLOUD:-gcloud}
 HERE=$(cd "$(dirname "$0")" && pwd)
 H=${SINTER_HARNESS_DIR:-$HERE}
-ART=${SINTER_ARTIFACT:-/Volumes/VGX1000 SSD/Codex/Projects/Sinter/worktrees/v1.5-improvements/docs/v1.5.0-release-gate/artifact/sinter-v1.5.0-linux-x86_64.tar.gz}
-RC_COMMIT=${SINTER_RC_COMMIT:-0fa75e47e82f2f9b0d74371fbdf4bd2ebea05e87}
-EXP_ART=${SINTER_EXP_ART:-8abe3a83db0a459f6df5f94435300cf50f6a8251f5189dc7fd58dbbf5ef9da71}
-EXP_EXE=${SINTER_EXP_EXE:-4a98c6fd2b4e8b8ed08eb0caa7a58f250c2be32d6ccfbf27566f17e0c8647869}
-EXP_VER=${SINTER_EXP_VER:-sinter 1.5.0}
-TARNAME=sinter-v1.5.0-linux-x86_64.tar.gz
+ART=$SINTER_ARTIFACT
+RC_COMMIT=$SINTER_RC_COMMIT
+EXP_ART=$SINTER_EXP_ART
+EXP_EXE=$SINTER_EXP_EXE
+EXP_VER=$SINTER_EXP_VER
+TARNAME=$(basename "$ART")
+if ! printf '%s' "$TARNAME" | grep -qE '^sinter-v[0-9]+\.[0-9]+\.[0-9]+-linux-x86_64\.tar\.gz$'; then
+  echo "SINTER_ARTIFACT is not a release tarball name: $TARNAME" >&2; exit 64
+fi
+for v in "$EXP_ART" "$EXP_EXE"; do
+  printf '%s' "$v" | grep -qE '^[0-9a-f]{64}$' || { echo "expected SHA-256 values must be 64 lowercase hex digits" >&2; exit 64; }
+done
+printf '%s' "$RC_COMMIT" | grep -qE '^[0-9a-f]{40}$' || { echo "SINTER_RC_COMMIT must be a full 40-hex commit id" >&2; exit 64; }
+[ -f "$ART" ] || { echo "SINTER_ARTIFACT does not exist: $ART" >&2; exit 64; }
+LOCAL_ART=$(shasum -a 256 "$ART" | cut -d' ' -f1)
+if [ "$LOCAL_ART" != "$EXP_ART" ]; then
+  echo "LOCAL ARTIFACT SHA-256 MISMATCH: $LOCAL_ART != SINTER_EXP_ART; refusing to start" >&2; exit 64
+fi
 EXPECTED_IDS="$H/expected-check-ids.txt"
 RAW_VERDICT="$HERE/raw-verdict.py"
 REMOTE_WORK="/var/tmp/sinter-acceptance-$RUN_ID"
@@ -57,6 +89,8 @@ mkdir -p "$RUN_DIR" || { echo "cannot create run dir $RUN_DIR" >&2; exit 65; }
 [ -w "$RUN_DIR" ] || { echo "run dir not writable: $RUN_DIR" >&2; exit 65; }
 
 RESULT_FILE="$RUN_DIR/result"
+SOURCE_IMAGE=""
+SOURCE_IMAGE_ID=""
 FAULT=${SINTER_TEST_FAULT_SAVE:-}
 RAW_FETCHED=0
 IP_ADDED=no
@@ -103,8 +137,8 @@ record_scripts() {
   [ "$FAULT" = scripts ] && { save_fail "injected scripts-copy failure"; return 1; }
   mkdir -p "$RUN_DIR/scripts" || { save_fail "cannot create scripts dir"; return 1; }
   local f b
-  for f in "$HERE/run-target-v150-fixed.sh" "$HERE/run-all-v150-fixed.sh" \
-           "$HERE/finalize-verdict-fixed.sh" "$HERE/collect-evidence-fixed.py" \
+  for f in "$HERE/run-target.sh" "$HERE/run-all.sh" \
+           "$HERE/finalize-verdict.sh" "$HERE/collect-evidence.py" \
            "$HERE/raw-verdict.py" "$HERE/derive-expected-checks.sh" "$HERE/run-acceptance-wrapper.sh" \
            "$HERE/remote-cleanup.sh" \
            "$H/acceptance-target.sh" "$H/target-prep.sh" "$H/sanitize.py" "$EXPECTED_IDS"; do
@@ -126,7 +160,7 @@ write_meta() { # write_meta <verdict> <acc_rc> <remote_sha> <remote_stat>
   if json=$(RUN_ID="$RUN_ID" SLABEL="$LABEL" SVM="$VM" SVERDICT="$verdict" SACC="$acc_rc" \
       SSTART="$RUN_START" SFINISH="$(ts)" SRAWSHA="$raw_sha" SEND="$end_line" \
       SRC="$RC_COMMIT" SART="$EXP_ART" SRWP="$REMOTE_WORK/raw.log" SCLEAN="$CLEANUP_OK" \
-      SRMSHA="$remote_sha" SRMSTAT="$remote_stat" \
+      SRMSHA="$remote_sha" SRMSTAT="$remote_stat" SIMAGE="$SOURCE_IMAGE" SIMAGEID="$SOURCE_IMAGE_ID" \
       python3 - <<'PY'
 import json, os, sys
 e = os.environ
@@ -138,6 +172,7 @@ print(json.dumps({
   "remote_raw_stat": e["SRMSTAT"], "acceptance_end": e["SEND"],
   "rc_commit": e["SRC"], "artifact_sha256": e["SART"],
   "remote_raw_path": e["SRWP"], "cleanup_ok": e["SCLEAN"] == "1",
+  "source_image": e["SIMAGE"], "source_image_id": e["SIMAGEID"],
 }, indent=2))
 PY
   ); then
@@ -207,7 +242,7 @@ finalize() { # finalize <verdict> <acc_rc> [remote_sha] [remote_stat] <reason>
   do_cleanup
   if [ "$verdict" = PASS ] && [ "$CLEANUP_OK" != 1 ]; then verdict="CLEANUP_FAILED"; fi
   if [ "$FAULT" = result ]; then save_fail "injected result failure"; else atomic_write "$RESULT_FILE" "$verdict" || true; fi
-  case "$verdict" in PASS|FAIL|TIMEOUT|NO_RAW_LOG|STALE_RAW_LOG|INCOMPLETE|ERROR|CLEANUP_FAILED) : ;; *) verdict="ERROR" ;; esac
+  case "$verdict" in PASS|FAIL|TIMEOUT|NO_RAW_LOG|STALE_RAW_LOG|RAW_SHA_MISMATCH|INCOMPLETE|ERROR|CLEANUP_FAILED) : ;; *) verdict="ERROR" ;; esac
   write_meta "$verdict" "$acc_rc" "$rsha" "$rstat" || true
   if [ "$verdict" = PASS ] && [ "$SAVE_FAILED" = 0 ] && [ "$CLEANUP_OK" = 1 ] \
      && [ -s "$RUN_DIR/run.json" ] && [ -s "$RESULT_FILE" ]; then
@@ -239,6 +274,21 @@ echo "expected_checks=$(wc -l < "$EXPECTED_IDS" | tr -d ' ')"
 echo "== script provenance =="
 record_scripts || true
 echo "preflight_status=$(gstatus)"
+echo "local_artifact_sha256=$LOCAL_ART"
+
+# ---- image provenance: the boot disk's source image, recorded per run ------
+BOOT_DISK=$("$GCLOUD" compute instances describe "$VM" --project="$PROJ" --zone="$ZONE" \
+  --format="value(disks[0].source.basename())" 2>/dev/null)
+if [ -n "$BOOT_DISK" ]; then
+  SOURCE_IMAGE=$("$GCLOUD" compute disks describe "$BOOT_DISK" --project="$PROJ" --zone="$ZONE" \
+    --format="value(sourceImage.basename())" 2>/dev/null)
+  SOURCE_IMAGE_ID=$("$GCLOUD" compute disks describe "$BOOT_DISK" --project="$PROJ" --zone="$ZONE" \
+    --format="value(sourceImageId)" 2>/dev/null)
+fi
+echo "source_image=$SOURCE_IMAGE source_image_id=$SOURCE_IMAGE_ID"
+if [ -z "$SOURCE_IMAGE" ] || ! printf '%s' "$SOURCE_IMAGE_ID" | grep -qE '^[0-9]+$'; then
+  finalize "ERROR" "image-provenance" "" "" "boot disk image provenance not recorded"; exit 14
+fi
 
 if [ "$NEED_IP" = yes ]; then
   HAS_AC=$("$GCLOUD" compute instances describe "$VM" --project="$PROJ" --zone="$ZONE" \
@@ -279,13 +329,16 @@ fi
 echo "artifact_on_target=$(gssh "sha256sum /tmp/$TARNAME | cut -d' ' -f1") upload_ok=$UP"
 if [ "$UP" != 1 ]; then finalize "ERROR" "artifact-upload" "" "" "artifact-upload"; exit 6; fi
 
-gssh 'sudo bash /tmp/target-prep.sh >/dev/null 2>&1; cat /tmp/prep.rc 2>/dev/null || echo missing' > "$RUN_DIR/prep_rc.txt"
+# A prep.rc left by an earlier run must never be read as this run's result.
+gssh 'sudo rm -f /tmp/prep.rc; if [ -e /tmp/prep.rc ]; then echo stale; else sudo bash /tmp/target-prep.sh >/dev/null 2>&1; cat /tmp/prep.rc 2>/dev/null || echo missing; fi' > "$RUN_DIR/prep_rc.txt"
 PREP_RC=$(cat "$RUN_DIR/prep_rc.txt" 2>/dev/null); echo "PREP_RC=$PREP_RC"
 if [ "$PREP_RC" != 0 ]; then finalize "ERROR" "prep" "" "" "prep"; exit 7; fi
 
 if [ "$MAKE_CACHE" = yes ]; then
   echo "warming dnf metadata cache (environment normalisation; metadata only)"
-  gssh 'sudo timeout 900 dnf -y makecache' | tail -6
+  MC=$(gssh 'sudo timeout 900 dnf -y makecache >/tmp/makecache.log 2>&1; echo "MAKECACHE_RC=$?"')
+  echo "$MC"
+  if [ "$MC" != "MAKECACHE_RC=0" ]; then finalize "ERROR" "makecache" "" "" "dnf makecache failed ($MC)"; exit 15; fi
 fi
 
 # ---- B2/B3: exclusive per-run dir + namespace capability (no rm of existing)
@@ -334,9 +387,14 @@ echo "remote_raw_sha=$RMT_SHA remote_raw_stat=$RMT_STAT"
 echo "target_finished_at=$(ts)"
 
 fetch_raw && echo "raw_log_fetched=yes" || echo "raw_log_fetched=no"
-if [ "$RAW_FETCHED" = 1 ] && [ -n "$RMT_SHA" ]; then
+if [ "$RAW_FETCHED" = 1 ]; then
   LOCAL_SHA=$(shasum -a 256 "$RUN_DIR/raw.log" | cut -d' ' -f1)
-  if [ "$LOCAL_SHA" != "$RMT_SHA" ]; then echo "RAW SHA MISMATCH local=$LOCAL_SHA remote=$RMT_SHA"; RMT_SHA="$RMT_SHA" ; fi
+  # The fetched log must be byte-identical to the one hashed on the target;
+  # otherwise it is not this run's evidence and the run stops (non-PASS).
+  if [ -z "$RMT_SHA" ] || [ "$LOCAL_SHA" != "$RMT_SHA" ]; then
+    echo "RAW SHA MISMATCH local=$LOCAL_SHA remote=${RMT_SHA:-unavailable}"
+    finalize "RAW_SHA_MISMATCH" "$ACC_RC" "$RMT_SHA" "$RMT_STAT" "raw log hash mismatch"; exit 1
+  fi
 fi
 VERDICT=$(python3 "$RAW_VERDICT" "$RUN_DIR/raw.log" "$EXPECTED_IDS" "$RUN_START" "$ACC_RC" 2>/dev/null || true)
 [ -n "$VERDICT" ] || VERDICT="VERIFIER_ERROR"
