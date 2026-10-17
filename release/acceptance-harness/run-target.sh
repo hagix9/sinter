@@ -64,6 +64,11 @@ for v in "$EXP_ART" "$EXP_EXE"; do
   printf '%s' "$v" | grep -qE '^[0-9a-f]{64}$' || { echo "expected SHA-256 values must be 64 lowercase hex digits" >&2; exit 64; }
 done
 printf '%s' "$RC_COMMIT" | grep -qE '^[0-9a-f]{40}$' || { echo "SINTER_RC_COMMIT must be a full 40-hex commit id" >&2; exit 64; }
+printf '%s' "$EXP_VER" | grep -qE '^sinter [0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$' \
+  || { echo "SINTER_EXP_VER must look like 'sinter X.Y.Z'" >&2; exit 64; }
+# VM and LABEL are expanded inside remote shell commands: allow only plain names.
+printf '%s' "$VM" | grep -qE '^[a-z][a-z0-9-]{0,62}$' || { echo "invalid instance name" >&2; exit 64; }
+printf '%s' "$LABEL" | grep -qE '^[a-z0-9]{1,32}$' || { echo "invalid target label" >&2; exit 64; }
 [ -f "$ART" ] || { echo "SINTER_ARTIFACT does not exist: $ART" >&2; exit 64; }
 LOCAL_ART=$(shasum -a 256 "$ART" | cut -d' ' -f1)
 if [ "$LOCAL_ART" != "$EXP_ART" ]; then
@@ -295,8 +300,11 @@ if [ "$NEED_IP" = yes ]; then
     --format="value(networkInterfaces[0].accessConfigs[0].type)" 2>/dev/null)
   if [ -z "$HAS_AC" ]; then
     echo "adding temporary external IP access-config (environment normalisation)"
-    "$GCLOUD" compute instances add-access-config "$VM" --project="$PROJ" --zone="$ZONE" --access-config-name=external-nat >/dev/null 2>&1 \
-      && IP_ADDED=yes || echo "WARN: add-access-config failed"
+    if "$GCLOUD" compute instances add-access-config "$VM" --project="$PROJ" --zone="$ZONE" --access-config-name=external-nat >/dev/null 2>&1; then
+      IP_ADDED=yes
+    else
+      finalize "ERROR" "add-access-config" "" "" "temporary external IP could not be added"; exit 16
+    fi
   else echo "access-config already present ($HAS_AC); not adding"; fi
 fi
 

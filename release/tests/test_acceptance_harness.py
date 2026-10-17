@@ -42,9 +42,10 @@ EXE = "e" * 64
 #   FAKE_PREP        what the prep step prints ("0", "1", "stale", "missing")
 #   FAKE_MAKECACHE   the makecache step's output line
 #   FAKE_REMOTE_SHA  "actual" (default) or a value to report for raw.log
+#   FAKE_ACCESS_CONFIG / FAKE_ADD_AC_FAIL   external-IP state / add failure
 FAKE_GCLOUD = textwrap.dedent(r'''
     #!/usr/bin/env python3
-    import datetime, hashlib, os, shutil, sys
+    import datetime, hashlib, os, shlex, shutil, sys
     d = os.environ["FAKE_DIR"]
     args = sys.argv[1:]
     with open(os.path.join(d, "calls.log"), "a") as f:
@@ -66,7 +67,7 @@ FAKE_GCLOUD = textwrap.dedent(r'''
         elif "disks[0]" in fmt:
             print(os.environ.get("FAKE_BOOT_DISK", "boot-disk-fixture"))
         elif "accessConfigs" in fmt:
-            print("ONE_TO_ONE_NAT")
+            print(os.environ.get("FAKE_ACCESS_CONFIG", "ONE_TO_ONE_NAT"))
         sys.exit(0)
     if sub == ["compute", "disks", "describe"]:
         fmt = opt("--format")
@@ -75,6 +76,8 @@ FAKE_GCLOUD = textwrap.dedent(r'''
         else:
             print(os.environ.get("FAKE_IMAGE", "fixture-image-v1"))
         sys.exit(0)
+    if sub == ["compute", "instances", "add-access-config"]:
+        sys.exit(1 if os.environ.get("FAKE_ADD_AC_FAIL") else 0)
     if sub == ["compute", "instances", "start"]:
         open(os.path.join(d, "status"), "w").write("RUNNING"); sys.exit(0)
     if sub == ["compute", "instances", "stop"]:
@@ -106,7 +109,8 @@ FAKE_GCLOUD = textwrap.dedent(r'''
         elif has("setsid"):
             now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             ids = [l.strip() for l in open(os.environ["FAKE_IDS"]) if l.strip()]
-            body = ["== acceptance start %s" % now]
+            label = shlex.split(cmd)[5]
+            body = ["== acceptance start %s label=%s" % (now, label)]
             body += ["== check %s ok" % i for i in ids]
             body += ["== acceptance end %s passed=%d failed=0 skipped=0" % (now, len(ids))]
             open(raw, "w").write("\n".join(body) + "\n")
@@ -174,12 +178,18 @@ class HarnessCase(unittest.TestCase):
                 e[k] = v
         return e
 
-    def run_target(self, run_id="fixture-run-1", **over):
+    def run_target(self, run_id="fixture-run-1", vm="fixture-vm", label="rocky10", need_ip="no", **over):
         p = subprocess.run(
-            ["bash", RUN_TARGET, "fixture-vm", "rocky10", self.out, "no", "yes", run_id],
+            ["bash", RUN_TARGET, vm, label, self.out, need_ip, "yes", run_id],
             env=self.env(**over), capture_output=True, text=True, timeout=120)
         self.run_dir = os.path.join(self.out, "runs", run_id)
         return p
+
+    def reset_fake(self):
+        for f in ("calls.log", "status", "raw.log", "acceptance.rc"):
+            p = os.path.join(self.fake, f)
+            if os.path.exists(p):
+                os.remove(p)
 
     def calls(self):
         p = os.path.join(self.fake, "calls.log")
@@ -208,10 +218,18 @@ class RequiredConfiguration(HarnessCase):
             "SINTER_EXP_ART": "Z" * 64,
             "SINTER_EXP_EXE": "e" * 63,
             "SINTER_ARTIFACT": os.path.join(self.dir, "renamed.tar.gz"),
+            "SINTER_EXP_VER": "1.5.0; reboot",
         }
         for k, v in bad.items():
             with self.subTest(field=k):
                 p = self.run_target(**{k: v})
+                self.assertEqual(p.returncode, 64, p.stderr)
+                self.assertEqual(self.calls(), [])
+
+    def test_unsafe_instance_name_or_label_stops_before_any_cloud_call(self):
+        for kw in [{"vm": "vm'; reboot; '"}, {"label": "rocky10 x"}, {"vm": ""}]:
+            with self.subTest(**kw):
+                p = self.run_target(**kw)
                 self.assertEqual(p.returncode, 64, p.stderr)
                 self.assertEqual(self.calls(), [])
 
@@ -250,10 +268,19 @@ class StopConditions(HarnessCase):
         self.assert_stopped("ERROR")
         self.assertFalse(any(c.startswith("compute instances start") for c in self.calls()))
 
-    def test_non_numeric_image_id_is_an_error(self):
-        p = self.run_target(FAKE_IMAGE_ID="")
-        self.assertEqual(p.returncode, 14)
+    def test_missing_or_non_numeric_image_id_is_an_error(self):
+        for value in ["", "abc", "12a"]:
+            with self.subTest(image_id=value):
+                self.reset_fake()
+                p = self.run_target(run_id="fixture-img-%s" % (value or "empty"), FAKE_IMAGE_ID=value)
+                self.assertEqual(p.returncode, 14)
+                self.assert_stopped("ERROR")
+
+    def test_failed_external_ip_addition_stops_the_run(self):
+        p = self.run_target(need_ip="yes", FAKE_ACCESS_CONFIG="", FAKE_ADD_AC_FAIL="1")
+        self.assertEqual(p.returncode, 16)
         self.assert_stopped("ERROR")
+        self.assertFalse(any(c.startswith("compute instances start") for c in self.calls()))
 
     def test_failed_makecache_stops_the_run(self):
         p = self.run_target(FAKE_MAKECACHE="MAKECACHE_RC=1")
@@ -270,6 +297,7 @@ class StopConditions(HarnessCase):
     def test_stale_missing_or_failed_prep_rc_stops_the_run(self):
         for answer in ["stale", "missing", "1", ""]:
             with self.subTest(prep=answer):
+                self.reset_fake()
                 p = self.run_target(run_id="fixture-prep-%s" % (answer or "empty"), FAKE_PREP=answer)
                 self.assertEqual(p.returncode, 7)
                 self.assert_stopped("ERROR")
@@ -323,14 +351,45 @@ class HappyPath(HarnessCase):
         self.assertEqual(p.returncode, 65)
 
 
+LABELS = ["ubuntu2404", "ubuntu2604", "rocky9", "rocky10", "rhel9", "rhel10", "alma9", "alma10"]
+
+
 class CollectorAndApproval(HarnessCase):
+    COLLECT = os.path.join(HARNESS, "collect-evidence.py")
+    APPROVE = os.path.join(HARNESS, "approve.py")
+
+    def collect(self, *extra, **over):
+        p = subprocess.run([sys.executable, self.COLLECT, self.out, *extra], env=self.env(**over),
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout
+
+    def verdict(self, text):
+        return [l for l in text.splitlines() if l.startswith("overall verdict:")][0].split(": ", 1)[1]
+
+    def run_matrix(self, labels=LABELS):
+        for i, lb in enumerate(labels):
+            self.reset_fake()
+            self.assertEqual(self.run_target(run_id="fixture-%s" % lb, vm="fixture-vm-%d" % i,
+                                             label=lb).returncode, 0, lb)
+
+    def approve(self, key_text="fixture-approval-key\n"):
+        key = os.path.join(self.dir, "approval.key")
+        write(key, key_text)
+        appr = os.path.join(self.dir, "approval.txt")
+        p = subprocess.run([sys.executable, self.APPROVE, self.out, "--key", key,
+                            "--owner", "fixture-owner", "--out", appr],
+                           env=self.env(), capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return key, appr
+
     def test_collector_and_approve_require_release_identity(self):
         os.makedirs(os.path.join(self.out, "runs"))
         key = os.path.join(self.dir, "key")
         write(key, "fixture-key\n")
         cases = [
-            [sys.executable, os.path.join(HARNESS, "collect-evidence.py"), self.out],
-            [sys.executable, os.path.join(HARNESS, "approve.py"), self.out,
+            [sys.executable, self.COLLECT, self.out],
+            [sys.executable, self.APPROVE, self.out,
              "--key", key, "--owner", "fixture-owner", "--out", os.path.join(self.dir, "a.txt")],
         ]
         for argv in cases:
@@ -341,13 +400,54 @@ class CollectorAndApproval(HarnessCase):
                                        text=True, timeout=60)
                     self.assertEqual(p.returncode, 64, p.stderr)
 
+    def test_matrix_cannot_be_narrowed_from_the_environment(self):
+        self.run_matrix(["rocky10"])
+        key, appr = self.approve()
+        text = self.collect("--approval-key", key, "--owner-approval", appr, SINTER_LABELS="rocky10")
+        self.assertEqual(self.verdict(text), "NO-GO")
+        self.assertIn("rhel9: no accepted PASS evidence", text)
+
+    def test_go_needs_all_eight_labels_and_a_valid_signed_approval(self):
+        self.run_matrix()
+        self.assertEqual(self.verdict(self.collect()), "PENDING_OWNER_APPROVAL")
+        key, appr = self.approve()
+        self.assertEqual(self.verdict(self.collect("--approval-key", key, "--owner-approval", appr)), "GO")
+        # wrong key, tampered approval, approval for another RC
+        other = os.path.join(self.dir, "other.key")
+        write(other, "another-fixture-key\n")
+        self.assertNotEqual(self.verdict(self.collect("--approval-key", other, "--owner-approval", appr)), "GO")
+        tampered = os.path.join(self.dir, "tampered.txt")
+        original = read(appr)
+        self.assertIn("owner: fixture-owner\n", original)
+        write(tampered, original.replace("owner: fixture-owner\n", "owner: someone-else\n"))
+        self.assertNotEqual(self.verdict(self.collect("--approval-key", key, "--owner-approval", tampered)), "GO")
+        self.assertEqual(self.verdict(self.collect("--approval-key", key, "--owner-approval", appr,
+                                                   SINTER_RC_COMMIT="2" * 40)), "NO-GO")
+
+    def test_pass_without_image_provenance_or_server_hash_is_rejected(self):
+        self.run_matrix(["rocky10"])
+        meta_path = os.path.join(self.out, "runs", "fixture-rocky10", "run.json")
+        original = read(meta_path)
+        for field in ["source_image", "source_image_id", "remote_raw_sha256"]:
+            with self.subTest(field=field):
+                m = json.loads(original)
+                m[field] = ""
+                write(meta_path, json.dumps(m))
+                text = self.collect()
+                self.assertTrue(any(l.strip().startswith("- rocky10:") and
+                                    ("provenance" in l or "server-side" in l)
+                                    for l in text.splitlines()), text)
+        write(meta_path, original)
+        self.assertFalse(any(l.strip().startswith("- rocky10:") for l in self.collect().splitlines()))
+
 
 class Sanitizer(HarnessCase):
-    def sanitize(self, text, patterns=None):
+    def sanitize(self, text, patterns=None, **over):
         log = os.path.join(self.dir, "raw.txt")
         self.sanitized = os.path.join(self.dir, "sanitized.log")
         write(log, text)
-        env = self.env()
+        over.setdefault("SINTER_SPECS", "fixture-vm-9:rocky10:no:no\nrocky9:rocky9:no:no")
+        env = self.env(**over)
         if patterns is not None:
             pf = os.path.join(self.dir, "patterns.tsv")
             write(pf, patterns)
@@ -356,30 +456,33 @@ class Sanitizer(HarnessCase):
                                log, self.sanitized],
                               env=env, capture_output=True, text=True, timeout=60)
 
-    def test_without_local_patterns_nothing_is_written(self):
-        p = self.sanitize("fixture-project-77 fixture-vm-9\n")
-        self.assertEqual(p.returncode, 2)
-        self.assertFalse(os.path.exists(self.sanitized))
+    def test_without_the_runs_identifiers_nothing_is_written(self):
+        for var in ["SINTER_PROJECT", "SINTER_ZONE", "SINTER_SPECS"]:
+            with self.subTest(missing=var):
+                p = self.sanitize("fixture-project fixture-vm-9\n", **{var: None})
+                self.assertEqual(p.returncode, 2)
+                self.assertFalse(os.path.exists(self.sanitized))
 
-    def test_malformed_or_empty_patterns_fail_closed(self):
-        for pat in ["no-tab-here\n", "# only a comment\n", "\tempty-regex\n"]:
+    def test_malformed_patterns_fail_closed(self):
+        for pat in ["no-tab-here\n", "\tempty-regex\n"]:
             with self.subTest(patterns=pat):
                 p = self.sanitize("x\n", pat)
                 self.assertEqual(p.returncode, 2)
                 self.assertFalse(os.path.exists(self.sanitized))
 
-    def test_local_and_generic_identifiers_are_masked(self):
-        text = ("ran on fixture-vm-9 in fixture-project-77\n"
-                "gcloud --project fixture-project-77 --zone fixture-zone-a\n"
-                "path /home/fixtureuser/x from 192.0.2.10\n")
-        p = self.sanitize(text, "fixture-project-77\t<project>\nfixture-vm-9\t<target>\n")
+    def test_run_identifiers_and_generic_values_are_masked(self):
+        text = ("ssh: connect to host fixture-vm-9 port 22 in fixture-project\n"
+                "zone fixture-zone-a; label rocky9 stays\n"
+                "path /home/fixtureuser/x /Users/fixtureuser/y /Volumes/Fixture Disk/z\n"
+                "from 192.0.2.10 and 2001:db8::7, at 12:34:56, loopback ::1\n")
+        p = self.sanitize(text, "fixture-extra-[0-9]+\t<extra>\n")
         self.assertEqual(p.returncode, 0, p.stderr)
         out = read(self.sanitized)
-        for leaked in ["fixture-project-77", "fixture-vm-9", "fixture-zone-a",
-                       "fixtureuser", "192.0.2.10"]:
+        for leaked in ["fixture-project", "fixture-vm-9", "fixture-zone-a", "fixtureuser",
+                       "Fixture", "Disk", "192.0.2.10", "2001:db8::7"]:
             self.assertNotIn(leaked, out)
-        self.assertIn("<project>", out)
-        self.assertIn("<target>", out)
+        for kept in ["label rocky9 stays", "12:34:56", "::1", "<target>", "<project>", "<zone>"]:
+            self.assertIn(kept, out)
 
 
 if __name__ == "__main__":

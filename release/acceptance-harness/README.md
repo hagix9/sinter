@@ -11,8 +11,9 @@ temporary external IP that is removed again.
 Everything environment- or release-specific comes from the environment;
 nothing is hardcoded and nothing has a default. Copy `harness.env.example`
 to a place **outside the repository**, fill it in and load it with
-`set -a; . <file>; set +a`. A missing or malformed value stops the run with
-exit 64 before any cloud call.
+`set -a; . <file>; set +a`. A missing or malformed value (including an
+instance name or label that is not a plain name) stops the run with exit 64
+before any cloud call.
 
 | Variable | Meaning |
 |----------|---------|
@@ -22,8 +23,7 @@ exit 64 before any cloud call.
 | `SINTER_RC_COMMIT` | full 40-hex release-candidate commit |
 | `SINTER_EXP_ART`, `SINTER_EXP_EXE` | step-6 tarball / executable SHA-256 |
 | `SINTER_EXP_VER` | expected `sinter --version` line |
-| `SINTER_SANITIZE_PATTERNS` | local, untracked `<regex><TAB><replacement>` file masking this environment's own identifiers in published logs |
-| `SINTER_LABELS` | optional; defaults to the eight release labels |
+| `SINTER_SANITIZE_PATTERNS` | optional: a local, untracked `<regex><TAB><replacement>` file with extra identifiers to mask in published logs |
 
 `GCLOUD` may name a different `gcloud` executable (the tests use a fake one).
 
@@ -50,8 +50,12 @@ fail-fast (no retry). For one target, `run-target.sh`:
 Every run writes `runs/<run-id>/` (`driver.log`, `run.json`, `result`, the
 raw log and a `scripts/` copy with its SHA-256 sums) and appends to
 `INDEX.tsv`; a used run directory is never reused. `collect-evidence.py`
-gathers the PASS runs; the GO decision additionally needs an Owner approval
-produced with `approve.py`. `sanitize.py` writes the publishable log.
+gathers the PASS runs; GO requires a verified PASS for all eight release
+labels (the matrix cannot be narrowed) and an Owner approval signed with
+`approve.py`. `sanitize.py <label> <raw> <out>` writes the publishable log: it
+masks the project, the zone and the instance names from `SINTER_SPECS` as
+literals, plus generic hosts, users, paths and addresses, and writes nothing
+if any of the run's identifiers would remain.
 
 Tests: `python3 -m unittest discover -s release/tests`
 (`test_acceptance_harness.py` drives these scripts against a fake `gcloud`).

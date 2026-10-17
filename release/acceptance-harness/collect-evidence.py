@@ -2,8 +2,8 @@
 # ============================================================================
 # Sinter release acceptance — evidence collector / GO gate (RELEASE.md
 # steps 7-9). The RC commit and artifact SHA-256 come from SINTER_RC_COMMIT
-# and SINTER_EXP_ART (required); the target labels default to the release
-# acceptance matrix and may be overridden with SINTER_LABELS.
+# and SINTER_EXP_ART (required); GO always requires all eight release target
+# labels (the matrix cannot be narrowed from the environment).
 #
 # F2: never trust run.json's own "PASS" string. Re-derive the truth from the
 #     evidence bytes:
@@ -51,8 +51,9 @@ def required_env():
     if not re.fullmatch(r"[0-9a-f]{40}", rc) or not re.fullmatch(r"[0-9a-f]{64}", art):
         sys.stderr.write("SINTER_RC_COMMIT (40 hex) and SINTER_EXP_ART (64 hex) are required\n")
         sys.exit(64)
-    labels = os.environ.get("SINTER_LABELS", " ".join(DEFAULT_LABELS)).split()
-    return rc, art, labels
+    # The GO gate always requires the full release matrix; it cannot be
+    # narrowed from the environment.
+    return rc, art, list(DEFAULT_LABELS)
 
 
 CANON_FIELDS = ["decision", "owner", "rc_commit", "artifact_sha256", "evidence_digest", "approved_at"]
@@ -222,8 +223,13 @@ def main():
                         problems.append("%s: remote_raw_path does not bind the run_id" % lb)
                     # B2: the fetched bytes must equal the server-side hash
                     rmsha = r.get("remote_raw_sha256", "")
-                    if rmsha and sha256_file(raw) != rmsha:
+                    if not rmsha:
+                        problems.append("%s: no server-side raw log sha recorded" % lb)
+                    elif sha256_file(raw) != rmsha:
                         problems.append("%s: raw log differs from the recorded server-side sha" % lb)
+                    # The boot image must have been recorded for this run.
+                    if not r.get("source_image") or not re.fullmatch(r"[0-9]+", str(r.get("source_image_id", ""))):
+                        problems.append("%s: boot image provenance not recorded" % lb)
                     # A3: raw start must fall inside this run's [started_at, finished_at]
                     rs = utc_epoch(raw_start_of(head))
                     se = utc_epoch(r.get("started_at", ""))

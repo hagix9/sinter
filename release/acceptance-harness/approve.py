@@ -30,8 +30,9 @@ def required_env():
     if not re.fullmatch(r"[0-9a-f]{40}", rc) or not re.fullmatch(r"[0-9a-f]{64}", art):
         sys.stderr.write("SINTER_RC_COMMIT (40 hex) and SINTER_EXP_ART (64 hex) are required\n")
         sys.exit(64)
-    labels = os.environ.get("SINTER_LABELS", " ".join(DEFAULT_LABELS)).split()
-    return rc, art, labels
+    # The GO gate always requires the full release matrix; it cannot be
+    # narrowed from the environment.
+    return rc, art, list(DEFAULT_LABELS)
 
 CANON_FIELDS = ["decision", "owner", "rc_commit", "artifact_sha256", "evidence_digest", "approved_at"]
 
