@@ -80,6 +80,7 @@ REMOTE_WORK="/var/tmp/sinter-acceptance-$RUN_ID"
 WRAPPER=/tmp/run-acceptance-wrapper.sh
 
 SSH_TMO=${SINTER_SSH_TIMEOUT:-120}
+PREP_TMO=${SINTER_PREP_TIMEOUT:-1200}   # target-prep.sh may wait for a running package manager
 SCP_TMO=${SINTER_SCP_TIMEOUT:-240}
 SSH_WAIT_TRIES=${SINTER_SSH_WAIT_TRIES:-60}
 UP_TRIES=${SINTER_UPLOAD_TRIES:-5}
@@ -123,6 +124,7 @@ atomic_write() {
 
 tmo() { local t=$1; shift; perl -e 'alarm shift; exec @ARGV' "$t" "$@"; }
 gssh()   { tmo "$SSH_TMO" "$GCLOUD" compute ssh "$VM" --project="$PROJ" --zone="$ZONE" --quiet --tunnel-through-iap --command "$1" </dev/null 2>/dev/null; }
+gssh_long() { tmo "$PREP_TMO" "$GCLOUD" compute ssh "$VM" --project="$PROJ" --zone="$ZONE" --quiet --tunnel-through-iap --command "$1" </dev/null 2>/dev/null; }
 gscp()   { tmo "$SCP_TMO" "$GCLOUD" compute scp --project="$PROJ" --zone="$ZONE" --quiet --tunnel-through-iap "$@"; }
 gpush()  { tmo "$SCP_TMO" "$GCLOUD" compute ssh "$VM" --project="$PROJ" --zone="$ZONE" --quiet --tunnel-through-iap --command "cat > $2" < "$1" 2>/dev/null; }
 gstatus(){ "$GCLOUD" compute instances describe "$VM" --project="$PROJ" --zone="$ZONE" --format="get(status)" 2>/dev/null; }
@@ -338,7 +340,7 @@ echo "artifact_on_target=$(gssh "sha256sum /tmp/$TARNAME | cut -d' ' -f1") uploa
 if [ "$UP" != 1 ]; then finalize "ERROR" "artifact-upload" "" "" "artifact-upload"; exit 6; fi
 
 # A prep.rc left by an earlier run must never be read as this run's result.
-gssh 'sudo rm -f /tmp/prep.rc; if [ -e /tmp/prep.rc ]; then echo stale; else sudo bash /tmp/target-prep.sh >/dev/null 2>&1; cat /tmp/prep.rc 2>/dev/null || echo missing; fi' > "$RUN_DIR/prep_rc.txt"
+gssh_long 'sudo rm -f /tmp/prep.rc; if [ -e /tmp/prep.rc ]; then echo stale; else sudo bash /tmp/target-prep.sh >/dev/null 2>&1; cat /tmp/prep.rc 2>/dev/null || echo missing; fi' > "$RUN_DIR/prep_rc.txt"
 PREP_RC=$(cat "$RUN_DIR/prep_rc.txt" 2>/dev/null); echo "PREP_RC=$PREP_RC"
 if [ "$PREP_RC" != 0 ]; then finalize "ERROR" "prep" "" "" "prep"; exit 7; fi
 

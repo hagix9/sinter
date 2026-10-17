@@ -65,7 +65,9 @@ All notable changes to Sinter are documented in this file.
   before any cloud call when one is missing. It records each target's boot
   image, verifies the tarball before upload, and stops a target on a raw-log
   hash mismatch, a stale or failed preparation step or a failed metadata
-  refresh. GO needs all eight targets.
+  refresh. Target preparation waits for a package manager that is already
+  running (a timer-started `dnf makecache` on a fresh RHEL-family VM) instead
+  of letting the acceptance race it. GO needs all eight targets.
 - The approval-set tools are in the repository:
   `release/make_approval_set.py` assembles the set and
   `release/verify_approval_set.py` checks it against the acceptance assets,

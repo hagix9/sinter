@@ -20,7 +20,28 @@ for t in dnf-automatic.timer dnf-makecache.timer apt-daily.timer apt-daily-upgra
   fi
 done
 systemctl stop unattended-upgrades.service >/dev/null 2>&1
-echo "pending package transactions: $(pgrep -c -f 'dnf|yum|apt-get' 2>/dev/null || echo 0)"
+# A timer that fired before it was disabled leaves its service running (on a
+# fresh RHEL-family VM, `dnf makecache --timer` about ten minutes after boot);
+# a package check started meanwhile waits for the dnf lock. Such a run is
+# never killed (an update stopped halfway can leave the host unbootable): wait
+# until no package-manager service or process is left, three quiet checks in a
+# row, for at most SINTER_PREP_QUIET_SECONDS (default 900). Otherwise stop
+# without a prep.rc, which the driver records as a failed preparation.
+busy() {
+  local units n
+  units=$(systemctl list-units --no-legend --state=activating,active,deactivating \
+    'dnf-makecache.service' 'dnf-automatic*.service' 'apt-daily*.service' 'packagekit.service' 2>/dev/null | wc -l)
+  n=$(ps -eo comm= | grep -cE '^(dnf|dnf-automatic|yum|apt|apt-get|dpkg|unattended-upgr|packagekitd)$')
+  [ "$units" -gt 0 ] || [ "$n" -gt 0 ]
+}
+quiet=0; waited=0; limit=${SINTER_PREP_QUIET_SECONDS:-900}
+while [ "$quiet" -lt 3 ]; do
+  if busy; then quiet=0; else quiet=$((quiet + 1)); fi
+  [ "$quiet" -ge 3 ] && break
+  if [ "$waited" -ge "$limit" ]; then echo "STOP package manager still busy after ${waited}s"; exit 6; fi
+  sleep 5; waited=$((waited + 5))
+done
+echo "package managers quiet (waited ${waited}s)"
 
 # attr: /usr/bin/getfattr is a documented target prerequisite
 if [ ! -x /usr/bin/getfattr ]; then

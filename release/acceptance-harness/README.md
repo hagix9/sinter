@@ -38,8 +38,11 @@ fail-fast (no retry). For one target, `run-target.sh`:
    `source_image_id` in `run.json`); no provenance → `ERROR`;
 3. starts the instance, uploads the harness and the tarball, and re-checks
    the tarball hash on the target;
-4. runs `target-prep.sh` after removing any earlier `/tmp/prep.rc`; a stale,
-   missing or non-zero result → `ERROR`;
+4. runs `target-prep.sh` after removing any earlier `/tmp/prep.rc`; it stops
+   the automatic-update timers and waits (at most `SINTER_PREP_QUIET_SECONDS`,
+   default 900; the call itself is bounded by `SINTER_PREP_TIMEOUT`, default
+   1200) for any package manager already running; a stale, missing or non-zero
+   result → `ERROR`;
 5. optionally refreshes dnf metadata; a non-zero `dnf makecache` → `ERROR`;
 6. runs the frozen `acceptance-target.sh` in a private per-run directory,
    hashes the raw log on the target, fetches it, and stops with
