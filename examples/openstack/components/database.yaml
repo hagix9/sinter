@@ -1,0 +1,83 @@
+# Controller: MariaDB (hagistack phase_database). Loopback only, by design.
+version: 1
+
+handlers:
+  - id: restart_mariadb
+    service: mariadb
+    action: restart
+
+resources:
+  - id: pkg_mariadb
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: mariadb-server, state: present }
+  - id: mariadb_conf
+    type: template
+    notify: [restart_mariadb]
+    depends_on: [pkg_mariadb]
+    with:
+      path: /etc/my.cnf.d/99-sinter-openstack.cnf
+      source: ../templates/mariadb.cnf.tpl
+      owner: root
+      group: root
+      mode: "0644"
+  - id: svc_mariadb
+    type: service
+    depends_on: [pkg_mariadb, mariadb_conf]
+    with: { name: mariadb, state: running, enabled: true }
+  - id: wait_mariadb
+    type: command
+    depends_on: [svc_mariadb, helper]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [wait-mariadb]
+      changed_when: "false"
+  - id: db_keystone
+    type: command
+    depends_on: [wait_mariadb, secrets_env]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [db, keystone]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: db_glance
+    type: command
+    depends_on: [wait_mariadb, secrets_env]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [db, glance]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: db_placement
+    type: command
+    depends_on: [wait_mariadb, secrets_env]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [db, placement]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: db_neutron
+    type: command
+    depends_on: [wait_mariadb, secrets_env]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [db, neutron]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: db_nova
+    type: command
+    depends_on: [wait_mariadb, secrets_env]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [db, nova]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: db_nova_api
+    type: command
+    depends_on: [wait_mariadb, secrets_env]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [db, nova_api]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: db_nova_cell0
+    type: command
+    depends_on: [wait_mariadb, secrets_env]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [db, nova_cell0]
+      changed_when: 'result.stdout == "changed\n"'

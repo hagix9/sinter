@@ -1,0 +1,51 @@
+# Controller: the dashboard (hagistack phase_horizon). The RPM ships an active vhost at /dashboard and a
+# local_settings Python file: Sinter keeps a marked block at its end (a gap: there is no block/INI editing
+# resource, so this is one command), and rebuilds the offline static assets only when it changed.
+version: 1
+
+resources:
+  - id: pkg_dashboard
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: openstack-dashboard, state: present }
+  - id: horizon_block
+    type: template
+    sensitive: true
+    depends_on: [etc_dir]
+    with:
+      path: /etc/sinter-openstack/horizon-block.py
+      source: ../templates/horizon-block.py.tpl
+      owner: root
+      group: root
+      mode: "0640"
+  - id: dashboard_state_dir
+    type: directory
+    depends_on: [pkg_dashboard]
+    with: { path: /var/lib/openstack-dashboard, owner: apache, group: apache, mode: "0750" }
+  - id: dashboard_static_dir
+    type: directory
+    depends_on: [pkg_dashboard]
+    with: { path: /usr/share/openstack-dashboard/static, owner: apache, group: apache, mode: "0755" }
+  - id: horizon_settings
+    type: command
+    depends_on: [pkg_dashboard, horizon_block, helper]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [horizon-settings, /etc/sinter-openstack/horizon-block.py]
+      changed_when: 'result.stdout == "changed\n"'
+  # collectstatic + compress: needed whenever the settings change (COMPRESS_OFFLINE is on)
+  - id: horizon_assets
+    type: command
+    depends_on: [horizon_settings, dashboard_static_dir, httpd_dashboard_writepath, wait_keystone]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [horizon-assets]
+      timeout_seconds: 1200
+      changed_when: 'result.stdout == "changed\n"'
+  - id: wait_horizon
+    type: command
+    depends_on: [horizon_assets, svc_httpd]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [wait-http, "http://{{ vars.controller_ip }}/dashboard/auth/login/", "90", "200"]
+      changed_when: "false"

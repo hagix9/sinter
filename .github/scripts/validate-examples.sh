@@ -18,6 +18,10 @@
 #   the reference and the age header only, never decrypts.
 # * The copies live under /tmp (the hosted runner's /home carries a default
 #   ACL that the controller-side trust check rightly refuses).
+# * A file that another example includes is a fragment: it is validated as part
+#   of the recipe that includes it, not on its own. An included file that git
+#   ignores (local secrets) is supplied, in the copy only, from a committed
+#   synthetic sample beside its directory (`X/file.yaml` <- `X.example/file.yaml`).
 # --self-test also proves that an invalid recipe makes this script fail.
 set -euo pipefail
 SINTER=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
@@ -82,6 +86,50 @@ while IFS= read -r f; do
   done
 done < <(find "$WORK" -name '*.yaml' -type f)
 
+# Files another example includes are fragments: they are validated as part of
+# the recipe that includes them, not on their own. An included file that git
+# ignores (local secrets the operator generates) is supplied, in the copy only,
+# from the committed synthetic sample beside its directory:
+# `<dir>/X/file.yaml` <- `<dir>/X.example/file.yaml`. Without a sample the
+# include stays missing and validation fails, as it should.
+FRAGMENTS="$WORK/fragments.txt"
+python3 - "$WORK" "$ROOT" "$FRAGMENTS" <<'PY'
+import os, re, shutil, subprocess, sys
+work, root, out = sys.argv[1], sys.argv[2], sys.argv[3]
+frags = set()
+for d, _, files in os.walk(os.path.join(work, "examples")):
+    for f in sorted(files):
+        if not f.endswith((".yaml", ".yml")):
+            continue
+        lines = open(os.path.join(d, f), encoding="utf-8").read().splitlines()
+        inc = False
+        for line in lines:
+            if re.match(r"^include:\s*$", line):
+                inc = True
+                continue
+            if inc and line and not line[0].isspace() and not line.startswith("#"):
+                inc = False
+            m = re.match(r"^\s+-\s+([^\s#]+)", line) if inc else None
+            if not m:
+                continue
+            ref = m.group(1).strip("'\"")
+            if ref.startswith("/") or ".." in ref.split("/"):
+                continue
+            target = os.path.normpath(os.path.join(d, ref))
+            frags.add(os.path.relpath(target, work))
+            if os.path.exists(target) or "/" not in ref:
+                continue
+            original = os.path.join(root, os.path.relpath(target, work))
+            ignored = subprocess.run(["git", "-C", root, "check-ignore", "-q", original]).returncode == 0
+            head, rest = ref.split("/", 1)
+            sample = os.path.join(d, head + ".example", rest)
+            if ignored and os.path.isfile(sample):
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                shutil.copyfile(sample, target)
+                print(f"sample for ignored include: {os.path.relpath(target, work)}")
+open(out, "w").write("".join(f + "\n" for f in sorted(frags)))
+PY
+
 if [ "${2:-}" = --self-test ]; then
   printf 'version: 1\nresources:\n  - id: bad\n    type: file\n    with:\n      path: relative/path\n      no_such_field: 1\n' > "$WORK/examples/zz-self-test-invalid.yaml"
 fi
@@ -91,6 +139,9 @@ while IFS= read -r f; do
   rel=${f#"$WORK"/}
   if grep -qE '^hosts:' "$f" && ! grep -qE '^(resources|recipes):' "$f"; then
     echo "skip (inventory): $rel"; continue
+  fi
+  if grep -qxF "$rel" "$FRAGMENTS"; then
+    echo "skip (included by another example): $rel"; continue
   fi
   if out=$("$SINTER" validate "$f" 2>&1); then
     checked=$((checked + 1))

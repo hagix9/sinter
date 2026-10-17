@@ -1,0 +1,11 @@
+# Compute: can this node reach the controller? (hagistack phase_compute_preflight). Nothing is installed if not.
+version: 1
+
+resources:
+  - id: compute_reach_controller
+    type: command
+    depends_on: [helper]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [wait-ports, "{{ vars.controller_ip }}", "5000", "9292", "8778", "5672", "6642", "11211"]
+      changed_when: "false"

@@ -1,0 +1,88 @@
+# Common: repositories (hagistack phase_repos). Rocky ships no OpenStack and nobody publishes 2026.1 for
+# EL10: the OpenStack RPMs come from the repository built with hagistack's build-rpms.sh (builder.yaml).
+version: 1
+
+resources:
+  # No `dnf makecache` command: since v1.5.0 a package install whose enabled repositories have no cached
+  # metadata (a fresh image, or a repository added earlier in this run) fetches it once itself.
+  - id: pkg_epel_release
+    type: package
+    depends_on: [helper, preflight_os]
+    with: { name: epel-release, state: present }
+  - id: crb
+    type: command
+    depends_on: [pkg_epel_release, helper]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [crb]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: repo_nfv_ovs
+    type: file
+    with:
+      path: /etc/yum.repos.d/sinter-openstack-nfv-ovs.repo
+      owner: root
+      group: root
+      mode: "0644"
+      content: |
+        # Open vSwitch and OVN for EL10. Rocky does not ship them; this is the released CentOS Stream 10
+        # NFV SIG mirror, addressed by $basearch.
+        [sinter-nfv-ovs]
+        name=NFV SIG OpenvSwitch ($basearch)
+        baseurl=https://mirror.stream.centos.org/SIGs/10-stream/nfv/$basearch/openvswitch-2/
+        enabled=1
+        gpgcheck=0
+        module_hotfixes=1
+  - id: repo_rdo_deps
+    type: file
+    with:
+      path: /etc/yum.repos.d/sinter-openstack-rdo-deps.repo
+      owner: root
+      group: root
+      mode: "0644"
+      content: |
+        # RDO's third-party dependency tree ONLY (eventlet, httplib2, pysaml2, RabbitMQ/Erlang ...).
+        # RDO's OpenStack component repositories (delorean-component-*) are deliberately NOT here: they
+        # carry trunk snapshots that would replace a 2026.1 library with a 2025-era build.
+        [sinter-rdo-deps]
+        name=RDO EL10 third-party python dependencies
+        baseurl=https://trunk.rdoproject.org/centos10-master/deps/latest/
+        enabled=1
+        gpgcheck=0
+        module_hotfixes=1
+
+        [sinter-rdo-build-deps]
+        name=RDO EL10 third-party build dependencies
+        baseurl=https://trunk.rdoproject.org/centos10-master/build-deps/latest/
+        enabled=1
+        gpgcheck=0
+        module_hotfixes=1
+
+        [sinter-rabbitmq]
+        name=RabbitMQ and Erlang for EL10
+        baseurl=https://trunk.rdoproject.org/centos10-master/rabbitmq/
+        enabled=1
+        gpgcheck=0
+        module_hotfixes=1
+  - id: repo_gazpacho
+    type: file
+    with:
+      path: /etc/yum.repos.d/sinter-openstack-gazpacho.repo
+      owner: root
+      group: root
+      mode: "0644"
+      content: |
+        # OpenStack 2026.1 Gazpacho, built from the released tarballs by build-rpms.sh. priority=1 so
+        # nothing else can shadow it. The RPMs are not signed (gpgcheck=0), as in hagistack.
+        [sinter-gazpacho]
+        name=OpenStack 2026.1 Gazpacho (self-built, Rocky 10)
+        baseurl={{ vars.repo_url }}
+        enabled=1
+        gpgcheck=0
+        priority=1
+  - id: repo_gazpacho_answers
+    type: command
+    depends_on: [crb, repo_nfv_ovs, repo_rdo_deps, repo_gazpacho, svc_repo_local]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [check-repo, sinter-gazpacho, openstack-keystone]
+      changed_when: "false"

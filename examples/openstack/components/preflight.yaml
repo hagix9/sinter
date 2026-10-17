@@ -1,0 +1,43 @@
+# Common: hagistack's preflight (phase_preflight), as commands that only look. Each fails the run
+# early when the node is not what the build was verified on.
+version: 1
+
+resources:
+  - id: preflight_os
+    type: command
+    with:
+      program: /bin/bash
+      args:
+        - -c
+        - 'test "$(uname -m)" = x86_64 && . /etc/os-release && test "$ID" = rocky && case "$VERSION_ID" in 10.*) ;; *) exit 1;; esac'
+      changed_when: "false"
+  - id: preflight_hostname
+    type: command
+    with:
+      program: /bin/bash
+      args:
+        - -c
+        - 'test "$(hostname -s)" = "{{ vars.os_hostname }}"'
+      changed_when: "false"
+  - id: preflight_mgmt_ip
+    type: command
+    with:
+      program: /bin/bash
+      args:
+        - -c
+        - 'ip -4 -o addr show | grep -q " {{ vars.mgmt_ip }}/"'
+      changed_when: "false"
+  - id: preflight_kvm
+    type: command
+    when: 'vars.virt_type == "kvm" && vars.has_hypervisor == "true"'
+    with:
+      program: /usr/bin/test
+      args: ["-r", "/dev/kvm"]
+      changed_when: "false"
+  # `crb` below uses `dnf config-manager`, which lives in dnf-plugins-core (part of the Rocky cloud images).
+  - id: preflight_dnf_plugins
+    type: command
+    with:
+      program: /usr/bin/rpm
+      args: ["-q", "dnf-plugins-core"]
+      changed_when: "false"

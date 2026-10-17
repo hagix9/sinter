@@ -1,0 +1,33 @@
+# Common: the places every node uses, the helper that performs the imperative steps, and the
+# deployment's secrets file (hagistack: /etc/hagistack/secrets.env, mode 0600).
+version: 1
+
+resources:
+  - id: etc_dir
+    type: directory
+    with: { path: /etc/sinter-openstack, owner: root, group: root, mode: "0700" }
+  - id: state_dir
+    type: directory
+    with: { path: /var/lib/sinter-openstack, owner: root, group: root, mode: "0755" }
+  - id: helper_dir
+    type: directory
+    with: { path: /usr/local/libexec/sinter-openstack, owner: root, group: root, mode: "0755" }
+  - id: helper
+    type: file
+    depends_on: [helper_dir]
+    with:
+      path: /usr/local/libexec/sinter-openstack/ensure
+      source: ../files/ensure.sh
+      owner: root
+      group: root
+      mode: "0750"
+  - id: secrets_env
+    type: template
+    sensitive: true
+    depends_on: [etc_dir]
+    with:
+      path: /etc/sinter-openstack/secrets.env
+      source: ../templates/secrets.env.tpl
+      owner: root
+      group: root
+      mode: "0600"

@@ -1,0 +1,96 @@
+# Controller: images (hagistack phase_glance) — the one service whose packaged unit still works on 2026.1.
+version: 1
+
+handlers:
+  - id: restart_glance_api
+    service: openstack-glance-api
+    action: restart
+
+resources:
+  - id: pkg_glance
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: openstack-glance, state: present }
+  - id: glance_conf
+    type: template
+    sensitive: true
+    notify: [restart_glance_api]
+    depends_on: [pkg_glance]
+    with:
+      path: /etc/glance/glance-api.conf
+      source: ../templates/glance-api.conf.tpl
+      owner: root
+      group: glance
+      mode: "0640"
+  - id: glance_images_dir
+    type: directory
+    depends_on: [pkg_glance]
+    with: { path: /var/lib/glance/images, owner: glance, group: glance, mode: "0750" }
+  - id: glance_db_sync
+    type: command
+    depends_on: [db_glance, glance_conf, helper]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [sync, glance]
+      timeout_seconds: 900
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_user_glance
+    type: command
+    depends_on: [ks_project_service]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-user, glance]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_role_glance
+    type: command
+    depends_on: [ks_user_glance]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-role, glance, service, admin]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_service_glance
+    type: command
+    depends_on: [ks_project_service]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-service, glance, image, "OpenStack Image"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_endpoint_glance_public
+    type: command
+    depends_on: [ks_service_glance]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-endpoint, glance, public, "http://{{ vars.controller_ip }}:9292", "{{ vars.region_name }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_endpoint_glance_internal
+    type: command
+    depends_on: [ks_service_glance]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-endpoint, glance, internal, "http://{{ vars.controller_ip }}:9292", "{{ vars.region_name }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_endpoint_glance_admin
+    type: command
+    depends_on: [ks_service_glance]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-endpoint, glance, admin, "http://{{ vars.controller_ip }}:9292", "{{ vars.region_name }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: svc_glance_api
+    type: service
+    depends_on: [pkg_glance, glance_conf, glance_images_dir, glance_db_sync, svc_memcached, ks_role_glance, ks_endpoint_glance_public, ks_endpoint_glance_internal, ks_endpoint_glance_admin]
+    with: { name: openstack-glance-api, state: running, enabled: true }
+  - id: wait_glance
+    type: command
+    depends_on: [svc_glance_api]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [wait-http, "http://{{ vars.mgmt_ip }}:9292/", "90"]
+      changed_when: "false"
+  - id: wait_glance_api
+    type: command
+    depends_on: [wait_glance]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [wait-api, "an authenticated image list", image, list]
+      changed_when: "false"

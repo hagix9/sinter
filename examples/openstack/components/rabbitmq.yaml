@@ -1,0 +1,26 @@
+# Controller: the message queue (hagistack phase_rabbitmq).
+version: 1
+
+resources:
+  - id: pkg_rabbitmq
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: rabbitmq-server, state: present }
+  - id: svc_rabbitmq
+    type: service
+    depends_on: [pkg_rabbitmq]
+    with: { name: rabbitmq-server, state: running, enabled: true }
+  - id: wait_rabbit
+    type: command
+    depends_on: [svc_rabbitmq, helper]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [wait-rabbit]
+      changed_when: "false"
+  - id: rabbit_user
+    type: command
+    depends_on: [wait_rabbit, secrets_env]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [rabbit-user]
+      changed_when: 'result.stdout == "changed\n"'

@@ -1,0 +1,11 @@
+# Controller and all-in-one: this node IS the controller, so its management address is the controller address.
+# A component (not an entry-point resource) so that it runs with the other preflight checks, before anything changes.
+version: 1
+
+resources:
+  - id: preflight_controller_address
+    type: command
+    with:
+      program: /usr/bin/test
+      args: ["{{ vars.mgmt_ip }}", "=", "{{ vars.controller_ip }}"]
+      changed_when: "false"

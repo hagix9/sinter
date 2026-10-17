@@ -1,0 +1,25 @@
+# Common: the OVN metadata agent, on every chassis (guests reach 169.254.169.254 through it).
+version: 1
+
+handlers:
+  - id: restart_neutron_ovn_metadata_agent
+    service: neutron-ovn-metadata-agent
+    action: restart
+
+resources:
+  - id: pkg_ovn_metadata_agent
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: openstack-neutron-ovn-metadata-agent, state: present }
+  - id: ovn_metadata_ini
+    type: template
+    sensitive: true
+    notify: [restart_neutron_ovn_metadata_agent]
+    depends_on: [pkg_ovn_metadata_agent]
+    with:
+      path: /etc/neutron/neutron_ovn_metadata_agent.ini
+      source: ../templates/neutron_ovn_metadata_agent.ini.tpl
+      owner: root
+      group: neutron
+      mode: "0640"
+  # svc_neutron_ovn_metadata_agent is declared by each entry point: only the controller roles hold neutron.conf

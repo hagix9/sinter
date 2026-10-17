@@ -1,0 +1,31 @@
+# Common: SELinux (hagistack phase_selinux). The verified mode is PERMISSIVE, switched now and at boot.
+# Enforcing mode is not verified: no OpenStack SELinux policy is installed.
+version: 1
+
+resources:
+  - id: selinux_httpd_net
+    type: command
+    depends_on: [helper]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [sebool-httpd]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: selinux_runtime
+    type: command
+    depends_on: [helper, selinux_httpd_net]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [selinux-permissive]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: selinux_config
+    type: file
+    depends_on: [selinux_runtime]
+    with:
+      path: /etc/selinux/config
+      owner: root
+      group: root
+      mode: "0644"
+      content: |
+        # Managed by Sinter (OpenStack demo): permissive is the only verified mode.
+        SELINUX=permissive
+        SELINUXTYPE=targeted

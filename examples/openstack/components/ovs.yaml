@@ -1,0 +1,50 @@
+# Common (every node that runs guests or the gateway): Open vSwitch (hagistack phase_ovn, first half).
+version: 1
+
+resources:
+  - id: pkg_openvswitch
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: openvswitch3.5, state: present }
+  - id: pkg_ovn
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: ovn26.03, state: present }
+  - id: pkg_ovn_host
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: ovn26.03-host, state: present }
+  # ovs-ctl rewrites external-ids:system-id at every start from /etc/openvswitch/system-id.conf and generates a
+  # random UUID there when the file is missing. Setting the id only in the database (as hagistack does) is lost at
+  # the next reboot, the chassis re-registers under the UUID and the old chassis stays in the southbound DB
+  # (found on a real host by rebooting). The file makes the chassis name survive.
+  - id: ovs_system_id_file
+    type: file
+    depends_on: [pkg_openvswitch]
+    with:
+      path: /etc/openvswitch/system-id.conf
+      content: "{{ vars.os_hostname }}\n"
+      # /etc/openvswitch belongs to openvswitch:hugetlbfs; Sinter works in a directory owned by another account as
+      # that account and will not hand a file in it to root (FS-3), so the file keeps the directory's owner.
+      owner: openvswitch
+      group: hugetlbfs
+      mode: "0644"
+  - id: svc_openvswitch
+    type: service
+    depends_on: [pkg_openvswitch, ovs_system_id_file]
+    with: { name: openvswitch, state: running, enabled: true }
+  - id: wait_ovs
+    type: command
+    depends_on: [svc_openvswitch, helper]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [wait-ovs]
+      changed_when: "false"
+  # a loopback-only manager so that os_vif (running as nova) can reach the OVSDB; the unix socket is root-only
+  - id: ovs_manager
+    type: command
+    depends_on: [wait_ovs]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ovs-manager, "ptcp:6640:127.0.0.1"]
+      changed_when: 'result.stdout == "changed\n"'

@@ -1,0 +1,58 @@
+# Sinter × hagistack (rocky10.2): the CONTROLLER role — OpenStack 2026.1 Gazpacho control plane on Rocky Linux 10.2.
+# Run: sinter plan|apply controller.yaml --host <node> --sudo   (after tools/gen-secrets.sh and editing site.yaml)
+# This node is also the OVN gateway chassis (as in hagistack's all-in-one). Not verified on hardware: see README.md.
+version: 1
+
+targets:
+  groups: [controller]
+
+vars:
+  has_hypervisor: { value: "false" }      # no nova-compute here, so no /dev/kvm is needed
+  nova_db_prefix: { value: "" }            # the controller opens the cell database
+
+include:
+  - site.yaml
+  - secrets/controller.yaml
+  - components/preflight.yaml
+  - components/preflight-controller.yaml
+  - components/host-base.yaml
+  - components/repo-local.yaml
+  - components/repos.yaml
+  - components/selinux.yaml
+  - components/web.yaml
+  - components/database.yaml
+  - components/rabbitmq.yaml
+  - components/memcached.yaml
+  - components/keystone.yaml
+  - components/glance.yaml
+  - components/placement.yaml
+  - components/ovs.yaml
+  - components/ovn-central.yaml
+  - components/ovn-chassis.yaml
+  - components/ovn-metadata.yaml
+  - components/neutron.yaml
+  - components/nova-controller.yaml
+  - components/horizon.yaml
+  - components/initial-resources.yaml
+
+resources:
+  - id: svc_ovn_controller
+    type: service
+    depends_on: [pkg_ovn_host, ovs_remote, ovs_encap_type, ovs_encap_ip, ovs_system_id, ovs_hostname, ovn_sb_connection, ovn_nb_connection, ovs_gw_chassis, ovs_bridge_mappings]
+    with: { name: ovn-controller, state: running, enabled: true }
+  - id: svc_neutron_ovn_metadata_agent
+    type: service
+    depends_on: [pkg_ovn_metadata_agent, ovn_metadata_ini, neutron_conf, ovs_manager, svc_ovn_controller]
+    with: { name: neutron-ovn-metadata-agent, state: running, enabled: true }
+  # nova.conf differs by role only in {{ vars.nova_db_prefix }}; the template is shared.
+  - id: nova_conf
+    type: template
+    sensitive: true
+    notify: [restart_nova_conductor, restart_nova_scheduler, reload_httpd]
+    depends_on: [pkg_nova_api, pkg_nova_conductor, pkg_nova_scheduler, etc_dir]
+    with:
+      path: /etc/nova/nova.conf
+      source: templates/nova.conf.tpl
+      owner: root
+      group: nova
+      mode: "0640"

@@ -1,0 +1,140 @@
+# Controller: networking, ML2/OVN (hagistack phase_neutron). There is no API unit and no vhost on 2026.1:
+# the API is a module served by httpd (vhost_neutron in web.yaml); the RPC server, the periodic workers
+# and the OVN maintenance worker are units whose RPMs install but do not enable them.
+version: 1
+
+handlers:
+  - id: restart_neutron_rpc_server
+    service: neutron-rpc-server
+    action: restart
+  - id: restart_neutron_periodic_workers
+    service: neutron-periodic-workers
+    action: restart
+  - id: restart_neutron_ovn_maintenance_worker
+    service: neutron-ovn-maintenance-worker
+    action: restart
+
+resources:
+  - id: pkg_neutron
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: openstack-neutron, state: present }
+  - id: pkg_neutron_ml2
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: openstack-neutron-ml2, state: present }
+  - id: pkg_neutron_rpc_server
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: openstack-neutron-rpc-server, state: present }
+  - id: pkg_neutron_periodic_workers
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: openstack-neutron-periodic-workers, state: present }
+  - id: pkg_neutron_ovn_maintenance_worker
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: openstack-neutron-ovn-maintenance-worker, state: present }
+  - id: neutron_conf
+    type: template
+    sensitive: true
+    notify: [restart_neutron_rpc_server, restart_neutron_periodic_workers, restart_neutron_ovn_maintenance_worker, restart_neutron_ovn_metadata_agent, reload_httpd]
+    depends_on: [pkg_neutron]
+    with:
+      path: /etc/neutron/neutron.conf
+      source: ../templates/neutron.conf.tpl
+      owner: root
+      group: neutron
+      mode: "0640"
+  - id: ml2_conf
+    type: template
+    sensitive: true
+    notify: [restart_neutron_rpc_server, restart_neutron_periodic_workers, restart_neutron_ovn_maintenance_worker, reload_httpd]
+    depends_on: [pkg_neutron_ml2]
+    with:
+      path: /etc/neutron/plugins/ml2/ml2_conf.ini
+      source: ../templates/ml2_conf.ini.tpl
+      owner: root
+      group: neutron
+      mode: "0640"
+  # neutron-rpc-server.service passes --config-file /etc/neutron/plugin.ini and no package creates it.
+  - id: neutron_plugin_ini
+    type: link
+    depends_on: [ml2_conf]
+    with: { path: /etc/neutron/plugin.ini, target: /etc/neutron/plugins/ml2/ml2_conf.ini }
+  - id: neutron_db_sync
+    type: command
+    depends_on: [db_neutron, neutron_conf, ml2_conf, neutron_plugin_ini, wait_ovn, helper]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [sync, neutron]
+      timeout_seconds: 900
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_user_neutron
+    type: command
+    depends_on: [ks_project_service]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-user, neutron]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_role_neutron
+    type: command
+    depends_on: [ks_user_neutron]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-role, neutron, service, admin]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_service_neutron
+    type: command
+    depends_on: [ks_project_service]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-service, neutron, network, "OpenStack Networking"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_endpoint_neutron_public
+    type: command
+    depends_on: [ks_service_neutron]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-endpoint, neutron, public, "http://{{ vars.controller_ip }}:9696", "{{ vars.region_name }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_endpoint_neutron_internal
+    type: command
+    depends_on: [ks_service_neutron]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-endpoint, neutron, internal, "http://{{ vars.controller_ip }}:9696", "{{ vars.region_name }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_endpoint_neutron_admin
+    type: command
+    depends_on: [ks_service_neutron]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-endpoint, neutron, admin, "http://{{ vars.controller_ip }}:9696", "{{ vars.region_name }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: svc_neutron_rpc_server
+    type: service
+    depends_on: [pkg_neutron_rpc_server, rabbit_user, neutron_conf, ml2_conf, neutron_plugin_ini, neutron_db_sync, ks_role_neutron, ks_endpoint_neutron_public, ks_endpoint_neutron_internal, ks_endpoint_neutron_admin, svc_ovn_controller]
+    with: { name: neutron-rpc-server, state: running, enabled: true }
+  - id: svc_neutron_periodic_workers
+    type: service
+    depends_on: [pkg_neutron_periodic_workers, rabbit_user, neutron_conf, ml2_conf, neutron_plugin_ini, neutron_db_sync, ks_role_neutron, ks_endpoint_neutron_public, ks_endpoint_neutron_internal, ks_endpoint_neutron_admin, svc_ovn_controller]
+    with: { name: neutron-periodic-workers, state: running, enabled: true }
+  - id: svc_neutron_ovn_maintenance_worker
+    type: service
+    depends_on: [pkg_neutron_ovn_maintenance_worker, rabbit_user, neutron_conf, ml2_conf, neutron_plugin_ini, neutron_db_sync, ks_role_neutron, ks_endpoint_neutron_public, ks_endpoint_neutron_internal, ks_endpoint_neutron_admin, svc_ovn_controller]
+    with: { name: neutron-ovn-maintenance-worker, state: running, enabled: true }
+  - id: wait_neutron
+    type: command
+    depends_on: [svc_httpd, neutron_db_sync, svc_neutron_rpc_server, ks_role_neutron, ks_endpoint_neutron_public, ks_endpoint_neutron_internal, ks_endpoint_neutron_admin]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [wait-http, "http://{{ vars.controller_ip }}:9696/", "90"]
+      changed_when: "false"
+  - id: wait_neutron_api
+    type: command
+    depends_on: [wait_neutron]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [wait-api, "an authenticated network list", network, list]
+      changed_when: "false"

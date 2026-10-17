@@ -1,0 +1,42 @@
+# Common: this node as an OVN chassis (hagistack phase_ovn, per-node part). The chassis name and Nova's host
+# name are both the SHORT hostname; they must agree or ports do not bind.
+version: 1
+
+resources:
+  - id: ovs_remote
+    type: command
+    depends_on: [wait_ovs]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ovs-set, ovn-remote, "tcp:{{ vars.controller_ip }}:6642"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ovs_encap_type
+    type: command
+    depends_on: [wait_ovs]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ovs-set, ovn-encap-type, geneve]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ovs_encap_ip
+    type: command
+    depends_on: [wait_ovs]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ovs-set, ovn-encap-ip, "{{ vars.mgmt_ip }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ovs_system_id
+    type: command
+    depends_on: [wait_ovs]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ovs-set, system-id, "{{ vars.os_hostname }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ovs_hostname
+    type: command
+    depends_on: [wait_ovs]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ovs-set, hostname, "{{ vars.os_hostname }}"]
+      changed_when: 'result.stdout == "changed\n"'
+# svc_ovn_controller is declared by the entry-point recipe: on the controller it must wait for the OVN central
+# connections, on a compute node it must not name them.

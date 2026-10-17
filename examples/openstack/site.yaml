@@ -1,0 +1,59 @@
+# Site settings for the OpenStack 2026.1 (Gazpacho) demo on Rocky Linux 10.2.
+# Every value is a literal (Sinter variables cannot refer to each other). EDIT
+# the values marked EDIT before applying; the rest are hagistack's defaults.
+# Nothing secret belongs here: secrets live in secrets/*.yaml (see tools/gen-secrets.sh).
+version: 1
+
+vars:
+  # --- the node ------------------------------------------------------------
+  mgmt_ip:                       # EDIT: this node's management address (internal IP on GCE)
+    value: "10.0.0.10"
+  controller_ip:                 # EDIT: the controller's management address. All-in-one: the same as mgmt_ip.
+    value: "10.0.0.10"
+  os_hostname:                   # EDIT: this node's SHORT hostname (`hostname -s`). Nova's host name and the
+    value: "osdemo1"             #       OVN chassis name are both set to it; they must match for ports to bind.
+  virt_type:                     # `kvm` when /dev/kvm is readable, else `qemu` (10-50x slower)
+    value: "kvm"
+  region_name:
+    value: "RegionOne"
+  py_site_packages:              # where the OpenStack RPMs install their Python modules (EL10 ships Python 3.12)
+    value: "/usr/lib/python3.12/site-packages"
+  # --- the RPM repository built by builder.yaml / hagistack's build-rpms.sh -----
+  repo_dir:                      # where the RPM repository (repodata/ + RPMs) is put; served over loopback HTTP
+    value: "/opt/hagistack-repo"
+  repo_port:
+    value: "8088"
+  repo_url:                      # baseurl of the 2026.1 repository. NOT file:// (Sinter cannot install from it)
+    value: "http://127.0.0.1:8088/"
+  # --- initial resources (all-in-one) ----------------------------------------
+  provider_physnet:
+    value: "physnet1"
+  provider_bridge:
+    value: "br-ex"
+  provider_cidr:                 # EDIT (documentation range by default)
+    value: "192.0.2.0/24"
+  provider_gateway:
+    value: "192.0.2.1"
+  floating_start:
+    value: "192.0.2.100"
+  floating_end:
+    value: "192.0.2.200"
+  tenant_cidr:
+    value: "10.10.10.0/24"
+  dns_server:                    # hagistack default: the provider gateway
+    value: "192.0.2.1"
+  image_name:
+    value: "cirros-0.6.3-x86_64"
+  image_url:
+    value: "https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img"
+  image_sha256:
+    value: "7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b"
+  # --- database tuning (hagistack defaults) -------------------------------------
+  mysql_max_connections:
+    value: "1024"
+  db_max_pool_size:
+    value: "25"
+  db_max_overflow:
+    value: "50"
+  libvirt_cpu_mode_line:         # "" with kvm; "cpu_mode = none" with qemu (hagistack sets it for software emulation)
+    value: ""

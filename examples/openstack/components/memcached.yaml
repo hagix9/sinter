@@ -1,0 +1,34 @@
+# Controller: the cache (hagistack phase_memcached). Bound to the management address and loopback.
+version: 1
+
+handlers:
+  - id: restart_memcached
+    service: memcached
+    action: restart
+
+resources:
+  - id: pkg_memcached
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: memcached, state: present }
+  - id: memcached_conf
+    type: template
+    notify: [restart_memcached]
+    depends_on: [pkg_memcached]
+    with:
+      path: /etc/sysconfig/memcached
+      source: ../templates/memcached.sysconfig.tpl
+      owner: root
+      group: root
+      mode: "0644"
+  - id: svc_memcached
+    type: service
+    depends_on: [pkg_memcached, memcached_conf]
+    with: { name: memcached, state: running, enabled: true }
+  - id: wait_memcached
+    type: command
+    depends_on: [svc_memcached, helper]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [wait-memcached, "{{ vars.mgmt_ip }}"]
+      changed_when: "false"

@@ -1,0 +1,5 @@
+PORT="11211"
+USER="memcached"
+MAXCONN="1024"
+CACHESIZE="64"
+OPTIONS="-l {{ vars.mgmt_ip }},127.0.0.1"

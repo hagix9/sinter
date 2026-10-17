@@ -1,0 +1,46 @@
+# Synthetic sample of the file tools/gen-secrets.sh writes to secrets/compute.yaml. Used only so that
+# CI can validate the entry recipes; these are not passwords. Run tools/gen-secrets.sh for real ones.
+version: 1
+vars:
+  mysql_root_pass:
+    value: ""
+    sensitive: true
+  keystone_db_pass:
+    value: ""
+    sensitive: true
+  glance_db_pass:
+    value: ""
+    sensitive: true
+  placement_db_pass:
+    value: ""
+    sensitive: true
+  neutron_db_pass:
+    value: ""
+    sensitive: true
+  nova_db_pass:
+    value: ""
+    sensitive: true
+  rabbit_pass:
+    value: "example-only-not-a-secret"
+    sensitive: true
+  admin_password:
+    value: ""
+    sensitive: true
+  glance_service_pass:
+    value: ""
+    sensitive: true
+  placement_service_pass:
+    value: "example-only-not-a-secret"
+    sensitive: true
+  neutron_service_pass:
+    value: "example-only-not-a-secret"
+    sensitive: true
+  nova_service_pass:
+    value: "example-only-not-a-secret"
+    sensitive: true
+  metadata_proxy_secret:
+    value: "example-only-not-a-secret"
+    sensitive: true
+  horizon_secret_key:
+    value: ""
+    sensitive: true

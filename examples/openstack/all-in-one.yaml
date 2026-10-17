@@ -1,0 +1,78 @@
+# Sinter × hagistack (rocky10.2): ALL-IN-ONE — the controller and the compute role on one node.
+# One recipe, one resource set: the controller's components plus nova-compute.yaml, so nothing is managed twice.
+# Run: sinter apply all-in-one.yaml --host <node> --sudo
+# Acceptance target of the demo: a single Rocky Linux 10.2 x86_64 node (GCE with nested virtualisation).
+version: 1
+
+targets:
+  groups: [allinone]
+
+vars:
+  has_hypervisor: { value: "true" }
+  nova_db_prefix: { value: "" }            # the all-in-one node opens the cell database
+
+include:
+  - site.yaml
+  - secrets/controller.yaml
+  - components/preflight.yaml
+  - components/preflight-controller.yaml
+  - components/host-base.yaml
+  - components/repo-local.yaml
+  - components/repos.yaml
+  - components/selinux.yaml
+  - components/web.yaml
+  - components/database.yaml
+  - components/rabbitmq.yaml
+  - components/memcached.yaml
+  - components/keystone.yaml
+  - components/glance.yaml
+  - components/placement.yaml
+  - components/ovs.yaml
+  - components/ovn-central.yaml
+  - components/ovn-chassis.yaml
+  - components/ovn-metadata.yaml
+  - components/neutron.yaml
+  - components/nova-controller.yaml
+  - components/nova-compute.yaml
+  - components/horizon.yaml
+  - components/initial-resources.yaml
+
+resources:
+  - id: svc_ovn_controller
+    type: service
+    depends_on: [pkg_ovn_host, ovs_remote, ovs_encap_type, ovs_encap_ip, ovs_system_id, ovs_hostname, ovn_sb_connection, ovn_nb_connection, ovs_gw_chassis, ovs_bridge_mappings]
+    with: { name: ovn-controller, state: running, enabled: true }
+  - id: svc_neutron_ovn_metadata_agent
+    type: service
+    depends_on: [pkg_ovn_metadata_agent, ovn_metadata_ini, neutron_conf, ovs_manager, svc_ovn_controller]
+    with: { name: neutron-ovn-metadata-agent, state: running, enabled: true }
+  - id: svc_nova_compute
+    type: service
+    depends_on: [pkg_nova_compute, nova_conf, nova_tmp_dir, svc_libvirtd, ovs_manager, svc_ovn_controller, rabbit_user, svc_nova_conductor, wait_placement_api, wait_neutron_api]
+    with: { name: openstack-nova-compute, state: running, enabled: true }
+  # nova.conf differs by role only in {{ vars.nova_db_prefix }}; the template is shared.
+  - id: nova_conf
+    type: template
+    sensitive: true
+    notify: [restart_nova_conductor, restart_nova_scheduler, restart_nova_compute, reload_httpd]
+    depends_on: [pkg_nova_api, pkg_nova_conductor, pkg_nova_scheduler, pkg_nova_compute, etc_dir]
+    with:
+      path: /etc/nova/nova.conf
+      source: templates/nova.conf.tpl
+      owner: root
+      group: nova
+      mode: "0640"
+  - id: wait_compute_up
+    type: command
+    depends_on: [svc_nova_compute, wait_nova_api_auth]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [wait-compute-up]
+      changed_when: "false"
+  - id: nova_discover_hosts
+    type: command
+    depends_on: [wait_compute_up]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [nova-cell, discover]
+      changed_when: 'result.stdout == "changed\n"'

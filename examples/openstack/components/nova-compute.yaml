@@ -1,0 +1,36 @@
+# Compute: the hypervisor (hagistack phase_nova_compute / phase_compute_nova). nova.conf is declared by the
+# entry-point recipe; libvirt, KVM and nova-compute are here.
+version: 1
+
+handlers:
+  - id: restart_nova_compute
+    service: openstack-nova-compute
+    action: restart
+
+resources:
+  - id: pkg_nova_compute
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: openstack-nova-compute, state: present }
+  - id: pkg_libvirt
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: libvirt, state: present }
+  - id: pkg_qemu_kvm
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: qemu-kvm, state: present }
+  - id: nova_tmp_dir
+    type: directory
+    depends_on: [pkg_nova_compute]
+    with: { path: /var/lib/nova/tmp, owner: nova, group: nova, mode: "0750" }
+  # libvirt. Rocky 10 ships the MODULAR daemons (virtqemud and friends), which systemd activates on demand through
+  # sockets enabled by preset; they CONFLICT with the legacy monolithic libvirtd. hagistack starts libvirtd, but on
+  # a rebooted host the modular sockets win (libvirtd.service ends up inactive) and the legacy daemon idles out
+  # after 120 s anyway (LIBVIRTD_ARGS="--timeout 120"), so `state: running` on it drifts. Found on a real host.
+  # The resource keeps its id; it now manages the QEMU driver's socket, which nova-compute's qemu:///system uses.
+  - id: svc_libvirtd
+    type: service
+    depends_on: [pkg_libvirt, pkg_qemu_kvm]
+    with: { name: virtqemud.socket, state: running, enabled: true }
+  # svc_nova_compute is declared by each entry point: what it must wait for differs by role

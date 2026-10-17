@@ -1,0 +1,84 @@
+# Controller: placement (hagistack phase_placement). The packaged vhost (00-placement-api.conf, retargeted
+# at the WSGI module by the RPM build) is used as shipped; web.yaml adds the <Directory> grant.
+version: 1
+
+resources:
+  - id: pkg_placement
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: openstack-placement-api, state: present }
+  - id: placement_conf
+    type: template
+    sensitive: true
+    notify: [reload_httpd]
+    depends_on: [pkg_placement]
+    with:
+      path: /etc/placement/placement.conf
+      source: ../templates/placement.conf.tpl
+      owner: root
+      group: placement
+      mode: "0640"
+  - id: placement_db_sync
+    type: command
+    depends_on: [db_placement, placement_conf, helper]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [sync, placement]
+      timeout_seconds: 900
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_user_placement
+    type: command
+    depends_on: [ks_project_service]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-user, placement]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_role_placement
+    type: command
+    depends_on: [ks_user_placement]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-role, placement, service, admin]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_service_placement
+    type: command
+    depends_on: [ks_project_service]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-service, placement, placement, "Placement API"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_endpoint_placement_public
+    type: command
+    depends_on: [ks_service_placement]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-endpoint, placement, public, "http://{{ vars.controller_ip }}:8778", "{{ vars.region_name }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_endpoint_placement_internal
+    type: command
+    depends_on: [ks_service_placement]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-endpoint, placement, internal, "http://{{ vars.controller_ip }}:8778", "{{ vars.region_name }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_endpoint_placement_admin
+    type: command
+    depends_on: [ks_service_placement]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-endpoint, placement, admin, "http://{{ vars.controller_ip }}:8778", "{{ vars.region_name }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: wait_placement_http
+    type: command
+    depends_on: [svc_httpd, placement_db_sync, ks_role_placement, ks_endpoint_placement_public, ks_endpoint_placement_internal, ks_endpoint_placement_admin]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [wait-http, "http://{{ vars.controller_ip }}:8778/", "90"]
+      changed_when: "false"
+  - id: wait_placement_api
+    type: command
+    depends_on: [wait_placement_http]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [wait-placement, "http://{{ vars.controller_ip }}:8778"]
+      changed_when: "false"

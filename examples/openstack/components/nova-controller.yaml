@@ -1,0 +1,107 @@
+# Controller: the compute control plane (hagistack phase_nova). All three packaged Nova API units name
+# binaries 33.0.2 does not build, so they stay disabled; the APIs are served by httpd (web.yaml).
+# nova.conf is declared by the entry-point recipe (it differs by role); these resources depend on it.
+version: 1
+
+handlers:
+  - id: restart_nova_conductor
+    service: openstack-nova-conductor
+    action: restart
+  - id: restart_nova_scheduler
+    service: openstack-nova-scheduler
+    action: restart
+
+resources:
+  - id: pkg_nova_api
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: openstack-nova-api, state: present }
+  - id: pkg_nova_conductor
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: openstack-nova-conductor, state: present }
+  - id: pkg_nova_scheduler
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: openstack-nova-scheduler, state: present }
+  - id: nova_db_sync
+    type: command
+    depends_on: [db_nova, db_nova_api, db_nova_cell0, nova_conf, pkg_nova_api, helper]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [sync, nova]
+      timeout_seconds: 900
+      changed_when: 'result.stdout == "changed\n"'
+  # the scheduler caches the cell list at start: a new cell restarts conductor and scheduler
+  - id: nova_cell1
+    type: command
+    depends_on: [nova_db_sync]
+    notify: [restart_nova_conductor, restart_nova_scheduler]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [nova-cell, create, cell1]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_user_nova
+    type: command
+    depends_on: [ks_project_service]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-user, nova]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_role_nova
+    type: command
+    depends_on: [ks_user_nova]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-role, nova, service, admin]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_service_nova
+    type: command
+    depends_on: [ks_project_service]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-service, nova, compute, "OpenStack Compute"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_endpoint_nova_public
+    type: command
+    depends_on: [ks_service_nova]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-endpoint, nova, public, "http://{{ vars.controller_ip }}:8774/v2.1", "{{ vars.region_name }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_endpoint_nova_internal
+    type: command
+    depends_on: [ks_service_nova]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-endpoint, nova, internal, "http://{{ vars.controller_ip }}:8774/v2.1", "{{ vars.region_name }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ks_endpoint_nova_admin
+    type: command
+    depends_on: [ks_service_nova]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-endpoint, nova, admin, "http://{{ vars.controller_ip }}:8774/v2.1", "{{ vars.region_name }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: svc_nova_conductor
+    type: service
+    depends_on: [pkg_nova_conductor, nova_conf, nova_cell1, rabbit_user]
+    with: { name: openstack-nova-conductor, state: running, enabled: true }
+  - id: svc_nova_scheduler
+    type: service
+    depends_on: [pkg_nova_scheduler, nova_conf, nova_cell1, rabbit_user]
+    with: { name: openstack-nova-scheduler, state: running, enabled: true }
+  - id: wait_nova_api
+    type: command
+    depends_on: [svc_httpd, nova_cell1, ks_role_nova, ks_endpoint_nova_public, ks_endpoint_nova_internal, ks_endpoint_nova_admin]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [wait-http, "http://{{ vars.controller_ip }}:8774/", "90"]
+      changed_when: "false"
+  - id: wait_nova_api_auth
+    type: command
+    depends_on: [wait_nova_api, svc_nova_conductor, svc_nova_scheduler]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [wait-api, "an authenticated compute service list", compute, service, list]
+      changed_when: "false"

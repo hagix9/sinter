@@ -1,0 +1,95 @@
+# Controller: identity (hagistack phase_keystone). The EL packaging ships no keystone.conf, no unit and no
+# vhost: Sinter writes the configuration, the vhost is in web.yaml, and Apache is started here.
+version: 1
+
+resources:
+  - id: pkg_keystone
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: openstack-keystone, state: present }
+  - id: pkg_openstackclient
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: python3-openstackclient, state: present }
+  - id: etc_keystone
+    type: directory
+    depends_on: [pkg_keystone]
+    with: { path: /etc/keystone, owner: root, group: keystone, mode: "0750" }
+  - id: keystone_conf
+    type: template
+    sensitive: true
+    notify: [reload_httpd]
+    depends_on: [etc_keystone]
+    with:
+      path: /etc/keystone/keystone.conf
+      source: ../templates/keystone.conf.tpl
+      owner: root
+      group: keystone
+      mode: "0640"
+  - id: keystone_db_sync
+    type: command
+    depends_on: [db_keystone, keystone_conf, helper]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [sync, keystone]
+      timeout_seconds: 900
+      changed_when: 'result.stdout == "changed\n"'
+  - id: keystone_fernet
+    type: command
+    depends_on: [keystone_conf]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [keystone-keys, fernet]
+      creates: /etc/keystone/fernet-keys/0
+      changed_when: 'result.stdout == "changed\n"'
+  - id: keystone_credential
+    type: command
+    depends_on: [keystone_conf]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [keystone-keys, credential]
+      creates: /etc/keystone/credential-keys/0
+      changed_when: 'result.stdout == "changed\n"'
+  - id: svc_httpd
+    type: service
+    depends_on: [pkg_httpd, pkg_mod_wsgi, httpd_servername, httpd_grant_placement, httpd_dashboard_writepath, vhost_keystone, vhost_neutron, vhost_nova_api, vhost_nova_metadata, keystone_db_sync, keystone_fernet, keystone_credential, svc_memcached, selinux_runtime, pkg_dashboard]
+    with: { name: httpd, state: running, enabled: true }
+  - id: wait_keystone
+    type: command
+    depends_on: [svc_httpd, helper]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [wait-http, "http://{{ vars.controller_ip }}:5000/v3", "90"]
+      changed_when: "false"
+  - id: admin_openrc
+    type: template
+    sensitive: true
+    depends_on: [etc_dir]
+    with:
+      path: /etc/sinter-openstack/admin-openrc
+      source: ../templates/admin-openrc.tpl
+      owner: root
+      group: root
+      mode: "0600"
+  # idempotent in Keystone itself; reported as changed when the admin could not authenticate yet
+  - id: keystone_bootstrap
+    type: command
+    depends_on: [wait_keystone, secrets_env, admin_openrc, keystone_conf]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [keystone-bootstrap, "{{ vars.controller_ip }}", "{{ vars.region_name }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: wait_token
+    type: command
+    depends_on: [keystone_bootstrap, pkg_openstackclient]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [wait-token]
+      changed_when: "false"
+  - id: ks_project_service
+    type: command
+    depends_on: [wait_token]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ks-project, service]
+      changed_when: 'result.stdout == "changed\n"'

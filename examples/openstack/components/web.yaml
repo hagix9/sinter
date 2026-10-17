@@ -1,0 +1,134 @@
+# Controller: Apache with mod_wsgi, the front end of Keystone, Placement, Neutron and Nova (hagistack
+# write_vhost and friends). OpenStack 2026.1 removed the generated WSGI scripts, so every API is an
+# importable module and a vhost points mod_wsgi at it. All vhosts are written BEFORE httpd starts, so
+# the first start already serves every API; a later change reloads httpd through the handler. Why svc_httpd sits
+# behind so many resources (keystone.yaml): a vhost or package added AFTER httpd started is only picked up by the
+# reload handler at the END of the apply, after the CLI steps that need it would already have run (Sinter has no
+# mid-run flush of handlers), so everything httpd serves is put in place first.
+version: 1
+
+handlers:
+  - id: reload_httpd
+    service: httpd
+    action: reload
+  # a systemd drop-in (sandbox paths) is not re-applied by a reload
+  - id: restart_httpd
+    service: httpd
+    action: restart
+
+resources:
+  - id: pkg_httpd
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: httpd, state: present }
+  - id: pkg_mod_wsgi
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: python3-mod_wsgi, state: present }
+  - id: httpd_servername
+    type: file
+    notify: [reload_httpd]
+    depends_on: [pkg_httpd]
+    with:
+      path: /etc/httpd/conf.d/00-sinter-openstack-servername.conf
+      content: "ServerName {{ vars.mgmt_ip }}\n"
+      owner: root
+      group: root
+      mode: "0644"
+  - id: httpd_grant_placement
+    type: file
+    notify: [reload_httpd]
+    depends_on: [pkg_httpd, pkg_placement]
+    with:
+      path: /etc/httpd/conf.d/01-sinter-openstack-grant-placement.conf
+      owner: root
+      group: root
+      mode: "0644"
+      content: |
+        # The packaged placement vhost points at the WSGI module, which lives outside DocumentRoot: Apache
+        # needs an explicit grant, or the answer is a plain 403 that looks nothing like an OpenStack error.
+        <Directory {{ vars.py_site_packages }}/placement/wsgi>
+          Require all granted
+        </Directory>
+  - id: vhost_keystone
+    type: template
+    notify: [reload_httpd]
+    depends_on: [pkg_httpd, pkg_mod_wsgi, pkg_keystone]
+    with:
+      path: /etc/httpd/conf.d/10-sinter-openstack-keystone.conf
+      source: ../templates/httpd-vhost.conf.tpl
+      owner: root
+      group: root
+      mode: "0644"
+      vars:
+        name: keystone
+        port: "5000"
+        user: keystone
+        module: keystone/wsgi/api.py
+        dir: keystone/wsgi
+  - id: vhost_neutron
+    type: template
+    notify: [reload_httpd]
+    depends_on: [pkg_httpd, pkg_mod_wsgi, pkg_neutron]
+    with:
+      path: /etc/httpd/conf.d/10-sinter-openstack-neutron.conf
+      source: ../templates/httpd-vhost.conf.tpl
+      owner: root
+      group: root
+      mode: "0644"
+      vars:
+        name: neutron
+        port: "9696"
+        user: neutron
+        module: neutron/wsgi/api.py
+        dir: neutron/wsgi
+  - id: vhost_nova_api
+    type: template
+    notify: [reload_httpd]
+    depends_on: [pkg_httpd, pkg_mod_wsgi, pkg_nova_api]
+    with:
+      path: /etc/httpd/conf.d/10-sinter-openstack-nova-api.conf
+      source: ../templates/httpd-vhost.conf.tpl
+      owner: root
+      group: root
+      mode: "0644"
+      vars:
+        name: nova-api
+        port: "8774"
+        user: nova
+        module: nova/wsgi/osapi_compute.py
+        dir: nova/wsgi
+  - id: vhost_nova_metadata
+    type: template
+    notify: [reload_httpd]
+    depends_on: [pkg_httpd, pkg_mod_wsgi, pkg_nova_api]
+    with:
+      path: /etc/httpd/conf.d/10-sinter-openstack-nova-metadata.conf
+      source: ../templates/httpd-vhost.conf.tpl
+      owner: root
+      group: root
+      mode: "0644"
+      vars:
+        name: nova-metadata
+        port: "8775"
+        user: nova
+        module: nova/wsgi/metadata.py
+        dir: nova/wsgi
+  - id: httpd_dropin_dir
+    type: directory
+    depends_on: [pkg_httpd]
+    with: { path: /etc/systemd/system/httpd.service.d, owner: root, group: root, mode: "0755" }
+  - id: httpd_dashboard_writepath
+    type: file
+    notify: [restart_httpd]
+    depends_on: [httpd_dropin_dir]
+    with:
+      path: /etc/systemd/system/httpd.service.d/10-sinter-openstack-dashboard-static.conf
+      owner: root
+      group: root
+      mode: "0644"
+      content: |
+        [Service]
+        # openstack-dashboard adds ExecStartPre steps that write here, and ProtectSystem=yes would otherwise
+        # make it read-only and stop httpd starting.
+        ReadWritePaths=/usr/share/openstack-dashboard

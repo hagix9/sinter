@@ -1,0 +1,62 @@
+# Controller: the initial resources (hagistack phase_bootstrap_resources); each is show-or-create by name.
+version: 1
+
+resources:
+  - id: os_flavor_tiny
+    type: command
+    depends_on: [wait_nova_api_auth]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [os-flavor, m1.tiny, "1", "256", "1"]
+      changed_when: 'result.stdout == "changed\n"'
+  # downloaded once, verified against the pinned digest BEFORE it is handed to Glance
+  - id: os_image
+    type: command
+    depends_on: [wait_glance_api]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [os-image, "{{ vars.image_name }}", "{{ vars.image_url }}", "{{ vars.image_sha256 }}"]
+      timeout_seconds: 1800
+      changed_when: 'result.stdout == "changed\n"'
+  - id: os_net_provider
+    type: command
+    depends_on: [wait_neutron_api, ovs_bridge_mappings]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [os-net-provider, hagistack-provider, "{{ vars.provider_physnet }}", hagistack-provider-subnet, "{{ vars.provider_cidr }}", "{{ vars.provider_gateway }}", "{{ vars.floating_start }}", "{{ vars.floating_end }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: os_net_tenant
+    type: command
+    depends_on: [wait_neutron_api]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [os-net-tenant, hagistack-tenant, hagistack-tenant-subnet, "{{ vars.tenant_cidr }}", "{{ vars.dns_server }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: os_router
+    type: command
+    depends_on: [os_net_provider, os_net_tenant]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [os-router, hagistack-router, hagistack-tenant-subnet, hagistack-provider]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: os_secgroup_ssh
+    type: command
+    depends_on: [wait_neutron_api]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [os-secgroup-rule, ssh]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: os_secgroup_icmp
+    type: command
+    depends_on: [wait_neutron_api]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [os-secgroup-rule, icmp]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: os_keypair
+    type: command
+    depends_on: [wait_nova_api_auth]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [os-keypair, hagistack-key]
+      changed_when: 'result.stdout == "changed\n"'

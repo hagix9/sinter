@@ -1,0 +1,171 @@
+# Prerequisite, NOT part of the all-in-one: the RPM builder.
+#
+# Rocky Linux has no OpenStack RPMs and nobody publishes 2026.1 for EL10, so hagistack builds them itself
+# (rocky10.2/build-rpms.sh, from pinned inputs). This recipe turns a DISPOSABLE Rocky Linux 10.2 x86_64 VM
+# into that builder and runs the build. hagistack: "never on an OpenStack node" -- it installs build
+# dependencies as root and writes repository files. Its output, the repository directory
+# /root/rpmbuild/RPMS (build-rpms.sh's default), is then copied to the all-in-one host (tools/stage-rpm-repo.sh
+# --from-builder does it), where components/repo-local.yaml serves it over loopback HTTP; file:// does not work with
+# Sinter's `package`. Copying is deliberately not a Sinter resource: it crosses hosts.
+#
+#   sinter apply builder.yaml           (on the builder, as root)
+#
+# A real GCE n2-standard-4 Rocky 10.2 builder produced the 195 RPMs on 2026-10-13 (about 50 minutes). The recipe was
+# edited afterwards (quality fixes); this final form of builder.yaml has not been run again on a real host.
+version: 1
+
+vars:
+  hagistack_commit: { value: "8225c50c0b283bcdce960d64f7f7dfe32f5afc1c" }
+  hagistack_url: { value: "https://github.com/hagix9/hagistack.git" }
+  build_nocheck: { value: "--nocheck" }
+
+resources:
+  - id: preflight_os
+    type: command
+    with:
+      program: /bin/bash
+      args:
+        - -c
+        - 'test "$(uname -m)" = x86_64 && . /etc/os-release && test "$ID" = rocky && case "$VERSION_ID" in 10.*) ;; *) exit 1;; esac'
+      changed_when: "false"
+  # No `dnf makecache` command: since v1.5.0 a package install whose enabled repositories have no cached
+  # metadata (a fresh image, or a repository added earlier in this run: EPEL, CRB, RDO) fetches it once itself.
+  - id: pkg_epel_release
+    type: package
+    depends_on: [preflight_os]
+    with: { name: epel-release, state: present }
+  - id: pkg_git
+    type: package
+    depends_on: [crb, repo_rdo_delorean, repo_rdo_deps]
+    with: { name: git, state: present }
+  - id: pkg_curl
+    type: package
+    depends_on: [crb, repo_rdo_delorean, repo_rdo_deps]
+    with: { name: curl, state: present }
+  - id: pkg_python3
+    type: package
+    depends_on: [crb, repo_rdo_delorean, repo_rdo_deps]
+    with: { name: python3, state: present }
+  - id: pkg_rpm_build
+    type: package
+    depends_on: [crb, repo_rdo_delorean, repo_rdo_deps]
+    with: { name: rpm-build, state: present }
+  - id: pkg_rpmdevtools
+    type: package
+    depends_on: [crb, repo_rdo_delorean, repo_rdo_deps]
+    with: { name: rpmdevtools, state: present }
+  - id: pkg_createrepo_c
+    type: package
+    depends_on: [crb, repo_rdo_delorean, repo_rdo_deps]
+    with: { name: createrepo_c, state: present }
+  - id: pkg_dnf_plugins_core
+    type: package
+    depends_on: [pkg_epel_release]
+    with: { name: dnf-plugins-core, state: present }
+  - id: pkg_sudo
+    type: package
+    depends_on: [crb, repo_rdo_delorean, repo_rdo_deps]
+    with: { name: sudo, state: present }
+  - id: crb
+    type: command
+    depends_on: [pkg_epel_release, pkg_dnf_plugins_core]
+    with:
+      program: /bin/bash
+      args:
+        - -c
+        - 'if dnf -q repolist --enabled | awk "{print \$1}" | grep -qx crb; then echo unchanged; else dnf config-manager --set-enabled crb >/dev/null && echo changed; fi'
+      changed_when: 'result.stdout == "changed\n"'
+  # hagistack's recorded builds used RDO's own repository files for the build dependencies (README: "Rocky
+  # BaseOS/AppStream/CRB, EPEL 10 and RDO's EL10 repository files (delorean.repo, delorean-deps.repo)").
+  # delorean-deps.repo carries the third-party dependency trees AND the NFV SIG Open vSwitch repository
+  # (python3-openvswitch); delorean.repo carries RDO's trunk component repositories, which the first pass of a
+  # build needs for the OpenStack libraries not built yet (build-rpms.sh excludes the names it built itself
+  # when it publishes). The files are floating ("latest"): a rebuild can see different trunk content.
+  # Found on the first real run: the custom repository file used before did not provide python3-openvswitch or
+  # python3-hacking, and 27 of 71 packages failed with unsatisfied build dependencies.
+  - id: repo_rdo_delorean
+    type: command
+    depends_on: [pkg_epel_release]    # curl is part of the cloud image; pkg_curl itself waits for these files
+    with:
+      program: /bin/bash
+      args:
+        - -c
+        # download to a temp name and move: a truncated download must not satisfy `creates`
+        - 'curl -fsSL --retry 3 -m 120 -o /etc/yum.repos.d/.delorean.repo.tmp https://trunk.rdoproject.org/centos10-master/current/delorean.repo && mv /etc/yum.repos.d/.delorean.repo.tmp /etc/yum.repos.d/delorean.repo'
+      creates: /etc/yum.repos.d/delorean.repo
+  - id: repo_rdo_deps
+    type: command
+    depends_on: [pkg_epel_release]    # curl is part of the cloud image; pkg_curl itself waits for these files
+    with:
+      program: /bin/bash
+      args:
+        - -c
+        - 'curl -fsSL --retry 3 -m 120 -o /etc/yum.repos.d/.delorean-deps.repo.tmp https://trunk.rdoproject.org/centos10-master/delorean-deps.repo && mv /etc/yum.repos.d/.delorean-deps.repo.tmp /etc/yum.repos.d/delorean-deps.repo'
+      creates: /etc/yum.repos.d/delorean-deps.repo
+  - id: src_clone
+    type: command
+    depends_on: [pkg_git]
+    with:
+      program: /bin/bash
+      args:
+        - -c
+        # clone into a temp directory and move it: a killed clone must not leave a .git that satisfies `creates`
+        - 'rm -rf /opt/.hagistack-src.tmp && git clone "{{ vars.hagistack_url }}" /opt/.hagistack-src.tmp && mv /opt/.hagistack-src.tmp /opt/hagistack-src'
+      creates: /opt/hagistack-src/.git
+      timeout_seconds: 600
+  - id: src_pin
+    type: command
+    depends_on: [src_clone]
+    with:
+      program: /bin/bash
+      args:
+        - -c
+        - 'cd /opt/hagistack-src && if [ "$(git rev-parse HEAD)" = "{{ vars.hagistack_commit }}" ]; then echo unchanged; else git checkout --detach "{{ vars.hagistack_commit }}" >/dev/null 2>&1 && [ "$(git rev-parse HEAD)" = "{{ vars.hagistack_commit }}" ] && echo changed; fi'
+      changed_when: 'result.stdout == "changed\n"'
+  - id: build_dir
+    type: directory
+    with: { path: /var/lib/hagistack-build, owner: root, group: root, mode: "0755" }
+  - id: helper_dir
+    type: directory
+    with: { path: /usr/local/libexec/sinter-openstack, owner: root, group: root, mode: "0755" }
+  - id: builder_script
+    type: file
+    depends_on: [helper_dir]
+    with:
+      path: /usr/local/libexec/sinter-openstack/builder-build
+      source: files/builder-build.sh
+      owner: root
+      group: root
+      mode: "0755"
+  # The build. Hours, not minutes (hagistack: ~121,000 os-ken tests are what --nocheck avoids); about an hour
+  # with --nocheck on n2-standard-4. Two passes (files/builder-build.sh). `creates` is a stamp written only when
+  # the script succeeded: build-rpms.sh publishes the repository even when some packages failed (and then exits
+  # non-zero), so the repository's existence proves nothing. Output: the repository is /root/rpmbuild/RPMS
+  # (build-rpms.sh's default; do not point REPO_PUBLISH_DIR at an empty directory: the final publish step would
+  # then describe an empty repository).
+  - id: build_rpms
+    type: command
+    depends_on:
+      [src_pin, build_dir, builder_script, crb, repo_rdo_delorean, repo_rdo_deps, pkg_rpm_build, pkg_rpmdevtools, pkg_createrepo_c, pkg_python3, pkg_curl, pkg_sudo]
+    with:
+      program: /usr/local/libexec/sinter-openstack/builder-build
+      env:
+        # HOME, PATH and LANG come from Sinter's command baseline (HOME is the target user's, /root)
+        WORK: /var/lib/hagistack-build
+        NOCHECK: "{{ vars.build_nocheck }}"
+      creates: /var/lib/hagistack-build/build.ok
+      timeout_seconds: 86400
+  # The self-built python3-cliff RPM is incomplete (found on the first real run): the upstream pyproject lists
+  # only the top-level "cliff" package, so the build with pbr 7.0.3 / setuptools 80 leaves out cliff.formatters,
+  # and `openstack` fails with "No module named 'cliff.formatters'". EPEL carries the same upstream release
+  # (python3-cliff 4.13.3), so the incomplete RPMs are dropped from the served repository and dnf takes EPEL's.
+  # A hagistack/build-environment problem, not a Sinter one. Runs after the build; idempotent.
+  - id: repo_fixup
+    type: command
+    depends_on: [build_rpms]
+    with:
+      program: /bin/bash
+      args:
+        - -c
+        - 'cd /root/rpmbuild/RPMS && n=$(find . \( -name "python3-cliff-[0-9]*.rpm" -o -name "python3-cliff-tests-[0-9]*.rpm" \) | wc -l); if [ "$n" -gt 0 ]; then find . \( -name "python3-cliff-[0-9]*.rpm" -o -name "python3-cliff-tests-[0-9]*.rpm" \) -delete && createrepo_c --update --quiet /root/rpmbuild/RPMS && echo changed; else echo unchanged; fi'
+      changed_when: 'result.stdout == "changed\n"'

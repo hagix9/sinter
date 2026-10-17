@@ -1,0 +1,56 @@
+# Controller: OVN central and the gateway chassis settings (hagistack phase_ovn, controller part).
+# The southbound database must be reachable by other nodes; the northbound one stays on loopback.
+version: 1
+
+resources:
+  - id: pkg_ovn_central
+    type: package
+    depends_on: [repo_gazpacho_answers]
+    with: { name: ovn26.03-central, state: present }
+  - id: svc_ovn_northd
+    type: service
+    depends_on: [pkg_ovn_central, svc_openvswitch]
+    with: { name: ovn-northd, state: running, enabled: true }
+  - id: wait_ovn
+    type: command
+    depends_on: [svc_ovn_northd, helper]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [wait-ovn]
+      changed_when: "false"
+  - id: ovn_sb_connection
+    type: command
+    depends_on: [wait_ovn]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ovn-connection, sb, "ptcp:6642:{{ vars.controller_ip }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ovn_nb_connection
+    type: command
+    depends_on: [wait_ovn]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ovn-connection, nb, "ptcp:6641:127.0.0.1"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ovs_gw_chassis
+    type: command
+    depends_on: [wait_ovs]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ovs-set, ovn-cms-options, enable-chassis-as-gw]
+      changed_when: 'result.stdout == "changed\n"'
+  # the provider NIC is never attached to the bridge (hagistack limitation)
+  - id: ovs_bridge_provider
+    type: command
+    depends_on: [wait_ovs]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ovs-bridge, "{{ vars.provider_bridge }}"]
+      changed_when: 'result.stdout == "changed\n"'
+  - id: ovs_bridge_mappings
+    type: command
+    depends_on: [ovs_bridge_provider]
+    with:
+      program: /usr/local/libexec/sinter-openstack/ensure
+      args: [ovs-set, ovn-bridge-mappings, "{{ vars.provider_physnet }}:{{ vars.provider_bridge }}"]
+      changed_when: 'result.stdout == "changed\n"'
