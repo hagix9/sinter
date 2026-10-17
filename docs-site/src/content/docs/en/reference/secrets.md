@@ -293,8 +293,8 @@ literal or a controller file:
 - **`user.password_hash: { secret: <path> }`** uses the same reference rules and
   identity discovery; the secret is one password hash line. See the
   [user resource](/en/reference/resources/user/#password-hash).
-- **MCP** manifest tools refuse any `content` or `password_hash` secret
-  reference: a manifest sent by a client cannot make the gateway decrypt a file.
+- **MCP** manifest tools refuse any `content`, `password_hash` or (v1.5.1)
+  `password_verifier` secret reference: a manifest sent by a client cannot make the gateway decrypt a file.
 
 The plaintext is held in memory in buffers that Sinter zeroizes when it is done
 with them, and is sent to the target over the existing SSH channel (or local

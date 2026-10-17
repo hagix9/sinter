@@ -118,8 +118,8 @@ and the [JSON output contract](/en/reference/cli/#json-output-contract).
   authority. Staging uses a private 0700 directory and a `create_new` 0600
   file. Ordinary CLI recipes keep full `include:`/`source:` support.
 - **No encrypted secrets over MCP.** A manifest that references an encrypted
-  secret — `content` or `password_hash` written as a map such as
-  `{ secret: … }` (see [sinter secrets](/en/reference/secrets/)) — is refused
+  secret — `content`, `password_hash` or (v1.5.1) `password_verifier` written
+  as a map such as `{ secret: … }` (see [sinter secrets](/en/reference/secrets/)) — is refused
   on the parsed structure before loading, with a message saying that
   decryption is not permitted over MCP; the reference text is not echoed.
   Every manifest-consuming tool passes through this one boundary. The MCP

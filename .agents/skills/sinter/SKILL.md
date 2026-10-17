@@ -7,7 +7,9 @@ description: Sinter agentless configuration management for Linux hosts. Use when
 
 Sinter describes the desired state of Linux hosts in a recipe (YAML or TOML)
 and converges them over SSH or on the local machine from a single binary.
-This skill covers the Sinter v1.0.0 CLI, recipe format, and MCP surfaces.
+This skill covers the Sinter v1.5.1 CLI, recipe format, and MCP surfaces
+(features marked with a version need at least that version; check
+`sinter --version`).
 
 ## 1. Find out what you can actually do
 
@@ -84,3 +86,7 @@ apply confirmation.
   you saw its result. Keep observations and your inferences separate.
 - Exit 6 (indeterminate) means the target state is unknown: do not report it
   as success or failure, and do not retry apply blindly; observe again first.
+- A package refusal (no such package, a provides-only name, a missing
+  dependency, `GPG check FAILED`, an unreachable repository) is reported
+  before any change. Fix the recipe (for example the real package name Sinter
+  names) instead of retrying.

@@ -1,6 +1,6 @@
 # Reading results
 
-Source of truth: Sinter v1.0.0 `docs-site/src/content/docs/en/reference/cli.md`
+Source of truth: Sinter v1.5.1 `docs-site/src/content/docs/en/reference/cli.md`
 (Reading plan / apply output, Reading audit output, JSON output contract).
 
 ## Plan and apply

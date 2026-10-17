@@ -1,6 +1,6 @@
 # Sinter surfaces and capability selection
 
-Source of truth: Sinter v1.0.0 `docs-site/public/webmcp.js`,
+Source of truth: Sinter v1.5.1 `docs-site/public/webmcp.js`,
 `docs-site/src/content/docs/en/reference/webmcp.md`, `src/mcp.rs`,
 `docs-site/src/content/docs/en/reference/mcp.md`, and `sinter --help`.
 
@@ -54,10 +54,12 @@ Limits:
   recipes that use them, use the CLI.
 - Manifest text is limited to 4 MiB. File and template content diffs are
   redacted in host plans.
+- A manifest with an encrypted-secret reference (`{ secret: … }`) is refused;
+  recipes that use secrets go through the CLI.
 
 ## 3. CLI: `sinter`
 
-The complete surface: `validate`, `plan`, `apply`, `audit`, `mcp`. It is the
+The complete surface: `validate`, `plan`, `apply`, `audit`, `mcp`, `secrets`. It is the
 only way to apply. Check it with `sinter --version`. Installing Sinter changes
 the user's machine: offer the official instructions (installation page or
 `sinter_get_installation`) and let the user decide.

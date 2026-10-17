@@ -277,7 +277,7 @@ identity は自分だけが読めて（`chmod 600`）自分の所有である必
 - **`user.password_hash: { secret: <path> }`** も同じ参照ルールと identity 探索を使い、
   シークレットはパスワードハッシュ 1 行です。[user リソース](/ja/reference/resources/user/#パスワードハッシュ)を
   参照してください。
-- **MCP** のマニフェスト系ツールは `content` / `password_hash` のシークレット参照を拒否
+- **MCP** のマニフェスト系ツールは `content` / `password_hash` /（v1.5.1）`password_verifier` のシークレット参照を拒否
   します。クライアントが送ったマニフェストでゲートウェイにファイルを復号させることは
   できません。
 

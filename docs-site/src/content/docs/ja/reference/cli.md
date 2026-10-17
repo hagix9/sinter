@@ -653,6 +653,7 @@ v1.0.0 以降、この節に記載した内容は 1.x 系全体を通じて安�
 | `resources` | integer | recipe 内のリソース数 |
 | `handlers` | integer | handler 数 |
 | `vars` | integer | var 数 |
+| `warnings` | array of strings | 空でないときだけ出力します（v1.5.1、まだリリースしていません）。`template.vars` の中の `{{ … }}` のような、エラーではない指摘です。bundle の文書では、各レシピの項目がそれぞれ `warnings` を持ちます。 |
 
 ### plan と apply
 

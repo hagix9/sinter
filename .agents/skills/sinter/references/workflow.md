@@ -1,29 +1,32 @@
 # Commands, JSON output, and exit codes
 
-Source of truth: Sinter v1.0.0 `sinter --help` and subcommand help,
+Source of truth: Sinter v1.5.1 `sinter --help` and subcommand help,
 `docs-site/src/content/docs/en/reference/cli.md`, and `tests/json_contract.rs`.
 
 ## Commands
 
 ```sh
-sinter --version                         # e.g. "sinter 1.0.0"
-sinter validate recipe.yaml [--format json]
+sinter --version                         # e.g. "sinter 1.5.1"
+sinter validate recipe.yaml [--format json]   # also a bundle file
 sinter plan  recipe.yaml [target options] [--format json]
 sinter apply recipe.yaml [target options] [--format json]
 sinter audit recipe.yaml [target options] [--format json]
 sinter mcp [--targets-file targets.toml]  # read-only MCP server on stdio
+sinter secrets encrypt|decrypt|list ...   # age files for secret references
 ```
 
 Target options for plan, apply, and audit:
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--host <HOST>` | local machine | SSH target. Omitted: the machine running `sinter`. |
+| `--host <HOST>` | local machine | SSH target or `~/.ssh/config` alias. Omitted (and no inventory): the machine running `sinter`. |
+| `--inventory <PATH>` | — | Inventory of hosts and groups; each recipe runs on the hosts its `targets` select. Exclusive with `--host`. |
 | `--port <PORT>` | inventory, then OpenSSH config, then `22` | SSH port. |
 | `--user <USER>` | inventory, then OpenSSH config, then current user | SSH user. |
 | `--known-hosts <PATH>` | inventory, then OpenSSH config, then `~/.ssh/known_hosts` | Strict host-key database; unknown or changed keys fail. |
 | `--identity <PATH>` | inventory, then OpenSSH config, then `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa` | Identity file; repeatable. Replaces the defaults. |
-| `--sudo` | off | Every target-side operation via non-interactive `sudo -n`. |
+| `--no-ssh-config` | off | Do not consult the OpenSSH client configuration. |
+| `--sudo` | off | Every target-side operation via non-interactive `sudo -n` (as root). A target user that is already root runs directly. `user.password_hash` and `postgresql_role` need root. |
 | `--verbose` | off | Verbose output. |
 
 Relative `include:` and `source:` paths resolve against the directory of the
@@ -63,7 +66,9 @@ exactly one JSON object and a newline. A document is written only when the
 command produced a report; when it fails earlier (for example exit 2 or 3),
 stdout is empty and one `sinter: ...` line goes to stderr.
 
-- validate: `{"command":"validate","status":"ok","resources","handlers","vars"}`.
+- validate: `{"command":"validate","status":"ok","resources","handlers","vars"}`,
+  plus `warnings` (v1.5.1) only when non-empty. Warnings do not change the
+  exit code.
 - plan / apply: `mode`, `status` (`success` 0, `plan_error` 4,
   `apply_failed` 5, `indeterminate` 6), `facts`, `resources`, `handlers`,
   `handlers_pending`.

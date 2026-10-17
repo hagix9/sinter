@@ -667,6 +667,7 @@ the whole 1.x series. `sinter mcp` is governed by the
 | `resources` | integer | Number of resources in the recipe. |
 | `handlers` | integer | Number of handlers. |
 | `vars` | integer | Number of vars. |
+| `warnings` | array of strings | Present only when non-empty (v1.5.1, not yet released): non-fatal findings such as `{{ … }}` in `template.vars`. In a bundle document each recipe entry carries its own `warnings`. |
 
 ### plan and apply
 

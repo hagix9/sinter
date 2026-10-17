@@ -121,8 +121,8 @@ drift次元として報告します。
   `create_new`の0600ファイルを使います。通常のCLI recipeは引き続き
   完全な`include:`/`source:`をサポートします。
 - **MCP経由では暗号化シークレットを扱いません。** 暗号化シークレットを
-  参照するmanifest — `{ secret: … }`のようなmapとして書かれた`content`や
-  `password_hash`（[sinter secrets](/ja/reference/secrets/)を参照）— は、
+  参照するmanifest — `{ secret: … }`のようなmapとして書かれた`content`、
+  `password_hash`、（v1.5.1）`password_verifier`（[sinter secrets](/ja/reference/secrets/)を参照）— は、
   ロード前にパース済み構造上で拒否され、メッセージは復号がMCP経由では
   許可されないことを示します。参照テキストはechoされません。manifestを
   受け取るすべてのツールがこの単一の境界を通ります。MCPサーバーは
