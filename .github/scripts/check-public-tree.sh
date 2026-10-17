@@ -23,7 +23,7 @@ must_publish=(
   release/ACCEPTANCE_EVIDENCE.md release/check_acceptance_manifest.py
   release/evidence/v1.5.0/acceptance-manifest.json
   release/evidence/v1.5.1/acceptance-manifest.json
-  release/acceptance-harness/README.md
+  release/acceptance-harness/README.md release/acceptance-harness/harness.env.example
   gateway/docs/PRODUCTION_DEPLOYMENT.md gateway/SINTER_GATEWAY_NEW.md
   submission/openai/SUBMISSION.md assets/demo/sinter-demo.svg
 )
@@ -37,16 +37,27 @@ must_ignore=(
   docs/next-improvements-2026-10-15/REPORT.md Sinter-Dev/README.md
   Sinter-Dev-FS0/src/main.rs worktrees/v1.5.1-phase3/README.md
   .opencode/commands/goal.md .claude/settings.local.json
+  release/acceptance-harness/harness.env release/acceptance-harness/sanitize-patterns.tsv
 )
 
+# 0 = ignored, 1 = not ignored; anything else (a fatal git error) stops the
+# check instead of being read as "not ignored".
+ignored() {
+  local rc=0
+  git check-ignore -q --no-index -- "$1" || rc=$?
+  case "$rc" in
+    0|1) return "$rc" ;;
+    *) echo "::error::git check-ignore failed (rc=$rc) for $1"; exit 2 ;;
+  esac
+}
 for p in "${must_publish[@]}"; do
-  if git check-ignore -q --no-index -- "$p"; then
+  if ignored "$p"; then
     echo "::error::public path is ignored: $p ($(git check-ignore -v --no-index -- "$p"))"
     fail=1
   fi
 done
 for p in "${must_ignore[@]}"; do
-  if ! git check-ignore -q --no-index -- "$p"; then
+  if ! ignored "$p"; then
     echo "::error::local work product is not ignored: $p"
     fail=1
   fi

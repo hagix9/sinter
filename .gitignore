@@ -38,3 +38,7 @@ target/
 # Agent / editor local configuration
 /.opencode/
 /.claude/
+# Filled-in acceptance harness configuration (keep it outside the repository;
+# these catch a copy left next to the harness)
+/release/acceptance-harness/harness.env
+/release/acceptance-harness/*.tsv

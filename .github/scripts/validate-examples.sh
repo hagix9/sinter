@@ -39,7 +39,7 @@ for d, _, files in os.walk(src):
             continue
         rel = os.path.relpath(os.path.join(d, f), src)
         text = open(os.path.join(d, f), encoding="utf-8").read()
-        for i, block in enumerate(re.findall(r"```ya?ml\n(.*?)```", text, re.S)):
+        for i, block in enumerate(re.findall(r"```ya?ml[^\n]*\n(.*?)```", text, re.S)):
             first = next((l for l in block.splitlines() if l.strip() and not l.lstrip().startswith("#")), "")
             top = [l for l in block.splitlines() if l and not l[0].isspace() and not l.startswith("#")]
             is_recipe = first.strip() == "version: 1" or any(l.startswith("resources:") for l in top)
@@ -52,6 +52,25 @@ for d, _, files in os.walk(src):
             n += 1
 print(f"docs: {n} complete recipe block(s) extracted")
 PY
+# Guard against a silent no-op (docs moved, fence syntax changed, ...).
+MIN_DOCS=36
+MIN_EXAMPLES=15
+docs_n=$(find "$WORK/docs" -name '*.yaml' -type f | wc -l | tr -d ' ')
+ex_n=$(find "$WORK/examples" -name '*.yaml' -type f | wc -l | tr -d ' ')
+if [ "$docs_n" -lt "$MIN_DOCS" ] || [ "$ex_n" -lt "$MIN_EXAMPLES" ]; then
+  echo "::error::too few recipes found (docs $docs_n < $MIN_DOCS or examples $ex_n < $MIN_EXAMPLES)"; exit 1
+fi
+
+# Template sources named by docs samples (relative to the recipe) get a
+# placeholder; the examples ship their own.
+while IFS= read -r f; do
+  dir=$(dirname "$f")
+  { grep -oE '^ *source: *[^ #]+' "$f" || true; } | sed -E 's/^ *source: *//' | while IFS= read -r ref; do
+    case "$ref" in /*|*..*|*'{{'*) continue ;; esac
+    mkdir -p "$dir/$(dirname "$ref")"
+    [ -e "$dir/$ref" ] || printf 'placeholder\n' > "$dir/$ref"
+  done
+done < <(find "$WORK/docs" -name '*.yaml' -type f)
 
 # Secret placeholders for every referenced path (relative to the recipe).
 while IFS= read -r f; do
