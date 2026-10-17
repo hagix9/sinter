@@ -6731,17 +6731,17 @@ fn package_failure_note(
 }
 
 /// Replace the userinfo of every `scheme://userinfo@host` in `s` with
-/// `[redacted]`. A `://` followed by an `@` before the next `/`, whitespace
-/// or end of text marks userinfo.
+/// `[redacted]`. Everything from `://` to the last `@` before the next
+/// whitespace (or the end of text) is treated as userinfo, so a password with
+/// an unencoded `/` is still covered; an `@` in a path is over-redacted, which
+/// only hides more.
 fn redact_url_credentials(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(i) = rest.find("://") {
         let (head, tail) = rest.split_at(i + 3);
         out.push_str(head);
-        let end = tail
-            .find(|c: char| c == '/' || c.is_whitespace())
-            .unwrap_or(tail.len());
+        let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
         match tail[..end].rfind('@') {
             Some(at) => {
                 out.push_str("[redacted]");
@@ -7749,7 +7749,18 @@ mod package_tests {
             "ftp://[redacted]@b c://[redacted]@e"
         );
         assert_eq!(redact_url_credentials("no url here @x"), "no url here @x");
-        assert_eq!(redact_url_credentials("https://h/p@q"), "https://h/p@q");
+        assert_eq!(
+            redact_url_credentials("E: https://u:pa/ss@h.example/x failed"),
+            "E: https://[redacted]@h.example/x failed"
+        );
+        assert_eq!(
+            redact_url_credentials("https://h/p@q"),
+            "https://[redacted]@q"
+        );
+        assert_eq!(
+            redact_url_credentials("https://h.example/x y@z"),
+            "https://h.example/x y@z"
+        );
         assert_eq!(redact_url_credentials("x://"), "x://");
     }
 
