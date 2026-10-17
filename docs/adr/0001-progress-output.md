@@ -482,10 +482,8 @@ The deferred gate has since been run. What it recorded, and no more:
   production code, dependencies and documentation were unchanged.
 - **Supersedes:** the "Not confirmed in a real run" remark above, for Linux. The
   doubling and the 300 s cap were observed on both Linux hosts in the Full Gate.
-- **Reports:** `SINTER_WP_PROGRESS_REAL_LINUX_GATE_2026-10-07.md`,
-  `SINTER_WP_PROGRESS_REAL_LINUX_REMEDIATION_2026-10-07.md` and
-  `SINTER_WP_PROGRESS_REAL_LINUX_REGATE_2026-10-08.md`. They are historical records and
-  are not edited by this ADR.
+- **Reports:** the gate, remediation and re-gate reports are internal development
+  records and are not published; this entry is the public summary of their results.
 
 **Still not validated:**
 

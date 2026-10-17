@@ -5,8 +5,8 @@
 //! Every observation Sinter makes is one command on the target, and over SSH
 //! each command is its own exec channel (about three to four network round
 //! trips). Those round trips, not Sinter's own computation, dominate the wall
-//! time of `plan`, `apply` and `audit` (see
-//! `SINTER_PERFORMANCE_BASELINE_RESEARCH_2026-10-04.md`). The tests here count
+//! time of `plan`, `apply` and `audit` (measured in an internal performance
+//! baseline). The tests here count
 //! the commands a run submits, through the statistics every executor keeps
 //! (`Engine::exec_stats`), so that:
 //!

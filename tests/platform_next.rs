@@ -5,9 +5,9 @@
 //! they exercise the production engine/model/targetfs/result path on any
 //! controller. They prove the two new targets resolve to the right backend
 //! and that the dnf snapshot install contract is unchanged on Rocky 10.
-//! Real-host evidence for both targets is recorded in
-//! SINTER_UBUNTU2604_ROCKY10_COMPATIBILITY_REPORT.md; fixture coverage here
-//! is not a substitute for it.
+//! Real-host verification of both targets is part of each release's
+//! acceptance (`release/evidence/`, and the Supported Platforms page of the
+//! documentation); fixture coverage here is not a substitute for it.
 mod common;
 
 use common::*;

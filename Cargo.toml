@@ -24,9 +24,9 @@ sha2 = "0.10"
 libc = "0.2"
 tempfile = "3"
 # Encrypted-secret core (src/secrets.rs). Standard age format only; no default
-# features (no plugins, SSH keys, async, CLI helpers). Exact pin: the version is
-# reviewed (SINTER_SECRETS_PHASE_A_2026-10-04.md) and moves only by a deliberate
-# change.
+# features (no plugins, SSH keys, async, CLI helpers). Exact pin: the version was
+# reviewed when the secrets feature was introduced (v1.2.0) and moves only by a
+# deliberate change.
 age = { version = "=0.12.1", default-features = false, features = ["armor"] }
 zeroize = "1"
 

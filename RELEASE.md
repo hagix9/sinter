@@ -608,7 +608,9 @@ the UTF-8 bytes of the path, and nothing else; it verifies with
 set is frozen once the digest is computed: re-packing the bundle archive
 changes the digest and needs a new approval.
 
-`verify_approval_set.py` checks the set: exactly the listed members, the
+`verify_approval_set.py` checks the set (it was used from the release staging
+for v1.5.0 and is not yet in this repository; it is added under `release/`,
+with its tests, before the next release candidate): exactly the listed members, the
 canonical list, consistency with the manifest, the bundle's
 `harness/PROVENANCE.json`, the runtime record, the collector record and the
 RC tree, reproduction of every collector output and bundle log from the

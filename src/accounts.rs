@@ -1,7 +1,6 @@
 //! Local `group` and `user` resources.
 //!
-//! Scope (reviewed contract, POST_V1.1.1_FOLLOWUP_RESEARCH.md §C.5 narrowed by
-//! the resource-type gap analysis §6.4):
+//! Scope (the reviewed contract, narrowed by the resource-type gap analysis):
 //!
 //! * local accounts only: every observation uses `getent -s files`, and an
 //!   account that only another identity source (LDAP, SSSD, ...) provides is

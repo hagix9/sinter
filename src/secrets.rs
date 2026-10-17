@@ -34,8 +34,8 @@ use std::io::{Read, Write};
 use std::str::FromStr;
 use zeroize::Zeroizing;
 
-/// Largest plaintext accepted or produced, in bytes. Provisional until the
-/// Phase A measurements justify it (see SINTER_SECRETS_PHASE_A_2026-10-04.md).
+/// Largest plaintext accepted or produced, in bytes. A provisional limit set
+/// from the measurements made when the feature was introduced.
 pub const MAX_SECRET_BYTES: usize = 16 * 1024 * 1024;
 
 /// Shortest passphrase accepted for *encryption*, in characters. Decryption

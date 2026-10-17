@@ -2,11 +2,12 @@
 //!
 //! Operator-facing commands over the Phase A secret core ([`crate::secrets`]).
 //! These commands work on files; recipes use secrets through
-//! [`crate::secret_source`] (`file.content` and `user.password_hash`, opened by
+//! [`crate::secret_source`] (`file.content`, `user.password_hash` and
+//! `postgresql_role.password_verifier`, opened by
 //! plan/apply/audit), and `list` can read recipes (`--recipe`). MCP has no
 //! secret integration: its manifest tools refuse secret references.
 //!
-//! Boundaries (see SINTER_SECRETS_PHASE_B_2026-10-04.md):
+//! Boundaries:
 //!
 //! * `decrypt` writes plaintext to **stdout only**, and refuses a terminal.
 //!   No other command ever prints decrypted bytes, a passphrase or a private

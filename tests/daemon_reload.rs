@@ -10,8 +10,8 @@
 //! `PENDING REAL-OS ACCEPTANCE` and is not claimed here; each such case is
 //! named in the matching test's comment.
 //!
-//! Case numbers (`A01`..`A48`) refer to the acceptance matrix of
-//! SINTER_SYSTEMD_DAEMON_RELOAD_FOCUSED_RESEARCH_2026-10-02.md §10.
+//! Case numbers (`A01`..`A48`) refer to the acceptance matrix of the focused
+//! research for this feature (an internal development record).
 mod common;
 
 use common::*;
@@ -1783,7 +1783,7 @@ fn a17_all_state_and_enabled_combinations_end_verified_from_fresh_observations()
 // ===========================================================================
 // Focused remediation of the independent re-audit (F01 - F04)
 //
-// SINTER_SYSTEMD_DAEMON_RELOAD_INDEPENDENT_REAUDIT_2026-10-02.md. Each group
+// The findings of the independent re-audit (internal record). Each group
 // drives the control flow that was wrong, not an expected string, and asserts
 // exact command counts where a forbidden command is the point.
 // ===========================================================================
@@ -2555,8 +2555,8 @@ fn f04_ordinary_and_user_manager_absent_paths_are_unaffected_and_audit_stays_rea
 // ---------------------------------------------------------------------------
 // Real-OS findings remediation (2026-10-03): R-1, R-2, R-3, R-4
 //
-// R-1/R-2 were seen on real systemd 252/255/257/259 (see
-// SINTER_SYSTEMD_DAEMON_RELOAD_REAL_OS_ACCEPTANCE_AUTHORIZED_2026-10-03.md).
+// R-1/R-2 were seen on real systemd 252/255/257/259 in the authorized real-OS
+// acceptance (internal record).
 // The scripted target models only what Sinter decides; the real-systemd
 // behavior is re-checked on the Linux gate host, not claimed here.
 // ---------------------------------------------------------------------------
