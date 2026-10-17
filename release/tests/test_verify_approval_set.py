@@ -137,6 +137,8 @@ class Fixture:
                   "remote_raw_path": f"/var/tmp/sinter-acceptance-{rid}/raw.log", "cleanup_ok": True,
                   "source_image": f"fixture-{lb}-image-v1", "source_image_id": "1234567890"}
             write(os.path.join(d, "run.json"), json.dumps(rj, indent=2) + "\n")
+            with open(os.path.join(self.evidence, "INDEX.tsv"), "a") as f:
+                f.write(f"2026-01-01T0{i}:06:00Z\t{rid}\t{lb}\tPASS\t0\t{H(raw_b)}\n")
 
     def _collect(self, rid, write_verdict=False):
         env = clean_env(SINTER_RC_COMMIT=self.rc, SINTER_EXP_ART=self.art_sha, SINTER_EXP_VER=f"sinter {VERSION}")
@@ -167,19 +169,13 @@ class Fixture:
                 e.update(bundle_form="verbatim", bundle_path=f"harness/{n}")
                 files[f"harness/{n}"] = b
             prov_files.append(e)
-        last_collect = read(os.path.join(self.collector_runs[-1], "collect.txt"))
-        digest = [ln for ln in last_collect.splitlines() if ln.startswith("evidence_digest: ")][-1].split(": ")[1]
-        rec_sums = self._record_sums()
-        results = []
-        for d in self.collector_runs:
-            v = [ln for ln in read(os.path.join(d, "collect.txt")).splitlines()
-                 if ln.startswith("overall verdict: ")][-1].split(": ")[1]
-            results.append({"result": v})
+        p = run([sys.executable, MAKE, "--collector-fragment", "--evidence", self.evidence,
+                 "--collector", os.path.join(hdir, "collect-evidence.py"),
+                 *sum((["--collector-run", d] for d in self.collector_runs), [])])
+        assert p.returncode == 0, p.stderr
         prov = {"schema": "sinter-harness-provenance/1", "source_commit": self.rc,
                 "runtime_record": {"sha256": H(self.runtime_record)}, "files": prov_files,
-                "post_acceptance_collector": {"sha256": H(read(os.path.join(hdir, "collect-evidence.py"), "rb")),
-                                              "results": results, "evidence_digest": digest,
-                                              "collector_record_sha256sums_sha256": rec_sums}}
+                "post_acceptance_collector": json.loads(p.stdout)}
         files["harness/PROVENANCE.json"] = (json.dumps(prov, indent=2) + "\n").encode()
         targets = []
         env = clean_env(**SANITIZE_ENV)
@@ -220,18 +216,6 @@ class Fixture:
         write(os.path.join(self.acceptance, f"sinter-v{VERSION}-acceptance-SHA256SUMS"),
               f"{H(man_b)}  sinter-v{VERSION}-acceptance-manifest.json\n{H(bun)}  {stem}.tar.gz\n")
         self.bundle_files = files
-
-    def _record_sums(self):
-        """SHA-256 of the collector record's SHA256SUMS as make_approval_set.py writes it."""
-        hdir = os.path.join(self.repo, "release/acceptance-harness")
-        entries = {"collect-evidence.py": read(os.path.join(hdir, "collect-evidence.py"), "rb"),
-                   "runtime-scripts-SHA256SUMS": self.runtime_record}
-        for i, d in enumerate(self.collector_runs, 1):
-            names = ["collect.txt", "summary.txt"] + (["VERDICT.txt"] if i == len(self.collector_runs) else [])
-            for n in names:
-                entries[f"runs/{i:02d}/{n}"] = read(os.path.join(d, n), "rb")
-        names = sorted(entries, key=lambda s: s.encode())
-        return H("".join(f"{H(entries[n])}  {n}\n" for n in names).encode())
 
     @staticmethod
     def tar(stem, files, owner=("root", 0)):
@@ -444,12 +428,36 @@ class RejectedSets(Base):
         self.assertEqual(p.returncode, 1)
         self.assertIn("DIFFERS", p.stdout)
 
-    def test_rc_tree_and_version_must_match_the_repository(self):
+    def test_rc_tree_must_match_the_repository(self):
         m = self.f.meta()
         m["rc_tree"] = "3" * 40
         self.f.set_meta(m)
         self.f.relist()
         self.assertInvalid(verify(self.set, "--rc-repo", self.f.repo), "H rc_tree")
+
+    def test_version_must_match_the_rc_cargo_toml(self):
+        repo = os.path.join(self.work, "repo")
+        shutil.copytree(self.f.repo, repo)
+        g = ["git", "-C", repo, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
+        # META names a commit whose Cargo.toml has another version.
+        write(os.path.join(repo, "Cargo.toml"), '[package]\nname = "sinter"\nversion = "9.9.8"\n')
+        run(g + ["commit", "-q", "-am", "other version"])
+        other = run(["git", "-C", repo, "rev-parse", "HEAD"]).stdout.strip()
+        tree = run(["git", "-C", repo, "rev-parse", "HEAD^{tree}"]).stdout.strip()
+        m = self.f.meta()
+        m["rc_commit"], m["rc_tree"] = other, tree
+        self.f.set_meta(m)
+        self.f.relist()
+        self.assertInvalid(verify(self.set, "--rc-repo", repo), "FAIL H Cargo.toml version at rc_commit")
+
+    def test_rc_commit_is_refused_before_reaching_git(self):
+        marker = os.path.join(self.work, "written-by-git")
+        m = self.f.meta()
+        m["rc_commit"] = f"--output={marker}"
+        self.f.set_meta(m)
+        self.f.relist()
+        self.assertInvalid(verify(self.set, "--rc-repo", self.f.repo), "not full 40-hex ids")
+        self.assertFalse(os.path.exists(marker))
 
     def test_collector_must_be_the_rc_collector(self):
         c = os.path.join(self.set, "collector-record/collect-evidence.py")
@@ -523,6 +531,105 @@ class RejectedSets(Base):
         p = verify(self.set, "--rc-repo", self.f.repo, "--evidence", ev, env=clean_env(**SANITIZE_ENV))
         self.assertInvalid(p, "FAIL I exactly one recorded run per target label")
 
+    def test_failed_run_removed_and_rerun_is_detected(self):
+        ev = os.path.join(self.work, "out")
+        shutil.copytree(self.f.evidence, ev)
+        # The append-only index still lists the failed first rocky9 run.
+        with open(os.path.join(ev, "INDEX.tsv"), "a") as f:
+            f.write("2026-01-01T02:59:00Z\tfixture-run-rocky9-first\trocky9\tFAIL\t1\t" + "c" * 64 + "\n")
+        p = verify(self.set, "--rc-repo", self.f.repo, "--evidence", ev, env=clean_env(**SANITIZE_ENV))
+        self.assertInvalid(p, "FAIL I INDEX.tsv lists exactly the recorded runs")
+        self.assertIn("FAIL I INDEX.tsv: one run per target label", p.stderr)
+
+    def test_index_row_must_match_the_recorded_run(self):
+        ev = os.path.join(self.work, "out")
+        shutil.copytree(self.f.evidence, ev)
+        idx = os.path.join(ev, "INDEX.tsv")
+        rows = read(idx).splitlines()
+        f = rows[0].split("\t")
+        f[5] = "d" * 64
+        rows[0] = "\t".join(f)
+        write(idx, "\n".join(rows) + "\n")
+        p = verify(self.set, "--rc-repo", self.f.repo, "--evidence", ev, env=clean_env(**SANITIZE_ENV))
+        self.assertInvalid(p, "FAIL I INDEX.tsv lists exactly the recorded runs")
+
+    def test_a_run_a_tally_saw_must_still_be_recorded(self):
+        ev = os.path.join(self.work, "out")
+        shutil.copytree(self.f.evidence, ev)
+        old, new = "fixture-run-alma9", "fixture-run-alma9-renamed"
+        shutil.move(os.path.join(ev, "runs", old), os.path.join(ev, "runs", new))
+        rj = os.path.join(ev, "runs", new, "run.json")
+        write(rj, read(rj).replace(old, new))
+        idx = os.path.join(ev, "INDEX.tsv")
+        write(idx, read(idx).replace(old + "\t", new + "\t"))
+        p = verify(self.set, "--rc-repo", self.f.repo, "--evidence", ev, env=clean_env(**SANITIZE_ENV))
+        self.assertInvalid(p, "FAIL I every run an earlier or last tally saw is still recorded")
+
+    def test_set_collector_is_never_executed_when_it_differs_from_the_rc(self):
+        marker = os.path.join(self.work, "executed")
+        c = os.path.join(self.set, "collector-record/collect-evidence.py")
+        write(c, f"open({marker!r}, 'w').write('x')\n" + read(c))
+        self.f.relist()
+        self.assertInvalid(self.full(), "FAIL I the collector to run is the RC collector")
+        self.assertFalse(os.path.exists(marker))
+
+    def test_label_outside_the_matrix_is_not_used_as_a_path(self):
+        ev = os.path.join(self.work, "out")
+        shutil.copytree(self.f.evidence, ev)
+        rj = os.path.join(ev, "runs/fixture-run-alma9/run.json")
+        m = json.loads(read(rj))
+        m["label"] = "../../escape"
+        write(rj, json.dumps(m))
+        p = verify(self.set, "--rc-repo", self.f.repo, "--evidence", ev, env=clean_env(**SANITIZE_ENV))
+        self.assertInvalid(p, "FAIL I run fixture-run-alma9: label is a target label")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "escape.log")))
+
+    def test_unnormalized_tar_member_name(self):
+        def mutate(files):
+            files["./logs/extra.log"] = b"x\n"
+        self.f.rebuild_bundle(mutate)
+        self.f.relist()
+        self.assertInvalid(verify(self.set), "not a normalized relative path")
+
+    def test_acceptance_sums_must_be_exact(self):
+        s_ = os.path.join(self.set, f"acceptance/sinter-v{VERSION}-acceptance-SHA256SUMS")
+        write(s_, read(s_) + "0" * 64 + "  extra.txt\n")
+        self.f.relist()
+        self.assertInvalid(verify(self.set), "FAIL D acceptance SHA256SUMS")
+
+    def test_gate_log_must_be_the_recorded_one(self):
+        g = os.path.join(self.work, "linux-gate.log")
+        write(g, "== step root-test start\n== step root-test rc=1 end\n")
+        self.assertInvalid(verify(self.set, "--gate-log", g), "FAIL K bundle gate log")
+
+    def test_harness_source_path_and_inclusion_are_fixed(self):
+        def change(prov):
+            for e in prov["files"]:
+                if e["name"] == "raw-verdict.py":
+                    e["source_path"] = "elsewhere/raw-verdict.py"
+                if e["name"] == "target-prep.sh":
+                    e["bundle_form"], e["bundle_path"] = "not-included", None
+        self.f.edit_provenance(change)
+        self.f.relist()
+        p = verify(self.set)
+        self.assertInvalid(p, "FAIL E raw-verdict.py: source_path")
+        self.assertIn("FAIL E target-prep.sh: may be left out of the bundle", p.stderr)
+
+    def test_acceptance_time_tools_are_refused(self):
+        self.f.edit_provenance(lambda prov: prov.update(acceptance_time_tools=[{"name": "x.sh"}]))
+        self.f.relist()
+        self.assertInvalid(verify(self.set), "FAIL E no acceptance-time tools")
+
+    def test_manifest_image_must_be_the_recorded_one(self):
+        ev = os.path.join(self.work, "out")
+        shutil.copytree(self.f.evidence, ev)
+        rj = os.path.join(ev, "runs/fixture-run-rhel9/run.json")
+        m = json.loads(read(rj))
+        m["source_image"] = "another-image"
+        write(rj, json.dumps(m))
+        p = verify(self.set, "--rc-repo", self.f.repo, "--evidence", ev, env=clean_env(**SANITIZE_ENV))
+        self.assertInvalid(p, "FAIL M rhel9: image == recorded value")
+
     def test_artifact_mismatch(self):
         art = os.path.join(self.work, os.path.basename(self.f.artifact))
         write(art, b"another tarball\n")
@@ -539,9 +646,10 @@ class RejectedSets(Base):
     def test_checker_result_is_required(self):
         stub = os.path.join(self.work, "checker.py")
         write(stub, "import sys\nprint('checker: NO-GO')\nsys.exit(1)\n")
-        self.assertInvalid(verify(self.set, "--checker", stub, "--artifact", self.f.artifact), "J official checker")
+        args = ("--checker", stub, "--artifact", self.f.artifact, "--rc-repo", self.f.repo)
+        self.assertInvalid(verify(self.set, *args), "J official checker")
         write(stub, "print('OK (verdict GO)')\n")
-        self.assertEqual(verify(self.set, "--checker", stub, "--artifact", self.f.artifact).returncode, 3)
+        self.assertEqual(verify(self.set, *args).returncode, 3)
 
     def test_publication_copy_is_not_accepted(self):
         # Rebuild the bundle with one harness file declared as a publication copy.

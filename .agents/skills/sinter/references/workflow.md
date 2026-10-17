@@ -20,7 +20,7 @@ Target options for plan, apply, and audit:
 | Flag | Default | Meaning |
 |---|---|---|
 | `--host <HOST>` | local machine | SSH target or `~/.ssh/config` alias. Omitted (and no inventory): the machine running `sinter`. |
-| `--inventory <PATH>` | — | Inventory of hosts and groups; each recipe runs on the hosts its `targets` select. Exclusive with `--host`. |
+| `--inventory <PATH>` (alias `--hosts`) | — | Inventory of hosts and groups; each recipe runs on the hosts its `targets` select. Exclusive with `--host`. |
 | `--port <PORT>` | inventory, then OpenSSH config, then `22` | SSH port. |
 | `--user <USER>` | inventory, then OpenSSH config, then current user | SSH user. |
 | `--known-hosts <PATH>` | inventory, then OpenSSH config, then `~/.ssh/known_hosts` | Strict host-key database; unknown or changed keys fail. |

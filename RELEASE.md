@@ -597,7 +597,9 @@ the staged bytes; any change to a staged file voids it.
 
 The approval is bound to one digest. Before review, the operator assembles
 the approval set under `evidence/approval-set/` in the staging directory with
-`release/make_approval_set.py`:
+`release/make_approval_set.py` (its `--collector-fragment` mode prints the
+`post_acceptance_collector` object for the bundle's `harness/PROVENANCE.json`
+beforehand):
 
 ```text
 APPROVAL-SET-META.json        version, tag, RC_COMMIT, RC tree, artifact and
@@ -627,9 +629,12 @@ the runtime-record collector, an earlier run is never GO, the last run is
 tree, `Cargo.toml` version, every harness file and the collector at
 `RC_COMMIT`); with `--evidence` it reproduces the collector output and every
 bundle log from the recorded evidence (the run's `SINTER_PROJECT`,
-`SINTER_ZONE` and `SINTER_SPECS` must be in the environment for the
-sanitizer); with `--artifact` it checks the tarball; with `--checker` it runs
-the full-mode checker. `--expect-rc` and `--expect-version` refuse a set made
+`SINTER_ZONE` and `SINTER_SPECS`, and `SINTER_SANITIZE_PATTERNS` if the run
+used one, must be in the environment for the sanitizer; it runs the RC
+collector, never the set's copy, with a minimal environment), and checks that
+the append-only `INDEX.tsv` lists exactly the recorded runs, one per label;
+with `--artifact` it checks the tarball; with `--checker` (needs
+`--artifact` and `--rc-repo`) it runs the full-mode checker. `--expect-rc` and `--expect-version` refuse a set made
 for another candidate. Exit 3 means valid but not yet approved
 (`PENDING_OWNER_APPROVAL`, never GO); exit 0 only with `--approved-digest`
 equal to the current digest. A digest approved for one candidate never

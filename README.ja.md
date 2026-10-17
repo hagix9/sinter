@@ -219,7 +219,7 @@ YAMLとTOMLは共通のsemantic IRに対するfrontendです。
 desired state、ChangeSet、実行動作が同等になります。
 
 トップレベルのフィールドは`version`、`vars`、`include`、`resources`、
-`handlers`です。
+`handlers`、（v1.1.0 から）`targets`と`backup`、`env`です。
 
 resource typeは`file`、`directory`、`template`、`link`、
 `command`、`package`、`service`です。

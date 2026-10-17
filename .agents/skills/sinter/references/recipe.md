@@ -50,7 +50,7 @@ notified them.
 | `service` | `name`, plus `state` (`running` or `stopped`) and/or `enabled` | — |
 | `group` | `name` | `state`, `gid`, `system` |
 | `user` | `name` | `state`, `uid`, `group`, `groups`, `shell`, `home`, `create_home`, `system`, `password_hash` |
-| `postgresql_role` (v1.5.1) | `name` | `state`, `login`, `superuser`, `createdb`, `createrole`, `inherit`, `replication`, `bypassrls`, `connection_limit`, `password_verifier` |
+| `postgresql_role` (v1.5.1) | `name` | `state`, `login`, `superuser`, `createdb`, `createrole`, `inherit`, `replication`, `bypassrls`, `connection_limit`, `password_verifier`, `os_user`, `psql` (`/usr/bin/psql` or `/usr/pgsql-<major>/bin/psql`), `port`, `database` |
 
 There are no other types (there is no repository, firewall or container
 resource; a dnf repository is a `file` under `/etc/yum.repos.d/`). If a user asks for one (for example a firewall or
@@ -131,7 +131,8 @@ container resource), say it does not exist rather than inventing syntax.
 
 Supported: Ubuntu 24.04 / 26.04 LTS (amd64) and Rocky Linux, RHEL, AlmaLinux
 9 / 10 (x86_64). From v1.5.1, Rocky Linux / RHEL 8 works as an **SSH target
-only**: the controller binary needs glibc 2.34, so it cannot run on EL8.
+only** (verified during v1.5.1 development, outside the release acceptance
+matrix): the controller binary needs glibc 2.34, so it cannot run on EL8.
 Oracle Linux is recognized but not acceptance-tested. Each target needs
 systemd, an OpenSSH server, `/bin/sh`, the `attr` package
 (`/usr/bin/getfattr`), and passwordless `sudo -n` when privilege is used. Do
@@ -148,4 +149,5 @@ not claim support for other platforms.
   a third-party repository and its key as `file` resources with `gpgcheck`
   on; see `examples/recipes/` in the Sinter repository.
 - A package that creates its own account (for example `postgres`): declare
-  the `group`/`user` before the package so plan can defer to it.
+  the `group`/`user`, with the attributes the package would give it, before
+  the package so plan can defer to it.

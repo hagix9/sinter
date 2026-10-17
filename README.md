@@ -219,7 +219,8 @@ YAML and TOML are frontends for one common semantic IR. Equivalent recipes in
 either format produce equivalent typed values, resource identities, ordering,
 desired state, ChangeSets, and execution behavior.
 
-Top-level fields: `version`, `vars`, `include`, `resources`, `handlers`.
+Top-level fields: `version`, `vars`, `include`, `resources`, `handlers`,
+`targets` and `backup` (v1.1.0), and `env`.
 
 Resource types: `file`, `directory`, `template`, `link`, `command`,
 `package`, `service`. Handlers are delayed `restart`/`reload` service actions.

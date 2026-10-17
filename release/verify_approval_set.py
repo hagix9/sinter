@@ -34,10 +34,13 @@ or inconsistent part makes the set invalid.
      bytes, and the collector is release/acceptance-harness/collect-evidence.py
   K  every bundle log's end line equals the manifest counts; (--gate-log) the
      bundle gate log equals the recorded step-4 log
-  I  (--evidence) the collector reproduces the last run's output, summary and
-     verdict; RC sanitize.py reproduces every bundle log from the recorded raw
+  I  (--evidence) INDEX.tsv lists exactly the recorded runs, one per label,
+     and every run a tally saw is still recorded; the RC collector (run only
+     when it equals the recorded one, with a minimal environment) reproduces
+     the last run's output, summary and verdict; RC sanitize.py reproduces every bundle log from the recorded raw
      log (it needs SINTER_PROJECT, SINTER_ZONE and SINTER_SPECS of the run in
-     the environment); exactly one recorded run per label; every run carries
+     the environment, plus SINTER_SANITIZE_PATTERNS if the run used one);
+     exactly one recorded run per label; every run carries
      the runtime record
   M  (--evidence) every manifest target field equals the recorded value
   R  (--artifact) the tarball has the recorded name, size and SHA-256
@@ -72,6 +75,11 @@ HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 VERSION = re.compile(r"^\d+\.\d+\.\d+$")
 RUN_ID = re.compile(r"^\d{2}$")
+HARNESS_DIR = "release/acceptance-harness/"
+# Post-acceptance tools and helpers that do not run in steps 7-9: the only
+# runtime-record files that may be absent from the bundle.
+MAY_BE_NOT_INCLUDED = {"collect-evidence.py", "finalize-verdict.sh", "derive-expected-checks.sh"}
+SAFE_MEMBER = re.compile(r"^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$")
 
 
 class Fail(Exception):
@@ -179,6 +187,10 @@ def verify(a):
     ver = meta.get("version")
     if not isinstance(ver, str) or not VERSION.match(ver):
         raise Fail("C: META version is not X.Y.Z")
+    # rc_commit and rc_tree reach git command lines below: refuse anything
+    # but full ids before they are used anywhere.
+    if not HEX40.match(str(meta.get("rc_commit", ""))) or not HEX40.match(str(meta.get("rc_tree", ""))):
+        raise Fail("C: META rc_commit / rc_tree are not full 40-hex ids")
     assets = [f"sinter-v{ver}-acceptance-manifest.json", f"sinter-v{ver}-acceptance-evidence.tar.gz",
               f"sinter-v{ver}-acceptance-SHA256SUMS"]
     v.ok(meta.get("acceptance_assets") == assets, "B acceptance assets are the three named after the version",
@@ -205,8 +217,6 @@ def verify(a):
     man = json.loads(man_raw)
     c = man["candidate"]
     # ---- C: META vs manifest --------------------------------------------------
-    v.ok(HEX40.match(str(meta.get("rc_commit", ""))) and HEX40.match(str(meta.get("rc_tree", ""))),
-         "C rc_commit and rc_tree are full 40-hex ids")
     v.ok(meta.get("tag") == "v" + ver, "C tag == v<version>")
     for k, mv in (("version", c.get("version")), ("tag", c.get("tag")), ("rc_commit", c.get("source_commit")),
                   ("artifact", c.get("artifact")), ("executable_sha256", c.get("executable_sha256"))):
@@ -228,6 +238,8 @@ def verify(a):
     with tarfile.open(fileobj=io.BytesIO(bun_raw), mode="r:gz") as tf:
         ms = tf.getmembers()
         for m in ms:
+            if not SAFE_MEMBER.match(m.name) or any(x in (".", "..") for x in m.name.split("/")):
+                raise Fail(f"T: member name is not a normalized relative path: {m.name!r}")
             if m.isreg():
                 if not m.name.startswith(stem + "/"):
                     raise Fail(f"T: member outside the top-level directory: {m.name}")
@@ -247,6 +259,10 @@ def verify(a):
         raise Fail("E: harness/PROVENANCE.json missing from the bundle")
     prov = json.loads(prov_raw)
     hf = {x["path"]: x["sha256"] for x in man["harness"]["files"]}
+    if len(hf) != len(man["harness"]["files"]):
+        raise Fail("E: manifest harness.files lists a path twice")
+    v.ok(sorted(t.get("label") for t in man.get("targets", [])) == sorted(LABELS),
+         "C manifest has exactly the eight target labels")
     v.ok(prov.get("schema") == "sinter-harness-provenance/1", "E PROVENANCE schema")
     v.ok(hf.get("harness/PROVENANCE.json") == H(prov_raw), "E PROVENANCE listed in harness.files with its hash")
     v.ok(prov.get("source_commit") == c.get("source_commit"), "E PROVENANCE.source_commit == candidate")
@@ -260,10 +276,15 @@ def verify(a):
     v.ok(prov.get("runtime_record", {}).get("sha256") == H(runtime_raw) == col.get("runtime_record_sha256"),
          "E runtime record digest (PROVENANCE == record == META)")
     names = []
+    v.ok(not prov.get("acceptance_time_tools"), "E no acceptance-time tools outside the repository harness",
+         "a v1.5.1 set runs only release/acceptance-harness")
     for e in prov.get("files", []):
         n = e.get("name")
         names.append(n)
         v.ok(e.get("runtime_sha256") == runtime.get(n), f"E {n}: runtime_sha256 == runtime record")
+        v.ok(isinstance(n, str) and e.get("source_path") == HARNESS_DIR + n, f"E {n}: source_path is {HARNESS_DIR}{n}")
+        if e.get("bundle_form") == "not-included":
+            v.ok(n in MAY_BE_NOT_INCLUDED, f"E {n}: may be left out of the bundle", "it runs in steps 7-9")
         form, bp = e.get("bundle_form"), e.get("bundle_path")
         if form == "verbatim":
             v.ok(isinstance(bp, str) and bp.startswith("harness/") and bp in bundle
@@ -311,9 +332,11 @@ def verify(a):
             continue
         v.ok(verdict == "PENDING_OWNER_APPROVAL" and cr(f"runs/{rid}/VERDICT.txt").decode("utf-8").strip() == verdict,
              f"G run {rid} (last): PENDING_OWNER_APPROVAL in collect.txt, summary.txt and VERDICT.txt", repr(verdict))
-        v.ok("problems: none" in out_t.splitlines(), f"G run {rid} (last): no problems")
+        plines = [ln for ln in out_t.splitlines() if ln.startswith("problems:")]
+        v.ok(plines == ["problems: none"] and not any(ln.startswith("  - ") for ln in out_t.splitlines()),
+             f"G run {rid} (last): no problems")
         rows = [ln.split("\t") for ln in out_t.splitlines()
-                if re.match(r"^[a-z0-9]+\t\S+\tPASS\tPASS\tyes\tyes\t== acceptance end ", ln)]
+                if re.match(r"^[a-z0-9]+\t\S+\tPASS\tPASS\tyes\tyes\t== acceptance end \S+ passed=\d+ failed=0 skipped=0$", ln)]
         v.ok(sorted(x[0] for x in rows) == sorted(LABELS), f"G run {rid} (last): one PASS row per label",
              str(sorted(x[0] for x in rows)))
         dig = {last(out_t, "evidence_digest: "), last(sum_t, "evidence_digest: "),
@@ -349,7 +372,10 @@ def verify(a):
         v.ok(orig is not None and orig == col_bytes, "H collector == release/acceptance-harness/collect-evidence.py at rc_commit")
     # ---- I / M: recorded evidence -------------------------------------------------
     if a.evidence:
-        reproduce(v, a, root, meta, col)
+        index_matches_runs(v, a.evidence, [cr(f"runs/{r['id']}/collect.txt").decode("utf-8") for r in col["runs"]])
+        rc_col = git(a.rc_repo, "show", f"{meta['rc_commit']}:{HARNESS_DIR}collect-evidence.py")
+        if v.ok(rc_col is not None and rc_col == col_bytes, "I the collector to run is the RC collector"):
+            reproduce(v, a, root, meta, col, rc_col)
         resanitize(v, a, meta, bundle, runtime_raw)
         record_fields(v, a.evidence, man)
     # ---- R: artifact ----------------------------------------------------------------
@@ -365,14 +391,51 @@ def verify(a):
         p = subprocess.run([sys.executable, "-I", a.checker, os.path.join(root, "acceptance", man_name),
                             "--bundle-archive", os.path.join(root, "acceptance", bun_name),
                             "--artifact", a.artifact, "--sums", os.path.join(root, "acceptance", sums_name),
-                            "--repo", a.rc_repo or "."], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            "--repo", a.rc_repo], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         v.ok(p.returncode == 0 and b"(verdict GO)" in p.stdout, "J official checker full mode",
              f"exit={p.returncode} {p.stderr.decode(errors='replace').strip()[:400]}")
     return v, digest
 
 
-def reproduce(v, a, root, meta, col):
-    """I: the recorded collector reproduces the last run byte for byte."""
+def minimal_env(**extra):
+    """Only what the tools need: no inherited credentials or tool settings."""
+    env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL", "TZ") if k in os.environ}
+    env.update(extra)
+    return env
+
+
+def index_matches_runs(v, ev, tallies):
+    """I: the append-only INDEX.tsv lists exactly the recorded runs, one per
+    label, and every run any tally saw is still recorded (a failed run cannot
+    be deleted and re-run unnoticed)."""
+    runs = os.path.join(ev, "runs")
+    rows = []
+    with open(os.path.join(ev, "INDEX.tsv"), encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                rows.append(line.rstrip("\n").split("\t"))
+    recorded = {}
+    for d in sorted(os.listdir(runs)):
+        rj = json.loads(rd(os.path.join(runs, d), "run.json"))
+        recorded[d] = (rj.get("label"), rj.get("verdict"), rj.get("raw_log_sha256"))
+    v.ok(all(len(r) == 6 for r in rows), "I INDEX.tsv rows are well-formed")
+    v.ok(sorted(r[1] for r in rows if len(r) == 6) == sorted(recorded)
+         and all(recorded.get(r[1]) == (r[2], r[3], r[5]) for r in rows if len(r) == 6),
+         "I INDEX.tsv lists exactly the recorded runs (id, label, verdict, raw SHA-256)")
+    labels = [r[2] for r in rows if len(r) == 6]
+    v.ok(sorted(labels) == sorted(LABELS), "I INDEX.tsv: one run per target label (no failed run removed)", str(labels))
+    seen = set()
+    for t in tallies:
+        for ln in t.splitlines():
+            f = ln.split("\t")
+            if len(f) == 7 and f[0] in LABELS:
+                seen.add(f[1])
+    v.ok(seen <= set(recorded), "I every run an earlier or last tally saw is still recorded",
+         f"missing={sorted(seen - set(recorded))}")
+
+
+def reproduce(v, a, root, meta, col, collector):
+    """I: the RC collector reproduces the last run byte for byte."""
     rc = meta["rc_commit"]
     last_id = col["runs"][-1]["id"]
     with tempfile.TemporaryDirectory(prefix="approval-set-repro-") as t:
@@ -384,15 +447,15 @@ def reproduce(v, a, root, meta, col):
                 return
             with open(os.path.join(hd, n), "wb") as f:
                 f.write(g)
-        shutil.copyfile(os.path.join(root, CR + "collect-evidence.py"), os.path.join(hd, "collect-evidence.py"))
+        with open(os.path.join(hd, "collect-evidence.py"), "wb") as f:
+            f.write(collector)
         ev = os.path.join(t, "evidence")
         shutil.copytree(a.evidence, ev, symlinks=True)
         for n in ("summary.txt", "VERDICT.txt"):
             if os.path.exists(os.path.join(ev, n)):
                 os.remove(os.path.join(ev, n))
-        env = {k: x for k, x in os.environ.items() if not k.startswith("SINTER_")}
-        env.update(SINTER_RC_COMMIT=rc, SINTER_EXP_ART=meta["artifact"]["sha256"],
-                   SINTER_EXP_VER="sinter " + meta["version"])
+        env = minimal_env(SINTER_RC_COMMIT=rc, SINTER_EXP_ART=meta["artifact"]["sha256"],
+                          SINTER_EXP_VER="sinter " + meta["version"])
         p = subprocess.run([sys.executable, "-I", os.path.join(hd, "collect-evidence.py"), ev, "--write-verdict"],
                            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         v.ok(p.returncode == 0 and p.stdout == rd(root, CR + f"runs/{last_id}/collect.txt"),
@@ -416,12 +479,16 @@ def resanitize(v, a, meta, bundle, runtime_raw):
         sp = os.path.join(t, "sanitize.py")
         with open(sp, "wb") as f:
             f.write(g)
+        env = minimal_env(**{k: os.environ[k] for k in ("SINTER_PROJECT", "SINTER_ZONE", "SINTER_SPECS",
+                                                         "SINTER_SANITIZE_PATTERNS") if k in os.environ})
         for d in sorted(os.listdir(runs)):
             label = json.loads(rd(os.path.join(runs, d), "run.json")).get("label")
+            if not v.ok(label in LABELS, f"I run {d}: label is a target label", repr(label)):
+                continue
             seen[label] = seen.get(label, 0) + 1
             out = os.path.join(t, f"{label}.log")
-            p = subprocess.run([sys.executable, "-I", sp, str(label), os.path.join(runs, d, "raw.log"), out],
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            p = subprocess.run([sys.executable, "-I", sp, label, os.path.join(runs, d, "raw.log"), out],
+                               env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             v.ok(p.returncode == 0 and os.path.exists(out) and bundle.get(f"logs/{label}.log") == rd(t, f"{label}.log"),
                  f"I {label}: bundle log == RC sanitize.py applied to the recorded raw log",
                  p.stderr.decode(errors="replace").strip()[:200])
@@ -498,8 +565,8 @@ def main(argv):
     if a.expect_version is not None and not VERSION.match(a.expect_version):
         print("usage: --expect-version must be X.Y.Z", file=sys.stderr)
         return 2
-    if (a.evidence and not a.rc_repo) or (a.checker and not a.artifact):
-        print("usage: --evidence needs --rc-repo; --checker needs --artifact", file=sys.stderr)
+    if (a.evidence and not a.rc_repo) or (a.checker and not (a.artifact and a.rc_repo)):
+        print("usage: --evidence needs --rc-repo; --checker needs --artifact and --rc-repo", file=sys.stderr)
         return 2
     if not os.path.isdir(a.set):
         print(f"usage: {a.set} is not a directory", file=sys.stderr)

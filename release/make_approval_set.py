@@ -24,7 +24,14 @@ verifies with `shasum -a 256 -c`. APPROVAL_SET_DIGEST is the SHA-256 of that
 file. Nothing here approves anything: release/verify_approval_set.py checks
 the set and reports PENDING_OWNER_APPROVAL until the Owner names the digest.
 
+The bundle's harness/PROVENANCE.json must name the collector record before
+the set exists (ACCEPTANCE_EVIDENCE.md, post_acceptance_collector);
+--collector-fragment prints that object, computed exactly as the set will
+record it, without writing anything.
+
 Usage:
+  make_approval_set.py --collector-fragment --evidence DIR \
+      --collector FILE --collector-run DIR [--collector-run DIR ...]
   make_approval_set.py <out-dir> --acceptance DIR --evidence DIR \
       --collector FILE --collector-run DIR [--collector-run DIR ...] --rc-tree TREE
 """
@@ -35,6 +42,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 
 LIST = "APPROVAL-SET.sha256"
 META = "APPROVAL-SET-META.json"
@@ -77,56 +85,30 @@ def die(msg):
     sys.exit(1)
 
 
-def main(argv):
-    ap = argparse.ArgumentParser(description="Assemble a sinter-approval-set/2 directory.")
-    ap.add_argument("out")
-    ap.add_argument("--acceptance", required=True, help="directory with the three acceptance assets")
-    ap.add_argument("--evidence", required=True, help="the acceptance OUT directory (runs/<id>/...)")
-    ap.add_argument("--collector", required=True, help="collect-evidence.py that produced the runs")
-    ap.add_argument("--collector-run", action="append", required=True,
-                    help="directory with collect.txt and summary.txt of one collector run (in order)")
-    ap.add_argument("--rc-tree", required=True)
-    a = ap.parse_args(argv)
-    if os.path.exists(a.out):
-        die(f"refusing to overwrite {a.out}")
-    if not re.fullmatch(r"[0-9a-f]{40}", a.rc_tree):
-        die("--rc-tree must be a 40-hex tree id")
-    mans = [n for n in os.listdir(a.acceptance) if re.fullmatch(r"sinter-v\d+\.\d+\.\d+-acceptance-manifest\.json", n)]
-    if len(mans) != 1:
-        die("the acceptance directory must hold exactly one acceptance manifest")
-    with open(os.path.join(a.acceptance, mans[0]), encoding="utf-8") as f:
-        c = json.load(f)["candidate"]
-    v = c["version"]
-    assets = [f"sinter-v{v}-acceptance-manifest.json", f"sinter-v{v}-acceptance-evidence.tar.gz",
-              f"sinter-v{v}-acceptance-SHA256SUMS"]
-    for n in assets:
-        if not os.path.isfile(os.path.join(a.acceptance, n)):
-            die(f"missing acceptance asset {n}")
-    # Every run must carry the same runtime record.
-    runs = os.path.join(a.evidence, "runs")
+def runtime_record(evidence):
+    """The runtime record every run carried (all runs must carry the same)."""
+    runs = os.path.join(evidence, "runs")
     records = {}
     for rid in sorted(os.listdir(runs)):
-        p = os.path.join(runs, rid, "scripts", "SHA256SUMS")
-        with open(p, "rb") as f:
+        with open(os.path.join(runs, rid, "scripts", "SHA256SUMS"), "rb") as f:
             records[rid] = f.read()
     if not records or len(set(records.values())) != 1:
         die("the runs do not carry one common runtime record")
-    finals = a.collector_run
+    return next(iter(records.values()))
+
+
+def build_record(cr, collector, record, finals):
+    """Write collector-record/ into cr; return (run_meta, evidence_digest)."""
     for d in finals:
         for n in ("collect.txt", "summary.txt"):
             if not os.path.isfile(os.path.join(d, n)):
                 die(f"{d}: missing {n}")
     if not os.path.isfile(os.path.join(finals[-1], "VERDICT.txt")):
         die("the last collector run must include VERDICT.txt")
-
-    cr = os.path.join(a.out, "collector-record")
-    os.makedirs(os.path.join(a.out, "acceptance"))
     os.makedirs(cr)
-    for n in assets:
-        shutil.copyfile(os.path.join(a.acceptance, n), os.path.join(a.out, "acceptance", n))
-    shutil.copyfile(a.collector, os.path.join(cr, "collect-evidence.py"))
+    shutil.copyfile(collector, os.path.join(cr, "collect-evidence.py"))
     with open(os.path.join(cr, "runtime-scripts-SHA256SUMS"), "wb") as f:
-        f.write(next(iter(records.values())))
+        f.write(record)
     run_meta = []
     for i, d in enumerate(finals, 1):
         rid = f"{i:02d}"
@@ -139,7 +121,59 @@ def main(argv):
     rec = [n for n in members(cr) if n != "SHA256SUMS"]
     with open(os.path.join(cr, "SHA256SUMS"), "wb") as f:
         f.write(canonical(cr, rec))
-    final_collect = os.path.join(cr, "runs", run_meta[-1]["id"], "collect.txt")
+    digest = last(os.path.join(cr, "runs", run_meta[-1]["id"], "collect.txt"), "evidence_digest: ")
+    return run_meta, digest
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(description="Assemble a sinter-approval-set/2 directory.")
+    ap.add_argument("out", nargs="?")
+    ap.add_argument("--collector-fragment", action="store_true",
+                    help="print the post_acceptance_collector object for harness/PROVENANCE.json and exit")
+    ap.add_argument("--acceptance", help="directory with the three acceptance assets")
+    ap.add_argument("--evidence", required=True, help="the acceptance OUT directory (runs/<id>/...)")
+    ap.add_argument("--collector", required=True, help="collect-evidence.py that produced the runs")
+    ap.add_argument("--collector-run", action="append", required=True,
+                    help="directory with collect.txt and summary.txt of one collector run (in order)")
+    ap.add_argument("--rc-tree")
+    a = ap.parse_args(argv)
+    if a.out and os.path.exists(a.out):
+        die(f"refusing to overwrite {a.out}")
+    record = runtime_record(a.evidence)
+    if a.collector_fragment:
+        with tempfile.TemporaryDirectory(prefix="approval-record-") as t:
+            cr = os.path.join(t, "collector-record")
+            run_meta, digest = build_record(cr, a.collector, record, a.collector_run)
+            frag = {"sha256": sha(os.path.join(cr, "collect-evidence.py")),
+                    "results": [{"run": r["id"], "result": r["verdict"]} for r in run_meta],
+                    "evidence_digest": digest,
+                    "collector_record_sha256sums_sha256": sha(os.path.join(cr, "SHA256SUMS"))}
+        print(json.dumps(frag, indent=2, sort_keys=True))
+        return 0
+    if not a.out or not a.acceptance or not a.rc_tree:
+        die("<out-dir>, --acceptance and --rc-tree are required to assemble a set")
+    if os.path.exists(a.out):
+        die(f"refusing to overwrite {a.out}")
+    if not re.fullmatch(r"[0-9a-f]{40}", a.rc_tree):
+        die("--rc-tree must be a 40-hex tree id")
+    mans = [n for n in os.listdir(a.acceptance) if re.fullmatch(r"sinter-v\d+\.\d+\.\d+-acceptance-manifest\.json", n)]
+    if len(mans) != 1:
+        die("the acceptance directory must hold exactly one acceptance manifest")
+    with open(os.path.join(a.acceptance, mans[0]), encoding="utf-8") as f:
+        c = json.load(f)["candidate"]
+    v = c["version"]
+    if mans[0] != f"sinter-v{v}-acceptance-manifest.json":
+        die("the manifest file name and candidate.version disagree")
+    assets = [f"sinter-v{v}-acceptance-manifest.json", f"sinter-v{v}-acceptance-evidence.tar.gz",
+              f"sinter-v{v}-acceptance-SHA256SUMS"]
+    for n in assets:
+        if not os.path.isfile(os.path.join(a.acceptance, n)):
+            die(f"missing acceptance asset {n}")
+    os.makedirs(os.path.join(a.out, "acceptance"))
+    for n in assets:
+        shutil.copyfile(os.path.join(a.acceptance, n), os.path.join(a.out, "acceptance", n))
+    cr = os.path.join(a.out, "collector-record")
+    run_meta, digest = build_record(cr, a.collector, record, a.collector_run)
     meta = {
         "schema": SCHEMA,
         "version": v, "tag": c["tag"],
@@ -151,7 +185,7 @@ def main(argv):
             "runtime_record_sha256": sha(os.path.join(cr, "runtime-scripts-SHA256SUMS")),
             "record_sha256sums_sha256": sha(os.path.join(cr, "SHA256SUMS")),
             "runs": run_meta,
-            "evidence_digest": last(final_collect, "evidence_digest: "),
+            "evidence_digest": digest,
         },
     }
     with open(os.path.join(a.out, META), "w", encoding="utf-8", newline="\n") as f:

@@ -86,7 +86,7 @@ apply confirmation.
   you saw its result. Keep observations and your inferences separate.
 - Exit 6 (indeterminate) means the target state is unknown: do not report it
   as success or failure, and do not retry apply blindly; observe again first.
-- A package refusal (no such package, a provides-only name, a missing
-  dependency, `GPG check FAILED`, an unreachable repository) is reported
-  before any change. Fix the recipe (for example the real package name Sinter
+- On dnf targets, a package refusal (no such package, a provides-only name,
+  a missing dependency, `GPG check FAILED`, an unreachable repository) is
+  reported before any change. Fix the recipe (for example the real package name Sinter
   names) instead of retrying.
