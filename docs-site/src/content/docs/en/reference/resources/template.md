@@ -36,7 +36,7 @@ hostname = {{ facts.hostname }}
 | `owner` | no | string | — | Owner name. |
 | `group` | no | string | — | Group name. |
 | `mode` | no | string | — | Quoted four-digit octal. |
-| `validate` | no | map | — | Command run against the staged file before publication (`program`, `args`, `timeout_seconds`). (`{{ staged }}` places the staged path inside an argument; v1.5.1, not yet released) |
+| `validate` | no | map | — | Command run against the staged file before publication (`program`, `args`, `timeout_seconds`). (`{{ staged }}` places the staged path inside an argument; since v1.5.1) |
 
 ## Expected behavior
 

@@ -3,10 +3,12 @@ title: Resources
 description: The resource model — common fields, ordering, dependencies, notifications.
 ---
 
-Resources are the unit of desired state. v1.5.0 implements nine types:
+Resources are the unit of desired state. v1.5.1 implements ten types:
 `file`, `directory`, `link`, `template`, `command`, `package`, `service`,
-and, for local Linux accounts, [`group`](/en/reference/resources/group/) and
-[`user`](/en/reference/resources/user/).
+for local Linux accounts [`group`](/en/reference/resources/group/) and
+[`user`](/en/reference/resources/user/), and
+[`postgresql_role`](/en/reference/resources/postgresql_role/) for a local
+PostgreSQL server.
 
 ## Common fields
 

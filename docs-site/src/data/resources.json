@@ -1,5 +1,5 @@
 {
-  "version": "1.5.0",
+  "version": "1.5.1",
   "resourceTypes": [
     {
       "type": "file",
@@ -138,7 +138,7 @@
     },
     {
       "type": "postgresql_role",
-      "summary": "UNRELEASED (v1.5.1): manage one role of a local PostgreSQL server: existence, declared attributes, and a SCRAM-SHA-256 verifier from an encrypted secret.",
+      "summary": "Manage one role of a local PostgreSQL server: existence, declared attributes, and a SCRAM-SHA-256 verifier from an encrypted secret.",
       "docPath": "reference/resources/postgresql_role",
       "parameters": [
         { "name": "name", "required": true, "type": "string", "default": null, "description": "Role name ([a-z_][a-z0-9_]*, at most 63 bytes, not pg_*)." },

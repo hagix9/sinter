@@ -6,8 +6,8 @@ description: Manage one role of a local PostgreSQL server, with a SCRAM-SHA-256 
 **Purpose:** declare one **role** of a PostgreSQL server running on the
 target: present or absent, the attributes you name, and optionally its
 password as a **SCRAM-SHA-256 verifier** kept in an encrypted secret. It is
-planned, applied and audited like any other resource. New in v1.5.1, which
-is not yet released; v1.5.0 rejects this resource type.
+planned, applied and audited like any other resource. New in v1.5.1;
+earlier versions reject this resource type.
 
 ## Synopsis
 

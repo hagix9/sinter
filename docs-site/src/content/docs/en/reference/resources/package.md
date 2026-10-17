@@ -51,6 +51,12 @@ not configure a persistent host-wide environment.
 - On dnf targets, installs run through a private cache snapshot — see
   [Execution Model](/en/concepts/execution-model/) and the
   [Rocky guide](/en/guides/rocky-linux/).
+- On apt targets Sinter never runs `apt-get update`: the package lists must
+  already be present. On a fresh image without them an install fails
+  (`E: Unable to locate package`, reported as a possible change because apt's
+  output is not trusted); refresh the lists first, for example with a
+  `command` resource that runs `/usr/bin/apt-get update` (with
+  `changed_when: "false"`) declared before the package.
 - Broken package states (half-configured etc.) fail rather than auto-repair.
 
 ## Idempotency

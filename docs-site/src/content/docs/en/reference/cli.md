@@ -19,7 +19,7 @@ See [Core MCP](/en/reference/mcp/) for the `mcp` subcommand and `--targets-file`
 and [sinter secrets](/en/reference/secrets/) for the `secrets`
 subcommand.
 
-`sinter --version` prints the version (e.g. `sinter 1.5.0`).
+`sinter --version` prints the version (e.g. `sinter 1.5.1`).
 
 ## validate
 
@@ -100,7 +100,7 @@ Two interactions with the commands above:
   file, or a repository `identity.age`.
 - A `user` resource with `password_hash` needs root: a root login, or `--sudo`
   (`/etc/shadow` is readable only by root). The same holds for
-  `postgresql_role` (v1.5.1, not yet released), whose `psql` runs as the
+  `postgresql_role` (since v1.5.1), whose `psql` runs as the
   cluster owner through `setpriv`.
 
 ## Target options
@@ -667,7 +667,7 @@ the whole 1.x series. `sinter mcp` is governed by the
 | `resources` | integer | Number of resources in the recipe. |
 | `handlers` | integer | Number of handlers. |
 | `vars` | integer | Number of vars. |
-| `warnings` | array of strings | Present only when non-empty (v1.5.1, not yet released): non-fatal findings such as `{{ … }}` in `template.vars`. In a bundle document each recipe entry carries its own `warnings`. |
+| `warnings` | array of strings | Present only when non-empty (since v1.5.1): non-fatal findings such as `{{ … }}` in `template.vars`. In a bundle document each recipe entry carries its own `warnings`. |
 
 ### plan and apply
 

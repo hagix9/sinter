@@ -1,10 +1,9 @@
 ---
 title: Recipe Overview
-description: Recipe examples built from functionality supported by Sinter v1.5.0.
+description: Recipe examples built from functionality supported by Sinter v1.5.1.
 ---
 
-All examples below use only resource types and fields implemented in v1.5.0
-(the last section lists recipes for the development version v1.5.1).
+All examples below use only resource types and fields implemented in v1.5.1.
 The resource types are platform-neutral: Sinter picks `apt` or `dnf` from the
 target. Package and service names are not always the same on Ubuntu and
 RHEL-family targets (for example `apache2` / `httpd`); select such resources
@@ -178,7 +177,7 @@ See the [Recipe Format reference](/en/reference/recipe-format/) and the
 Complete recipes for Rocky Linux / RHEL 8, 9 and 10 live in
 `examples/recipes/` of the repository; each file explains itself. They use
 `facts.os.version_major` to branch per release and were measured on Rocky Linux
-8.10, 9.8 and 10.2 during v1.5.1 development.
+8.10, 9.8 and 10.2 for v1.5.1.
 
 | File | What it sets up |
 |------|-----------------|
@@ -192,5 +191,5 @@ Complete recipes for Rocky Linux / RHEL 8, 9 and 10 live in
 :::note[Official recipe collections]
 Curated recipe collections (for example a `linux-baseline` set) are a future
 product improvement and do not exist yet — this page documents only what
-v1.5.0 implements.
+v1.5.1 implements.
 :::

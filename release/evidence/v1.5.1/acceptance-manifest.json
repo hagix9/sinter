@@ -1,0 +1,363 @@
+{
+  "schema": "sinter-acceptance-manifest/1",
+  "candidate": {
+    "version": "1.5.1",
+    "tag": "v1.5.1",
+    "source_commit": "a756cf383942422a7fc0ac066059324192e942aa",
+    "artifact": {
+      "filename": "sinter-v1.5.1-linux-x86_64.tar.gz",
+      "sha256": "6436cdb2f1a2e2705155d5b976e7b5629d12392232c9afbadcf66aa9e54773a9",
+      "size_bytes": 2444327
+    },
+    "executable_sha256": "13135761afd8b2baf75456bed5f128fe4007a9753b1ad7b9bf50ebe504db8f99",
+    "build": {
+      "baseline": "Rocky Linux 9.8 (Blue Onyx) x86_64",
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+      "max_glibc": "GLIBC_2.34"
+    }
+  },
+  "harness": {
+    "name": "sinter v1.5.1 acceptance harness (release/acceptance-harness at source_commit)",
+    "version": "a756cf383942422a7fc0ac066059324192e942aa runtime-record 66a53a694933f3e236c6181ab345a61e3f458d8e3905b990e2ae8e7d8d6cbf33",
+    "files": [
+      {
+        "path": "harness/PROVENANCE.json",
+        "sha256": "da80eac41af3f15b0854d72b6090db4cc06e8d42eb029590ceac7544aca9d41c"
+      },
+      {
+        "path": "harness/acceptance-target.sh",
+        "sha256": "91b4246b89e3402bbcbd79b97d71d1ac9d3e745f08fbe30b7a5fe8a924040af9"
+      },
+      {
+        "path": "harness/expected-check-ids.txt",
+        "sha256": "ca1a80c58617b3921b86e4cf093e78b95bf32deef9a2c36d580c75ba75b54700"
+      },
+      {
+        "path": "harness/raw-verdict.py",
+        "sha256": "5ab00bb2af9ab7393b51979689bc5751895a4894999962491a5e52105c892594"
+      },
+      {
+        "path": "harness/remote-cleanup.sh",
+        "sha256": "0bb9660703959a3edf91430f52355225578b0355376f75dd05fd9efaef989255"
+      },
+      {
+        "path": "harness/run-acceptance-wrapper.sh",
+        "sha256": "bda57caab472cafb22fd1fb1896619fc842dd2ff3a0281d7df84f1f3c4b4b6db"
+      },
+      {
+        "path": "harness/run-all.sh",
+        "sha256": "e38c9f858002bbfe46329fd0325d59a7ad4b42983874448d7294fc7c5cc82caf"
+      },
+      {
+        "path": "harness/run-target.sh",
+        "sha256": "a5a9bfe603eb2e721383c73e20e25ba701309aaa654b358f38651233653ca0c4"
+      },
+      {
+        "path": "harness/sanitize.py",
+        "sha256": "57f232805611f1772c2f9cd0d4b47d1649b623c950d02f104801a3649e66a446"
+      },
+      {
+        "path": "harness/target-prep.sh",
+        "sha256": "5393f5b357b7b83807b41a1512b63fe4926784478b8c0001d3ee264457dc21cd"
+      }
+    ],
+    "runner": "run-all.sh <out> with SINTER_SPECS listing the 8 targets: for each, run-target.sh <vm> <target-label> (local artifact hash gate, boot image provenance, upload and on-target hash check, target-prep.sh, run-acceptance-wrapper.sh -> acceptance-target.sh <target-label>, server-side raw-log hash, fetch, raw-verdict.py with expected-check-ids.txt, remote-cleanup.sh); fail-fast, no retry. sanitize.py <target-label> <raw> <log> writes logs/<target-label>.log. Executed files and their runtime SHA-256: harness/PROVENANCE.json",
+    "operator": "release maintainer (agent-operated)"
+  },
+  "run": {
+    "started_at": "2026-10-17T05:44:17Z",
+    "finished_at": "2026-10-17T06:07:27Z"
+  },
+  "linux_validation": {
+    "os_name": "Ubuntu",
+    "os_version": "24.04",
+    "arch": "x86_64",
+    "source_commit": "a756cf383942422a7fc0ac066059324192e942aa",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "started_at": "2026-10-17T05:18:10Z",
+    "finished_at": "2026-10-17T05:33:10Z",
+    "linux_only_suites": [
+      "tests/cli.rs",
+      "tests/commands.rs",
+      "tests/engine.rs",
+      "tests/file_safety.rs",
+      "tests/fs2_script_real.rs",
+      "tests/handlers.rs",
+      "tests/multihost_lab.rs",
+      "tests/package_service.rs",
+      "tests/remediation.rs",
+      "tests/truthfulness.rs"
+    ],
+    "steps": [
+      {
+        "name": "root-fmt",
+        "command": "cargo fmt --check",
+        "result": "PASS",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "name": "root-clippy",
+        "command": "cargo clippy --locked --all-targets --all-features -- -D warnings",
+        "result": "PASS",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "name": "root-test",
+        "command": "env SINTER_TEST_STRICT=1 SINTER_TEST_LOCAL_SSHD=1 cargo test --locked --all-targets --all-features",
+        "result": "PASS",
+        "passed": 1932,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "name": "installer-test",
+        "command": "python3 tests/installer/test_install.py",
+        "result": "PASS",
+        "passed": 18,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "name": "checker-test",
+        "command": "python3 -m unittest discover -s release/tests",
+        "result": "PASS",
+        "passed": 149,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "name": "gateway-fmt",
+        "command": "cargo fmt --manifest-path gateway/Cargo.toml --check",
+        "result": "PASS",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "name": "gateway-clippy",
+        "command": "cargo clippy --manifest-path gateway/Cargo.toml --locked --all-targets --all-features -- -D warnings",
+        "result": "PASS",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "name": "gateway-test",
+        "command": "cargo test --manifest-path gateway/Cargo.toml --locked --all-targets --all-features",
+        "result": "PASS",
+        "passed": 198,
+        "failed": 0,
+        "ignored": 0
+      }
+    ],
+    "verdict": "PASS",
+    "log": {
+      "path": "validation/linux-gate.log",
+      "sha256": "ce10b46158c9d07c4d7d6d7f8f6baf75832cb5de876e3c3871fb61ce4ae8b875"
+    }
+  },
+  "targets": [
+    {
+      "label": "ubuntu2404",
+      "os_name": "Ubuntu",
+      "os_version": "24.04",
+      "arch": "x86_64",
+      "image": "ubuntu-2404-noble-amd64-v20261016",
+      "started_at": "2026-10-17T05:45:29Z",
+      "finished_at": "2026-10-17T05:46:24Z",
+      "artifact_sha256": "6436cdb2f1a2e2705155d5b976e7b5629d12392232c9afbadcf66aa9e54773a9",
+      "executable_sha256": "13135761afd8b2baf75456bed5f128fe4007a9753b1ad7b9bf50ebe504db8f99",
+      "version_output": "sinter 1.5.1",
+      "checks": {
+        "total": 33,
+        "passed": 33,
+        "failed": 0,
+        "skipped": 0
+      },
+      "verdict": "PASS",
+      "log": {
+        "path": "logs/ubuntu2404.log",
+        "sha256": "df625a118bca9addbf71e148571cfb60d810995372e122a35082b39c20a9a173"
+      }
+    },
+    {
+      "label": "ubuntu2604",
+      "os_name": "Ubuntu",
+      "os_version": "26.04",
+      "arch": "x86_64",
+      "image": "ubuntu-2604-resolute-amd64-v20261016",
+      "started_at": "2026-10-17T05:47:38Z",
+      "finished_at": "2026-10-17T05:48:32Z",
+      "artifact_sha256": "6436cdb2f1a2e2705155d5b976e7b5629d12392232c9afbadcf66aa9e54773a9",
+      "executable_sha256": "13135761afd8b2baf75456bed5f128fe4007a9753b1ad7b9bf50ebe504db8f99",
+      "version_output": "sinter 1.5.1",
+      "checks": {
+        "total": 33,
+        "passed": 33,
+        "failed": 0,
+        "skipped": 0
+      },
+      "verdict": "PASS",
+      "log": {
+        "path": "logs/ubuntu2604.log",
+        "sha256": "32e15d60e09c693a36d2bfabfb18b3e0a315ed6c771a1ee4fc90fb15cafa62d2"
+      }
+    },
+    {
+      "label": "rocky9",
+      "os_name": "Rocky Linux",
+      "os_version": "9.8",
+      "arch": "x86_64",
+      "image": "rocky-linux-9-v20261015",
+      "started_at": "2026-10-17T05:49:22Z",
+      "finished_at": "2026-10-17T05:51:08Z",
+      "artifact_sha256": "6436cdb2f1a2e2705155d5b976e7b5629d12392232c9afbadcf66aa9e54773a9",
+      "executable_sha256": "13135761afd8b2baf75456bed5f128fe4007a9753b1ad7b9bf50ebe504db8f99",
+      "version_output": "sinter 1.5.1",
+      "checks": {
+        "total": 33,
+        "passed": 33,
+        "failed": 0,
+        "skipped": 0
+      },
+      "verdict": "PASS",
+      "log": {
+        "path": "logs/rocky9.log",
+        "sha256": "a543bbbca64f27089c7839338f549bf8df6c60aaf9a230f53f374adf83cad262"
+      }
+    },
+    {
+      "label": "rocky10",
+      "os_name": "Rocky Linux",
+      "os_version": "10.2",
+      "arch": "x86_64",
+      "image": "rocky-linux-10-v20261015",
+      "started_at": "2026-10-17T05:51:59Z",
+      "finished_at": "2026-10-17T05:53:05Z",
+      "artifact_sha256": "6436cdb2f1a2e2705155d5b976e7b5629d12392232c9afbadcf66aa9e54773a9",
+      "executable_sha256": "13135761afd8b2baf75456bed5f128fe4007a9753b1ad7b9bf50ebe504db8f99",
+      "version_output": "sinter 1.5.1",
+      "checks": {
+        "total": 33,
+        "passed": 33,
+        "failed": 0,
+        "skipped": 0
+      },
+      "verdict": "PASS",
+      "log": {
+        "path": "logs/rocky10.log",
+        "sha256": "7f3f651a4d640b3d316f3a2c46836e733af39d3df31216f7c17807a0d6f1060b"
+      }
+    },
+    {
+      "label": "rhel9",
+      "os_name": "Red Hat Enterprise Linux",
+      "os_version": "9.8",
+      "arch": "x86_64",
+      "image": "rhel-9-v20261014",
+      "started_at": "2026-10-17T05:53:55Z",
+      "finished_at": "2026-10-17T05:58:24Z",
+      "artifact_sha256": "6436cdb2f1a2e2705155d5b976e7b5629d12392232c9afbadcf66aa9e54773a9",
+      "executable_sha256": "13135761afd8b2baf75456bed5f128fe4007a9753b1ad7b9bf50ebe504db8f99",
+      "version_output": "sinter 1.5.1",
+      "checks": {
+        "total": 33,
+        "passed": 33,
+        "failed": 0,
+        "skipped": 0
+      },
+      "verdict": "PASS",
+      "log": {
+        "path": "logs/rhel9.log",
+        "sha256": "51b9ac13a9c3fb464b18fc86f114593e54768326cf91e7e36d61d42460dbb694"
+      }
+    },
+    {
+      "label": "rhel10",
+      "os_name": "Red Hat Enterprise Linux",
+      "os_version": "10.2",
+      "arch": "x86_64",
+      "image": "rhel-10-v20261014",
+      "started_at": "2026-10-17T05:59:51Z",
+      "finished_at": "2026-10-17T06:01:03Z",
+      "artifact_sha256": "6436cdb2f1a2e2705155d5b976e7b5629d12392232c9afbadcf66aa9e54773a9",
+      "executable_sha256": "13135761afd8b2baf75456bed5f128fe4007a9753b1ad7b9bf50ebe504db8f99",
+      "version_output": "sinter 1.5.1",
+      "checks": {
+        "total": 33,
+        "passed": 33,
+        "failed": 0,
+        "skipped": 0
+      },
+      "verdict": "PASS",
+      "log": {
+        "path": "logs/rhel10.log",
+        "sha256": "7b4afc17272e9baf4c61c85a67c2ebbefe2606e89ece445922381b19ebfbd394"
+      }
+    },
+    {
+      "label": "alma9",
+      "os_name": "AlmaLinux",
+      "os_version": "9.8",
+      "arch": "x86_64",
+      "image": "almalinux-9-v20261013",
+      "started_at": "2026-10-17T06:04:35Z",
+      "finished_at": "2026-10-17T06:05:41Z",
+      "artifact_sha256": "6436cdb2f1a2e2705155d5b976e7b5629d12392232c9afbadcf66aa9e54773a9",
+      "executable_sha256": "13135761afd8b2baf75456bed5f128fe4007a9753b1ad7b9bf50ebe504db8f99",
+      "version_output": "sinter 1.5.1",
+      "checks": {
+        "total": 33,
+        "passed": 33,
+        "failed": 0,
+        "skipped": 0
+      },
+      "verdict": "PASS",
+      "log": {
+        "path": "logs/alma9.log",
+        "sha256": "16a7773ae34d8275c455ab3debb6386122c9eb1f64cc14cdc567a726342fb82b"
+      }
+    },
+    {
+      "label": "alma10",
+      "os_name": "AlmaLinux",
+      "os_version": "10.2",
+      "arch": "x86_64",
+      "image": "almalinux-10-v20261013",
+      "started_at": "2026-10-17T06:06:36Z",
+      "finished_at": "2026-10-17T06:07:27Z",
+      "artifact_sha256": "6436cdb2f1a2e2705155d5b976e7b5629d12392232c9afbadcf66aa9e54773a9",
+      "executable_sha256": "13135761afd8b2baf75456bed5f128fe4007a9753b1ad7b9bf50ebe504db8f99",
+      "version_output": "sinter 1.5.1",
+      "checks": {
+        "total": 33,
+        "passed": 33,
+        "failed": 0,
+        "skipped": 0
+      },
+      "verdict": "PASS",
+      "log": {
+        "path": "logs/alma10.log",
+        "sha256": "f35f7b6e1d7697178a28e3fadfd92f6d3edb7bfec26dc7a421ad57c837d89b80"
+      }
+    }
+  ],
+  "totals": {
+    "targets": 8,
+    "total": 264,
+    "passed": 264,
+    "failed": 0,
+    "skipped": 0
+  },
+  "verdict": "GO",
+  "evidence_bundle": "sinter-v1.5.1-acceptance-evidence.tar.gz",
+  "sanitization": {
+    "allowed_literals": []
+  }
+}

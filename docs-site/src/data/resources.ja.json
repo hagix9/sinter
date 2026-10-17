@@ -100,7 +100,7 @@
       }
     },
     "postgresql_role": {
-      "summary": "未リリース（v1.5.1）: ローカルの PostgreSQL サーバーのロールを 1 つ管理する（存在、宣言した属性、暗号化シークレットの SCRAM-SHA-256 verifier）。",
+      "summary": "ローカルの PostgreSQL サーバーのロールを 1 つ管理する（存在、宣言した属性、暗号化シークレットの SCRAM-SHA-256 verifier）。",
       "parameters": {
         "name": "ロール名（[a-z_][a-z0-9_]*、最大 63 バイト、pg_* は不可）。",
         "state": "present または absent（CASCADE なしの DROP ROLE）。",

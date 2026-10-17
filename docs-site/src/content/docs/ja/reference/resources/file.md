@@ -30,7 +30,7 @@ description: 通常ファイルの内容とメタデータを管理する。
 | `owner` | いいえ | string | — | 所有者名。 |
 | `group` | いいえ | string | — | グループ名。 |
 | `mode` | いいえ | string | — | 引用符付きの 4 桁 8 進数。例: `"0644"`。 |
-| `validate` | いいえ | map | — | 公開前に staging ファイルへ実行する検証コマンド（`program`、`args`、`timeout_seconds`）。（`{{ staged }}` で staging ファイルのパスを引数の中に置ける。v1.5.1、まだリリースしていません） |
+| `validate` | いいえ | map | — | 公開前に staging ファイルへ実行する検証コマンド（`program`、`args`、`timeout_seconds`）。（`{{ staged }}` で staging ファイルのパスを引数の中に置ける。v1.5.1 から） |
 
 ## 期待される動作
 
@@ -95,7 +95,7 @@ drop-in（`sshd_config.d/*.conf`、`rsyslog.d/*.conf`）では、drop-in が解�
 
 ### staging ファイルを引数の中に置く（`{{ staged }}`）
 
-`{{ staged }}` は v1.5.1（まだリリースしていません）で追加されます。v1.5.0 は
+`{{ staged }}` は v1.5.1 で追加されました。それより前の版は
 これを式のエラー（`bare names are not allowed`）として拒否します。
 
 検証ツールによっては、ファイルのパスを最後の別の引数ではなく、引数の一部として

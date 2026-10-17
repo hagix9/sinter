@@ -19,7 +19,7 @@ Commands:
 `secrets`サブコマンドについては[sinter secrets](/ja/reference/secrets/)を
 参照してください。
 
-`sinter --version` はバージョンを表示します（例: `sinter 1.5.0`）。
+`sinter --version` はバージョンを表示します（例: `sinter 1.5.1`）。
 
 ## validate
 
@@ -103,7 +103,7 @@ sinter secrets list    [--format text|json] [--recipe <FILE>...] [<PATH>...]
   リポジトリの `identity.age` を使います。
 - `password_hash` を持つ `user` リソースには root が必要です。root でログインするか、
   `--sudo` を使ってください（`/etc/shadow` は root だけが読めるため）。`postgresql_role`
-  （v1.5.1、まだリリースしていません）も同じで、`psql` を `setpriv` でクラスタの所有者と
+  （v1.5.1 から）も同じで、`psql` を `setpriv` でクラスタの所有者と
   して実行します。
 
 ## ターゲットオプション
@@ -653,7 +653,7 @@ v1.0.0 以降、この節に記載した内容は 1.x 系全体を通じて安�
 | `resources` | integer | recipe 内のリソース数 |
 | `handlers` | integer | handler 数 |
 | `vars` | integer | var 数 |
-| `warnings` | array of strings | 空でないときだけ出力します（v1.5.1、まだリリースしていません）。`template.vars` の中の `{{ … }}` のような、エラーではない指摘です。bundle の文書では、各レシピの項目がそれぞれ `warnings` を持ちます。 |
+| `warnings` | array of strings | 空でないときだけ出力します（v1.5.1 から）。`template.vars` の中の `{{ … }}` のような、エラーではない指摘です。bundle の文書では、各レシピの項目がそれぞれ `warnings` を持ちます。 |
 
 ### plan と apply
 

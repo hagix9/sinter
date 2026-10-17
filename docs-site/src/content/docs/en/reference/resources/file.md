@@ -30,7 +30,7 @@ and mode — or is absent.
 | `owner` | no | string | — | Owner name. |
 | `group` | no | string | — | Group name. |
 | `mode` | no | string | — | Quoted four-digit octal, e.g. `"0644"`. |
-| `validate` | no | map | — | Command run against the staged file before publication (`program`, `args`, `timeout_seconds`). (`{{ staged }}` places the staged path inside an argument; v1.5.1, not yet released) |
+| `validate` | no | map | — | Command run against the staged file before publication (`program`, `args`, `timeout_seconds`). (`{{ staged }}` places the staged path inside an argument; since v1.5.1) |
 
 ## Expected behavior
 
@@ -94,8 +94,8 @@ configuration together with the staged file, prefer that (for example
 
 ### Placing the staged file inside an argument (`{{ staged }}`)
 
-`{{ staged }}` is new in v1.5.1, which is not yet released; v1.5.0 rejects
-it as an expression error (`bare names are not allowed`).
+`{{ staged }}` is new in v1.5.1; earlier versions reject it as an expression
+error (`bare names are not allowed`).
 
 Some checkers need the file path as part of an argument rather than as a
 separate last argument — `postgres` only accepts `--config-file=PATH`. Write

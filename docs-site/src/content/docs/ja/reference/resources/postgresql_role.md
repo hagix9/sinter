@@ -6,8 +6,8 @@ description: ローカルの PostgreSQL サーバーのロールを 1 つ管理�
 **目的:** ターゲットで動いている PostgreSQL サーバーの**ロール**を 1 つ宣言します。
 存在するか（present / absent）、指定した属性、そして必要ならパスワードを、暗号化
 したシークレットに入れた **SCRAM-SHA-256 の verifier** として管理します。ほかの
-リソースと同じく plan、apply、audit の対象です。v1.5.1（まだリリースしていません）で
-追加されるリソースで、v1.5.0 はこのタイプを受け付けません。
+リソースと同じく plan、apply、audit の対象です。v1.5.1 で
+追加されたリソースで、それより前の版はこのタイプを受け付けません。
 
 ## 書式
 
@@ -120,7 +120,7 @@ sinter secrets encrypt app.verifier -o secrets/app-verifier.age
 
 ## プラットフォームに関する補足
 
-v1.5.1 の開発中に、PostgreSQL 10.23（Rocky Linux 8 の既定の stream）、13.23
+v1.5.1 の検証で、PostgreSQL 10.23（Rocky Linux 8 の既定の stream）、13.23
 （Rocky Linux 9 の既定）、16.15（Rocky Linux 8 / 9 の stream 16、Rocky Linux 10）、
 17.11（Rocky Linux 9 の PGDG）で実測しました。PostgreSQL 10 以降が必要です。
 `pg_hba.conf` はこのリソースでは管理しません。ファイルとして管理してください

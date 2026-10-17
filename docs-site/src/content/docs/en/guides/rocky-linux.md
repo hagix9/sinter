@@ -4,7 +4,7 @@ description: Rocky Linux 9 and 10 x86_64 managed-target guide — dnf backend.
 ---
 
 Rocky Linux 9 x86_64 has been supported since v0.2.0; Rocky Linux 10 x86_64
-since v0.4.0. Both lines are acceptance-tested in v1.5.0 and use the **dnf**
+since v0.4.0. Both lines are acceptance-tested in v1.5.1 and use the **dnf**
 package backend.
 
 **Acceptance references:** Rocky Linux 9.8 x86_64 with DNF 4.14.0 — verified
@@ -16,12 +16,12 @@ references, not independent evidence for every other minor release.
 
 ## Unified Linux x86_64 distribution
 
-Sinter v1.5.0 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for all
+Sinter v1.5.1 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for all
 supported x86_64 version lines. The executable is unified; runtime platform
 detection still selects APT on Ubuntu and DNF on RHEL-family targets. This
 is not a claim of support for arbitrary Linux systems or architectures.
 
-The Sinter v1.5.0 release artifact passed eight-real-host acceptance on
+The Sinter v1.5.1 release artifact passed eight-real-host acceptance on
 Ubuntu 24.04, Ubuntu 26.04, Rocky Linux 9.8, Rocky Linux 10.2,
 RHEL 9.8, RHEL 10.2, AlmaLinux 9.8, and AlmaLinux 10.2 — all x86_64, 264 checks
 passed, 0 failed.
@@ -82,7 +82,7 @@ closed before any mutation.
 
 Sinter itself cannot run on EL8 (the Linux build needs glibc 2.34), but it can
 **manage** an EL8 host over SSH from a supported controller (EL9/EL10 or
-Ubuntu; macOS only as a source build). Measured during v1.5.1 development on Rocky Linux 8.10 (dnf 4.7.0) —
+Ubuntu; macOS only as a source build). Measured for v1.5.1 on Rocky Linux 8.10 (dnf 4.7.0) —
 not yet a release acceptance claim:
 
 - **Prerequisite:** the `attr` package (`getfattr`). Minimal and cloud images
@@ -118,7 +118,7 @@ not yet a release acceptance claim:
 
   The EL8 streams are those `dnf module list postgresql` shows on Rocky Linux
   8.10 (it also lists 9.6). The EL8/EL9 `postgresql:16` and EL10 16 installs and
-  PGDG 17 on all three were verified during v1.5.1 development; the other rows
+  PGDG 17 on all three were verified for v1.5.1; the other rows
   are not. The dates are the PostgreSQL project's; how long the distribution
   maintains a module stream is set by its own application-stream life cycle.
 - **PostgreSQL 17 from PGDG:** `examples/recipes/postgresql-pgdg17.yaml`

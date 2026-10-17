@@ -4,7 +4,7 @@ description: Rocky Linux 9 / 10 x86_64 管理対象ガイド — dnf バック�
 ---
 
 Rocky Linux 9 x86_64 は v0.2.0 から、Rocky Linux 10 x86_64 は v0.4.0 から
-サポートされています。両version lineは v1.5.0 で受入検証済みであり、
+サポートされています。両version lineは v1.5.1 で受入検証済みであり、
 どちらも **dnf** パッケージバックエンドを使います。
 
 **受入基準環境:** Rocky Linux 9.8 x86_64（DNF 4.14.0）— 実際の SSH と
@@ -16,12 +16,12 @@ purge の収束/冪等性について検証済みです。Rocky 9/10 は対応�
 
 ## 統一 Linux x86_64 配布
 
-Sinter v1.5.0では、対応するすべてのx86_64向けバージョンラインに
+Sinter v1.5.1では、対応するすべてのx86_64向けバージョンラインに
 `sinter-v<VERSION>-linux-x86_64.tar.gz` を1つ配布します。
 実行ファイルは共通ですが、実行時の検出により Ubuntu は APT、RHEL系は
 DNF を使います。任意の Linux や他のアーキテクチャへの対応を意味しません。
 
-Sinter v1.5.0 のリリース成果物は Ubuntu 24.04、Ubuntu 26.04、
+Sinter v1.5.1 のリリース成果物は Ubuntu 24.04、Ubuntu 26.04、
 Rocky Linux 9.8、Rocky Linux 10.2、RHEL 9.8、RHEL 10.2、
 AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64、264チェック通過・失敗0）の
 8実ホストで受入検証済みです。
@@ -83,7 +83,7 @@ dnf のインストールでは、変更を行う `dnf` プロセスがメタデ
 
 Sinter 自体は EL8 では動きません（Linux 版は glibc 2.34 が必要です）。しかし、
 対応する controller（EL9 / EL10、Ubuntu。macOS はソースからのビルドのみ）から SSH で EL8 のホストを
-**管理**できます。v1.5.1 の開発中に Rocky Linux 8.10（dnf 4.7.0）で実測しました
+**管理**できます。v1.5.1 の検証で Rocky Linux 8.10（dnf 4.7.0）で実測しました
 （リリースの受入としての主張ではまだありません）。
 
 - **前提:** `attr` パッケージ（`getfattr`）。最小構成やクラウドのイメージには
@@ -118,7 +118,7 @@ Sinter 自体は EL8 では動きません（Linux 版は glibc 2.34 が必要�
   | 17 | PGDG | PGDG | PGDG | 2029-11 |
 
   EL8 の stream は、Rocky Linux 8.10 で `dnf module list postgresql` が示すもの
-  です（9.6 も表示されます）。v1.5.1 の開発中に検証したのは、EL8 / EL9 の
+  です（9.6 も表示されます）。v1.5.1 の検証で検証したのは、EL8 / EL9 の
   `postgresql:16`、EL10 の 16、3 つすべての PGDG 17 の導入で、ほかの行は検証して
   いません。日付は PostgreSQL プロジェクトのものです。ディストリビューションが
   module stream を保守する期間は、そのディストリビューションの application

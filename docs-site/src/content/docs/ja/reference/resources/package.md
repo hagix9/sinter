@@ -53,6 +53,11 @@ description: ターゲットのパッケージバックエンドでパッケー�
   スナップショット経由で行われます —
   [実行モデル](/ja/concepts/execution-model/)と
   [Rocky ガイド](/ja/guides/rocky-linux/)を参照してください。
+- apt ターゲットでは、Sinter は `apt-get update` を実行しません。パッケージ一覧が
+  すでにある必要があります。一覧の無い新しいイメージでは導入が失敗します
+  （`E: Unable to locate package`。apt の出力は信用しないので、変更の可能性ありと
+  報告されます）。先に一覧を更新してください。例えば、`/usr/bin/apt-get update` を
+  実行する `command` リソース（`changed_when: "false"`）をパッケージより前に宣言します。
 - 壊れたパッケージ状態（設定途中など）は自動修復ではなく失敗と
   なります。
 
