@@ -83,9 +83,9 @@ embedded scriptingは依然として実装対象に含めません。複数ホ�
 
 ## インストール
 
-Sinter **v1.5.0** は、対応するすべての Linux x86_64 プラットフォーム
+Sinter **v1.5.1** は、対応するすべての Linux x86_64 プラットフォーム
 ライン（Ubuntu、Rocky Linux、RHEL 9 / 10、AlmaLinux 9 / 10）向けに、
-1つの `sinter-v1.5.0-linux-x86_64.tar.gz` アーティファクトで配布します。
+1つの `sinter-v1.5.1-linux-x86_64.tar.gz` アーティファクトとしてリリースを準備しています。
 
 ```sh
 curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
@@ -226,8 +226,8 @@ resource typeは`file`、`directory`、`template`、`link`、
 handlerは遅延実行されるserviceの`restart` / `reload`アクションです。
 v1.2.0以降、ローカルアカウント用の`group`と`user`の2種類があります。
 宣言順と`depends_on`による順序、ローカルデータベースのみ、番号の振り直しなし、補助グループは
-追加のみ、`absent`は`-r` / `-f`なし、という契約です。開発中の版（v1.5.1。まだ
-リリースしていません）では `postgresql_role` が加わります。リソースリファレンスを
+追加のみ、`absent`は`-r` / `-f`なし、という契約です。v1.5.1 では
+`postgresql_role` が加わります。リソースリファレンスを
 参照してください。
 
 また、v1.2.0以降は`sinter secrets encrypt | decrypt | list`があり、
