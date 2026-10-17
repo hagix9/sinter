@@ -259,7 +259,7 @@ Also the platform "developer mode" guide on static credentials.
 | Resource | State | Note |
 |---|---|---|
 | Production Gateway VM and its static IP, disk, firewall rules, uptime check and alert | stopped since 2026-09-27 | Not stopped by this freeze itself. Its resources still cost money. **Do not restart it with its existing binary**; see [Restart guard (CVE-2026-25537)](#restart-guard-cve-2026-25537). Deleting it needs an explicit owner decision. |
-| Developer-machine `sinter-bridge` (test account) connected to the production Gateway | running | Not a spike artifact. Stop it when you no longer need the connection. |
+| Developer-machine `sinter-bridge` (test account) connected to the production Gateway | not running (checked 2026-10-17) | Not a spike artifact. With the production Gateway stopped it has nothing to connect to; no `sinter-bridge` process was found on the developer machine. |
 | Logto Cloud development tenant | active (free) | Users older than 90 days are deleted automatically. |
 | Acceptance-test VMs (8, stopped) | not part of this lane | They are Sinter release infrastructure. Their disks and daily snapshots still cost money. |
 
