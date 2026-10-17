@@ -58,6 +58,22 @@ All notable changes to Sinter are documented in this file.
   declare the account (with the package's attributes) before the package,
   which makes plan defer instead of fail.
 
+### Release validation
+
+- The acceptance harness (`release/acceptance-harness/`) takes every
+  environment- and release-specific value from the environment and stops
+  before any cloud call when one is missing. It records each target's boot
+  image, verifies the tarball before upload, and stops a target on a raw-log
+  hash mismatch, a stale or failed preparation step or a failed metadata
+  refresh. GO needs all eight targets.
+- The approval-set tools are in the repository:
+  `release/make_approval_set.py` assembles the set and
+  `release/verify_approval_set.py` checks it against the acceptance assets,
+  the collector record, the release candidate and the recorded evidence
+  (layout `sinter-approval-set/2`).
+- CI validates every example recipe and every complete recipe in the docs,
+  and guards the public tree against committed local work products.
+
 ### Security
 
 - **Gateway: rustls 0.23.46** (from 0.23.45) for RUSTSEC-2026-0346,

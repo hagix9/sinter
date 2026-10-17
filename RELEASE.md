@@ -593,18 +593,21 @@ Publishing requires explicit human review of, in order:
 No publish until the human confirms all five. The approval covers exactly
 the staged bytes; any change to a staged file voids it.
 
-### Approval set (v1.5.0 onward)
+### Approval set (v1.5.0 onward; layout `sinter-approval-set/2` from v1.5.1)
 
 The approval is bound to one digest. Before review, the operator assembles
-the approval set under `evidence/approval-set/` in the staging directory:
+the approval set under `evidence/approval-set/` in the staging directory with
+`release/make_approval_set.py`:
 
 ```text
 APPROVAL-SET-META.json        version, tag, RC_COMMIT, RC tree, artifact and
                               executable SHA-256, collector facts
 acceptance/                   byte copies of the three acceptance assets
-collector-record/             runtime harness record; every post-acceptance
-                              collector, its outputs (a failed first result
-                              included), its diff, and their SHA256SUMS
+collector-record/             the collector (collect-evidence.py), the runtime
+                              record every run carried, every collector run in
+                              order under runs/NN/ (a failed first result
+                              included; the last one with VERDICT.txt), and
+                              their SHA256SUMS
 APPROVAL-SET.sha256           canonical member list (not a member itself)
 ```
 
@@ -614,19 +617,28 @@ the UTF-8 bytes of the path, and nothing else; it verifies with
 set is frozen once the digest is computed: re-packing the bundle archive
 changes the digest and needs a new approval.
 
-`verify_approval_set.py` checks the set (it was used from the release staging
-for v1.5.0 and is not yet in this repository; it is added under `release/`,
-with its tests, before the next release candidate): exactly the listed members, the
-canonical list, consistency with the manifest, the bundle's
-`harness/PROVENANCE.json`, the runtime record, the collector record and the
-RC tree, reproduction of every collector output and bundle log from the
-recorded evidence, and the full-mode checker. Exit 3 means valid but not yet
-approved (`PENDING_OWNER_APPROVAL`, never GO); exit 0 only with
-`--approved-digest` equal to the current digest.
+`release/verify_approval_set.py` checks the set: exactly the listed members,
+the canonical list, consistency with the manifest, the bundle's
+`harness/PROVENANCE.json` (every bundled harness file is the executed bytes;
+publication copies are not accepted for the harness kept in this
+repository), the runtime record, the collector record (the collector must be
+the runtime-record collector, an earlier run is never GO, the last run is
+`PENDING_OWNER_APPROVAL` with one PASS row per label), and the RC (commit,
+tree, `Cargo.toml` version, every harness file and the collector at
+`RC_COMMIT`); with `--evidence` it reproduces the collector output and every
+bundle log from the recorded evidence (the run's `SINTER_PROJECT`,
+`SINTER_ZONE` and `SINTER_SPECS` must be in the environment for the
+sanitizer); with `--artifact` it checks the tarball; with `--checker` it runs
+the full-mode checker. `--expect-rc` and `--expect-version` refuse a set made
+for another candidate. Exit 3 means valid but not yet approved
+(`PENDING_OWNER_APPROVAL`, never GO); exit 0 only with `--approved-digest`
+equal to the current digest. A digest approved for one candidate never
+covers a set for another: the set names its RC.
 
-Before review, run it with all of `--rc-repo`, `--evidence`, `--gate-log`
-and `--checker`; a structural run alone cannot detect a consistently forged
-set. Any other exit than 3 before the approval, or than 0 after it, is a STOP.
+Before review, run it with all of `--rc-repo`, `--evidence`, `--gate-log`,
+`--artifact`, `--checker` and `--expect-rc`; a structural run alone cannot
+detect a consistently forged set. Any other exit than 3 before the approval,
+or than 0 after it, is a STOP.
 
 The Owner records the approval in writing, naming `APPROVAL_SET_DIGEST`,
 `RC_COMMIT`, the artifact SHA-256, and the SHA-256 of the staged
@@ -652,10 +664,10 @@ git remote -v
 cd ~/Downloads/Sinter-v${VERSION}-release-staging
 shasum -a 256 -c SHA256SUMS              # all OK
 shasum -a 256 -c sinter-v${VERSION}-acceptance-SHA256SUMS
-python3 verify_approval_set.py evidence/approval-set --rc-repo <repo> \
+python3 <repo>/release/verify_approval_set.py evidence/approval-set --rc-repo <repo> \
   --evidence <acceptance out> --gate-log <step-4 log> \
   --checker <repo>/release/check_acceptance_manifest.py \
-  --artifact sinter-v${VERSION}-linux-x86_64.tar.gz \
+  --artifact sinter-v${VERSION}-linux-x86_64.tar.gz --expect-rc ${RC_COMMIT} \
   --approved-digest ${APPROVAL_SET_DIGEST}   # exit 0
 (cd evidence/approval-set && sed -n 's|  acceptance/|  ../../|p' APPROVAL-SET.sha256 | shasum -a 256 -c)
                                          # staged assets == approved copies
