@@ -299,16 +299,22 @@ fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
     match (&source, format) {
         (Source::Recipe(u), OutputFormat::Json) => {
             let (r, h, v) = counts(&u.model);
-            let doc = serde_json::json!({
+            let mut doc = serde_json::json!({
                 "command": "validate",
                 "status": "ok",
                 "resources": r,
                 "handlers": h,
                 "vars": v,
             });
+            if !u.model.warnings.is_empty() {
+                doc["warnings"] = serde_json::json!(u.model.warnings);
+            }
             println!("{}", serde_json::to_string_pretty(&doc).unwrap());
         }
         (Source::Recipe(u), OutputFormat::Text) => {
+            for w in &u.model.warnings {
+                eprintln!("warning: {}", sanitize_line(w));
+            }
             let (r, h, v) = counts(&u.model);
             println!(
                 "{}: {} resource(s), {} handler(s), {} var(s)",
@@ -324,7 +330,7 @@ fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
                 .iter()
                 .map(|u| {
                     let (r, h, v) = counts(&u.model);
-                    serde_json::json!({
+                    let mut rec = serde_json::json!({
                         "recipe": u.label,
                         "path": u.path.display().to_string(),
                         "resources": r,
@@ -334,7 +340,11 @@ fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
                             "hosts": t.hosts,
                             "groups": t.groups,
                         })),
-                    })
+                    });
+                    if !u.model.warnings.is_empty() {
+                        rec["warnings"] = serde_json::json!(u.model.warnings);
+                    }
+                    rec
                 })
                 .collect();
             let total =
@@ -351,6 +361,11 @@ fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
             println!("{}", serde_json::to_string_pretty(&doc).unwrap());
         }
         (Source::Bundle(b), OutputFormat::Text) => {
+            for u in &b.recipes {
+                for w in &u.model.warnings {
+                    eprintln!("warning: {}: {}", sanitize_line(&u.label), sanitize_line(w));
+                }
+            }
             println!(
                 "{}: bundle {}: {} recipe(s)",
                 style::status("ok", color),

@@ -72,6 +72,9 @@ pub struct Model {
     pub backups: Vec<String>,
     /// Explicit execution targets (`targets`), from the entry recipe only.
     pub targets: Option<TargetSelector>,
+    /// Load-time warnings: likely mistakes that are still valid recipes
+    /// (shown by `validate`; they never change what a run does).
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1988,6 +1991,32 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
     // Dependency graph must be acyclic. Detect it during static validation.
     detect_dependency_cycle(&frozen)?;
 
+    // R-3: `template.vars` values are passed to the template as written; a
+    // `{{ ... }}` inside one is not evaluated and would be rendered literally.
+    let mut warnings = Vec::new();
+    for fr in &frozen {
+        if fr.type_ != "template" {
+            continue;
+        }
+        if let Some(Value::Map(m)) = fr.with.get("vars") {
+            for (k, v) in m {
+                if value_has_interpolation(v) {
+                    warnings.push(format!(
+                        "{}: template vars value {} contains {{{{ ... }}}}; template vars are not \
+                         interpolated and the text would be rendered literally — reference \
+                         vars.* or facts.* in the template body instead",
+                        fr.id,
+                        if fr.sensitive || fr.derived_sensitive {
+                            "(name redacted)".to_string()
+                        } else {
+                            format!("{:?}", k)
+                        }
+                    ));
+                }
+            }
+        }
+    }
+
     Ok(Model {
         vars,
         resources: frozen,
@@ -1996,7 +2025,18 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
         register_producers,
         backups: state.backups.into_iter().map(|(p, _)| p).collect(),
         targets: state.targets,
+        warnings,
     })
+}
+
+/// Whether a value (or any string nested in it) carries `{{ ... }}`.
+fn value_has_interpolation(v: &Value) -> bool {
+    match v {
+        Value::Str(s) => crate::expressions::has_interpolation(s),
+        Value::List(items) => items.iter().any(value_has_interpolation),
+        Value::Map(m) => m.values().any(value_has_interpolation),
+        _ => false,
+    }
 }
 
 fn detect_dependency_cycle(resources: &[FrozenResource]) -> Result<()> {
