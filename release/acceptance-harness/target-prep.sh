@@ -84,11 +84,13 @@ if [ ! -f /opt/sinter-acceptance/ssh/id_ed25519 ]; then
 else
   echo "keypair exists"
 fi
-install -d -m 700 -o sinter -g sinter /home/sinter/.ssh
-touch /home/sinter/.ssh/authorized_keys
-grep -q 'acceptance' /home/sinter/.ssh/authorized_keys 2>/dev/null || cat /opt/sinter-acceptance/ssh/id_ed25519.pub >> /home/sinter/.ssh/authorized_keys
-chown sinter:sinter /home/sinter/.ssh/authorized_keys
-chmod 600 /home/sinter/.ssh/authorized_keys
+# The acceptance user's home comes from the account database (no fixed path).
+SSHDIR="$(getent passwd sinter | cut -d: -f6)/.ssh"
+install -d -m 700 -o sinter -g sinter "$SSHDIR"
+touch "$SSHDIR/authorized_keys"
+grep -q 'acceptance' "$SSHDIR/authorized_keys" 2>/dev/null || cat /opt/sinter-acceptance/ssh/id_ed25519.pub >> "$SSHDIR/authorized_keys"
+chown sinter:sinter "$SSHDIR/authorized_keys"
+chmod 600 "$SSHDIR/authorized_keys"
 sudo -u sinter ssh-keyscan -H -p 22 127.0.0.1 2>/dev/null > /opt/sinter-acceptance/ssh/known_hosts.raw || true
 grep -v '^#' /opt/sinter-acceptance/ssh/known_hosts.raw | grep -v '^$' > /opt/sinter-acceptance/ssh/known_hosts || true
 chown sinter:sinter /opt/sinter-acceptance/ssh/known_hosts /opt/sinter-acceptance/ssh/id_ed25519.pub

@@ -441,6 +441,25 @@ class CollectorAndApproval(HarnessCase):
         self.assertFalse(any(l.strip().startswith("- rocky10:") for l in self.collect().splitlines()))
 
 
+class PublishableHarness(unittest.TestCase):
+    """Every harness file that runs in steps 7-9 is bundled verbatim, so it must
+    pass the release checker's sensitive-content scan as it is."""
+    BUNDLED = ["acceptance-target.sh", "run-acceptance-wrapper.sh", "remote-cleanup.sh", "target-prep.sh",
+               "raw-verdict.py", "expected-check-ids.txt", "run-all.sh", "run-target.sh", "sanitize.py"]
+
+    def test_bundled_harness_files_pass_the_checker_scan(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "release_checker", os.path.join(os.path.dirname(HARNESS), "check_acceptance_manifest.py"))
+        checker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checker)
+        for name in self.BUNDLED:
+            with self.subTest(file=name):
+                errors = []
+                checker.scan(read(os.path.join(HARNESS, name)), f"harness/{name}", set(), set(), errors)
+                self.assertEqual(errors, [])
+
+
 class Sanitizer(HarnessCase):
     def sanitize(self, text, patterns=None, **over):
         log = os.path.join(self.dir, "raw.txt")
