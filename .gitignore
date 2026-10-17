@@ -9,3 +9,32 @@ target/
 *.db
 *.db-wal
 *.db-shm
+
+# ---- Local work products: never published (root-anchored, IGN-01..05) ----
+# Review / audit / research / handoff reports kept beside the checkout
+/SINTER_*.md
+/OPENSSF_*.md
+/WP_*.md
+/POST_*.md
+/V[0-9]*_*.md
+/CODEX_*
+# Local agent instructions (machine-specific policy)
+/AGENTS.md
+/CLAUDE.md
+# Evidence, scratch and handoff directories
+/.work/
+/tmp/
+/work_*/
+/research/
+/artifacts/
+/audit-handoff/
+/acceptance-harness-fix-*/
+/v[0-9]*.[0-9]*.[0-9]*-*/
+/docs/*-evidence/
+/docs/next-improvements-*/
+# Nested development clones and worktrees
+/Sinter-Dev*/
+/worktrees/
+# Agent / editor local configuration
+/.opencode/
+/.claude/
