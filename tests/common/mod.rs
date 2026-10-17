@@ -288,7 +288,9 @@ pub fn ssh_spec() -> Option<SshSpec> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(22);
-    let user = std::env::var("SINTER_TEST_SSH_USER").unwrap_or_else(|_| "a0000".to_string());
+    let user = std::env::var("SINTER_TEST_SSH_USER")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "root".to_string());
     let known_hosts = std::env::var_os("SINTER_TEST_SSH_KNOWN_HOSTS")
         .map(PathBuf::from)
         .expect("SINTER_TEST_SSH_KNOWN_HOSTS must be set when SSH tests run");
@@ -442,7 +444,9 @@ fn target_baseline_env(sudo: bool) -> std::collections::BTreeMap<String, String>
 
 /// The target user's home directory, resolved on the target.
 pub fn target_user_home() -> Option<String> {
-    let user = std::env::var("SINTER_TEST_SSH_USER").unwrap_or_else(|_| "a0000".to_string());
+    let user = std::env::var("SINTER_TEST_SSH_USER")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "root".to_string());
     let (code, stdout, _) = target_run("/usr/bin/getent", &["passwd", &user], false).ok()?;
     if code != 0 {
         return None;

@@ -11,5 +11,7 @@ set is one batched capture of the same three-ancestor chain:
 Hosts: `ubuntu24` (GNU coreutils 9.4, attr 2.5.2), `ubuntu26` (uutils coreutils 0.8.0,
 attr 2.5.2), `rocky98` (GNU 8.32, attr 2.6.0, SELinux enforcing), `rocky102` (GNU 9.5,
 attr 2.6.0). `rocky98_missing` is a failed batch (`stat` exit 1, partial stdout, the
-diagnostic in `.stat.stderr`). The data is metadata of throw-away test trees only.
+diagnostic in `.stat.stderr`). The data is metadata of throw-away test trees only. The local account name in
+the captured paths was replaced by the synthetic, same-length name `tuser`
+(the byte layout of every record is unchanged).
 They are inputs to unit tests in `src/targetfs.rs`; nothing here is executed.
