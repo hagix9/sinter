@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { findInternalMarkers } from './webmcp-leak.mjs';
 
 // Deployed-site WebMCP/discovery acceptance check (read-only, GET only).
 //
@@ -114,11 +115,10 @@ if (robots) {
 const sm = await expectOk('/sitemap-index.xml', /xml/);
 if (sm && !sm.includes('sitemap')) fail('sitemap-index.xml: unexpected content');
 
-// no private/internal leakage in public payloads
-const blob = JSON.stringify(payloads);
-for (const bad of ['/Users/', 'CAND', 'FAILED', 'staging', '.bin', 'SHA256SUMS.failed']) {
-  if (blob.includes(bad)) fail(`payloads: contain internal marker "${bad}"`);
-}
+// no private/internal leakage in public payloads (rules: webmcp-leak.mjs)
+const leaks = findInternalMarkers(payloads);
+for (const bad of leaks) fail(`payloads: contain internal marker "${bad}"`);
+if (!leaks.length) ok('payloads: no internal markers');
 
 console.log(failures ? `\nwebmcp:smoke FAILED — ${failures} failure(s)` : '\nwebmcp:smoke OK — all live checks passed');
 process.exit(failures ? 1 : 0);
