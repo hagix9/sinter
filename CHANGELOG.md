@@ -2,6 +2,25 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **A lost wait is reported as unknown, not as "failed, nothing changed".**
+  When a local run could start a command but the wait for it then failed, the
+  result said the command failed and nothing changed, although the command may
+  have run. It is now indeterminate with a possible change (exit 6, like a
+  timeout after dispatch), the command is not retried and nothing after it
+  runs. The command is not killed after a failed wait, so it may still be
+  running when Sinter reports. Normal exits, failing exit codes, signals and timeouts are reported as
+  before.
+- **Backup directories are created private.** The backup store and run
+  directories are created with `mkdir -m 0700` instead of a plain `mkdir` that
+  left them with the umask's mode until the following `chmod 0700`. With GNU
+  coreutils they never exist with a wider mode; the `chmod 0700` is kept (for a
+  `mkdir` that applies the mode only after creating the directory), so the
+  commands and checks are otherwise unchanged.
+
 ## [1.5.1] - 2026-10-17
 
 ### Added

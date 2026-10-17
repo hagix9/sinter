@@ -1501,6 +1501,28 @@ impl TargetFs {
         Ok(())
     }
 
+    /// `mkdir -m 0700 -- path`: with GNU coreutils the directory is created
+    /// with mode 0700 by the `mkdir` call itself, so it is never visible with
+    /// the mode its creator's umask would give (with umask 000 that is
+    /// world-writable). Other implementations (BusyBox, some uutils releases)
+    /// may set the mode right after creating it; the caller's `chmod 0700`
+    /// follows either way. Used for Sinter's own backup store and run
+    /// directories. A name that already exists is an error, exactly like a
+    /// plain `mkdir`; nothing is created with `-p`.
+    pub(crate) fn mkdir_private(&mut self, _permit: &MutationPermit, path: &str) -> Result<()> {
+        self.identity_memo.clear();
+        self.run_argv_ok_mutating(
+            "/bin/mkdir",
+            &[
+                "-m".to_string(),
+                "0700".to_string(),
+                "--".to_string(),
+                path.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// `mkdir -p` for directories inside a freshly created private backup
     /// run directory (never used on managed paths).
     pub(crate) fn mkdir_p(&mut self, _permit: &MutationPermit, path: &str) -> Result<()> {

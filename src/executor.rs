@@ -642,6 +642,9 @@ pub struct LocalExecutor {
     pub home: String,
     pub log: Vec<CommandRecord>,
     stats: ExecStatsHandle,
+    /// Test seam: make the next `try_wait` after dispatch fail with this error.
+    #[cfg(test)]
+    wait_fault: Option<std::io::ErrorKind>,
 }
 
 impl LocalExecutor {
@@ -660,6 +663,8 @@ impl LocalExecutor {
             home,
             log: Vec::new(),
             stats: ExecStatsHandle::default(),
+            #[cfg(test)]
+            wait_fault: None,
         })
     }
 
@@ -746,31 +751,32 @@ impl LocalExecutor {
         let err_handle = std::thread::spawn(move || read_capped(stderr_pipe, cap));
 
         // One bounded deadline covers spawn, execution, pipe drain, and wait.
-        let mut timed_out = false;
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(s)) => break Some(s),
-                Ok(None) => {
-                    if Instant::now() >= deadline {
-                        // Kill the whole process group; a direct-child kill may
-                        // leave grandchildren holding the pipes open.
-                        unsafe {
-                            libc::kill(-pgid, libc::SIGKILL);
-                        }
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        timed_out = true;
-                        break None;
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
+        #[cfg(test)]
+        let mut injected = self.wait_fault.take();
+        let outcome = wait_for_child(
+            &mut || {
+                #[cfg(test)]
+                if let Some(kind) = injected.take() {
+                    return Err(std::io::Error::from(kind));
                 }
-                Err(e) => {
-                    return Err(SinterError::apply(format!(
-                        "failed to wait for child: {}",
-                        e
-                    )))
-                }
+                child.try_wait()
+            },
+            deadline,
+            Duration::from_millis(10),
+        );
+        if matches!(outcome, WaitOutcome::TimedOut) {
+            // Kill the whole process group; a direct-child kill may leave
+            // grandchildren holding the pipes open.
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
             }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let (status, wait_failure) = match outcome {
+            WaitOutcome::Exited(s) => (Some(s), None),
+            WaitOutcome::TimedOut => (None, None),
+            WaitOutcome::WaitFailed(e) => (None, Some(e.to_string())),
         };
 
         // Join the reader threads with a bounded grace period. If a descendant
@@ -786,15 +792,24 @@ impl LocalExecutor {
         let (stdout, out_trunc) = join_with_budget(out_handle, join_budget);
         let (stderr, err_trunc) = join_with_budget(err_handle, join_budget);
 
-        let completion = match status {
-            Some(s) => classify_status(&s),
-            None => {
-                let _ = timed_out;
-                Completion::Indeterminate {
-                    started: true,
-                    reason: format!("timeout of {}s elapsed after dispatch", req.timeout_secs),
-                }
-            }
+        let completion = match (status, wait_failure) {
+            (Some(s), _) => classify_status(&s),
+            // The command was dispatched and the controller can no longer
+            // learn how it ended (RW-068). This is not "failed, nothing
+            // changed": the command may be running, finished, or half done.
+            // Report it as a started-but-unknown completion, like a timeout,
+            // so the resource layer records a possible change and never
+            // retries the command. The process group is not killed: a failed
+            // wait proves nothing about whether the group id still belongs to
+            // this child.
+            (None, Some(why)) => Completion::Indeterminate {
+                started: true,
+                reason: format!("failed to wait for child after dispatch: {}", why),
+            },
+            (None, None) => Completion::Indeterminate {
+                started: true,
+                reason: format!("timeout of {}s elapsed after dispatch", req.timeout_secs),
+            },
         };
 
         Ok(Output {
@@ -804,6 +819,36 @@ impl LocalExecutor {
             stdout_truncated: out_trunc,
             stderr_truncated: err_trunc,
         })
+    }
+}
+
+/// How waiting for a dispatched child ended.
+enum WaitOutcome {
+    Exited(std::process::ExitStatus),
+    TimedOut,
+    /// `try_wait` itself failed after the child had been started.
+    WaitFailed(std::io::Error),
+}
+
+/// Poll `try_wait` until the child exits, the deadline passes (the caller
+/// then kills and reaps it), or polling itself fails. Kept separate from
+/// `exec_local` so the failure branch can be driven deterministically.
+fn wait_for_child(
+    try_wait: &mut dyn FnMut() -> std::io::Result<Option<std::process::ExitStatus>>,
+    deadline: Instant,
+    poll: Duration,
+) -> WaitOutcome {
+    loop {
+        match try_wait() {
+            Ok(Some(s)) => return WaitOutcome::Exited(s),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    return WaitOutcome::TimedOut;
+                }
+                std::thread::sleep(poll);
+            }
+            Err(e) => return WaitOutcome::WaitFailed(e),
+        }
     }
 }
 
@@ -2404,6 +2449,11 @@ pub struct FakeTarget {
     /// unexpected stderr content on a successful check (R5-F04). Wins over
     /// `probe_completion`.
     pub dnf_probe_output: Option<Output>,
+    /// Forced answer for a user program (an absolute path run by a `command`
+    /// resource), instead of the default "success if declared present".
+    /// Lets a test make a dispatched command end in any completion, for
+    /// example the started-but-unknown one a failed wait produces.
+    pub program_outputs: BTreeMap<String, Output>,
     /// Forced package-query completion.
     pub query_completion: Option<Completion>,
     /// Ordered complete package-query results (stdout, stderr, truncation
@@ -2667,6 +2717,7 @@ impl FakeTarget {
             manager_output: None,
             probe_completion: None,
             dnf_probe_output: None,
+            program_outputs: BTreeMap::new(),
             query_completion: None,
             query_results: std::collections::VecDeque::new(),
             dnf_repos: vec![DnfRepo {
@@ -2733,6 +2784,7 @@ impl FakeTarget {
             manager_output: None,
             probe_completion: None,
             dnf_probe_output: None,
+            program_outputs: BTreeMap::new(),
             query_completion: None,
             query_results: std::collections::VecDeque::new(),
             dnf_repos: vec![DnfRepo {
@@ -2790,6 +2842,7 @@ impl FakeTarget {
             manager_output: None,
             probe_completion: None,
             dnf_probe_output: None,
+            program_outputs: BTreeMap::new(),
             query_completion: None,
             query_results: std::collections::VecDeque::new(),
             dnf_repos: Vec::new(),
@@ -2845,6 +2898,7 @@ impl FakeTarget {
             manager_output: None,
             probe_completion: None,
             dnf_probe_output: None,
+            program_outputs: BTreeMap::new(),
             query_completion: None,
             query_results: std::collections::VecDeque::new(),
             dnf_repos: Vec::new(),
@@ -2894,6 +2948,7 @@ impl FakeTarget {
             manager_output: None,
             probe_completion: None,
             dnf_probe_output: None,
+            program_outputs: BTreeMap::new(),
             query_completion: None,
             query_results: std::collections::VecDeque::new(),
             dnf_repos: Vec::new(),
@@ -3442,7 +3497,9 @@ impl FakeExecutor {
             // deterministically so a missing model can never masquerade as
             // a successful observation.
             _ => {
-                if self.target.executables.contains(&req.program) {
+                if let Some(o) = self.target.program_outputs.get(&req.program) {
+                    o.clone()
+                } else if self.target.executables.contains(&req.program) {
                     Self::exited(0, String::new(), String::new())
                 } else {
                     Self::exited(
@@ -4554,7 +4611,206 @@ mod tests {
             home: "/".to_string(),
             log: Vec::new(),
             stats: ExecStatsHandle::default(),
+            wait_fault: None,
         }
+    }
+
+    // ---- RW-068: a failed wait after dispatch -------------------------------
+
+    /// A failure of `try_wait` *after* the command was started is its own
+    /// outcome: never a timeout, never a normal exit, and never retried.
+    #[test]
+    fn wait_failure_is_its_own_outcome() {
+        let exited = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .status()
+            .expect("sh");
+        let mut calls = 0;
+        let outcome = wait_for_child(
+            &mut || {
+                calls += 1;
+                // A retry would see an exit here, so it fails the test rather
+                // than looping.
+                if calls == 1 {
+                    Err(std::io::Error::from_raw_os_error(libc::ECHILD))
+                } else {
+                    Ok(Some(exited))
+                }
+            },
+            Instant::now() + Duration::from_secs(30),
+            Duration::from_millis(1),
+        );
+        assert_eq!(calls, 1, "a failed wait is final: no retry of try_wait");
+        match outcome {
+            WaitOutcome::WaitFailed(e) => assert_eq!(e.raw_os_error(), Some(libc::ECHILD)),
+            _ => panic!("expected WaitFailed"),
+        }
+    }
+
+    #[test]
+    fn wait_failure_after_polling_is_not_a_timeout() {
+        let mut calls = 0;
+        let outcome = wait_for_child(
+            &mut || {
+                calls += 1;
+                match calls {
+                    1..=3 => Ok(None),
+                    4 => Err(std::io::Error::other("injected")),
+                    // A retry would see an exit here, so it fails the test
+                    // rather than looping.
+                    _ => Ok(Some(
+                        std::process::Command::new("/bin/sh")
+                            .args(["-c", "exit 0"])
+                            .status()
+                            .expect("sh"),
+                    )),
+                }
+            },
+            Instant::now() + Duration::from_secs(30),
+            Duration::from_millis(1),
+        );
+        assert_eq!(calls, 4);
+        assert!(matches!(outcome, WaitOutcome::WaitFailed(_)));
+    }
+
+    #[test]
+    fn wait_deadline_is_a_timeout_and_a_normal_exit_is_an_exit() {
+        let outcome = wait_for_child(&mut || Ok(None), Instant::now(), Duration::from_millis(1));
+        assert!(matches!(outcome, WaitOutcome::TimedOut));
+
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .status()
+            .expect("sh");
+        let mut once = Some(status);
+        let outcome = wait_for_child(
+            &mut || Ok(once.take()),
+            Instant::now() + Duration::from_secs(30),
+            Duration::from_millis(1),
+        );
+        assert!(matches!(outcome, WaitOutcome::Exited(s) if s.success()));
+    }
+
+    fn local_req(script: &str, timeout: u64) -> ExecRequest {
+        let mut r = ExecRequest::new("/bin/sh").arg("-c").arg(script);
+        r.env.insert("PATH".into(), "/usr/bin:/bin".into());
+        r.cwd = Some("/".into());
+        r.timeout_secs = timeout;
+        r
+    }
+
+    fn wait_for_file(p: &std::path::Path, secs: u64) -> bool {
+        let end = Instant::now() + Duration::from_secs(secs);
+        while Instant::now() < end {
+            if p.exists() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        p.exists()
+    }
+
+    /// The failure RW-068 is about, with a real child: the wait fails after
+    /// the command was started. The result says "started, outcome unknown",
+    /// and the command still runs to completion on its own, which is why
+    /// "failed, nothing changed" would be wrong.
+    #[test]
+    fn a_wait_failure_after_dispatch_is_started_but_unknown_and_the_command_still_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let mut ex = local(false, false);
+        ex.wait_fault = Some(std::io::ErrorKind::Other);
+        let t0 = Instant::now();
+        let out = ex
+            .run(&local_req(
+                &format!("sleep 1; echo ran > '{}'", marker.display()),
+                30,
+            ))
+            .expect("a started command is never an Err");
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "bounded: {:?}",
+            t0.elapsed()
+        );
+        match &out.completion {
+            Completion::Indeterminate { started, reason } => {
+                assert!(*started);
+                assert!(
+                    reason.contains("failed to wait for child after dispatch"),
+                    "{reason}"
+                );
+            }
+            other => panic!("expected Indeterminate, got {other:?}"),
+        }
+        assert!(
+            wait_for_file(&marker, 10),
+            "the command was not stopped by the wait failure, so its effect is possible"
+        );
+    }
+
+    /// Before dispatch: a spawn failure is still a definite "nothing happened".
+    #[test]
+    fn a_spawn_failure_stays_a_plain_apply_error_with_no_mutation() {
+        let mut ex = local(false, false);
+        ex.wait_fault = Some(std::io::ErrorKind::Other);
+        let mut r = ExecRequest::new("/nonexistent-dir/sinter-no-such-program");
+        r.cwd = Some("/".into());
+        let e = ex.run(&r).expect_err("spawn must fail");
+        assert_eq!(e.kind, crate::error::ErrorKind::Apply);
+        assert_eq!(e.mutation, crate::error::MutationState::None);
+        assert!(e.message.contains("failed to start"), "{}", e.message);
+        // The unused fault stays armed: it belongs to the next dispatched command.
+        assert!(ex.wait_fault.is_some());
+    }
+
+    /// No change to the ordinary completions: success, a failing exit code
+    /// and a signal are reported exactly as before.
+    #[test]
+    fn exit_codes_and_signals_are_unchanged() {
+        let mut ex = local(false, false);
+        assert_eq!(
+            ex.run(&local_req("exit 0", 30)).unwrap().completion,
+            Completion::Exited(0)
+        );
+        assert_eq!(
+            ex.run(&local_req("exit 3", 30)).unwrap().completion,
+            Completion::Exited(3)
+        );
+        assert_eq!(
+            ex.run(&local_req("kill -TERM $$", 30)).unwrap().completion,
+            Completion::Signaled(libc::SIGTERM)
+        );
+    }
+
+    /// The timeout path is unchanged: Indeterminate, the whole process group
+    /// is killed (the descendant never writes its marker), prompt return.
+    #[test]
+    fn the_timeout_path_still_kills_the_group_and_is_indeterminate() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("late");
+        let mut ex = local(false, false);
+        let t0 = Instant::now();
+        let out = ex
+            .run(&local_req(
+                &format!("(sleep 3; echo late > '{}') & wait", marker.display()),
+                1,
+            ))
+            .unwrap();
+        assert!(t0.elapsed() < Duration::from_secs(8), "{:?}", t0.elapsed());
+        match &out.completion {
+            Completion::Indeterminate { started, reason } => {
+                assert!(*started);
+                assert!(
+                    reason.contains("timeout of 1s elapsed after dispatch"),
+                    "{reason}"
+                );
+            }
+            other => panic!("expected Indeterminate, got {other:?}"),
+        }
+        assert!(
+            !wait_for_file(&marker, 5),
+            "the process group must have been killed"
+        );
     }
 
     #[test]

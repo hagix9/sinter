@@ -137,7 +137,10 @@ pending reloads as `manager_reload` drift.
 **Indeterminate apply (exit 6)**
 
 Sinter could not confirm whether a mutation completed. Do not retry blindly —
-inspect the target state first, then re-apply if safe.
+inspect the target state first, then re-apply if safe. After v1.5.1
+(unreleased), a local run whose wait for a started command fails is reported
+the same way (`failed to wait for child after dispatch`), not as "failed,
+nothing changed": the command may have run, and may still be running.
 
 ## dnf-specific
 

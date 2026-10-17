@@ -233,13 +233,16 @@ fn fail(p: &Progress<'_>, e: SinterError) -> SinterError {
 }
 
 /// Ensure `dir` exists as a trusted directory, creating it 0700 if absent.
+/// The directory is created with `mkdir -m 0700` (RW-020), so with GNU
+/// coreutils it never exists with a wider mode; the `chmod 0700` that follows
+/// is kept, for a `mkdir` that sets the mode only after creating the entry.
 fn ensure_dir(fs: &mut TargetFs, dir: &str) -> Result<()> {
     fs.check_trusted_parents_strict(dir)?;
     let permit = fs.mutation_permit()?;
     let st = fs.inspect(dir)?;
     match st.kind {
         ObjKind::Dir => check_existing_store_dir(fs, dir, &st),
-        ObjKind::Absent => match fs.mkdir(&permit, dir) {
+        ObjKind::Absent => match fs.mkdir_private(&permit, dir) {
             Ok(()) => fs.chmod(&permit, dir, 0o700),
             Err(e) => {
                 // A concurrent invocation may have created it between the
@@ -313,9 +316,10 @@ pub(crate) fn perform(
     fs.check_trusted_parents_strict(&run_dir)
         .map_err(|e| fail(&before_store, e))?;
     let permit = fs.mutation_permit()?;
-    // Plain mkdir: an existing run directory is a collision and fails. It is
-    // not ours, so the failure report names no directory.
-    fs.mkdir(&permit, &run_dir).map_err(|e| {
+    // Plain (non `-p`) mkdir, mode 0700 from the start: an existing run
+    // directory is a collision and fails. It is not ours, so the failure
+    // report names no directory.
+    fs.mkdir_private(&permit, &run_dir).map_err(|e| {
         fail(
             &before_store,
             SinterError::apply(format!(

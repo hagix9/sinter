@@ -996,6 +996,19 @@ impl FakeFs {
                     ok()
                 }
             }
+            // `mkdir -m MODE -- path`: like the plain form, but the mode is
+            // applied by the creating call itself.
+            ("mkdir", ["-m", mode, "--", p]) => match u32::from_str_radix(mode, 8) {
+                Ok(m) if m <= 0o7777 => {
+                    if self.nodes.contains_key(*p) || !self.nodes.contains_key(&parent_of(p)) {
+                        Self::fail("mkdir: cannot create directory")
+                    } else {
+                        self.mkdir_node(p, m, uid, gid);
+                        ok()
+                    }
+                }
+                _ => Self::fail("mkdir: invalid mode"),
+            },
             ("rmdir", [p]) | ("rmdir", ["--", p]) => match self.nodes.get(*p) {
                 Some(_) if self.sticky_denies(uid, p) => {
                     Self::fail("rmdir: Operation not permitted")
