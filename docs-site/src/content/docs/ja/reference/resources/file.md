@@ -30,7 +30,7 @@ description: 通常ファイルの内容とメタデータを管理する。
 | `owner` | いいえ | string | — | 所有者名。 |
 | `group` | いいえ | string | — | グループ名。 |
 | `mode` | いいえ | string | — | 引用符付きの 4 桁 8 進数。例: `"0644"`。 |
-| `validate` | いいえ | map | — | 公開前に staging ファイルへ実行する検証コマンド（`program`、`args`、`timeout_seconds`）。（`{{ staged }}` で staging ファイルのパスを引数の中に置ける） |
+| `validate` | いいえ | map | — | 公開前に staging ファイルへ実行する検証コマンド（`program`、`args`、`timeout_seconds`）。（`{{ staged }}` で staging ファイルのパスを引数の中に置ける。v1.5.1、まだリリースしていません） |
 
 ## 期待される動作
 
@@ -83,7 +83,7 @@ description: 通常ファイルの内容とメタデータを管理する。
 drop-in（`sshd_config.d/*.conf`、`rsyslog.d/*.conf`）では、drop-in が解釈できることは
 示せますが、それを含む設定全体が正しいことまでは示せません。ツールが主設定と staging
 ファイルをまとめて検査できるなら、そちらを使ってください（例: 下の
-`httpd -t -c "Include {{ staged }}"`）。
+`httpd -t -c "Include {{ staged }}"`。v1.5.1 が必要です）。
 
 - 非ゼロ終了・シグナル・タイムアウトのときは内容を**公開しません**。宛先は
   そのままです。タイムアウトや応答不明は indeterminate として報告されます
@@ -94,6 +94,9 @@ drop-in（`sshd_config.d/*.conf`、`rsyslog.d/*.conf`）では、drop-in が解�
 - `validate` を書かなければ、従来どおり公開されます。
 
 ### staging ファイルを引数の中に置く（`{{ staged }}`）
+
+`{{ staged }}` は v1.5.1（まだリリースしていません）で追加されます。v1.5.0 は
+これを式のエラー（`bare names are not allowed`）として拒否します。
 
 検証ツールによっては、ファイルのパスを最後の別の引数ではなく、引数の一部として
 渡す必要があります（`postgres` は `--config-file=PATH` の形しか受け付けません）。

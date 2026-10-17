@@ -213,13 +213,17 @@ v1.5.1; this section states it in one place):
 
 Safe per-release branching (for example a step that exists only on EL8/EL9):
 
-- Put the release-specific `command` steps **before** the resources that need
-  them and do not list them in `depends_on` (a skipped step would block its
-  dependents); declaration order and fail-fast keep them in order — a failure
-  stops the run.
-- Guard every `when` that reads such a step's register with the same release
-  condition first, so the register is only read when the step ran:
+- A resource that reads a release-specific step's register must list that
+  step directly in `depends_on` (`validate` requires it) and must carry the
+  same release condition first in its own `when`. Its own condition is
+  evaluated before its dependencies, so on other releases it is skipped
+  instead of blocked, and the register is only read when the step ran:
   `when: "facts.os.version_major < 10 && registers.state.exit_code == 1"`.
+- A resource that only needs the release-specific steps to have run (for
+  example a `package` installed after a module-enable step) should not list
+  them in `depends_on`, because on other releases the skipped step would block
+  it. Declare it **after** those steps instead: declaration order and
+  fail-fast keep them in order, and a failure stops the run.
 - See `examples/recipes/postgresql-os.yaml` and `epel-crb.yaml`.
 
 ## Strictness

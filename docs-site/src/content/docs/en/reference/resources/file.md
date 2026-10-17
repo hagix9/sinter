@@ -30,7 +30,7 @@ and mode — or is absent.
 | `owner` | no | string | — | Owner name. |
 | `group` | no | string | — | Group name. |
 | `mode` | no | string | — | Quoted four-digit octal, e.g. `"0644"`. |
-| `validate` | no | map | — | Command run against the staged file before publication (`program`, `args`, `timeout_seconds`). (`{{ staged }}` places the staged path inside an argument) |
+| `validate` | no | map | — | Command run against the staged file before publication (`program`, `args`, `timeout_seconds`). (`{{ staged }}` places the staged path inside an argument; v1.5.1, not yet released) |
 
 ## Expected behavior
 
@@ -82,7 +82,7 @@ drop-in (`sshd_config.d/*.conf`, `rsyslog.d/*.conf`) that is not the whole
 configuration: the check proves the drop-in parses, not that the full
 configuration that includes it is valid. Where the tool can check the main
 configuration together with the staged file, prefer that (for example
-`httpd -t -c "Include {{ staged }}"` below).
+`httpd -t -c "Include {{ staged }}"` below, which needs v1.5.1).
 
 - On a non-zero exit, a signal, or a timeout the content is **not published**
   and the destination is left exactly as it was; a timeout or lost response is
@@ -93,6 +93,9 @@ configuration together with the staged file, prefer that (for example
 - Without `validate`, the file is published exactly as before.
 
 ### Placing the staged file inside an argument (`{{ staged }}`)
+
+`{{ staged }}` is new in v1.5.1, which is not yet released; v1.5.0 rejects
+it as an expression error (`bare names are not allowed`).
 
 Some checkers need the file path as part of an argument rather than as a
 separate last argument — `postgres` only accepts `--config-file=PATH`. Write

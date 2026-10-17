@@ -102,10 +102,27 @@ Sinter 自体は EL8 では動きません（Linux 版は glibc 2.34 が必要�
 ## PostgreSQL、EPEL / CRB、その他のリポジトリ
 
 - **OS の PostgreSQL:** 既定は EL8 が 10、EL9 が 13 で、どちらも upstream の
-  サポートが終了しています。EL10 は 16 です。`examples/recipes/postgresql-os.yaml`
-  は 3 つとも 16 を導入し（EL8 / EL9 は module stream `postgresql:16`）、検証付きの
-  `postgresql.conf`、`pg_hba.conf`、
+  サポートが終了しています。EL10 は 16 です。OS の **16** か、PGDG の **17** を
+  使ってください。新しいサーバーに既定の 10 や 13 を選ばないでください。
+  `examples/recipes/postgresql-os.yaml` は 3 つとも 16 を導入し（EL8 / EL9 は
+  module stream `postgresql:16`）、検証付きの `postgresql.conf`、`pg_hba.conf`、
   [`postgresql_role`](/ja/reference/resources/postgresql_role/) を設定します。
+
+  | メジャー版 | EL8（module stream） | EL9 | EL10 | upstream のサポート終了 |
+  |-----------|----------------------|-----|------|------------------------|
+  | 10 | `postgresql:10`（既定） | — | — | 2022-11（終了） |
+  | 12 | `postgresql:12` | — | — | 2024-11（終了） |
+  | 13 | `postgresql:13` | 既定（モジュールではない） | — | 2025-11（終了） |
+  | 15 | `postgresql:15` | `postgresql:15` | — | 2027-11 |
+  | 16 | `postgresql:16` | `postgresql:16` | 既定 | 2028-11 |
+  | 17 | PGDG | PGDG | PGDG | 2029-11 |
+
+  EL8 の stream は、Rocky Linux 8.10 で `dnf module list postgresql` が示すもの
+  です（9.6 も表示されます）。v1.5.1 の開発中に検証したのは、EL8 / EL9 の
+  `postgresql:16`、EL10 の 16、3 つすべての PGDG 17 の導入で、ほかの行は検証して
+  いません。日付は PostgreSQL プロジェクトのものです。ディストリビューションが
+  module stream を保守する期間は、そのディストリビューションの application
+  stream のライフサイクルで決まります。
 - **PGDG の PostgreSQL 17:** `examples/recipes/postgresql-pgdg17.yaml` は、指紋を
   照合して固定した鍵と、`gpgcheck` / `repo_gpgcheck` を有効にした PGDG の
   リポジトリをファイルとして宣言します。PGDG の repo RPM を URL から導入する

@@ -194,8 +194,10 @@ Limits of this record, stated rather than implied:
 
 ## Explicitly not supported
 
-- Other distributions (fail closed with a capability error rather than
-  guessing a backend). The backend is chosen by family (Debian/Ubuntu → apt,
+- Other distributions. One whose `/etc/os-release` `ID_LIKE` names a supported
+  family (`debian`, `ubuntu`, `rhel`, `fedora`, `centos`) is driven with that
+  family's backend but is not supported; any other fails closed with a
+  capability error rather than guessing a backend. The backend is chosen by family (Debian/Ubuntu → apt,
   Red Hat family → dnf), not by release: another release of a supported
   family is driven with the same backend but is not supported unless listed
   above.

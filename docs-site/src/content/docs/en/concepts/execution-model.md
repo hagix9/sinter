@@ -55,7 +55,8 @@ stopped early does not start a new reload; the report then says the manager is
 unsynchronized.
 
 :::caution[Known limitation: a failed apply drops pending notifications]
-Handlers run only after every resource has succeeded. If an apply fails after
+Handlers run only when the apply did not stop, that is when no resource
+failed or ended indeterminate. If an apply fails after
 a resource already changed a file that notifies a handler, the handler does
 not run, and the next apply — finding the file correct — notifies nobody.
 After a failed apply, restart or reload the affected services by hand.

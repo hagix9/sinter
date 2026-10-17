@@ -101,10 +101,26 @@ not yet a release acceptance claim:
 ## PostgreSQL, EPEL / CRB and other repositories
 
 - **PostgreSQL from the OS:** EL8 defaults to 10 and EL9 to 13 (both past their
-  upstream end of life); EL10 ships 16. `examples/recipes/postgresql-os.yaml`
-  installs 16 on all three (module stream `postgresql:16` on EL8/EL9), with a
-  validated `postgresql.conf`, `pg_hba.conf` and a
-  [`postgresql_role`](/en/reference/resources/postgresql_role/).
+  upstream end of life); EL10 ships 16. Use **16** from the OS, or **17** from
+  PGDG; do not take the default 10 or 13 for a new server.
+  `examples/recipes/postgresql-os.yaml` installs 16 on all three (module stream
+  `postgresql:16` on EL8/EL9), with a validated `postgresql.conf`,
+  `pg_hba.conf` and a [`postgresql_role`](/en/reference/resources/postgresql_role/).
+
+  | Major | EL8 (module stream) | EL9 | EL10 | Upstream support ends |
+  |-------|---------------------|-----|------|-----------------------|
+  | 10 | `postgresql:10` (default) | — | — | 2022-11 (ended) |
+  | 12 | `postgresql:12` | — | — | 2024-11 (ended) |
+  | 13 | `postgresql:13` | default (not modular) | — | 2025-11 (ended) |
+  | 15 | `postgresql:15` | `postgresql:15` | — | 2027-11 |
+  | 16 | `postgresql:16` | `postgresql:16` | default | 2028-11 |
+  | 17 | PGDG | PGDG | PGDG | 2029-11 |
+
+  The EL8 streams are those `dnf module list postgresql` shows on Rocky Linux
+  8.10 (it also lists 9.6). The EL8/EL9 `postgresql:16` and EL10 16 installs and
+  PGDG 17 on all three were verified during v1.5.1 development; the other rows
+  are not. The dates are the PostgreSQL project's; how long the distribution
+  maintains a module stream is set by its own application-stream life cycle.
 - **PostgreSQL 17 from PGDG:** `examples/recipes/postgresql-pgdg17.yaml`
   declares the PGDG repository as files with a pinned, fingerprint-checked key
   and `gpgcheck`/`repo_gpgcheck` on. Installing the PGDG repo RPM from a URL is

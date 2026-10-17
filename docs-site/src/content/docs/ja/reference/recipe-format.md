@@ -214,12 +214,16 @@ content: "listen = {{ vars.port }}"
 
 リリースごとの安全な分岐（例: EL8 / EL9 にだけある手順）:
 
-- リリース固有の `command` の手順は、それを必要とするリソースより**前**に宣言し、
-  `depends_on` には書かないでください（飛ばされた手順は依存するものを blocked に
-  します）。宣言順と fail-fast で順序が保たれ、失敗すれば実行が止まります。
-- その手順の register を読む `when` は、まず同じリリースの条件で守り、手順が実行
-  されたときだけ register を読むようにします:
+- リリース固有の手順の register を読むリソースは、その手順を `depends_on` に
+  直接書き（`validate` が要求します）、自分の `when` の先頭に同じリリースの条件を
+  置いてください。自分の条件は依存より先に評価されるので、ほかのリリースでは
+  blocked ではなく skipped になり、register は手順が実行されたときだけ読まれます:
   `when: "facts.os.version_major < 10 && registers.state.exit_code == 1"`。
+- リリース固有の手順が実行済みであればよいだけのリソース（例: module を有効に
+  する手順のあとに導入する `package`）は、その手順を `depends_on` に書かないで
+  ください。ほかのリリースでは、飛ばされた手順がそのリソースを blocked にします。
+  代わりに、その手順より**後**に宣言してください。宣言順と fail-fast で順序が
+  保たれ、失敗すれば実行が止まります。
 - `examples/recipes/postgresql-os.yaml` と `epel-crb.yaml` を参照してください。
 
 ## 厳格性
