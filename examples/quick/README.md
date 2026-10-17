@@ -33,6 +33,6 @@ sinter apply examples/quick/packages.yaml --host host.example.com --user admin -
 sinter apply examples/quick/packages.yaml --host host.example.com --user admin --sudo   # idempotent
 ```
 
-The larger, multi-role example lives in `examples/multihost/`. Complete
+The larger, multi-role example lives in [`examples/multihost/`](../multihost/). Complete
 RHEL-family recipes (Python, PostgreSQL, EPEL/CRB, signed repositories, Apache)
-live in `examples/recipes/`.
+live in [`examples/recipes/`](../recipes/).

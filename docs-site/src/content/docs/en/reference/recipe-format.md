@@ -224,7 +224,7 @@ Safe per-release branching (for example a step that exists only on EL8/EL9):
   them in `depends_on`, because on other releases the skipped step would block
   it. Declare it **after** those steps instead: declaration order and
   fail-fast keep them in order, and a failure stops the run.
-- See `examples/recipes/postgresql-os.yaml` and `epel-crb.yaml`.
+- See [`examples/recipes/postgresql-os.yaml`](https://github.com/hagix9/sinter/blob/main/examples/recipes/postgresql-os.yaml) and [`epel-crb.yaml`](https://github.com/hagix9/sinter/blob/main/examples/recipes/epel-crb.yaml).
 
 ## Strictness
 

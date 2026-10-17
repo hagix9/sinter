@@ -57,7 +57,7 @@ Every push and pull request runs two GitHub Actions workflows:
   builds the root test binaries without running them, and runs the gateway
   tests and the installer and release-checker tests. None of these change
   the machine they run on.
-- **Dependency advisories** checks `Cargo.lock` and `gateway/Cargo.lock`
+- **Dependency advisories** checks [`Cargo.lock`](https://github.com/hagix9/sinter/blob/main/Cargo.lock) and [`gateway/Cargo.lock`](https://github.com/hagix9/sinter/blob/main/gateway/Cargo.lock)
   against OSV.dev, which carries GitHub-reviewed and RustSec advisories. It
   also runs weekly, so a new advisory against unchanged dependencies is
   noticed. Dependabot alerts watch the repository as well.
@@ -66,7 +66,7 @@ These checks report only advisories that are already published in those
 databases, with the version ranges the databases record. Databases can lag or
 record incomplete ranges. A failing run is fixed forward; tests are not
 retried automatically. CI does not replace the release gate or target
-acceptance in `RELEASE.md`.
+acceptance in [`RELEASE.md`](https://github.com/hagix9/sinter/blob/main/RELEASE.md).
 
 The root test suite (`cargo test` in the repository root) runs in the release
 gate, not in CI. With passwordless sudo, some of its tests change the machine

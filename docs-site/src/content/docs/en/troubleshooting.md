@@ -201,7 +201,7 @@ The account is created by a package's scriptlet, so it does not exist while
 plan runs. Declare the `group`/`user` before the package, with the attributes
 the package uses (`apache`: uid/gid 48, home `/usr/share/httpd`, shell
 `/sbin/nologin`); plan then defers what depends on it, and the scriptlet keeps
-the declared account. See `examples/recipes/apache-htpasswd.yaml`.
+the declared account. See [`examples/recipes/apache-htpasswd.yaml`](https://github.com/hagix9/sinter/blob/main/examples/recipes/apache-htpasswd.yaml).
 
 **`postgresql_role` fails**
 

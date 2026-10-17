@@ -1,8 +1,8 @@
 # Sinter surfaces and capability selection
 
-Source of truth: Sinter v1.5.1 `docs-site/public/webmcp.js`,
-`docs-site/src/content/docs/en/reference/webmcp.md`, `src/mcp.rs`,
-`docs-site/src/content/docs/en/reference/mcp.md`, and `sinter --help`.
+Source of truth: Sinter v1.5.1 [`docs-site/public/webmcp.js`](https://github.com/hagix9/sinter/blob/v1.5.1/docs-site/public/webmcp.js),
+[`docs-site/src/content/docs/en/reference/webmcp.md`](https://github.com/hagix9/sinter/blob/v1.5.1/docs-site/src/content/docs/en/reference/webmcp.md), [`src/mcp.rs`](https://github.com/hagix9/sinter/blob/v1.5.1/src/mcp.rs),
+[`docs-site/src/content/docs/en/reference/mcp.md`](https://github.com/hagix9/sinter/blob/v1.5.1/docs-site/src/content/docs/en/reference/mcp.md), and `sinter --help`.
 
 There are three different surfaces. Their tool names share the `sinter_`
 prefix but they are unrelated; do not mix them up.

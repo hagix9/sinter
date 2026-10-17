@@ -224,7 +224,7 @@ content: "listen = {{ vars.port }}"
   ください。ほかのリリースでは、飛ばされた手順がそのリソースを blocked にします。
   代わりに、その手順より**後**に宣言してください。宣言順と fail-fast で順序が
   保たれ、失敗すれば実行が止まります。
-- `examples/recipes/postgresql-os.yaml` と `epel-crb.yaml` を参照してください。
+- [`examples/recipes/postgresql-os.yaml`](https://github.com/hagix9/sinter/blob/main/examples/recipes/postgresql-os.yaml) と [`epel-crb.yaml`](https://github.com/hagix9/sinter/blob/main/examples/recipes/epel-crb.yaml) を参照してください。
 
 ## 厳格性
 

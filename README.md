@@ -73,7 +73,7 @@ sinter apply --host server.example.com --sudo recipe.yaml
 sinter audit --host server.example.com --sudo recipe.yaml
 ```
 
-This repository implements Sinter as specified by `GOALS.md` and `DESIGN.md`,
+This repository implements Sinter as specified by [`GOALS.md`](GOALS.md) and [`DESIGN.md`](DESIGN.md),
 which are the authoritative specification. It manages Ubuntu (`apt`) and
 RHEL-family (Rocky Linux, RHEL, AlmaLinux — `dnf`) targets. The
 implementation still adds no roles, plugins, orchestration, or embedded
@@ -559,7 +559,7 @@ Setup, troubleshooting, and security/privacy details:
 
 Sinter is licensed under either of:
 
-- Apache License, Version 2.0 (`LICENSE-APACHE`)
-- MIT License (`LICENSE-MIT`)
+- Apache License, Version 2.0 ([`LICENSE-APACHE`](LICENSE-APACHE))
+- MIT License ([`LICENSE-MIT`](LICENSE-MIT))
 
 at your option.

@@ -175,7 +175,7 @@ See the [Recipe Format reference](/en/reference/recipe-format/) and the
 ## RHEL-family recipes (v1.5.1)
 
 Complete recipes for Rocky Linux / RHEL 8, 9 and 10 live in
-`examples/recipes/` of the repository; each file explains itself. They use
+[`examples/recipes/`](https://github.com/hagix9/sinter/tree/main/examples/recipes) of the repository; each file explains itself. They use
 `facts.os.version_major` to branch per release and were measured on Rocky Linux
 8.10, 9.8 and 10.2 for v1.5.1.
 

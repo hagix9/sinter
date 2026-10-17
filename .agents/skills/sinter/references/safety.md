@@ -1,7 +1,7 @@
 # Safety and the confirmation boundary
 
-Source of truth: Sinter v1.5.1 `README.md` (Safety guarantees),
-`docs-site/src/content/docs/en/reference/cli.md`, and the resource pages.
+Source of truth: Sinter v1.5.1 [`README.md`](https://github.com/hagix9/sinter/blob/v1.5.1/README.md) (Safety guarantees),
+[`docs-site/src/content/docs/en/reference/cli.md`](https://github.com/hagix9/sinter/blob/v1.5.1/docs-site/src/content/docs/en/reference/cli.md), and the resource pages.
 
 ## Which machine is the target
 

@@ -1,7 +1,7 @@
 # Commands, JSON output, and exit codes
 
 Source of truth: Sinter v1.5.1 `sinter --help` and subcommand help,
-`docs-site/src/content/docs/en/reference/cli.md`, and `tests/json_contract.rs`.
+[`docs-site/src/content/docs/en/reference/cli.md`](https://github.com/hagix9/sinter/blob/v1.5.1/docs-site/src/content/docs/en/reference/cli.md), and [`tests/json_contract.rs`](https://github.com/hagix9/sinter/blob/v1.5.1/tests/json_contract.rs).
 
 ## Commands
 

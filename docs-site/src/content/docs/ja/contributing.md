@@ -57,7 +57,7 @@ push と pull request のたびに、2 つの GitHub Actions ワークフロー�
 - **CI** は、ルートの crate と `gateway/` のフォーマットと clippy を確認し、ルートの
   テストバイナリをビルドだけして（実行はしません）、gateway のテスト、インストーラと
   リリースチェッカーのテストを実行します。いずれも実行するマシンを変更しません。
-- **Dependency advisories** は、`Cargo.lock` と `gateway/Cargo.lock` を OSV.dev
+- **Dependency advisories** は、[`Cargo.lock`](https://github.com/hagix9/sinter/blob/main/Cargo.lock) と [`gateway/Cargo.lock`](https://github.com/hagix9/sinter/blob/main/gateway/Cargo.lock) を OSV.dev
   と照合します。OSV.dev には GitHub がレビューした advisory と RustSec の advisory
   が含まれます。依存関係が変わらなくても新しい advisory に気付けるよう、毎週も
   実行されます。Dependabot alerts もリポジトリを監視しています。
@@ -65,7 +65,7 @@ push と pull request のたびに、2 つの GitHub Actions ワークフロー�
 これらのチェックが報告するのは、各データベースで公開済みの advisory だけで、
 バージョン範囲もデータベースの記録どおりです。データベースには反映の遅れや、
 範囲の記録漏れがあり得ます。失敗した実行は、後続のコミットで修正します。テストは
-自動では再試行しません。CI は `RELEASE.md` のリリースゲートやターゲットでの受け入れ
+自動では再試行しません。CI は [`RELEASE.md`](https://github.com/hagix9/sinter/blob/main/RELEASE.md) のリリースゲートやターゲットでの受け入れ
 検証の代わりにはなりません。
 
 ルートのテストスイート（リポジトリ直下での `cargo test`）は、CI ではなくリリース

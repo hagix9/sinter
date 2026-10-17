@@ -1,6 +1,6 @@
 # Recipes
 
-Source of truth: Sinter v1.5.1 `docs-site/src/content/docs/en/reference/recipe-format.md`
+Source of truth: Sinter v1.5.1 [`docs-site/src/content/docs/en/reference/recipe-format.md`](https://github.com/hagix9/sinter/blob/v1.5.1/docs-site/src/content/docs/en/reference/recipe-format.md)
 and `reference/resources/*.md` (published at
 https://sinter.fulltrust.co.jp/en/reference/recipe-format/ and
 https://sinter.fulltrust.co.jp/en/reference/resources/).
@@ -147,7 +147,7 @@ not claim support for other platforms.
   EL8/EL9, the default on EL10) or **17** from PGDG; do not pick the default 10
   (EL8) or 13 (EL9) for a new server, both past upstream end of life. Manage
   a third-party repository and its key as `file` resources with `gpgcheck`
-  on; see `examples/recipes/` in the Sinter repository.
+  on; see [`examples/recipes/`](https://github.com/hagix9/sinter/tree/main/examples/recipes) in the Sinter repository.
 - A package that creates its own account (for example `postgres`): declare
   the `group`/`user`, with the attributes the package would give it, before
   the package so plan can defer to it.

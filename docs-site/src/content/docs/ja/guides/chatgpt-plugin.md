@@ -151,7 +151,7 @@ Plugin を使う間は bridge が起動している必要があります。停�
 - **フォアグラウンド**: ターミナルで `sinter-bridge` を実行します。Gateway に到達
   できない場合はバックオフ（1 秒から倍増、最大 60 秒）で再接続し、`sinter mcp`
   子プロセスは 5 分間に最大 5 回まで再起動します。
-- **systemd（Linux）**: リポジトリの `gateway/contrib/systemd/` に user unit と
+- **systemd（Linux）**: リポジトリの [`gateway/contrib/systemd/`](https://github.com/hagix9/sinter/tree/main/gateway/contrib/systemd) に user unit と
   環境変数テンプレートがあります。`sinter/gateway` ディレクトリで:
 
   ```sh

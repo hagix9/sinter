@@ -74,7 +74,7 @@ sinter apply --host server.example.com --sudo recipe.yaml
 sinter audit --host server.example.com --sudo recipe.yaml
 ```
 
-このリポジトリは、`GOALS.md`と`DESIGN.md`で定義された Sinter を実装しています。
+このリポジトリは、[`GOALS.md`](GOALS.md)と[`DESIGN.md`](DESIGN.md)で定義された Sinter を実装しています。
 これら2ファイルが正式な仕様です。Ubuntu（`apt`）と RHEL 系（Rocky Linux、RHEL、
 AlmaLinux — `dnf`）のターゲットを管理します。roles、plugins、orchestration、
 embedded scriptingは依然として実装対象に含めません。複数ホストは、意図的に
@@ -552,5 +552,5 @@ ChatGPT → Sinter Plugin → 公開 Gateway (https://gateway.fulltrust.co.jp/mc
 
 Sinterは以下のいずれかを選択できるデュアルライセンスです。
 
-- Apache License, Version 2.0 (`LICENSE-APACHE`)
-- MIT License (`LICENSE-MIT`)
+- Apache License, Version 2.0 ([`LICENSE-APACHE`](LICENSE-APACHE))
+- MIT License ([`LICENSE-MIT`](LICENSE-MIT))

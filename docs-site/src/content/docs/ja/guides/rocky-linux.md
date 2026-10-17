@@ -94,17 +94,17 @@ Sinter 自体は EL8 では動きません（Linux 版は glibc 2.34 が必要�
   `python36:3.6`、自動で有効になります）、`python3.11`、`python3.12`、
   `python3.11-pip`、`python39`、`python38`。EL8 の `python3` と `python311` は
   パッケージ名ではなく provides なので、Sinter は導入の前に拒否し、実際の
-  パッケージ名を案内します。`examples/recipes/python-el8.yaml` を参照してください。
+  パッケージ名を案内します。[`examples/recipes/python-el8.yaml`](https://github.com/hagix9/sinter/blob/main/examples/recipes/python-el8.yaml) を参照してください。
 - **module stream:** module の既定の stream を有効にしながらの導入は動作します
   （取引に `Enabling module streams:` が出る場合）。既定以外の stream を使うときは
-  先に有効にしてください。`examples/recipes/postgresql-os.yaml` を参照してください。
+  先に有効にしてください。[`examples/recipes/postgresql-os.yaml`](https://github.com/hagix9/sinter/blob/main/examples/recipes/postgresql-os.yaml) を参照してください。
 
 ## PostgreSQL、EPEL / CRB、その他のリポジトリ
 
 - **OS の PostgreSQL:** 既定は EL8 が 10、EL9 が 13 で、どちらも upstream の
   サポートが終了しています。EL10 は 16 です。OS の **16** か、PGDG の **17** を
   使ってください。新しいサーバーに既定の 10 や 13 を選ばないでください。
-  `examples/recipes/postgresql-os.yaml` は 3 つとも 16 を導入し（EL8 / EL9 は
+  [`examples/recipes/postgresql-os.yaml`](https://github.com/hagix9/sinter/blob/main/examples/recipes/postgresql-os.yaml) は 3 つとも 16 を導入し（EL8 / EL9 は
   module stream `postgresql:16`）、検証付きの `postgresql.conf`、`pg_hba.conf`、
   [`postgresql_role`](/ja/reference/resources/postgresql_role/) を設定します。
 
@@ -123,16 +123,16 @@ Sinter 自体は EL8 では動きません（Linux 版は glibc 2.34 が必要�
   いません。日付は PostgreSQL プロジェクトのものです。ディストリビューションが
   module stream を保守する期間は、そのディストリビューションの application
   stream のライフサイクルで決まります。
-- **PGDG の PostgreSQL 17:** `examples/recipes/postgresql-pgdg17.yaml` は、指紋を
+- **PGDG の PostgreSQL 17:** [`examples/recipes/postgresql-pgdg17.yaml`](https://github.com/hagix9/sinter/blob/main/examples/recipes/postgresql-pgdg17.yaml) は、指紋を
   照合して固定した鍵と、`gpgcheck` / `repo_gpgcheck` を有効にした PGDG の
   リポジトリをファイルとして宣言します。PGDG の repo RPM を URL から導入する
   方法は推奨しません。dnf は既定ではローカル / URL の RPM の署名を検証しません
   （`localpkg_gpgcheck=0`）。
-- **EPEL と CRB / PowerTools:** `examples/recipes/epel-crb.yaml`。dnf は初回の
+- **EPEL と CRB / PowerTools:** [`examples/recipes/epel-crb.yaml`](https://github.com/hagix9/sinter/blob/main/examples/recipes/epel-crb.yaml)。dnf は初回の
   利用時に、リポジトリの `gpgkey` のファイルから鍵を取り込みます。信頼の起点は
   その鍵のファイルなので、サードパーティのリポジトリでは鍵を固定して（ファイル
   として管理して）ください。
-- **任意の署名付きリポジトリ:** `examples/recipes/signed-repo.yaml`（鍵のファイル
+- **任意の署名付きリポジトリ:** [`examples/recipes/signed-repo.yaml`](https://github.com/hagix9/sinter/blob/main/examples/recipes/signed-repo.yaml)（鍵のファイル
   + リポジトリのファイル + パッケージ）。署名の無いパッケージや別の鍵で署名
   されたパッケージは拒否されます（`GPG check FAILED`）。
 

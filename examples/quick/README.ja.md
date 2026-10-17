@@ -33,6 +33,6 @@ sinter apply examples/quick/packages.yaml --host host.example.com --user admin -
 sinter apply examples/quick/packages.yaml --host host.example.com --user admin --sudo   # 冪等
 ```
 
-複数ロールの例は `examples/multihost/` にあります。RHEL 系の完成したレシピ
+複数ロールの例は [`examples/multihost/`](../multihost/) にあります。RHEL 系の完成したレシピ
 （Python、PostgreSQL、EPEL / CRB、署名付きリポジトリ、Apache）は
-`examples/recipes/` にあります。
+[`examples/recipes/`](../recipes/) にあります。

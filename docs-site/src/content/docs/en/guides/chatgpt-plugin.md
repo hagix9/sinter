@@ -157,7 +157,7 @@ calls fail with `controller_offline` about 130 seconds after its last poll.
   backoff (1 s doubling, up to 60 s) if the Gateway is unreachable, and
   restarts the `sinter mcp` child up to 5 times in 5 minutes.
 - **systemd (Linux)**: the repository ships a user unit and an environment
-  template in `gateway/contrib/systemd/`. From the `sinter/gateway`
+  template in [`gateway/contrib/systemd/`](https://github.com/hagix9/sinter/tree/main/gateway/contrib/systemd). From the `sinter/gateway`
   directory:
 
   ```sh

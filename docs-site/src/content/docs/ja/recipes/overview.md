@@ -176,7 +176,7 @@ resources:
 ## RHEL 系のレシピ（v1.5.1）
 
 Rocky Linux / RHEL 8、9、10 向けの完成したレシピは、リポジトリの
-`examples/recipes/` にあります。各ファイルの冒頭に説明があります。リリースごとの
+[`examples/recipes/`](https://github.com/hagix9/sinter/tree/main/examples/recipes) にあります。各ファイルの冒頭に説明があります。リリースごとの
 分岐には `facts.os.version_major` を使い、v1.5.1 の検証で Rocky Linux 8.10、9.8、
 10.2 で実測しました。
 

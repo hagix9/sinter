@@ -93,17 +93,17 @@ not yet a release acceptance claim:
   `python36:3.6`, enabled automatically), `python3.11`, `python3.12`,
   `python3.11-pip`, `python39`, `python38`. `python3` and `python311` are not
   package names on EL8 (provides only); Sinter refuses them before installing
-  and names the real package. See `examples/recipes/python-el8.yaml`.
+  and names the real package. See [`examples/recipes/python-el8.yaml`](https://github.com/hagix9/sinter/blob/main/examples/recipes/python-el8.yaml).
 - **Module streams:** an install that enables a module's default stream works
   (`Enabling module streams:` in the transaction). To get a non-default stream,
-  enable it first; see `examples/recipes/postgresql-os.yaml`.
+  enable it first; see [`examples/recipes/postgresql-os.yaml`](https://github.com/hagix9/sinter/blob/main/examples/recipes/postgresql-os.yaml).
 
 ## PostgreSQL, EPEL / CRB and other repositories
 
 - **PostgreSQL from the OS:** EL8 defaults to 10 and EL9 to 13 (both past their
   upstream end of life); EL10 ships 16. Use **16** from the OS, or **17** from
   PGDG; do not take the default 10 or 13 for a new server.
-  `examples/recipes/postgresql-os.yaml` installs 16 on all three (module stream
+  [`examples/recipes/postgresql-os.yaml`](https://github.com/hagix9/sinter/blob/main/examples/recipes/postgresql-os.yaml) installs 16 on all three (module stream
   `postgresql:16` on EL8/EL9), with a validated `postgresql.conf`,
   `pg_hba.conf` and a [`postgresql_role`](/en/reference/resources/postgresql_role/).
 
@@ -121,15 +121,15 @@ not yet a release acceptance claim:
   PGDG 17 on all three were verified for v1.5.1; the other rows
   are not. The dates are the PostgreSQL project's; how long the distribution
   maintains a module stream is set by its own application-stream life cycle.
-- **PostgreSQL 17 from PGDG:** `examples/recipes/postgresql-pgdg17.yaml`
+- **PostgreSQL 17 from PGDG:** [`examples/recipes/postgresql-pgdg17.yaml`](https://github.com/hagix9/sinter/blob/main/examples/recipes/postgresql-pgdg17.yaml)
   declares the PGDG repository as files with a pinned, fingerprint-checked key
   and `gpgcheck`/`repo_gpgcheck` on. Installing the PGDG repo RPM from a URL is
   not recommended: dnf does not check a local/URL RPM's signature by default
   (`localpkg_gpgcheck=0`).
-- **EPEL and CRB/PowerTools:** `examples/recipes/epel-crb.yaml`. dnf imports a
+- **EPEL and CRB/PowerTools:** [`examples/recipes/epel-crb.yaml`](https://github.com/hagix9/sinter/blob/main/examples/recipes/epel-crb.yaml). dnf imports a
   repository's key from its `gpgkey` file on first use; the key file is the
   trust anchor, so pin it (manage it as a file) for third-party repositories.
-- **Any signed repository:** `examples/recipes/signed-repo.yaml` (key file +
+- **Any signed repository:** [`examples/recipes/signed-repo.yaml`](https://github.com/hagix9/sinter/blob/main/examples/recipes/signed-repo.yaml) (key file +
   repository file + package). Unsigned packages and packages signed by another
   key are refused (`GPG check FAILED`).
 

@@ -206,7 +206,7 @@ live cache にダウンロード済みのパッケージをトランザクショ
 パッケージより前に、パッケージと同じ属性（`apache` は uid / gid 48、home
 `/usr/share/httpd`、shell `/sbin/nologin`）で `group` / `user` を宣言してください。
 plan はそれに依存するものを遅延として扱い、scriptlet は宣言したアカウントを
-そのまま使います。`examples/recipes/apache-htpasswd.yaml` を参照してください。
+そのまま使います。[`examples/recipes/apache-htpasswd.yaml`](https://github.com/hagix9/sinter/blob/main/examples/recipes/apache-htpasswd.yaml) を参照してください。
 
 **`postgresql_role` が失敗する**
 
