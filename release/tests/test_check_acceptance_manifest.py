@@ -578,6 +578,56 @@ class ArchiveSafety(Base):
         self.assertReject(run_checker(m, "--bundle-archive", other, "--artifact", a), "wrong bundle")
 
 
+def load_checker_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("check_acceptance_manifest_under_test", CHECKER)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class RootInventoryExtraction(unittest.TestCase):
+    """The root test inventory is read from `git archive` of the candidate commit:
+    only directories and regular files inside the scratch directory are extracted."""
+
+    def test_only_plain_members_inside_the_destination(self):
+        mod = load_checker_module()
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            def add(name, kind=tarfile.REGTYPE, data=b"", link=""):
+                ti = tarfile.TarInfo(name)
+                ti.type, ti.linkname, ti.size = kind, link, len(data)
+                ti.mode = 0o755 if kind == tarfile.DIRTYPE else 0o644  # as git archive writes them
+                tf.addfile(ti, io.BytesIO(data) if kind == tarfile.REGTYPE else None)
+            add("crate", tarfile.DIRTYPE)
+            add("crate/Cargo.toml", data=b"[package]\n")
+            add("crate/link", tarfile.SYMTYPE, link="/etc/passwd")
+            add("crate/up", tarfile.SYMTYPE, link="../../outside")
+            add("crate/hard", tarfile.LNKTYPE, link="crate/Cargo.toml")
+            add("crate/fifo", tarfile.FIFOTYPE)
+            add("crate/dev", tarfile.CHRTYPE)
+            add("/abs-outside", data=b"x")
+            add("../dotdot-outside", data=b"x")
+            add("crate/../../nested-outside", data=b"x")
+        with tempfile.TemporaryDirectory(prefix="sinter-extract-test-") as scratch:
+            dest = os.path.join(scratch, "dest")
+            os.mkdir(dest)
+            mod.extract_plain_members(buf.getvalue(), dest)
+            found = sorted(os.path.relpath(os.path.join(r, n), dest)
+                           for r, ds, fs in os.walk(dest) for n in ds + fs)
+            self.assertEqual(found, ["crate", os.path.join("crate", "Cargo.toml")])
+            self.assertEqual(os.listdir(scratch), ["dest"], "a member escaped the destination")
+            self.assertTrue(os.path.isfile(os.path.join(dest, "crate", "Cargo.toml")))
+            self.assertFalse(os.path.islink(os.path.join(dest, "crate", "Cargo.toml")))
+
+    def test_an_extraction_error_fails_closed(self):
+        mod = load_checker_module()
+        with mock.patch.object(mod, "extract_plain_members", side_effect=tarfile.TarError("refused")):
+            with self.assertRaises(mod.Invalid) as cm:
+                mod.root_test_inventory(REPO, COMMIT)
+        self.assertIn("cannot extract commit", str(cm.exception))
+
+
 class Integrity(Base):
     def test_modified_log(self):
         self.assertReject(

@@ -607,6 +607,25 @@ def check_linux_gate(lv, commit, run_start, template, errors, refs, facts):
     check_ref(lp, ls, f"{w}.log", errors, refs, exact=LINUX_GATE_LOG)
 
 
+def extract_plain_members(tar, dest):
+    """Extract the directories and regular files of the tar bytes `tar` into `dest`.
+
+    Every other member (symlink, hardlink, device, FIFO) and every absolute or
+    `..` path is skipped. Where tarfile has extraction filters (Python 3.12+,
+    and 3.8.17 / 3.9.17 / 3.10.12 / 3.11.4 onwards) each member also goes
+    through the "data" filter: the default from Python 3.14, which refuses a
+    member that would leave `dest` (raising tarfile.TarError) and does not warn
+    the way 3.12 / 3.13 do when no filter is given. Without filters the member
+    checks above are the whole protection, as before.
+    """
+    data_filter = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+    with tarfile.open(fileobj=io.BytesIO(tar)) as tf:
+        for m in tf.getmembers():
+            norm = os.path.normpath(m.name)
+            if (m.isdir() or m.isreg()) and not os.path.isabs(norm) and not norm.startswith(".."):
+                tf.extract(m, dest, **data_filter)
+
+
 def root_test_inventory(repo, commit):
     """Test harnesses and Linux-only suites of the root crate at `commit`.
 
@@ -624,11 +643,10 @@ def root_test_inventory(repo, commit):
         raise Invalid(f"{where}: cannot read commit {commit} from {repo} "
                       "(run the checker from a clone that contains the candidate commit)")
     with tempfile.TemporaryDirectory(prefix="sinter-root-inventory-") as tmp:
-        with tarfile.open(fileobj=io.BytesIO(tar)) as tf:
-            for m in tf.getmembers():
-                norm = os.path.normpath(m.name)
-                if (m.isdir() or m.isreg()) and not os.path.isabs(norm) and not norm.startswith(".."):
-                    tf.extract(m, tmp)
+        try:
+            extract_plain_members(tar, tmp)
+        except (tarfile.TarError, OSError):
+            raise Invalid(f"{where}: cannot extract commit {commit}")
         try:
             meta = json.loads(subprocess.run(
                 ["cargo", "metadata", "--no-deps", "--offline", "--format-version", "1",
