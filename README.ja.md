@@ -10,7 +10,7 @@
 
 [![GitHub Codespaces で開く](https://github.com/codespaces/badge.svg)](https://codespaces.new/hagix9/sinter?quickstart=1)
 
-ブラウザ上の使い捨て Ubuntu コンテナで Sinter v1.5.1 を試せます。ローカルへの
+ブラウザ上の使い捨て Ubuntu コンテナで Sinter v1.5.2 を試せます。ローカルへの
 インストール、SSH、サーバーは不要です。[スタートガイド](examples/start/README.ja.md)を参照してください。
 
 Sinterは、Itamaeに着想を得た軽量なエージェントレス構成管理ツールです。
@@ -92,7 +92,7 @@ curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
 $HOME/.local/bin/sinter --version
 ```
 
-受入検証したpoint release（v1.5.1 リリース成果物）は Ubuntu 24.04、
+受入検証したpoint release（v1.5.2 リリース成果物）は Ubuntu 24.04、
 Ubuntu 26.04、Rocky Linux 9.8、Rocky Linux 10.2、RHEL 9.8、
 RHEL 10.2、AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64）です。
 他の各point releaseを個別に受入検証したという意味ではありません。
@@ -326,15 +326,16 @@ Sinterの実ホスト受入マトリクスには含まれていません。
 
 v1.0.0 以降の各リリースは、公開前にリリース成果物そのものを8つの対応
 ターゲットで受入検証し、その受入証跡（manifest、raw log、チェックサム）を
-リリースと一緒に公開します。Sinter v1.5.1 のリリースは、Linux x86_64
+リリースと一緒に公開します。Sinter v1.5.2 のリリースは、Linux x86_64
 検証ゲートを通過した後、リリース成果物そのもの
-（`sinter-v1.5.1-linux-x86_64.tar.gz`）を8台の実x86_64 Linuxホストで
+（`sinter-v1.5.2-linux-x86_64.tar.gz`）を8台の実x86_64 Linuxホストで
 受入検証しました — [インストール](#インストール)に記載のpoint releaseです。
 各ホストでtarballと展開したバイナリがバイト単位で同一（SHA-256）であることを
 確認し、リリースの受入シナリオ（成果物同一性、プラットフォーム検出、SSHコマンド実行、
 `package` のinstall/removeとネイティブ検証・冪等性、`file`、`service`、`command` の
 guard、変更前失敗、機密の秘匿、`audit`、残留物なしの確認）を実行して、
-**264チェックが通過、失敗0（ターゲットあたり33）** でした（[v1.5.1 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.5.1)参照）。
+**264チェックが通過、失敗0（ターゲットあたり33）** でした（[v1.5.2 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.5.2)参照）。
+Sinter v1.5.1 も以前の同じ8台での受入検証（264チェック、失敗0。[v1.5.1 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.5.1)）を通過しています。
 Sinter v1.5.0 も以前の同じ8台での受入検証（264チェック、失敗0。[v1.5.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.5.0)）を通過しています。
 Sinter v1.4.0 も以前の同じ8台での受入検証（264チェック、失敗0。[v1.4.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.4.0)）を通過しています。
 Sinter v1.2.0 も以前の同じ8台での受入検証（1240チェック、失敗0。[v1.2.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.2.0)）を通過しています。

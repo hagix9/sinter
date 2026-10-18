@@ -1,9 +1,9 @@
 ---
 title: Recipe Overview
-description: Recipe examples built from functionality supported by Sinter v1.5.1.
+description: Recipe examples built from functionality supported by Sinter v1.5.2.
 ---
 
-All examples below use only resource types and fields implemented in v1.5.1.
+All examples below use only resource types and fields implemented in v1.5.2.
 The resource types are platform-neutral: Sinter picks `apt` or `dnf` from the
 target. Package and service names are not always the same on Ubuntu and
 RHEL-family targets (for example `apache2` / `httpd`); select such resources
@@ -198,5 +198,5 @@ of the 2026-10-17 real-host acceptance.
 :::note[Official recipe collections]
 Curated recipe collections (for example a `linux-baseline` set) are a future
 product improvement and do not exist yet — this page documents only what
-v1.5.1 implements.
+v1.5.2 implements.
 :::

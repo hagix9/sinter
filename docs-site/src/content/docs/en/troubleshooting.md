@@ -70,12 +70,12 @@ When the target user is not root and `--sudo` was not given, plan adds a
 users, groups, files outside the user's own tree). It is a note only: plan
 neither runs sudo nor probes for it, and the status does not change; apply then
 fails unless you connect as root or add `--sudo`. A root login or `--sudo`
-never gets this note. After v1.5.1 (unreleased) the note is shown in the
+never gets this note. From v1.5.2 the note is shown in the
 default text output; in v1.5.1 and earlier it appears only with `--verbose` and
 in `--format json` (`notes`). For a sensitive resource the text output says
 `needs root (details redacted)`.
 
-**`cannot inspect PATH: permission denied`** (after v1.5.1, unreleased)
+**`cannot inspect PATH: permission denied`** (from v1.5.2)
 
 The target user could not look up the path, usually because a parent directory
 is not searchable by it. Nothing is assumed about the path: plan, apply and
@@ -151,8 +151,8 @@ pending reloads as `manager_reload` drift.
 **Indeterminate apply (exit 6)**
 
 Sinter could not confirm whether a mutation completed. Do not retry blindly —
-inspect the target state first, then re-apply if safe. After v1.5.1
-(unreleased), a local run whose wait for a started command fails is reported
+inspect the target state first, then re-apply if safe. From v1.5.2,
+a local run whose wait for a started command fails is reported
 the same way (`failed to wait for child after dispatch`), not as "failed,
 nothing changed": the command may have run, and may still be running.
 

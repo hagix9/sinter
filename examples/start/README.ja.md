@@ -3,7 +3,7 @@
 [English](README.md) | **日本語**
 
 この codespace は、あなたの GitHub アカウント上に作られる使い捨ての
-Ubuntu 24.04 x86_64 コンテナです。作成時に、公開済みの Sinter v1.5.1
+Ubuntu 24.04 x86_64 コンテナです。作成時に、公開済みの Sinter v1.5.2
 リリースを repository の [`install.sh`](../../install.sh) で `~/.local/bin` にインストール
 しています。[`install.sh`](../../install.sh) はダウンロードしたファイルをリリースの
 `SHA256SUMS` で検証します。あわせて、Sinter が管理対象のマシンに必要とする
