@@ -2,7 +2,24 @@
 
 All notable changes to Sinter are documented in this file.
 
-## [Unreleased]
+## [1.5.2] - 2026-10-18
+
+### Added
+
+- **OpenStack 2026.1 all-in-one recipes for Rocky Linux 10.2** in
+  `examples/openstack/` (example recipes, not a Sinter feature): a builder
+  recipe that builds the OpenStack RPMs from the upstream sources (no RPM is
+  distributed), the all-in-one recipe (Keystone, Glance, Placement, Nova,
+  Neutron with OVN, Horizon) and helper scripts. A verification and demo
+  setup, not hardened for production (SELinux permissive, unsigned RPMs,
+  `gpgcheck=0`). Accepted on a real GCE host on 2026-10-17 with an earlier
+  revision of the recipes: two later changes (the Keystone key steps' output
+  handling and `tools/gen-secrets.sh`) are covered by tests but have not run on
+  a real host. `tools/gen-secrets.sh` needs `openssl`, checks every value,
+  writes no file when a value cannot be generated and never replaces an
+  existing one.
+- **OpenStack tutorial** on the documentation site, in English and Japanese,
+  linked from the home page.
 
 ### Fixed
 

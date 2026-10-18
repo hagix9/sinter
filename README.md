@@ -83,8 +83,8 @@ inventory (hosts, flat groups, explicit per-recipe `targets`) — see
 
 ## Install
 
-Sinter **v1.5.1** ships one
-`sinter-v1.5.1-linux-x86_64.tar.gz` artifact covering every supported Linux
+Sinter **v1.5.2** is prepared for release as one
+`sinter-v1.5.2-linux-x86_64.tar.gz` artifact covering every supported Linux
 x86_64 platform line: Ubuntu, Rocky Linux, RHEL 9 / 10, and AlmaLinux 9 / 10.
 
 ```sh
