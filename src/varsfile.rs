@@ -368,10 +368,12 @@ pub fn freeze_executions(
                 ));
             } else if default.type_name() != value.type_name() {
                 problems.push(format!(
-                    "{label}: variable {name}: recipe {} declares a {}, the variables file \
-                     gives a {}",
+                    "{label}: variable {name}: recipe {} declares {} {}, the variables file \
+                     gives {} {}",
                     u.label,
+                    article(default.type_name()),
                     default.type_name(),
+                    article(value.type_name()),
                     value.type_name()
                 ));
             }
@@ -489,6 +491,15 @@ fn group_conflicts(vf: &VarsFile, host: &str, groups: &[String]) -> Vec<String> 
         }
     }
     out
+}
+
+/// The indefinite article for a [`Value::type_name`] ("an integer", "a string").
+fn article(type_name: &str) -> &'static str {
+    if type_name.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    }
 }
 
 fn capped(mut lines: Vec<String>) -> Vec<String> {
@@ -844,7 +855,7 @@ mod tests {
             e,
             vec![
                 "vars: variable nope is not declared by any recipe of this run".to_string(),
-                "vars: variable port: recipe site declares a integer, the variables file gives a string".to_string(),
+                "vars: variable port: recipe site declares an integer, the variables file gives a string".to_string(),
                 "vars: variable tok is declared sensitive by recipe site; a variables file cannot override a sensitive variable".to_string(),
                 "groups.ghost: group ghost is not defined in inventory hosts.yaml".to_string(),
                 "hosts.web99: host web99 is not defined in inventory hosts.yaml".to_string(),
@@ -934,8 +945,8 @@ mod tests {
         assert_eq!(
             e,
             vec![
-                "hosts.h1: variable port: recipe s declares a string, the variables file gives a integer".to_string(),
-                "hosts.h2: variable port: recipe s declares a string, the variables file gives a integer".to_string(),
+                "hosts.h1: variable port: recipe s declares a string, the variables file gives an integer".to_string(),
+                "hosts.h2: variable port: recipe s declares a string, the variables file gives an integer".to_string(),
             ]
         );
     }
@@ -1035,5 +1046,34 @@ mod tests {
         for bad in ["", "a-b", "a.b", "a b", "ä", &"x".repeat(129)] {
             assert!(!valid_var_name(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn every_type_name_takes_its_article() {
+        let all = [
+            Value::Null,
+            Value::Bool(true),
+            Value::Int(1),
+            Value::Float(1.5),
+            Value::Str(String::new()),
+            Value::List(Vec::new()),
+            Value::Map(BTreeMap::new()),
+        ];
+        let phrases: Vec<String> = all
+            .iter()
+            .map(|v| format!("{} {}", article(v.type_name()), v.type_name()))
+            .collect();
+        assert_eq!(
+            phrases,
+            [
+                "a null",
+                "a boolean",
+                "an integer",
+                "a float",
+                "a string",
+                "a list",
+                "a map"
+            ]
+        );
     }
 }
