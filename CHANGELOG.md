@@ -2,6 +2,28 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Host and group variables: `--vars-file`.** `plan`, `apply` and `audit`
+  take a variables file (YAML or TOML, `version: 1`) that gives the variables
+  the recipes declare other values for the whole run (`vars`), for the hosts
+  of an inventory group (`groups`, needs `--inventory`) or for one host
+  (`hosts`). Precedence is the recipe's value < `vars` < `groups` < `hosts`;
+  two groups of a host that disagree are an error unless the host sets the
+  variable. Every variable must be declared by a recipe of the run and keep
+  its type; a sensitive variable cannot be set; with a bundle, a value applies
+  to the recipes that declare the variable. Every selected host is checked
+  before any host is contacted: a problem exits 2, nothing connects, and the
+  messages name the file position (when the parser gives one), layer,
+  variable and field but never show a value from the file. The file is plain
+  text and its values appear in normal output like recipe values; `validate`
+  accepts the option and ignores it. A
+  file with only `version: 1` changes no value or result (only how some
+  static recipe errors are reported). See
+  [Host and group variables](https://sinter.fulltrust.co.jp/en/reference/cli/#host-and-group-variables).
+
 ## [1.5.2] - 2026-10-18
 
 ### Added

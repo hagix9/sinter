@@ -130,6 +130,11 @@ vars:
   forward references and cycles cannot exist.
 - `sensitive: true` redacts the value — and everything derived from it — in
   all output and diagnostics.
+- A variables file (`--vars-file`) can give a declared variable another
+  `value` for a run, an inventory group or one host; a `sensitive` variable
+  cannot be set that way. See
+  [Host and group variables](/en/reference/cli/#host-and-group-variables)
+  (available in releases after v1.5.2).
 
 ## resources
 

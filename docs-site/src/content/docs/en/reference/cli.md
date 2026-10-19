@@ -111,6 +111,7 @@ Accepted by `validate`, `plan`, `apply` and `audit`; `validate` ignores them.
 |------|---------|-------------|
 | `--host <HOST>` | localhost | SSH host or `~/.ssh/config` `Host` alias. Omit for local execution. |
 | `--inventory <PATH>` (alias `--hosts`) | — | Hosts and groups; each recipe runs only on the hosts its `targets` select. See [Multiple hosts](#multiple-hosts). Mutually exclusive with `--host`. |
+| `--vars-file <PATH>` | — | Variables file (YAML or TOML) with values for the whole run, per inventory group and per host, for variables the recipes declare. See [Host and group variables](#host-and-group-variables). |
 | `--port <PORT>` | inventory, ssh_config `Port`, else `22` | SSH port. |
 | `--user <USER>` | inventory, ssh_config `User`, else `$USER` | SSH user. |
 | `--known-hosts <PATH>` | inventory, ssh_config `UserKnownHostsFile`, else `~/.ssh/known_hosts` | Host-key database (strict). |
@@ -220,8 +221,10 @@ Hosts that no recipe selects are never resolved or contacted. `targets`
 only apply with an inventory: `--host` (or no host, i.e. localhost) keeps
 the single-target behavior and ignores `targets`.
 
-There are no nested groups, host or group variables, patterns, an implicit
-"all" group, dynamic inventory or parallel runs.
+There are no nested groups, patterns, an implicit "all" group, dynamic
+inventory or parallel runs. Host and group variables come from a separate
+file (available in releases after v1.5.2): see
+[Host and group variables](#host-and-group-variables).
 
 ### Bundles
 
@@ -267,6 +270,181 @@ inventory, each recipe runs in order on the one `--host` (or localhost).
 - Text output prints `== <recipe> @ <host> (<user>@<address>:<port>) ==`
   before each execution's normal report and an `== executions ==` summary at
   the end.
+
+### Host and group variables
+
+*Available in releases after v1.5.2.*
+
+`--vars-file <PATH>` sets the variables that recipes declare under `vars` to
+other values: for the whole run, for the hosts of an inventory group, or for
+one host. The recipes stay unchanged; the file only replaces the `value` of
+declared variables. `plan`, `apply` and `audit` take it.
+
+```yaml
+# vars.yaml
+version: 1
+vars:              # every host of this run
+  log_level: info
+groups:            # hosts that belong to the inventory group
+  web:
+    listen_port: 8080
+hosts:             # one host; wins over vars and groups
+  web02:
+    site_name: shop
+    listen_port: 8081
+```
+
+```yaml
+# site.yaml
+version: 1
+targets:
+  groups: [web]
+vars:
+  site_name:   { value: example }
+  listen_port: { value: 80 }
+  log_level:   { value: warn }
+resources:
+  - id: site-conf
+    type: file
+    with:
+      path: /etc/myapp/site.conf
+      mode: "0644"
+      content: |
+        name={{ vars.site_name }}
+        port={{ vars.listen_port }}
+        log={{ vars.log_level }}
+```
+
+```sh
+sinter plan  site.yaml --inventory hosts.yaml --vars-file vars.yaml
+sinter apply site.yaml --inventory hosts.yaml --vars-file vars.yaml
+```
+
+With the `hosts.yaml` above, `web01` gets `name=example`, `port=8080` and
+`log=info`; `web02` gets `name=shop`, `port=8081` and `log=info`. The same
+file in TOML:
+
+```toml
+# vars.toml
+version = 1
+
+[vars]
+log_level = "info"
+
+[groups.web]
+listen_port = 8080
+
+[hosts.web02]
+site_name = "shop"
+listen_port = 8081
+```
+
+**File format**
+
+- YAML (`.yaml`, `.yml`) or TOML (`.toml`), UTF-8, at most 1 MiB.
+- `version: 1` is required. The only other top-level keys are `vars`,
+  `groups` and `hosts`, each optional. `vars` maps variable names to values;
+  `groups` and `hosts` map a group or host name to such a map. Leave a layer
+  out or write `{}`: a YAML key with nothing after it (`vars:`) is an error.
+- Values are literals: strings, numbers, booleans, lists and maps. A
+  variable's value may not be `null` (elements inside a list or map are not
+  checked), and `{{ ... }}` in a value is plain text, not an expression.
+- Variable names use ASCII letters, digits and `_`, at most 128 characters.
+  A recipe variable with another character in its name, such as `-`, cannot
+  be set from the file.
+- Group and host names follow the inventory name rules: ASCII letters,
+  digits, `.`, `_` and `-`, starting with a letter or digit, at most 64
+  characters.
+
+**Precedence**
+
+For each host and variable: the recipe's `value` < `vars` < `groups` <
+`hosts`.
+
+- A host takes the values of every inventory group it belongs to, whichever
+  `targets` selected it.
+- Two groups of a selected host that give the same variable different values
+  stop the run. For example, if `web02` were also in a group `eu` that sets
+  another `log_level`:
+  `hosts.web02: variable log_level is given different values by groups eu, web; set it in hosts.web02 to decide`.
+  Setting the variable under `hosts.<host>` resolves it. Groups that give the
+  same value do not conflict.
+
+**What the file may set**
+
+- Every variable in the file must be declared by at least one recipe of the
+  run (for a bundle, any of its recipes, includes counted). In a bundle, a
+  value applies only to the recipes that declare that variable.
+- A value must have the type of the declared value: string, integer, float,
+  boolean, list and map are different types (`8080` is not `"8080"`, `1` is
+  not `1.0`). Only the outer type is checked, not list or map elements.
+- A variable declared `sensitive: true` cannot be set from the file; this is
+  an error. The file is plain text: never put secrets in it; use
+  [secrets](/en/reference/secrets/) instead.
+- With `--inventory`, every group under `groups` and every host under `hosts`
+  must exist in the inventory, including hosts this run does not select.
+
+**One host or the local machine**
+
+- `groups` needs `--inventory`. With `--host`, or without a host (local
+  run), a file with a non-empty `groups` layer is refused. A one-host
+  inventory gives a single host its groups.
+- `hosts.<name>` applies when `<name>` is exactly the `--host` value, or
+  `localhost` for a local run. Other `hosts` entries are checked but not
+  applied.
+
+**Checks before any connection**
+
+Every selected host is checked before any host is contacted: the file, its
+values against the recipes, and every recipe with each host's values. If
+anything fails, `plan`, `apply` and `audit` exit 2 and list the problems on
+standard error, ending with
+`variables: the static checks failed (problems listed above); no host was contacted`.
+`ssh -G` is not run, nothing connects, and with `--format json` standard
+output is empty.
+
+- Problems are reported in stages. A file that cannot be read or does not
+  follow the format is reported first; the checks of its values against the
+  recipes, and then the checks of each recipe with each host's values, run
+  only after the earlier stage passes. These two later stages list at most 50
+  problems, then a count.
+- Messages never show a value from the file. A syntax error gives only the
+  line and column, when the parser provides them
+  (`YAML syntax error at line 2, column 20; the content is not shown`).
+  Some YAML errors (a duplicate key, an anchor, alias or merge key, a tag, an
+  out-of-range number, several documents) and TOML dates or non-finite
+  numbers give no position.
+- A recipe check that fails because of a value from the file names the
+  field (or the check), the variables and their layer, but not the value:
+  `recipe <recipe> @ <hosts>: <id>: <type> static check failed: field <field>; it depends on variables from the variables file: <variable> (<layer>); the value is withheld`.
+- Variable, group and host names are shown. Never write a value where a name
+  belongs.
+- The recipes are checked with the values each execution receives. A
+  default that would fail on its own, such as a placeholder path, is
+  accepted when every execution overrides it; `validate`, which uses the
+  recipe's own values, still reports it. Failures that can only happen while
+  running (facts and registers, template rendering, secrets, the connection)
+  are not part of these checks and occur per execution as before.
+
+**After the checks pass**
+
+- The values are ordinary, non-sensitive values: they appear in plan diffs,
+  results and error messages like any value written in a recipe. The output
+  does not say which layer a value came from.
+- For a `file` resource whose target file does not exist yet, `plan` shows
+  only its size (`current: absent`, `desired: 32 bytes` for `web01` above),
+  not its content, so the values a host receives are not visible there. A
+  change to an existing text file (UTF-8, up to 256 KiB, not sensitive) is
+  shown as a line diff.
+
+**Other commands**
+
+- `validate` accepts `--vars-file` and ignores it; the file is not read, and
+  the recipe is checked with its own values.
+- `--vars-file` may be given once. `sinter mcp` has no variables file.
+- A file with only `version: 1` changes no value or result; only the way
+  some static recipe errors are reported differs (a `recipe <recipe> @ <host>:`
+  prefix, the final `variables: ...` line and, in a bundle, their order).
 
 ## Backups before apply
 

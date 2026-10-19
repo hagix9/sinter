@@ -114,6 +114,7 @@ sinter secrets list    [--format text|json] [--recipe <FILE>...] [<PATH>...]
 |--------|-----------|------|
 | `--host <HOST>` | localhost | SSH ホスト、または `~/.ssh/config` の `Host` 別名。省略でローカル実行。 |
 | `--inventory <PATH>`（別名 `--hosts`） | — | ホストとグループの定義。各レシピは自身の `targets` が選んだホストでだけ実行されます。[複数ホスト](#複数ホスト)参照。`--host` とは併用不可。 |
+| `--vars-file <PATH>` | — | 変数ファイル（YAML または TOML）。レシピが宣言した変数に、実行全体・インベントリのグループ・ホストごとの値を与えます。[ホスト変数とグループ変数](#ホスト変数とグループ変数)参照。 |
 | `--port <PORT>` | インベントリ、ssh_config の `Port`、なければ `22` | SSH ポート。 |
 | `--user <USER>` | インベントリ、ssh_config の `User`、なければ `$USER` | SSH ユーザ。 |
 | `--known-hosts <PATH>` | インベントリ、ssh_config の `UserKnownHostsFile`、なければ `~/.ssh/known_hosts` | ホスト鍵データベース（厳格）。 |
@@ -223,8 +224,10 @@ executions: 2 (1 recipe(s), 3 host(s))
 インベントリ使用時だけ意味を持ちます。`--host`（または指定なし＝localhost）
 は従来どおりの単一ターゲット動作で、`targets` を無視します。
 
-ネストしたグループ、ホスト変数・グループ変数、パターン、暗黙の "all"
-グループ、動的インベントリ、並列実行はありません。
+ネストしたグループ、パターン、暗黙の "all" グループ、動的インベントリ、
+並列実行はありません。ホスト変数・グループ変数は別のファイルで与えます
+（v1.5.2 より後のリリースで利用できます）。
+[ホスト変数とグループ変数](#ホスト変数とグループ変数)を参照してください。
 
 ### バンドル
 
@@ -270,6 +273,176 @@ sinter apply web-stack.yaml --inventory hosts.yaml
 - テキスト出力では各実行の通常のレポートの前に
   `== <レシピ> @ <ホスト> (<user>@<address>:<port>) ==` を、最後に
   `== executions ==` の要約を出力します。
+
+### ホスト変数とグループ変数
+
+*v1.5.2 より後のリリースで利用できます。*
+
+`--vars-file <PATH>` は、レシピが `vars` で宣言した変数に別の値を与えます。
+値は、実行全体、インベントリのグループに属するホスト、または 1 台のホストを
+単位に指定できます。レシピ自体は変わらず、ファイルは宣言済みの変数の `value`
+だけを置き換えます。`plan`、`apply`、`audit` で使えます。
+
+```yaml
+# vars.yaml
+version: 1
+vars:              # この実行のすべてのホスト
+  log_level: info
+groups:            # インベントリのグループに属するホスト
+  web:
+    listen_port: 8080
+hosts:             # 1 台のホスト。vars と groups より優先
+  web02:
+    site_name: shop
+    listen_port: 8081
+```
+
+```yaml
+# site.yaml
+version: 1
+targets:
+  groups: [web]
+vars:
+  site_name:   { value: example }
+  listen_port: { value: 80 }
+  log_level:   { value: warn }
+resources:
+  - id: site-conf
+    type: file
+    with:
+      path: /etc/myapp/site.conf
+      mode: "0644"
+      content: |
+        name={{ vars.site_name }}
+        port={{ vars.listen_port }}
+        log={{ vars.log_level }}
+```
+
+```sh
+sinter plan  site.yaml --inventory hosts.yaml --vars-file vars.yaml
+sinter apply site.yaml --inventory hosts.yaml --vars-file vars.yaml
+```
+
+上の `hosts.yaml` を使うと、`web01` は `name=example`、`port=8080`、
+`log=info`、`web02` は `name=shop`、`port=8081`、`log=info` になります。
+同じ内容を TOML で書くと次のとおりです。
+
+```toml
+# vars.toml
+version = 1
+
+[vars]
+log_level = "info"
+
+[groups.web]
+listen_port = 8080
+
+[hosts.web02]
+site_name = "shop"
+listen_port = 8081
+```
+
+**ファイル形式**
+
+- YAML（`.yaml`、`.yml`）または TOML（`.toml`）。UTF-8 で 1 MiB 以下。
+- `version: 1` は必須です。ほかに使えるトップレベルのキーは `vars`、`groups`、
+  `hosts` だけで、いずれも省略できます。`vars` は変数名から値へのマップです。
+  `groups` と `hosts` は、グループ名・ホスト名ごとに、同じ形（変数名→値）の
+  マップを持ちます。使わない層は省略するか `{}` と書きます。YAML でキーだけを
+  書く（`vars:`）とエラーです。
+- 値はリテラルです（文字列、数値、真偽値、リスト、マップ）。変数の値に `null`
+  は使えません（リストやマップの要素は検査しません）。値の中の `{{ ... }}` は
+  式ではなくただの文字列です。
+- 変数名に使えるのは ASCII 英字・数字・`_` で、128 文字以下です。名前に
+  それ以外の文字（`-` など）を含むレシピの変数は、このファイルでは設定できません。
+- グループ名・ホスト名はインベントリと同じ規則に従います。ASCII 英字・数字・
+  `.`・`_`・`-` を使い、先頭は英字か数字、64 文字以下です。
+
+**優先順位**
+
+ホストごと・変数ごとに、レシピの `value` < `vars` < `groups` < `hosts` です。
+
+- ホストは、インベントリで自分が属するすべてのグループの値を受け取ります。
+  どの `targets` で選ばれたかには関係しません。
+- 選ばれたホストが属する 2 つのグループが同じ変数に異なる値を与えると、実行は
+  止まります。例えば `web02` が別の `log_level` を持つグループ `eu` にも属して
+  いた場合は次のようになります:
+  `hosts.web02: variable log_level is given different values by groups eu, web; set it in hosts.web02 to decide`。
+  `hosts.<ホスト>` にその変数を書けば解決します。同じ値を与えるグループ同士は
+  衝突しません。
+
+**ファイルで設定できるもの**
+
+- ファイルに書く変数は、その実行のいずれかのレシピ（バンドルならその中の
+  いずれかのレシピ。include も含む）が宣言している必要があります。バンドルでは、
+  値はその変数を宣言しているレシピにだけ適用されます。
+- 値の型は、宣言された値の型と一致する必要があります。文字列、整数、浮動小数点数、
+  真偽値、リスト、マップはそれぞれ別の型です（`8080` と `"8080"`、`1` と `1.0`
+  は別）。検査するのは外側の型だけで、リストやマップの要素は検査しません。
+- `sensitive: true` と宣言された変数は、このファイルでは設定できません（エラー）。
+  ファイルは平文です。秘密情報は書かず、[シークレット](/ja/reference/secrets/)を
+  使ってください。
+- `--inventory` を使う場合、`groups` のグループと `hosts` のホストはすべて
+  インベントリに存在する必要があります。この実行で選ばれないホストも同じです。
+
+**1 台のホストまたはローカル実行**
+
+- `groups` には `--inventory` が必要です。`--host` を使う場合やホストを指定しない
+  場合（ローカル実行）、空でない `groups` 層を含むファイルは拒否されます。1 台だけの
+  インベントリを使えば、そのホストにグループを与えられます。
+- `hosts.<名前>` が適用されるのは、`<名前>` が `--host` の値と完全に一致する
+  場合、またはローカル実行で `localhost` の場合です。それ以外の `hosts` の
+  エントリは検査されますが、適用されません。
+
+**接続前の検査**
+
+どのホストに接続するより前に、選ばれたすべてのホストについて検査します。
+対象は、ファイル自体、レシピに対する値、そして各ホストの値を使った各レシピです。
+問題があれば `plan`、`apply`、`audit` は終了コード 2 で終わり、標準エラーに
+問題を列挙して、最後に
+`variables: the static checks failed (problems listed above); no host was contacted`
+と出力します。`ssh -G` は実行されず、どこにも接続しません。`--format json`
+の場合、標準出力は空です。
+
+- 問題は段階ごとに報告されます。読めないファイルや形式に合わないファイルが
+  最初に報告され、レシピに対する値の検査、続いて各ホストの値を使った各レシピの
+  検査は、前の段階を通過してから行われます。後の 2 段階は最大 50 件まで列挙し、
+  残りは件数で示します。
+- メッセージにファイルの値は表示されません。構文エラーは、パーサーが位置を
+  返す場合に行と列だけを示します
+  （`YAML syntax error at line 2, column 20; the content is not shown`）。一部の
+  YAML のエラー（重複キー、アンカー・エイリアス・マージキー、タグ、範囲外の数値、
+  複数ドキュメント）と、TOML の日時・非有限数は位置を示しません。
+- ファイルの値が原因でレシピの検査が失敗した場合、メッセージはフィールド
+  （または検査）、変数、その層を示し、値は示しません:
+  `recipe <recipe> @ <hosts>: <id>: <type> static check failed: field <field>; it depends on variables from the variables file: <variable> (<layer>); the value is withheld`。
+- 変数名・グループ名・ホスト名は表示されます。名前を書く位置に値を書かないで
+  ください。
+- レシピは、各実行が受け取る値で検査されます。それ単独では検査に通らない既定値
+  （仮置きのパスなど）も、すべての実行で上書きされていれば受け入れられます。
+  レシピ自身の値で検査する `validate` は、引き続きそれを報告します。実行中に
+  しか起きない失敗（facts と register、テンプレートの描画、シークレット、接続）
+  はこの検査の対象外で、従来どおり実行ごとに起きます。
+
+**検査を通過した後**
+
+- 値は通常の（sensitive でない）値として扱われます。レシピに書いた値と同様に、
+  plan の差分、結果、エラーメッセージに表示されます。どの層の値が使われたかは
+  出力に示されません。
+- 対象のファイルがまだ存在しない `file` リソースについて、`plan` はサイズ
+  （上の `web01` なら `current: absent`、`desired: 32 bytes`）だけを示し、内容は
+  示しません。そのため、ホストが受け取る値はそこでは確認できません。既存の
+  テキストファイル（UTF-8、256 KiB 以下、sensitive でないもの）の変更は、
+  行単位の差分で示されます。
+
+**その他のコマンド**
+
+- `validate` は `--vars-file` を受け付けますが無視します。ファイルは読まれず、
+  レシピは自身の値で検査されます。
+- `--vars-file` は 1 回だけ指定できます。`sinter mcp` に変数ファイルはありません。
+- `version: 1` だけのファイルは、値も結果も変えません。変わるのはレシピの一部の
+  静的エラーの報告のしかただけです（`recipe <recipe> @ <host>:` の前置き、最後の
+  `variables: ...` の行、バンドルではその順序）。
 
 ## apply 前のバックアップ
 
