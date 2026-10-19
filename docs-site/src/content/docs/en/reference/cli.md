@@ -411,9 +411,14 @@ output is empty.
 - Messages never show a value from the file. A syntax error gives only the
   line and column, when the parser provides them
   (`YAML syntax error at line 2, column 20; the content is not shown`).
-  Some YAML errors (a duplicate key, an anchor, alias or merge key, a tag, an
-  out-of-range number, several documents) and TOML dates or non-finite
-  numbers give no position.
+  Some YAML errors (a duplicate key, an anchor, alias or merge key, an
+  unsupported tag, an out-of-range number, several documents) and TOML dates
+  or non-finite numbers give no position. The YAML core tags, written with
+  the default `!!` handle, are accepted on a value of their kind: `!!str`,
+  `!!int`, `!!float`, `!!bool` and `!!null` on a single value, `!!seq` on a
+  list and `!!map` on a map (a variable's value still may not be `null`).
+  Any other tag, a core tag on another kind of value, or a value its tag does
+  not accept is an error.
 - A recipe check that fails because of a value from the file names the
   field (or the check), the variables and their layer, but not the value:
   `recipe <recipe> @ <hosts>: <id>: <type> static check failed: field <field>; it depends on variables from the variables file: <variable> (<layer>); the value is withheld`.

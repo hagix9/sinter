@@ -411,8 +411,12 @@ listen_port = 8081
 - メッセージにファイルの値は表示されません。構文エラーは、パーサーが位置を
   返す場合に行と列だけを示します
   （`YAML syntax error at line 2, column 20; the content is not shown`）。一部の
-  YAML のエラー（重複キー、アンカー・エイリアス・マージキー、タグ、範囲外の数値、
-  複数ドキュメント）と、TOML の日時・非有限数は位置を示しません。
+  YAML のエラー（重複キー、アンカー・エイリアス・マージキー、サポートしないタグ、
+  範囲外の数値、複数ドキュメント）と、TOML の日時・非有限数は位置を示しません。
+  既定の `!!` で書いた YAML の core tag は、その種類の値に付けた場合だけ使えます
+  （単一の値に `!!str`・`!!int`・`!!float`・`!!bool`・`!!null`、リストに `!!seq`、
+  マップに `!!map`。変数の値そのものに `null` が使えないことは変わりません）。
+  それ以外のタグ、別の種類の値に付けた core tag、タグに合わない値はエラーです。
 - ファイルの値が原因でレシピの検査が失敗した場合、メッセージはフィールド
   （または検査）、変数、その層を示し、値は示しません:
   `recipe <recipe> @ <hosts>: <id>: <type> static check failed: field <field>; it depends on variables from the variables file: <variable> (<layer>); the value is withheld`。
