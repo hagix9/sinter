@@ -1,10 +1,10 @@
 use clap::{Args, Parser, Subcommand};
 use sinter::audit::{run_audit, AuditReport};
-use sinter::bundle::{load_source, RecipeUnit, Source};
+use sinter::bundle::{load_source, prepare_source, RecipeUnit, Source};
 use sinter::diff::sanitize_line;
 use sinter::engine::{Engine, Mode, RunOptions, RunReport, SshSpec, TargetSpec};
 use sinter::error::{ErrorKind, SinterError};
-use sinter::inventory::{load_inventory, Resolution};
+use sinter::inventory::{load_inventory, Inventory, Resolution};
 use sinter::model::Model;
 use sinter::output::{
     audit_report_json, render_apply, render_audit, render_plan, run_report_json, OutputFormat,
@@ -169,6 +169,12 @@ struct ExecOpts {
     /// is already root runs directly, without sudo.
     #[arg(long)]
     sudo: bool,
+    /// Variables file (YAML or TOML): common (`vars`), per-group (`groups`,
+    /// needs --inventory) and per-host (`hosts`) values for variables the
+    /// recipes declare. Every host is checked before any is contacted. Plain
+    /// text: never put secrets in it; sensitive variables cannot be set here.
+    #[arg(long, value_name = "PATH")]
+    vars_file: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -538,12 +544,15 @@ fn run_phase_with(
             "--host and --inventory (--hosts) are mutually exclusive: give one host, or select hosts through the recipe targets and an inventory",
         ));
     }
-    let source = load_source(&a.recipe)?;
     let ro = RenderOptions {
         verbose: a.verbose,
         format,
         color: format == OutputFormat::Text && style::stdout_color(),
     };
+    if let Some(vars) = &a.exec.vars_file {
+        return run_phase_vars(phase, a, vars, &ro, progress);
+    }
+    let source = load_source(&a.recipe)?;
     if let Some(inv) = &a.exec.inventory {
         // Several executions follow, so target resolution is a progress scope
         // of its own; each execution then gets its own.
@@ -552,18 +561,42 @@ fn run_phase_with(
         session.end(scope_outcome(&planned));
         return run_executions(phase, &source, planned?, a, &ro, progress);
     }
-    match &source {
+    run_one_target(phase, &source, None, a, &ro, progress)
+}
+
+/// One explicit target (`--host` or localhost). `models`, one per recipe,
+/// replace the recipes' own models (a variables file, DESIGN §19.5).
+fn run_one_target(
+    phase: Phase,
+    source: &Source,
+    frozen: Option<Vec<FrozenExecution>>,
+    a: &TargetArgs,
+    ro: &RenderOptions,
+    progress: &ProgressOptions,
+) -> Result<u8, SinterError> {
+    // Checked before `ssh -G` or anything else runs: exactly one model per
+    // recipe, frozen for this very target, in recipe order.
+    let mut models = match frozen {
+        Some(f) => Some(models_for_one_target(f, source, one_target_name(a))?.into_iter()),
+        None => None,
+    };
+    match source {
         Source::Recipe(u) => {
             // The established single-target path: one document, unchanged. One
             // execution, so one progress scope covers resolution (if any) and
             // the run; it ends before anything is rendered.
+            let model = match models.as_mut() {
+                Some(m) => m
+                    .next()
+                    .ok_or_else(|| model_mismatch("no model for the recipe"))?,
+                None => u.model.clone(),
+            };
             let session = progress.begin(unit_info(phase, u));
-            let executed = single_target(a, Some(&session)).and_then(|target| {
-                execute(phase, u.model.clone(), target.spec, a, None, session.sink())
-            });
+            let executed = single_target(a, Some(&session))
+                .and_then(|target| execute(phase, model, target.spec, a, None, session.sink()));
             session.end(run_outcome_of(&executed));
             let outcome = executed?;
-            outcome.render(phase, &ro)?;
+            outcome.render(phase, ro)?;
             Ok(outcome.exit_code())
         }
         Source::Bundle(b) => {
@@ -572,26 +605,250 @@ fn run_phase_with(
             let target = match &a.exec.host {
                 None => single_target(a, None)?,
                 Some(_) => {
-                    let session = progress.begin(source_info(phase, &source));
+                    let session = progress.begin(source_info(phase, source));
                     let resolved = single_target(a, Some(&session));
                     session.end(scope_outcome(&resolved));
                     resolved?
                 }
             };
-            let executions = (0..b.recipes.len())
-                .map(|i| Execution {
+            let mut executions = Vec::with_capacity(b.recipes.len());
+            for i in 0..b.recipes.len() {
+                let model = match models.as_mut() {
+                    Some(m) => Some(
+                        m.next()
+                            .ok_or_else(|| model_mismatch("no model for a recipe"))?,
+                    ),
+                    None => None,
+                };
+                executions.push(Execution {
                     unit: i,
                     target: target.clone(),
-                })
-                .collect();
+                    model,
+                });
+            }
             let plan = ExecutionPlan {
                 inventory: None,
                 resolutions: Vec::new(),
                 executions,
             };
-            run_executions(phase, &source, plan, a, &ro, progress)
+            run_executions(phase, source, plan, a, ro, progress)
         }
     }
+}
+
+/// A run with a variables file (DESIGN §19.5). Before `ssh -G` or any
+/// contact with a host, in this order: every recipe is loaded unfrozen, the
+/// inventory is loaded, the variables file is read, targets are resolved,
+/// and every (recipe, host) execution is checked and frozen with its own
+/// values. One problem anywhere stops the run (exit 2) with nothing
+/// contacted; then the run proceeds exactly as without a variables file.
+fn run_phase_vars(
+    phase: Phase,
+    a: &TargetArgs,
+    vars_path: &Path,
+    ro: &RenderOptions,
+    progress: &ProgressOptions,
+) -> Result<u8, SinterError> {
+    use sinter::varsfile::{freeze_executions, load_vars_file, Mode as VarsMode};
+    let prepared = prepare_source(&a.recipe)?;
+    let inventory = match &a.exec.inventory {
+        Some(p) => Some(load_inventory(p)?),
+        None => None,
+    };
+    let vars = load_vars_file(vars_path).map_err(static_failure)?;
+    let (resolutions, pairs): (Vec<Resolution>, Vec<(usize, String)>) = match &inventory {
+        Some(inv) => {
+            let resolutions = resolve_targets(
+                inv,
+                prepared
+                    .units
+                    .iter()
+                    .map(|u| (u.label.as_str(), u.item.targets())),
+            )?;
+            let pairs = resolutions
+                .iter()
+                .enumerate()
+                .flat_map(|(i, r)| r.selected().map(move |h| (i, h.to_string())))
+                .collect();
+            (resolutions, pairs)
+        }
+        None => {
+            let name = one_target_name(a);
+            let pairs = (0..prepared.units.len())
+                .map(|i| (i, name.to_string()))
+                .collect();
+            (Vec::new(), pairs)
+        }
+    };
+    let mode = match &inventory {
+        Some(inv) => VarsMode::Inventory(inv),
+        None => VarsMode::Single,
+    };
+    let models =
+        freeze_executions(&prepared.units, &vars, &mode, &pairs).map_err(static_failure)?;
+    // From here on a model travels with the (recipe, host) it was frozen
+    // for; it is only ever assigned by that key, never by position alone.
+    #[allow(unused_mut)]
+    let mut frozen = bind_models(pairs, models)?;
+    #[cfg(test)]
+    tests::tamper_frozen(&mut frozen);
+    // Display and reporting read only static parts of a recipe's model
+    // (targets, backups, secret references): its first execution's serves.
+    let mut first: Vec<Option<Model>> = vec![None; prepared.units.len()];
+    for f in &frozen {
+        match first.get_mut(f.unit) {
+            Some(slot) => {
+                slot.get_or_insert_with(|| f.model.clone());
+            }
+            None => return Err(model_mismatch("a model belongs to no recipe of this run")),
+        }
+    }
+    let first = first
+        .into_iter()
+        .collect::<Option<Vec<Model>>>()
+        .ok_or_else(|| model_mismatch("a recipe of this run has no frozen model"))?;
+    let source = prepared.into_source(first);
+    let Some(inv) = inventory else {
+        return run_one_target(phase, &source, Some(frozen), a, ro, progress);
+    };
+    let session = progress.begin(source_info(phase, &source));
+    let planned = inventory_targets(&inv, resolutions, a, &session);
+    session.end(scope_outcome(&planned));
+    let mut plan = planned?;
+    // Checked in every build, before any execution connects.
+    attach_models(&mut plan.executions, frozen, source.units())?;
+    run_executions(phase, &source, plan, a, ro, progress)
+}
+
+/// A model frozen for one planned execution: recipe `unit` on host `host`.
+struct FrozenExecution {
+    unit: usize,
+    host: String,
+    model: Model,
+}
+
+/// Pair each frozen model with the (recipe, host) it was frozen for. The
+/// static gate returns one model per planned pair; any other count is an
+/// internal inconsistency and stops the run.
+fn bind_models(
+    pairs: Vec<(usize, String)>,
+    models: Vec<Model>,
+) -> Result<Vec<FrozenExecution>, SinterError> {
+    if pairs.len() != models.len() {
+        return Err(model_mismatch(&format!(
+            "{} planned executions, {} frozen models",
+            pairs.len(),
+            models.len()
+        )));
+    }
+    Ok(pairs
+        .into_iter()
+        .zip(models)
+        .map(|((unit, host), model)| FrozenExecution { unit, host, model })
+        .collect())
+}
+
+/// Give every planned execution the model frozen for its own recipe and
+/// host. The counts must match and each position must name the same recipe
+/// and host; otherwise nothing is assigned and the run stops (fail closed,
+/// no host contacted). Recipe labels and host names only — never a value.
+fn attach_models(
+    executions: &mut [Execution],
+    frozen: Vec<FrozenExecution>,
+    units: &[RecipeUnit],
+) -> Result<(), SinterError> {
+    if executions.len() != frozen.len() {
+        return Err(model_mismatch(&format!(
+            "{} planned executions, {} frozen models",
+            executions.len(),
+            frozen.len()
+        )));
+    }
+    for (i, (ex, f)) in executions.iter().zip(&frozen).enumerate() {
+        if ex.unit != f.unit || ex.target.name != f.host {
+            return Err(model_mismatch(&format!(
+                "execution {} is {} @ {}, its model was frozen for {} @ {}",
+                i + 1,
+                unit_label(units, ex.unit),
+                ex.target.name,
+                unit_label(units, f.unit),
+                f.host
+            )));
+        }
+    }
+    for (ex, f) in executions.iter_mut().zip(frozen) {
+        ex.model = Some(f.model);
+    }
+    Ok(())
+}
+
+/// The models of a single-target run, one per recipe in order, each frozen
+/// for `target` (the `--host` string or `localhost`).
+fn models_for_one_target(
+    frozen: Vec<FrozenExecution>,
+    source: &Source,
+    target: &str,
+) -> Result<Vec<Model>, SinterError> {
+    let units = source.units();
+    if frozen.len() != units.len() {
+        return Err(model_mismatch(&format!(
+            "{} recipes on one target, {} frozen models",
+            units.len(),
+            frozen.len()
+        )));
+    }
+    frozen
+        .into_iter()
+        .enumerate()
+        .map(|(i, f)| {
+            if f.unit != i || f.host != target {
+                return Err(model_mismatch(&format!(
+                    "execution {} is {} @ {}, its model was frozen for {} @ {}",
+                    i + 1,
+                    unit_label(units, i),
+                    target,
+                    unit_label(units, f.unit),
+                    f.host
+                )));
+            }
+            Ok(f.model)
+        })
+        .collect()
+}
+
+/// The name of the one explicit target: the `--host` string, or localhost.
+fn one_target_name(a: &TargetArgs) -> &str {
+    a.exec.host.as_deref().unwrap_or("localhost")
+}
+
+fn unit_label(units: &[RecipeUnit], unit: usize) -> String {
+    units
+        .get(unit)
+        .map(|u| u.label.clone())
+        .unwrap_or_else(|| format!("recipe #{}", unit + 1))
+}
+
+/// An internal inconsistency between the planned executions and the frozen
+/// models. Exit 2 like every static failure; nothing has run.
+fn model_mismatch(detail: &str) -> SinterError {
+    SinterError::schema(format!(
+        "internal error: the planned executions do not match the frozen models ({detail}); no host was contacted"
+    ))
+}
+
+/// Report every problem of a variables-file static gate on stderr (none
+/// carries a value from the file) and fail the run before any contact.
+fn static_failure(problems: sinter::varsfile::Problems) -> SinterError {
+    for line in &problems.0 {
+        eprintln!(
+            "{} {}",
+            style::status("sinter:", style::stderr_color()),
+            sanitize_line(line)
+        );
+    }
+    SinterError::schema(
+        "variables: the static checks failed (problems listed above); no host was contacted",
+    )
 }
 
 /// A connection target with its display identity.
@@ -686,6 +943,9 @@ fn resolve_request(req: &TargetRequest, use_ssh_config: bool) -> Result<SshSpec,
 struct Execution {
     unit: usize,
     target: Target,
+    /// This execution's own model (a variables file, DESIGN §19.5); `None`
+    /// runs the recipe's model.
+    model: Option<Model>,
 }
 
 struct ExecutionPlan {
@@ -711,14 +971,35 @@ fn inventory_plan(
     session: &ProgressSession,
 ) -> Result<ExecutionPlan, SinterError> {
     let inv = load_inventory(inv_path)?;
-    let mut resolutions = Vec::new();
-    for u in source.units() {
-        resolutions.push(sinter::inventory::resolve(
-            &inv,
-            u.model.targets.as_ref(),
-            &u.label,
-        )?);
-    }
+    let resolutions = resolve_targets(
+        &inv,
+        source
+            .units()
+            .iter()
+            .map(|u| (u.label.as_str(), u.model.targets.as_ref())),
+    )?;
+    inventory_targets(&inv, resolutions, a, session)
+}
+
+/// Resolve each recipe's `targets` (label, selector) against the inventory,
+/// in order; the first failure stops.
+fn resolve_targets<'a>(
+    inv: &Inventory,
+    recipes: impl Iterator<Item = (&'a str, Option<&'a sinter::document::TargetSelector>)>,
+) -> Result<Vec<Resolution>, SinterError> {
+    recipes
+        .map(|(label, targets)| sinter::inventory::resolve(inv, targets, label))
+        .collect()
+}
+
+/// Resolve every selected host (`ssh -G` included) and list the executions:
+/// recipe-major, hosts in name order.
+fn inventory_targets(
+    inv: &Inventory,
+    resolutions: Vec<Resolution>,
+    a: &TargetArgs,
+    session: &ProgressSession,
+) -> Result<ExecutionPlan, SinterError> {
     let mut targets: BTreeMap<String, Target> = BTreeMap::new();
     // `Resolve` stage: one item per distinct selected host, each of which costs
     // a local `ssh -G` evaluation. Absent when that evaluation is skipped.
@@ -779,6 +1060,7 @@ fn inventory_plan(
             executions.push(Execution {
                 unit: i,
                 target: targets[name].clone(),
+                model: None,
             });
         }
     }
@@ -938,7 +1220,7 @@ fn run_executions(
     let run_id = sinter::backup::new_run_id();
     let mut results: Vec<ExecResult> = Vec::new();
     let mut stopped_by: Option<String> = None;
-    for ex in plan.executions {
+    for mut ex in plan.executions {
         let u = &units[ex.unit];
         let what = format!("{} @ {}", u.label, ex.target.name);
         if let Some(culprit) = &stopped_by {
@@ -960,9 +1242,10 @@ fn run_executions(
         // anything of this execution is rendered. Executions that are not run
         // have no scope.
         let session = progress.begin(unit_info(phase, u));
+        let model = ex.model.take().unwrap_or_else(|| u.model.clone());
         let executed = execute(
             phase,
-            u.model.clone(),
+            model,
             ex.target.spec.clone(),
             a,
             Some(&id),
@@ -1120,6 +1403,8 @@ fn execute(
     backup_run_id: Option<&str>,
     progress: Arc<dyn ProgressSink>,
 ) -> Result<Outcome, SinterError> {
+    #[cfg(test)]
+    tests::EXECUTED_MODELS.with(|m| m.borrow_mut().push(model.clone()));
     // Audit uses Plan-mode construction: a read-only TargetFs, and run_audit
     // additionally refuses any engine that can produce a mutation permit, so
     // audit is mutation-free by construction twice over.
@@ -1238,6 +1523,22 @@ mod tests {
         /// (compiled in tests only).
         pub(super) static FAKE_TARGETS: std::cell::RefCell<std::collections::VecDeque<sinter::executor::FakeTarget>> =
             const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+        /// Every model [`execute`] received, in order (compiled in tests only).
+        pub(super) static EXECUTED_MODELS: std::cell::RefCell<Vec<Model>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+        /// Corrupts the frozen models of a variables-file run right after
+        /// they are bound, to prove a mismatch stops the run (tests only).
+        static TAMPER: std::cell::Cell<Option<Tamper>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    /// Corrupts a run's frozen models (may add or remove some, so a `Vec`).
+    type Tamper = fn(&mut Vec<FrozenExecution>);
+
+    pub(super) fn tamper_frozen(frozen: &mut Vec<FrozenExecution>) {
+        if let Some(f) = TAMPER.with(std::cell::Cell::get) {
+            f(frozen);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2322,5 +2623,628 @@ mod tests {
             }),
             ProgressMode::Disabled
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // WP-VARS (DESIGN §19.5): the real wiring with a variables file.
+    // -----------------------------------------------------------------------
+
+    const CANARY: &str = "SINTER_VARS_CANARY_DO_NOT_PRINT_20261019";
+
+    /// A recipe whose static path and content come from variables.
+    const VARS_RECIPE: &str = "version: 1\ntargets:\n  groups: [web]\nvars:\n  name: { value: CHANGE_ME }\n  port: { value: 80 }\nresources:\n  - id: a\n    type: file\n    with:\n      path: \"/etc/perf/{{ vars.name }}\"\n      content: \"port {{ vars.port }}\\n\"\n";
+
+    struct VarsRun {
+        result: Result<u8, SinterError>,
+        /// Scripted targets nobody consumed (each execution consumes one).
+        untouched_targets: usize,
+        models: Vec<Model>,
+    }
+
+    fn drive_vars(phase: Phase, argv: &[&str], targets: usize) -> VarsRun {
+        let a = target_args(phase, argv);
+        let format = parse_format(&a.format).unwrap();
+        let w = wiring(ProgressMode::Disabled);
+        FAKE_TARGETS.with(|f| *f.borrow_mut() = (0..targets).map(|_| base()).collect());
+        EXECUTED_MODELS.with(|m| m.borrow_mut().clear());
+        let result = run_phase_with(phase, &a, format, &w.opts);
+        let untouched_targets = FAKE_TARGETS.with(|f| f.borrow_mut().drain(..).count());
+        let models = EXECUTED_MODELS.with(|m| std::mem::take(&mut *m.borrow_mut()));
+        VarsRun {
+            result,
+            untouched_targets,
+            models,
+        }
+    }
+
+    fn paths(models: &[Model]) -> Vec<String> {
+        models
+            .iter()
+            .map(|m| m.resources[0].path.clone().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn every_inventory_host_runs_its_own_model() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", VARS_RECIPE);
+        let inv = inventory(&dir);
+        let v = write(
+            &dir,
+            "v.yaml",
+            "version: 1\ngroups:\n  web: { port: 8081 }\nhosts:\n  web01: { name: one }\n  web02: { name: two, port: 9 }\n",
+        );
+        let mut seen = Vec::new();
+        for phase in [Phase::Plan, Phase::Audit, Phase::Apply] {
+            let run = drive_vars(
+                phase,
+                &[
+                    &r,
+                    "--hosts",
+                    &inv,
+                    "--vars-file",
+                    &v,
+                    "--no-ssh-config",
+                    "--format",
+                    "json",
+                ],
+                2,
+            );
+            assert!(run.result.is_ok(), "{phase:?}: {:?}", run.result.err());
+            assert_eq!(run.untouched_targets, 0);
+            assert_eq!(paths(&run.models), ["/etc/perf/one", "/etc/perf/two"]);
+            assert_eq!(
+                run.models[0].vars["port"].value,
+                sinter::value::Value::Int(8081)
+            );
+            assert_eq!(
+                run.models[1].vars["port"].value,
+                sinter::value::Value::Int(9)
+            );
+            // Host A's value never reaches host B's model (the engine's
+            // variables are built from it).
+            assert_eq!(
+                run.models[1].vars["name"].value,
+                sinter::value::Value::Str("two".into())
+            );
+            seen.push(format!("{:?}", run.models));
+        }
+        // plan, audit and apply evaluate each host identically.
+        assert!(seen.windows(2).all(|w| w[0] == w[1]));
+    }
+
+    #[test]
+    fn without_a_variables_file_the_recipe_model_runs_unchanged() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", &VARS_RECIPE.replace("CHANGE_ME", "fixed"));
+        let inv = inventory(&dir);
+        let run = drive_vars(
+            Phase::Plan,
+            &[&r, "--hosts", &inv, "--no-ssh-config", "--format", "json"],
+            2,
+        );
+        assert!(run.result.is_ok());
+        let established = format!("{:?}", sinter::model::load_model(Path::new(&r)).unwrap());
+        assert_eq!(run.models.len(), 2);
+        for m in &run.models {
+            assert_eq!(format!("{m:?}"), established);
+        }
+    }
+
+    #[test]
+    fn a_static_failure_on_one_host_contacts_no_host_in_any_phase() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", VARS_RECIPE);
+        let inv = inventory(&dir);
+        let cases = [
+            // unparsable file
+            ("bad.yaml", format!("version: 1\nhosts: {{ web01: {{ name: \"{CANARY}\n")),
+            // schema
+            ("schema.yaml", "version: 2\n".to_string()),
+            // override problem
+            ("unknown.yaml", "version: 1\nvars: { nope: 1 }\nhosts: { web01: { name: a }, web02: { name: b } }\n".to_string()),
+            // one host's freeze fails (relative path), the other is fine
+            ("one.yaml", format!("version: 1\nhosts:\n  web01: {{ name: ok }}\n  web02: {{ name: \"../{CANARY}\" }}\n")),
+        ];
+        let rel = write(
+            &dir,
+            "rel.yaml",
+            "version: 1\ntargets:\n  groups: [web]\nvars:\n  dir: { value: CHANGE_ME }\nresources:\n  - id: a\n    type: file\n    with: { path: \"{{ vars.dir }}/a\", content: x }\n",
+        );
+        let cases: Vec<(&str, String, &str)> = cases
+            .into_iter()
+            .map(|(n, b)| (n, b, r.as_str()))
+            // a default that only fails where nothing overrides it
+            .chain([(
+                "partial.yaml",
+                "version: 1\nhosts:\n  web01: { dir: /etc/perf }\n".to_string(),
+                rel.as_str(),
+            )])
+            .collect();
+        for (name, body, r) in cases {
+            let v = write(&dir, name, &body);
+            for phase in [Phase::Plan, Phase::Audit, Phase::Apply] {
+                let run = drive_vars(
+                    phase,
+                    &[
+                        r,
+                        "--hosts",
+                        &inv,
+                        "--vars-file",
+                        &v,
+                        "--no-ssh-config",
+                        "--format",
+                        "json",
+                    ],
+                    2,
+                );
+                let e = run.result.expect_err(name);
+                assert_eq!(e.kind, ErrorKind::Schema, "{name}");
+                assert!(!e.message.contains(CANARY), "{name}");
+                assert_eq!(
+                    run.untouched_targets, 2,
+                    "{name} {phase:?}: a target was contacted"
+                );
+                assert!(run.models.is_empty(), "{name} {phase:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn single_target_and_bundles_take_the_host_layer() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", VARS_RECIPE);
+        write(
+            &dir,
+            "r2.yaml",
+            "version: 1\nvars:\n  port: { value: 1 }\nresources:\n  - id: b\n    type: file\n    with: { path: /etc/perf/b, content: \"{{ vars.port }}\" }\n",
+        );
+        let bundle = write(&dir, "b.yaml", "version: 1\nrecipes: [r.yaml, r2.yaml]\n");
+        let v = write(
+            &dir,
+            "v.yaml",
+            "version: 1\nvars: { port: 7 }\nhosts:\n  localhost: { name: local }\n  srv1: { name: remote }\n",
+        );
+        // Local target: hosts.localhost.
+        let run = drive_vars(Phase::Plan, &[&r, "--vars-file", &v, "--format", "json"], 1);
+        assert!(run.result.is_ok(), "{:?}", run.result.err());
+        assert_eq!(paths(&run.models), ["/etc/perf/local"]);
+        // --host: hosts.<that string>.
+        let run = drive_vars(
+            Phase::Plan,
+            &[
+                &r,
+                "--host",
+                "srv1",
+                "--no-ssh-config",
+                "--vars-file",
+                &v,
+                "--format",
+                "json",
+            ],
+            1,
+        );
+        assert_eq!(paths(&run.models), ["/etc/perf/remote"]);
+        // A bundle on one target: every recipe gets the host's values.
+        let run = drive_vars(
+            Phase::Plan,
+            &[&bundle, "--vars-file", &v, "--format", "json"],
+            2,
+        );
+        assert!(run.result.is_ok(), "{:?}", run.result.err());
+        assert_eq!(paths(&run.models), ["/etc/perf/local", "/etc/perf/b"]);
+        for m in &run.models {
+            assert_eq!(m.vars["port"].value, sinter::value::Value::Int(7));
+        }
+        // A freeze failure on the local target starts no executor.
+        let bad = write(
+            &dir,
+            "bad.yaml",
+            "version: 1\nhosts: { localhost: { name: \"../x\" } }\n",
+        );
+        let run = drive_vars(
+            Phase::Apply,
+            &[&r, "--vars-file", &bad, "--format", "json"],
+            1,
+        );
+        assert_eq!(run.result.unwrap_err().kind, ErrorKind::Schema);
+        assert_eq!(run.untouched_targets, 1);
+        assert!(run.models.is_empty());
+        // Group values need an inventory: refused before anything runs.
+        let g = write(
+            &dir,
+            "g.yaml",
+            "version: 1\ngroups: { web: { port: 1 } }\nhosts: { localhost: { name: x } }\n",
+        );
+        let run = drive_vars(
+            Phase::Apply,
+            &[&r, "--vars-file", &g, "--format", "json"],
+            1,
+        );
+        assert!(run.result.is_err());
+        assert_eq!(run.untouched_targets, 1);
+        assert!(run.models.is_empty());
+    }
+
+    #[test]
+    fn apply_stays_fail_fast_with_a_variables_file() {
+        let dir = fixture();
+        // The first scripted target is unsupported: its execution fails at
+        // connect.
+        let r = write(
+            &dir,
+            "r.yaml",
+            "version: 1\ntargets:\n  groups: [web]\nvars:\n  pkg: { value: jq }\nresources:\n  - id: p\n    type: package\n    with: { name: \"{{ vars.pkg }}\", state: present }\n",
+        );
+        let inv = inventory(&dir);
+        let v = write(
+            &dir,
+            "v.yaml",
+            "version: 1\nhosts: { web01: { pkg: curl }, web02: { pkg: git } }\n",
+        );
+        let a = target_args(
+            Phase::Apply,
+            &[
+                &r,
+                "--hosts",
+                &inv,
+                "--vars-file",
+                &v,
+                "--no-ssh-config",
+                "--format",
+                "json",
+            ],
+        );
+        let w = wiring(ProgressMode::Disabled);
+        FAKE_TARGETS.with(|f| *f.borrow_mut() = vec![FakeTarget::unsupported(), base()].into());
+        EXECUTED_MODELS.with(|m| m.borrow_mut().clear());
+        let code = run_phase_with(Phase::Apply, &a, OutputFormat::Json, &w.opts).unwrap();
+        let left = FAKE_TARGETS.with(|f| f.borrow_mut().drain(..).count());
+        let models = EXECUTED_MODELS.with(|m| std::mem::take(&mut *m.borrow_mut()));
+        assert_ne!(code, 0);
+        // web02 was never contacted: it is reported not_run.
+        assert_eq!(left, 1);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].resources[0].package_name.as_deref(), Some("curl"));
+    }
+
+    // -----------------------------------------------------------------------
+    // WP-VARS A-1: models are bound to (recipe, host) and checked in every
+    // build before anything connects.
+    // -----------------------------------------------------------------------
+
+    /// A model whose variable `tag` identifies it.
+    fn tagged(tag: &str) -> Model {
+        let dir = fixture();
+        let p = write(
+            &dir,
+            "t.yaml",
+            &format!("version: 1\nvars:\n  tag: {{ value: {tag} }}\nresources: []\n"),
+        );
+        sinter::model::load_model(Path::new(&p)).unwrap()
+    }
+
+    fn tag_of(m: &Model) -> String {
+        match &m.vars["tag"].value {
+            sinter::value::Value::Str(s) => s.clone(),
+            v => panic!("{v:?}"),
+        }
+    }
+
+    fn planned(list: &[(usize, &str)]) -> Vec<Execution> {
+        list.iter()
+            .map(|(unit, host)| Execution {
+                unit: *unit,
+                target: Target {
+                    name: host.to_string(),
+                    spec: TargetSpec { ssh: None },
+                },
+                model: None,
+            })
+            .collect()
+    }
+
+    fn frozen(list: &[(usize, &str)]) -> Vec<FrozenExecution> {
+        list.iter()
+            .map(|(unit, host)| FrozenExecution {
+                unit: *unit,
+                host: host.to_string(),
+                model: tagged(&format!("u{unit}-{host}")),
+            })
+            .collect()
+    }
+
+    fn units(n: usize) -> Vec<RecipeUnit> {
+        (0..n)
+            .map(|i| RecipeUnit {
+                label: format!("r{i}"),
+                path: PathBuf::from(format!("r{i}.yaml")),
+                model: tagged("display"),
+            })
+            .collect()
+    }
+
+    const PLAN: &[(usize, &str)] = &[(0, "web01"), (0, "web02"), (1, "web01"), (1, "web02")];
+
+    #[test]
+    fn matching_models_are_attached_to_their_own_execution() {
+        let mut ex = planned(PLAN);
+        attach_models(&mut ex, frozen(PLAN), &units(2)).unwrap();
+        let got: Vec<String> = ex
+            .iter()
+            .map(|e| tag_of(e.model.as_ref().unwrap()))
+            .collect();
+        assert_eq!(got, ["u0-web01", "u0-web02", "u1-web01", "u1-web02"]);
+    }
+
+    #[test]
+    fn any_mismatch_attaches_nothing_and_fails_closed() {
+        let cases: Vec<(&str, Vec<(usize, &str)>)> = vec![
+            ("too few models", PLAN[..3].to_vec()),
+            ("too many models", [PLAN, &[(1, "web03")]].concat()),
+            (
+                "other recipe",
+                vec![(0, "web01"), (0, "web02"), (0, "web01"), (1, "web02")],
+            ),
+            (
+                "other host",
+                vec![(0, "web01"), (0, "web03"), (1, "web01"), (1, "web02")],
+            ),
+            (
+                "swapped order",
+                vec![(0, "web02"), (0, "web01"), (1, "web01"), (1, "web02")],
+            ),
+            (
+                "recipe out of range",
+                vec![(0, "web01"), (0, "web02"), (1, "web01"), (7, "web02")],
+            ),
+        ];
+        for (what, list) in cases {
+            let mut ex = planned(PLAN);
+            let e = attach_models(&mut ex, frozen(&list), &units(2)).expect_err(what);
+            assert_eq!(e.kind, ErrorKind::Schema, "{what}");
+            assert!(
+                e.message.starts_with(
+                    "internal error: the planned executions do not match the frozen models"
+                ),
+                "{what}: {}",
+                e.message
+            );
+            assert!(e.message.ends_with("no host was contacted"), "{what}");
+            assert!(
+                ex.iter().all(|e| e.model.is_none()),
+                "{what}: a model was attached"
+            );
+        }
+        // The plan itself shorter than the models is the same failure.
+        let mut ex = planned(&PLAN[..3]);
+        assert!(attach_models(&mut ex, frozen(PLAN), &units(2)).is_err());
+        assert!(ex.iter().all(|e| e.model.is_none()));
+    }
+
+    #[test]
+    fn binding_requires_one_model_per_planned_pair() {
+        let pairs = |n: usize| (0..n).map(|i| (0, format!("h{i}"))).collect::<Vec<_>>();
+        let models = |n: usize| (0..n).map(|i| tagged(&format!("m{i}"))).collect::<Vec<_>>();
+        assert!(bind_models(pairs(2), models(1)).is_err());
+        assert!(bind_models(pairs(1), models(2)).is_err());
+        let b = bind_models(pairs(2), models(2)).unwrap();
+        assert_eq!(
+            (b[1].unit, b[1].host.as_str(), tag_of(&b[1].model).as_str()),
+            (0, "h1", "m1")
+        );
+    }
+
+    #[test]
+    fn one_target_models_must_name_that_target_in_recipe_order() {
+        let dir = fixture();
+        let a = write(&dir, "a.yaml", "version: 1\nresources: []\n");
+        write(&dir, "b.yaml", "version: 1\nresources: []\n");
+        let bundle = write(&dir, "x.yaml", "version: 1\nrecipes: [a.yaml, b.yaml]\n");
+        let source = load_source(Path::new(&bundle)).unwrap();
+        let ok = models_for_one_target(frozen(&[(0, "srv"), (1, "srv")]), &source, "srv").unwrap();
+        assert_eq!(
+            ok.iter().map(tag_of).collect::<Vec<_>>(),
+            ["u0-srv", "u1-srv"]
+        );
+        for (what, list) in [
+            ("too few", vec![(0, "srv")]),
+            ("too many", vec![(0, "srv"), (1, "srv"), (1, "srv")]),
+            ("other host", vec![(0, "srv"), (1, "localhost")]),
+            ("swapped", vec![(1, "srv"), (0, "srv")]),
+        ] {
+            assert!(
+                models_for_one_target(frozen(&list), &source, "srv").is_err(),
+                "{what}"
+            );
+        }
+        let single = load_source(Path::new(&a)).unwrap();
+        assert!(models_for_one_target(frozen(&[(0, "other")]), &single, "localhost").is_err());
+    }
+
+    fn drop_last(f: &mut Vec<FrozenExecution>) {
+        f.pop();
+    }
+    fn duplicate_last(f: &mut Vec<FrozenExecution>) {
+        let last = f.last().unwrap();
+        let copy = FrozenExecution {
+            unit: last.unit,
+            host: last.host.clone(),
+            model: last.model.clone(),
+        };
+        f.push(copy);
+    }
+    #[allow(clippy::ptr_arg)] // a `Tamper`
+    fn swap_first_two(f: &mut Vec<FrozenExecution>) {
+        f.swap(0, 1);
+    }
+    #[allow(clippy::ptr_arg)] // a `Tamper`
+    fn other_host(f: &mut Vec<FrozenExecution>) {
+        f[0].host = "elsewhere".into();
+    }
+    /// Recipe 0 <-> 1 on the last model: another recipe of a bundle, or no
+    /// recipe of a plain run.
+    #[allow(clippy::ptr_arg)] // a `Tamper`
+    fn other_recipe(f: &mut Vec<FrozenExecution>) {
+        let last = f.len() - 1;
+        f[last].unit = 1 - f[last].unit.min(1);
+    }
+    #[allow(clippy::ptr_arg)] // a `Tamper`
+    fn no_recipe(f: &mut Vec<FrozenExecution>) {
+        f[0].unit = 99;
+    }
+
+    /// A run whose frozen models are corrupted by `tamper`.
+    fn drive_tampered(phase: Phase, argv: &[&str], targets: usize, tamper: Tamper) -> VarsRun {
+        TAMPER.with(|t| t.set(Some(tamper)));
+        let run = drive_vars(phase, argv, targets);
+        TAMPER.with(|t| t.set(None));
+        run
+    }
+
+    const TAMPERS: &[(&str, Tamper)] = &[
+        ("drop last", drop_last),
+        ("duplicate last", duplicate_last),
+        ("swap first two", swap_first_two),
+        ("other host", other_host),
+        ("other recipe", other_recipe),
+        ("no recipe", no_recipe),
+    ];
+
+    #[test]
+    fn a_mismatch_in_any_mode_and_phase_runs_nothing() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", VARS_RECIPE);
+        let r2 = write(
+            &dir,
+            "r2.yaml",
+            &VARS_RECIPE
+                .replace("id: a", "id: b")
+                .replace("/etc/perf/", "/etc/perf/b-"),
+        );
+        let _ = r2;
+        let bundle = write(&dir, "b.yaml", "version: 1\nrecipes: [r.yaml, r2.yaml]\n");
+        let inv = inventory(&dir);
+        let vi = write(
+            &dir,
+            "vi.yaml",
+            "version: 1\nhosts:\n  web01: { name: one }\n  web02: { name: two }\n",
+        );
+        let vs = write(
+            &dir,
+            "vs.yaml",
+            "version: 1\nhosts:\n  web01: { name: one }\n  localhost: { name: here }\n",
+        );
+        // (source, mode arguments, executions)
+        let runs: Vec<(&str, Vec<&str>, usize, &String)> = vec![
+            (r.as_str(), vec!["--hosts", &inv, "--no-ssh-config"], 2, &vi),
+            (
+                bundle.as_str(),
+                vec!["--hosts", &inv, "--no-ssh-config"],
+                4,
+                &vi,
+            ),
+            (r.as_str(), vec![], 1, &vs),
+            (bundle.as_str(), vec![], 2, &vs),
+            (
+                bundle.as_str(),
+                vec!["--host", "web01", "--no-ssh-config"],
+                2,
+                &vs,
+            ),
+        ];
+        for (src, mode, n, v) in &runs {
+            for (what, tamper) in TAMPERS {
+                if *what == "swap first two" && *n < 2 {
+                    continue; // one execution has no order to swap
+                }
+                for phase in [Phase::Plan, Phase::Audit, Phase::Apply] {
+                    let mut argv = vec![*src, "--vars-file", v.as_str(), "--format", "json"];
+                    argv.extend(mode.iter().copied());
+                    let run = drive_tampered(phase, &argv, *n, *tamper);
+                    let ctx = format!("{src} {mode:?} {what} {phase:?}");
+                    let e = run.result.expect_err(&ctx);
+                    assert_eq!(e.kind, ErrorKind::Schema, "{ctx}");
+                    assert!(
+                        e.message.starts_with("internal error:"),
+                        "{ctx}: {}",
+                        e.message
+                    );
+                    assert_eq!(run.untouched_targets, *n, "{ctx}: a target was contacted");
+                    assert!(run.models.is_empty(), "{ctx}: something ran");
+                }
+            }
+            // Untampered, the same run executes every execution.
+            let mut argv = vec![*src, "--vars-file", v.as_str(), "--format", "json"];
+            argv.extend(mode.iter().copied());
+            let run = drive_vars(Phase::Plan, &argv, *n);
+            assert!(run.result.is_ok(), "{src} {mode:?}: {:?}", run.result.err());
+            assert_eq!(run.untouched_targets, 0);
+            assert_eq!(run.models.len(), *n);
+        }
+    }
+
+    #[test]
+    fn bundles_on_several_hosts_run_each_recipe_with_its_hosts_values() {
+        let dir = fixture();
+        write(&dir, "r.yaml", VARS_RECIPE);
+        write(
+            &dir,
+            "r2.yaml",
+            &VARS_RECIPE
+                .replace("id: a", "id: b")
+                .replace("/etc/perf/", "/etc/perf/b-"),
+        );
+        let bundle = write(&dir, "b.yaml", "version: 1\nrecipes: [r.yaml, r2.yaml]\n");
+        let inv = inventory(&dir);
+        let v = write(
+            &dir,
+            "v.yaml",
+            "version: 1\nhosts:\n  web01: { name: one, port: 1 }\n  web02: { name: two, port: 2 }\n",
+        );
+        for phase in [Phase::Plan, Phase::Audit, Phase::Apply] {
+            let run = drive_vars(
+                phase,
+                &[
+                    &bundle,
+                    "--hosts",
+                    &inv,
+                    "--vars-file",
+                    &v,
+                    "--no-ssh-config",
+                    "--format",
+                    "json",
+                ],
+                4,
+            );
+            assert!(run.result.is_ok(), "{phase:?}: {:?}", run.result.err());
+            assert_eq!(
+                paths(&run.models),
+                [
+                    "/etc/perf/one",
+                    "/etc/perf/two",
+                    "/etc/perf/b-one",
+                    "/etc/perf/b-two"
+                ],
+                "{phase:?}"
+            );
+            let ports: Vec<_> = run
+                .models
+                .iter()
+                .map(|m| m.vars["port"].value.clone())
+                .collect();
+            use sinter::value::Value::Int;
+            assert_eq!(ports, [Int(1), Int(2), Int(1), Int(2)], "{phase:?}");
+        }
+    }
+
+    /// Evidence of the build the mismatch tests ran in: they hold with debug
+    /// assertions on and off (`cargo test --release`).
+    #[test]
+    fn mismatch_checks_do_not_depend_on_debug_assertions() {
+        eprintln!("A-1 build: debug_assertions={}", cfg!(debug_assertions));
+        let mut ex = planned(PLAN);
+        assert!(attach_models(&mut ex, frozen(&PLAN[..3]), &units(2)).is_err());
+        assert!(ex.iter().all(|e| e.model.is_none()));
     }
 }

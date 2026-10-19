@@ -116,6 +116,20 @@ pub(crate) fn load_model_with(
     entry: &Path,
     refs: crate::secret_source::ReferenceCheck,
 ) -> Result<Model> {
+    prepare_with(entry, refs)?.freeze_default()
+}
+
+/// Parse the recipe at `entry` and expand its include graph without freezing
+/// it: no variable value is used yet (DESIGN §19.5). [`Prepared::freeze_default`]
+/// then gives exactly what [`load_model`] gives.
+pub fn prepare(entry: &Path) -> Result<Prepared> {
+    prepare_with(entry, crate::secret_source::ReferenceCheck::Strict)
+}
+
+pub(crate) fn prepare_with(
+    entry: &Path,
+    refs: crate::secret_source::ReferenceCheck,
+) -> Result<Prepared> {
     // Pre-pass: collect every sensitive variable name across the whole
     // include graph before any resource is expanded. Sensitivity of an
     // expression must not depend on include ordering — a resource in an
@@ -141,7 +155,208 @@ pub(crate) fn load_model_with(
         refs,
     };
     state.load(entry)?;
-    freeze(state, entry)
+    Ok(Prepared {
+        state,
+        entry: entry.to_path_buf(),
+    })
+}
+
+/// A loaded recipe whose variable values are not applied yet. Freezing a
+/// copy never changes it, so one prepared recipe yields independent models
+/// for any number of hosts.
+#[derive(Clone)]
+pub struct Prepared {
+    state: LoadState,
+    entry: PathBuf,
+}
+
+/// The variable values a variables file gives one execution (DESIGN §19.5):
+/// name -> (value, layer). The layer (`vars`, `groups.<g>`, `hosts.<h>`) is
+/// for diagnostics only; it never changes sensitivity.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VarOverrides {
+    entries: BTreeMap<String, (Value, String)>,
+}
+
+impl VarOverrides {
+    pub fn insert(&mut self, name: &str, value: Value, layer: &str) {
+        self.entries
+            .insert(name.to_string(), (value, layer.to_string()));
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// The layer an overridden variable came from.
+    pub fn layer(&self, name: &str) -> Option<&str> {
+        self.entries.get(name).map(|(_, l)| l.as_str())
+    }
+
+    pub fn value(&self, name: &str) -> Option<&Value> {
+        self.entries.get(name).map(|(v, _)| v)
+    }
+}
+
+impl Prepared {
+    /// `targets` of the entry recipe.
+    pub fn targets(&self) -> Option<&TargetSelector> {
+        self.state.targets.as_ref()
+    }
+
+    /// Declared variables, include graph included: (name, default, sensitive).
+    pub fn declared(&self) -> impl Iterator<Item = (&str, &Value, bool)> {
+        self.state
+            .vars
+            .iter()
+            .map(|v| (v.name.as_str(), &v.value, v.sensitive))
+    }
+
+    /// Freeze with the recipe's own values: the established path.
+    pub fn freeze_default(self) -> Result<Model> {
+        freeze(self.state, &self.entry, &VarOverrides::default())
+    }
+
+    /// Freeze a copy with `overrides` applied. Every override must name a
+    /// declared, non-sensitive variable and keep the declared type; errors
+    /// name the variable and the types, never a value. A static check that
+    /// fails on a field depending on an override reports the field and the
+    /// variables instead of its own message (DESIGN §19.5).
+    pub fn freeze_with(&self, overrides: &VarOverrides) -> Result<Model> {
+        let mut state = self.state.clone();
+        for (name, (value, layer)) in &overrides.entries {
+            let Some(v) = state.vars.iter_mut().find(|v| &v.name == name) else {
+                return Err(SinterError::schema(format!(
+                    "{}: variable {} is not declared by the recipe",
+                    layer, name
+                )));
+            };
+            if v.sensitive {
+                return Err(SinterError::schema(format!(
+                    "{}: variable {} is sensitive and cannot be overridden",
+                    layer, name
+                )));
+            }
+            if v.value.type_name() != value.type_name() {
+                return Err(SinterError::schema(format!(
+                    "{}: variable {} must be {}, not {}",
+                    layer,
+                    name,
+                    v.value.type_name(),
+                    value.type_name()
+                )));
+            }
+            v.value = value.clone();
+        }
+        freeze(state, &self.entry, overrides)
+    }
+}
+
+/// The static check a resource is in, for value-free diagnostics (DESIGN
+/// §19.5). Anything not marked is `Unattributed`, which withholds whenever
+/// the resource references an overridden variable anywhere.
+#[derive(Debug, Clone)]
+enum Stage {
+    Unattributed,
+    /// Evaluates no variable value: its message is kept.
+    ValueFree,
+    /// Evaluates this `with` field (and checks the result).
+    Field(&'static str),
+    /// Ownership of this field's value conflicts with resource `peer`.
+    Ownership {
+        field: &'static str,
+        peer: String,
+    },
+}
+
+/// Run `check` in stage `at`. On success the stage returns to
+/// `Unattributed`, so a check added later without a stage of its own is
+/// treated conservatively; on failure `at` stays for the boundary.
+fn staged<T>(stage: &mut Stage, at: Stage, check: impl FnOnce() -> Result<T>) -> Result<T> {
+    *stage = at;
+    let out = check()?;
+    *stage = Stage::Unattributed;
+    Ok(out)
+}
+
+/// Field -> overridden variables its value references. Conservative: the
+/// same structural-or-textual test sensitive redaction uses.
+fn override_refs(
+    with: &BTreeMap<String, Value>,
+    overrides: &VarOverrides,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out = BTreeMap::new();
+    for (k, v) in with {
+        let names: BTreeSet<String> = overrides
+            .entries
+            .keys()
+            .filter(|n| value_may_be_sensitive(v, &BTreeSet::from([(*n).clone()])))
+            .cloned()
+            .collect();
+        if !names.is_empty() {
+            out.insert(k.clone(), names);
+        }
+    }
+    out
+}
+
+/// The single boundary every failure of a resource's static checks passes.
+/// The original error is kept unless the failing stage reads a field that
+/// references an overridden variable; then a diagnostic is built from the
+/// resource id, the check and the variable names. The original message is
+/// never inspected.
+fn withhold_override_values(
+    r: &RawResource,
+    stage: &Stage,
+    refs: &BTreeMap<String, BTreeSet<String>>,
+    peer_refs: &BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    overrides: &VarOverrides,
+    e: SinterError,
+) -> SinterError {
+    let mut names: BTreeSet<&String> = BTreeSet::new();
+    let check = match stage {
+        Stage::ValueFree => return e,
+        Stage::Unattributed => {
+            names.extend(refs.values().flatten());
+            "check not attributed to one field".to_string()
+        }
+        Stage::Field(f) => {
+            names.extend(refs.get(*f).into_iter().flatten());
+            format!("field {f}")
+        }
+        Stage::Ownership { field, peer } => {
+            names.extend(refs.get(*field).into_iter().flatten());
+            names.extend(
+                peer_refs
+                    .get(peer)
+                    .and_then(|m| m.get(*field))
+                    .into_iter()
+                    .flatten(),
+            );
+            format!("ownership of field {field} (conflicts with resource {peer})")
+        }
+    };
+    if names.is_empty() {
+        return e;
+    }
+    let vars: Vec<String> = names
+        .iter()
+        .map(|n| format!("{} ({})", n, overrides.layer(n).unwrap_or("variables file")))
+        .collect();
+    SinterError {
+        message: format!(
+            "{}: {} static check failed: {}; it depends on variables from the variables file: {}; the value is withheld",
+            r.id,
+            r.type_,
+            check,
+            vars.join(", ")
+        ),
+        ..e
+    }
 }
 
 /// Recursively collect every sensitive variable name in the include graph.
@@ -177,6 +392,7 @@ fn collect_sensitive_vars(
     Ok(())
 }
 
+#[derive(Clone)]
 struct LoadState {
     seen: HashSet<PathBuf>,
     vars: Vec<VarDef>,
@@ -204,6 +420,7 @@ struct LoadState {
 
 /// A resource declaration as written, retained for declaration-level
 /// validation that must not be erased by static loop expansion.
+#[derive(Clone)]
 struct Declaration {
     id: String,
     type_: String,
@@ -1259,7 +1476,7 @@ fn merge_recipe_env(
     out
 }
 
-fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
+fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Model> {
     // Duplicate resource and handler ID detection.
     let mut resource_ids: BTreeSet<String> = BTreeSet::new();
     for r in &state.resources {
@@ -1351,297 +1568,381 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
     // resources as a base their own `env` overrides (DESIGN §27.1).
     let recipe_env = state.recipe_env.clone().unwrap_or(Value::Null);
 
+    // Fields referencing an overridden variable, per frozen resource (the
+    // other side of an ownership conflict). Empty without a variables file.
+    let mut peer_refs: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
     for r in &state.resources {
-        // Dependency / notify reference validation.
-        for dep in &r.depends_on {
-            if !resource_ids.contains(dep) {
-                return Err(SinterError::schema(format!(
-                    "{}: depends_on references unknown or unexpanded resource {}",
-                    r.id, dep
-                )));
-            }
-        }
-        for n in &r.notify {
-            if !handler_ids.contains(n) {
-                return Err(SinterError::schema(format!(
-                    "{}: notify references unknown handler {}",
-                    r.id, n
-                )));
-            }
-        }
-
-        let item_eval = r.loop_item.as_ref().map(|v| EvalVal::known(v.clone()));
-        let scope = Scope {
-            vars: Some(&static_vars),
-            facts: None,
-            registers: None,
-            item: item_eval.as_ref(),
-            result: None,
-            template: None,
-        };
-
-        // Validate `when` parses and gather register references. Sensitive
-        // conditions/resources keep token contents out of diagnostics.
-        let mut expr_register_refs: BTreeSet<String> = BTreeSet::new();
-        let mut scratch_names = BTreeSet::new();
-        if let Some(w) = &r.when {
-            let when_sensitive =
-                r.sensitive || value_may_be_sensitive(&Value::Str(w.clone()), &sensitive_var_names);
-            let expr = parse_expr(w).map_err(|e| {
-                if when_sensitive {
-                    SinterError::schema(format!(
-                        "{}: invalid when expression (value redacted): {}",
-                        r.id,
-                        e.category()
-                    ))
-                } else {
-                    SinterError::schema(format!("{}: invalid when expression: {}", r.id, e))
-                }
-            })?;
-            collect_register_refs(&expr, &mut expr_register_refs, &mut scratch_names);
-        }
-        // Gather register references from interpolated `with` values.
-        for v in r.with.values() {
-            collect_value_register_refs(
-                v,
-                &mut expr_register_refs,
-                r.sensitive,
-                &sensitive_var_names,
-            )?;
-        }
-        for reg in &expr_register_refs {
-            let producer = register_producers.get(reg).ok_or_else(|| {
-                SinterError::schema(format!("{}: references unknown register {}", r.id, reg))
-            })?;
-            if !r.depends_on.contains(producer) {
-                return Err(SinterError::schema(format!(
-                    "{}: register {} must be listed directly in depends_on",
-                    r.id, reg
-                )));
-            }
-        }
-
-        let mut fr = FrozenResource {
-            id: r.id.clone(),
-            type_: r.type_.clone(),
-            with: merge_recipe_env(&r.type_, &r.with, &recipe_env),
-            when: r.when.clone(),
-            depends_on: r.depends_on.clone(),
-            notify: r.notify.clone(),
-            sensitive: r.sensitive,
-            derived_sensitive: false,
-            origin: r.origin.clone(),
-            loop_index: r.loop_index,
-            loop_item: r.loop_item.clone(),
-            path: None,
-            program: None,
-            creates: None,
-            removes: None,
-            package_name: None,
-            service_name: None,
-            account_name: None,
-            controller_source: None,
-            secret: None,
-            register: r
-                .with
-                .get("register")
-                .and_then(|v| v.as_str())
-                .map(String::from),
-        };
-
-        let resource_ctx = r.id.clone();
-        // Whether diagnostics about a `with` field must be redacted for this
-        // resource (explicit sensitivity or a reference to a sensitive
-        // variable — including unparseable text that still names one).
-        let field_sensitive = |key: &str| {
-            r.sensitive
-                || r.with
-                    .get(key)
-                    .is_some_and(|v| value_may_be_sensitive(v, &sensitive_var_names))
-        };
-        match r.type_.as_str() {
-            "file" => {
-                validate_with_fields(&r.with, FILE_FIELDS, &resource_ctx)?;
-                if let Some(v) = r.with.get("validate") {
-                    validate_validate_spec(v, &resource_ctx)?;
-                }
-                let path = static_string(
-                    &r.with,
-                    "path",
-                    &scope,
-                    &resource_ctx,
-                    true,
-                    field_sensitive("path"),
-                )?;
-                validate_path(&path)
-                    .map_err(|e| SinterError::schema(format!("{}: {}", resource_ctx, e.message)))?;
-                fr.path = Some(path);
-                validate_file_common(
-                    &r.with,
-                    &scope,
-                    &resource_ctx,
-                    &mut fr,
-                    &sensitive_var_names,
-                )?;
-                // `content: { secret: <path> }`: resolve and confine the
-                // reference. Nothing is decrypted while loading.
-                if let Some(content) = r.with.get("content") {
-                    if let Ok(crate::secret_source::ContentShape::Secret(reference)) =
-                        crate::secret_source::content_shape(content)
-                    {
-                        fr.secret = Some(crate::secret_source::resolve_reference_with(
-                            state.refs,
-                            &r.origin,
-                            reference,
-                            &resource_ctx,
-                            r.sensitive,
-                        )?);
+        let refs = override_refs(&r.with, overrides);
+        let mut stage = Stage::Unattributed;
+        // Every early return of this resource's checks leaves the closure and
+        // passes the one boundary below (DESIGN §19.5).
+        #[allow(clippy::redundant_closure_call)]
+        let checked: Result<FrozenResource> = (|| {
+            // Dependency / notify reference validation.
+            staged(&mut stage, Stage::ValueFree, || {
+                for dep in &r.depends_on {
+                    if !resource_ids.contains(dep) {
+                        return Err(SinterError::schema(format!(
+                            "{}: depends_on references unknown or unexpanded resource {}",
+                            r.id, dep
+                        )));
                     }
                 }
-            }
-            "directory" => {
-                validate_with_fields(&r.with, DIR_FIELDS, &resource_ctx)?;
-                let path = static_string(
-                    &r.with,
-                    "path",
-                    &scope,
-                    &resource_ctx,
-                    true,
-                    field_sensitive("path"),
-                )?;
-                validate_path(&path)
-                    .map_err(|e| SinterError::schema(format!("{}: {}", resource_ctx, e.message)))?;
-                fr.path = Some(path);
-            }
-            "link" => {
-                validate_with_fields(&r.with, LINK_FIELDS, &resource_ctx)?;
-                let path = static_string(
-                    &r.with,
-                    "path",
-                    &scope,
-                    &resource_ctx,
-                    true,
-                    field_sensitive("path"),
-                )?;
-                validate_path(&path)
-                    .map_err(|e| SinterError::schema(format!("{}: {}", resource_ctx, e.message)))?;
-                fr.path = Some(path);
-            }
-            "template" => {
-                if r.with.contains_key("content") {
-                    return Err(SinterError::schema(format!(
-                        "{}: template does not support content; use source",
-                        resource_ctx
-                    )));
+                for n in &r.notify {
+                    if !handler_ids.contains(n) {
+                        return Err(SinterError::schema(format!(
+                            "{}: notify references unknown handler {}",
+                            r.id, n
+                        )));
+                    }
                 }
-                validate_with_fields(&r.with, TEMPLATE_FIELDS, &resource_ctx)?;
-                if let Some(v) = r.with.get("validate") {
-                    validate_validate_spec(v, &resource_ctx)?;
+                Ok(())
+            })?;
+
+            let item_eval = r.loop_item.as_ref().map(|v| EvalVal::known(v.clone()));
+            let scope = Scope {
+                vars: Some(&static_vars),
+                facts: None,
+                registers: None,
+                item: item_eval.as_ref(),
+                result: None,
+                template: None,
+            };
+
+            // Validate `when` parses and gather register references. Sensitive
+            // conditions/resources keep token contents out of diagnostics. Only
+            // the written text is checked here; no value is evaluated.
+            staged(&mut stage, Stage::ValueFree, || {
+                let mut expr_register_refs: BTreeSet<String> = BTreeSet::new();
+                let mut scratch_names = BTreeSet::new();
+                if let Some(w) = &r.when {
+                    let when_sensitive = r.sensitive
+                        || value_may_be_sensitive(&Value::Str(w.clone()), &sensitive_var_names);
+                    let expr = parse_expr(w).map_err(|e| {
+                        if when_sensitive {
+                            SinterError::schema(format!(
+                                "{}: invalid when expression (value redacted): {}",
+                                r.id,
+                                e.category()
+                            ))
+                        } else {
+                            SinterError::schema(format!("{}: invalid when expression: {}", r.id, e))
+                        }
+                    })?;
+                    collect_register_refs(&expr, &mut expr_register_refs, &mut scratch_names);
                 }
-                let path = static_string(
-                    &r.with,
-                    "path",
-                    &scope,
-                    &resource_ctx,
-                    true,
-                    field_sensitive("path"),
-                )?;
-                validate_path(&path)
-                    .map_err(|e| SinterError::schema(format!("{}: {}", resource_ctx, e.message)))?;
-                fr.path = Some(path);
-                let source = static_string(
-                    &r.with,
-                    "source",
-                    &scope,
-                    &resource_ctx,
-                    true,
-                    field_sensitive("source"),
-                )?;
-                let source_sensitive = r.sensitive
-                    || value_references_sensitive_var(&r.with["source"], &sensitive_var_names);
-                fr.controller_source = Some(resolve_source(&r.origin, &source).map_err(|e| {
-                    if source_sensitive {
+                // Gather register references from interpolated `with` values.
+                for v in r.with.values() {
+                    collect_value_register_refs(
+                        v,
+                        &mut expr_register_refs,
+                        r.sensitive,
+                        &sensitive_var_names,
+                    )?;
+                }
+                for reg in &expr_register_refs {
+                    let producer = register_producers.get(reg).ok_or_else(|| {
                         SinterError::schema(format!(
-                            "{}: source validation failed (value redacted)",
-                            resource_ctx
+                            "{}: references unknown register {}",
+                            r.id, reg
                         ))
-                    } else {
-                        e
+                    })?;
+                    if !r.depends_on.contains(producer) {
+                        return Err(SinterError::schema(format!(
+                            "{}: register {} must be listed directly in depends_on",
+                            r.id, reg
+                        )));
                     }
-                })?);
-                validate_file_common(
-                    &r.with,
-                    &scope,
-                    &resource_ctx,
-                    &mut fr,
-                    &sensitive_var_names,
-                )?;
-            }
-            "command" => {
-                validate_with_fields(&r.with, COMMAND_FIELDS, &resource_ctx)?;
-                let program = static_string(
-                    &r.with,
-                    "program",
-                    &scope,
-                    &resource_ctx,
-                    true,
-                    field_sensitive("program"),
-                )?;
-                if !program.starts_with('/') {
-                    return Err(SinterError::schema(format!(
-                        "{}: program must be an absolute path",
-                        resource_ctx
-                    )));
                 }
-                fr.program = Some(program);
-                if let Some(v) = r.with.get("creates") {
-                    if !v.is_null() {
-                        let s = static_string(
+                Ok(())
+            })?;
+
+            let mut fr = FrozenResource {
+                id: r.id.clone(),
+                type_: r.type_.clone(),
+                with: merge_recipe_env(&r.type_, &r.with, &recipe_env),
+                when: r.when.clone(),
+                depends_on: r.depends_on.clone(),
+                notify: r.notify.clone(),
+                sensitive: r.sensitive,
+                derived_sensitive: false,
+                origin: r.origin.clone(),
+                loop_index: r.loop_index,
+                loop_item: r.loop_item.clone(),
+                path: None,
+                program: None,
+                creates: None,
+                removes: None,
+                package_name: None,
+                service_name: None,
+                account_name: None,
+                controller_source: None,
+                secret: None,
+                register: r
+                    .with
+                    .get("register")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            };
+
+            let resource_ctx = r.id.clone();
+            // Whether diagnostics about a `with` field must be redacted for this
+            // resource (explicit sensitivity or a reference to a sensitive
+            // variable — including unparseable text that still names one).
+            let field_sensitive = |key: &str| {
+                r.sensitive
+                    || r.with
+                        .get(key)
+                        .is_some_and(|v| value_may_be_sensitive(v, &sensitive_var_names))
+            };
+            match r.type_.as_str() {
+                "file" => {
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(&r.with, FILE_FIELDS, &resource_ctx)?;
+                        if let Some(v) = r.with.get("validate") {
+                            validate_validate_spec(v, &resource_ctx)?;
+                        }
+                        Ok(())
+                    })?;
+                    let path = staged(&mut stage, Stage::Field("path"), || {
+                        let path = static_string(
                             &r.with,
-                            "creates",
+                            "path",
                             &scope,
                             &resource_ctx,
                             true,
-                            field_sensitive("creates"),
+                            field_sensitive("path"),
                         )?;
-                        validate_path(&s).map_err(|e| {
-                            SinterError::schema(format!("{}: creates: {}", resource_ctx, e.message))
+                        validate_path(&path).map_err(|e| {
+                            SinterError::schema(format!("{}: {}", resource_ctx, e.message))
                         })?;
-                        fr.creates = Some(s);
+                        Ok(path)
+                    })?;
+                    fr.path = Some(path);
+                    validate_file_common(
+                        &r.with,
+                        &scope,
+                        &resource_ctx,
+                        &mut fr,
+                        &sensitive_var_names,
+                        &mut stage,
+                    )?;
+                    // `content: { secret: <path> }`: resolve and confine the
+                    // reference (a static literal). Nothing is decrypted while
+                    // loading.
+                    if let Some(content) = r.with.get("content") {
+                        if let Ok(crate::secret_source::ContentShape::Secret(reference)) =
+                            crate::secret_source::content_shape(content)
+                        {
+                            fr.secret = Some(staged(&mut stage, Stage::ValueFree, || {
+                                crate::secret_source::resolve_reference_with(
+                                    state.refs,
+                                    &r.origin,
+                                    reference,
+                                    &resource_ctx,
+                                    r.sensitive,
+                                )
+                            })?);
+                        }
                     }
                 }
-                if let Some(v) = r.with.get("removes") {
-                    if !v.is_null() {
-                        let s = static_string(
+                "directory" => {
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(&r.with, DIR_FIELDS, &resource_ctx)
+                    })?;
+                    let path = staged(&mut stage, Stage::Field("path"), || {
+                        let path = static_string(
                             &r.with,
-                            "removes",
+                            "path",
                             &scope,
                             &resource_ctx,
                             true,
-                            field_sensitive("removes"),
+                            field_sensitive("path"),
                         )?;
-                        validate_path(&s).map_err(|e| {
-                            SinterError::schema(format!("{}: removes: {}", resource_ctx, e.message))
+                        validate_path(&path).map_err(|e| {
+                            SinterError::schema(format!("{}: {}", resource_ctx, e.message))
                         })?;
-                        fr.removes = Some(s);
+                        Ok(path)
+                    })?;
+                    fr.path = Some(path);
+                }
+                "link" => {
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(&r.with, LINK_FIELDS, &resource_ctx)
+                    })?;
+                    let path = staged(&mut stage, Stage::Field("path"), || {
+                        let path = static_string(
+                            &r.with,
+                            "path",
+                            &scope,
+                            &resource_ctx,
+                            true,
+                            field_sensitive("path"),
+                        )?;
+                        validate_path(&path).map_err(|e| {
+                            SinterError::schema(format!("{}: {}", resource_ctx, e.message))
+                        })?;
+                        Ok(path)
+                    })?;
+                    fr.path = Some(path);
+                }
+                "template" => {
+                    staged(&mut stage, Stage::ValueFree, || {
+                        if r.with.contains_key("content") {
+                            return Err(SinterError::schema(format!(
+                                "{}: template does not support content; use source",
+                                resource_ctx
+                            )));
+                        }
+                        validate_with_fields(&r.with, TEMPLATE_FIELDS, &resource_ctx)?;
+                        if let Some(v) = r.with.get("validate") {
+                            validate_validate_spec(v, &resource_ctx)?;
+                        }
+                        Ok(())
+                    })?;
+                    let path = staged(&mut stage, Stage::Field("path"), || {
+                        let path = static_string(
+                            &r.with,
+                            "path",
+                            &scope,
+                            &resource_ctx,
+                            true,
+                            field_sensitive("path"),
+                        )?;
+                        validate_path(&path).map_err(|e| {
+                            SinterError::schema(format!("{}: {}", resource_ctx, e.message))
+                        })?;
+                        Ok(path)
+                    })?;
+                    fr.path = Some(path);
+                    let controller_source = staged(&mut stage, Stage::Field("source"), || {
+                        let source = static_string(
+                            &r.with,
+                            "source",
+                            &scope,
+                            &resource_ctx,
+                            true,
+                            field_sensitive("source"),
+                        )?;
+                        let source_sensitive = r.sensitive
+                            || value_references_sensitive_var(
+                                &r.with["source"],
+                                &sensitive_var_names,
+                            );
+                        resolve_source(&r.origin, &source).map_err(|e| {
+                            if source_sensitive {
+                                SinterError::schema(format!(
+                                    "{}: source validation failed (value redacted)",
+                                    resource_ctx
+                                ))
+                            } else {
+                                e
+                            }
+                        })
+                    })?;
+                    fr.controller_source = Some(controller_source);
+                    validate_file_common(
+                        &r.with,
+                        &scope,
+                        &resource_ctx,
+                        &mut fr,
+                        &sensitive_var_names,
+                        &mut stage,
+                    )?;
+                }
+                "command" => {
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(&r.with, COMMAND_FIELDS, &resource_ctx)
+                    })?;
+                    let program = staged(&mut stage, Stage::Field("program"), || {
+                        let program = static_string(
+                            &r.with,
+                            "program",
+                            &scope,
+                            &resource_ctx,
+                            true,
+                            field_sensitive("program"),
+                        )?;
+                        if !program.starts_with('/') {
+                            return Err(SinterError::schema(format!(
+                                "{}: program must be an absolute path",
+                                resource_ctx
+                            )));
+                        }
+                        Ok(program)
+                    })?;
+                    fr.program = Some(program);
+                    if let Some(v) = r.with.get("creates") {
+                        if !v.is_null() {
+                            let s = staged(&mut stage, Stage::Field("creates"), || {
+                                let s = static_string(
+                                    &r.with,
+                                    "creates",
+                                    &scope,
+                                    &resource_ctx,
+                                    true,
+                                    field_sensitive("creates"),
+                                )?;
+                                validate_path(&s).map_err(|e| {
+                                    SinterError::schema(format!(
+                                        "{}: creates: {}",
+                                        resource_ctx, e.message
+                                    ))
+                                })?;
+                                Ok(s)
+                            })?;
+                            fr.creates = Some(s);
+                        }
                     }
+                    if let Some(v) = r.with.get("removes") {
+                        if !v.is_null() {
+                            let s = staged(&mut stage, Stage::Field("removes"), || {
+                                let s = static_string(
+                                    &r.with,
+                                    "removes",
+                                    &scope,
+                                    &resource_ctx,
+                                    true,
+                                    field_sensitive("removes"),
+                                )?;
+                                validate_path(&s).map_err(|e| {
+                                    SinterError::schema(format!(
+                                        "{}: removes: {}",
+                                        resource_ctx, e.message
+                                    ))
+                                })?;
+                                Ok(s)
+                            })?;
+                            fr.removes = Some(s);
+                        }
+                    }
+                    validate_command_fields(
+                        &r.with,
+                        &scope,
+                        &resource_ctx,
+                        &mut fr,
+                        &sensitive_var_names,
+                        &mut stage,
+                    )?;
                 }
-                validate_command_fields(
-                    &r.with,
-                    &scope,
-                    &resource_ctx,
-                    &mut fr,
-                    &sensitive_var_names,
-                )?;
-            }
-            "package" => {
-                validate_with_fields(&r.with, PACKAGE_FIELDS, &resource_ctx)?;
-                if let Some(v) = r.with.get("env") {
-                    validate_env_map(v, &resource_ctx)?;
-                }
-                let name_sensitive = field_sensitive("name");
-                let name =
-                    static_string(&r.with, "name", &scope, &resource_ctx, true, name_sensitive)
+                "package" => {
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(&r.with, PACKAGE_FIELDS, &resource_ctx)?;
+                        if let Some(v) = r.with.get("env") {
+                            validate_env_map(v, &resource_ctx)?;
+                        }
+                        Ok(())
+                    })?;
+                    let name_sensitive = field_sensitive("name");
+                    let name = staged(&mut stage, Stage::Field("name"), || {
+                        let name = static_string(
+                            &r.with,
+                            "name",
+                            &scope,
+                            &resource_ctx,
+                            true,
+                            name_sensitive,
+                        )
                         .map_err(|e| {
                             if name_sensitive {
                                 SinterError::schema(format!(
@@ -1652,336 +1953,402 @@ fn freeze(state: LoadState, entry: &Path) -> Result<Model> {
                                 e
                             }
                         })?;
-                validate_package_name(&name, &resource_ctx, name_sensitive)?;
-                fr.package_name = Some(name);
-                validate_desired_enum(
-                    &r.with,
-                    "state",
-                    &["present", "absent"],
-                    &resource_ctx,
-                    "package state is required and must be present or absent",
-                )?;
-            }
-            "service" => {
-                validate_with_fields(&r.with, SERVICE_FIELDS, &resource_ctx)?;
-                let name = static_string(
-                    &r.with,
-                    "name",
-                    &scope,
-                    &resource_ctx,
-                    true,
-                    field_sensitive("name"),
-                )?;
-                fr.service_name = Some(name);
-                let state = r.with.get("state");
-                let enabled = r.with.get("enabled");
-                if state.is_none() && enabled.is_none() {
+                        validate_package_name(&name, &resource_ctx, name_sensitive)?;
+                        Ok(name)
+                    })?;
+                    fr.package_name = Some(name);
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_desired_enum(
+                            &r.with,
+                            "state",
+                            &["present", "absent"],
+                            &resource_ctx,
+                            "package state is required and must be present or absent",
+                        )
+                    })?;
+                }
+                "service" => {
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(&r.with, SERVICE_FIELDS, &resource_ctx)
+                    })?;
+                    let name = staged(&mut stage, Stage::Field("name"), || {
+                        static_string(
+                            &r.with,
+                            "name",
+                            &scope,
+                            &resource_ctx,
+                            true,
+                            field_sensitive("name"),
+                        )
+                    })?;
+                    fr.service_name = Some(name);
+                    staged(&mut stage, Stage::ValueFree, || {
+                        let state = r.with.get("state");
+                        let enabled = r.with.get("enabled");
+                        if state.is_none() && enabled.is_none() {
+                            return Err(SinterError::schema(format!(
+                                "{}: service requires at least one of state or enabled",
+                                resource_ctx
+                            )));
+                        }
+                        if state.is_some() {
+                            validate_desired_enum(
+                                &r.with,
+                                "state",
+                                &["running", "stopped"],
+                                &resource_ctx,
+                                "service state must be running or stopped",
+                            )?;
+                        }
+                        if let Some(e) = enabled {
+                            if e.as_bool().is_none()
+                                && !matches!(e, Value::Str(s) if crate::expressions::has_interpolation(s))
+                            {
+                                return Err(SinterError::schema(format!(
+                                    "{}: service enabled must be a boolean",
+                                    resource_ctx
+                                )));
+                            }
+                        }
+                        Ok(())
+                    })?;
+                }
+                "postgresql_role" => {
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(&r.with, crate::pgrole::PGROLE_FIELDS, &resource_ctx)
+                    })?;
+                    let name_sensitive = field_sensitive("name");
+                    let name = staged(&mut stage, Stage::Field("name"), || {
+                        let name = static_string(
+                            &r.with,
+                            "name",
+                            &scope,
+                            &resource_ctx,
+                            true,
+                            name_sensitive,
+                        )?;
+                        if !crate::pgrole::valid_role_name(&name) {
+                            return Err(SinterError::schema(format!(
+                                "{}: postgresql_role name {} is not a valid role name",
+                                resource_ctx,
+                                if name_sensitive {
+                                    "(value redacted)".to_string()
+                                } else {
+                                    format!("{:?}", name)
+                                }
+                            )));
+                        }
+                        Ok(name)
+                    })?;
+                    staged(&mut stage, Stage::ValueFree, || {
+                        crate::pgrole::validate_literals(&r.with, &resource_ctx)
+                    })?;
+                    // One resource per role of one server (port, when literal).
+                    let port = r
+                        .with
+                        .get("port")
+                        .and_then(|v| v.as_int())
+                        .map(|p| p.to_string())
+                        // An omitted port is the server default, 5432.
+                        .unwrap_or_else(|| "5432".to_string());
+                    if let Some(owner) = account_name_owner.insert(
+                        ("postgresql_role".to_string(), format!("{}@{}", name, port)),
+                        r.id.clone(),
+                    ) {
+                        stage = Stage::Ownership {
+                            field: "name",
+                            peer: owner.clone(),
+                        };
+                        return Err(SinterError::schema(format!(
+                            "conflicting ownership of PostgreSQL role {} by resources {} and {}",
+                            if name_sensitive {
+                                "(value redacted)"
+                            } else {
+                                name.as_str()
+                            },
+                            owner,
+                            r.id
+                        )));
+                    }
+                    // `password_verifier: { secret: <path> }`: resolve and confine
+                    // the reference. Nothing is decrypted while loading.
+                    if let Some(pv) = r.with.get("password_verifier") {
+                        if let Ok(crate::secret_source::ContentShape::Secret(reference)) =
+                            crate::secret_source::content_shape(pv)
+                        {
+                            fr.secret = Some(staged(&mut stage, Stage::ValueFree, || {
+                                crate::secret_source::resolve_reference_with(
+                                    state.refs,
+                                    &r.origin,
+                                    reference,
+                                    &resource_ctx,
+                                    r.sensitive || name_sensitive,
+                                )
+                            })?);
+                        }
+                    }
+                }
+                "group" | "user" => {
+                    let kind = r.type_.as_str();
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(
+                            &r.with,
+                            if kind == "group" {
+                                GROUP_FIELDS
+                            } else {
+                                USER_FIELDS
+                            },
+                            &resource_ctx,
+                        )
+                    })?;
+                    let name_sensitive = field_sensitive("name");
+                    let name = staged(&mut stage, Stage::Field("name"), || {
+                        let name = static_string(
+                            &r.with,
+                            "name",
+                            &scope,
+                            &resource_ctx,
+                            true,
+                            name_sensitive,
+                        )?;
+                        if !crate::accounts::valid_account_name(&name) {
+                            return Err(SinterError::schema(format!(
+                                "{}: {} name {} is not a valid account name",
+                                resource_ctx,
+                                kind,
+                                if name_sensitive {
+                                    "(value redacted)".to_string()
+                                } else {
+                                    format!("{:?}", name)
+                                }
+                            )));
+                        }
+                        Ok(name)
+                    })?;
+                    if let Some(owner) =
+                        account_name_owner.insert((kind.to_string(), name.clone()), r.id.clone())
+                    {
+                        stage = Stage::Ownership {
+                            field: "name",
+                            peer: owner.clone(),
+                        };
+                        return Err(SinterError::schema(format!(
+                            "conflicting ownership of {} {} by resources {} and {}",
+                            kind,
+                            if name_sensitive {
+                                "(value redacted)"
+                            } else {
+                                name.as_str()
+                            },
+                            owner,
+                            r.id
+                        )));
+                    }
+                    fr.account_name = Some(name);
+                    staged(&mut stage, Stage::ValueFree, || {
+                        if r.with.contains_key("state") {
+                            validate_desired_enum(
+                                &r.with,
+                                "state",
+                                &["present", "absent"],
+                                &resource_ctx,
+                                &format!("{} state must be present or absent", kind),
+                            )?;
+                        }
+                        crate::accounts::validate_account_literals(
+                            kind,
+                            &r.with,
+                            &resource_ctx,
+                            r.sensitive || name_sensitive,
+                        )
+                    })?;
+                    // `password_hash: { secret: <path> }`: resolve and confine the
+                    // reference. Nothing is decrypted while loading.
+                    if let Some(ph) = r.with.get("password_hash") {
+                        if let Ok(crate::secret_source::ContentShape::Secret(reference)) =
+                            crate::secret_source::content_shape(ph)
+                        {
+                            fr.secret = Some(staged(&mut stage, Stage::ValueFree, || {
+                                crate::secret_source::resolve_reference_with(
+                                    state.refs,
+                                    &r.origin,
+                                    reference,
+                                    &resource_ctx,
+                                    r.sensitive || name_sensitive,
+                                )
+                            })?);
+                        }
+                    }
+                }
+                other => {
+                    stage = Stage::ValueFree;
                     return Err(SinterError::schema(format!(
-                        "{}: service requires at least one of state or enabled",
-                        resource_ctx
+                        "{}: unknown resource type {}",
+                        resource_ctx, other
                     )));
                 }
-                if state.is_some() {
-                    validate_desired_enum(
-                        &r.with,
-                        "state",
-                        &["running", "stopped"],
-                        &resource_ctx,
-                        "service state must be running or stopped",
-                    )?;
-                }
-                if let Some(e) = enabled {
-                    if e.as_bool().is_none()
-                        && !matches!(e, Value::Str(s) if crate::expressions::has_interpolation(s))
-                    {
+            }
+
+            // Ownership conflicts for filesystem resources.
+            if matches!(r.type_.as_str(), "file" | "template" | "directory" | "link") {
+                if let Some(p) = &fr.path {
+                    if let Some(prev) = path_owner.insert(p.clone(), r.id.clone()) {
+                        stage = Stage::Ownership {
+                            field: "path",
+                            peer: prev.clone(),
+                        };
                         return Err(SinterError::schema(format!(
-                            "{}: service enabled must be a boolean",
-                            resource_ctx
+                            "conflicting ownership of path {} by resources {} and {}",
+                            p, prev, r.id
                         )));
                     }
                 }
             }
-            "postgresql_role" => {
-                validate_with_fields(&r.with, crate::pgrole::PGROLE_FIELDS, &resource_ctx)?;
-                let name_sensitive = field_sensitive("name");
-                let name =
-                    static_string(&r.with, "name", &scope, &resource_ctx, true, name_sensitive)?;
-                if !crate::pgrole::valid_role_name(&name) {
-                    return Err(SinterError::schema(format!(
-                        "{}: postgresql_role name {} is not a valid role name",
-                        resource_ctx,
-                        if name_sensitive {
-                            "(value redacted)".to_string()
-                        } else {
-                            format!("{:?}", name)
-                        }
-                    )));
-                }
-                crate::pgrole::validate_literals(&r.with, &resource_ctx)?;
-                // One resource per role of one server (port, when literal).
-                let port = r
-                    .with
-                    .get("port")
-                    .and_then(|v| v.as_int())
-                    .map(|p| p.to_string())
-                    // An omitted port is the server default, 5432.
-                    .unwrap_or_else(|| "5432".to_string());
-                if let Some(owner) = account_name_owner.insert(
-                    ("postgresql_role".to_string(), format!("{}@{}", name, port)),
-                    r.id.clone(),
-                ) {
-                    return Err(SinterError::schema(format!(
-                        "conflicting ownership of PostgreSQL role {} by resources {} and {}",
-                        if name_sensitive {
-                            "(value redacted)"
-                        } else {
-                            name.as_str()
-                        },
-                        owner,
-                        r.id
-                    )));
-                }
-                // `password_verifier: { secret: <path> }`: resolve and confine
-                // the reference. Nothing is decrypted while loading.
-                if let Some(pv) = r.with.get("password_verifier") {
-                    if let Ok(crate::secret_source::ContentShape::Secret(reference)) =
-                        crate::secret_source::content_shape(pv)
-                    {
-                        fr.secret = Some(crate::secret_source::resolve_reference_with(
-                            state.refs,
-                            &r.origin,
-                            reference,
-                            &resource_ctx,
-                            r.sensitive || name_sensitive,
-                        )?);
-                    }
-                }
-            }
-            "group" | "user" => {
-                let kind = r.type_.as_str();
-                validate_with_fields(
-                    &r.with,
-                    if kind == "group" {
-                        GROUP_FIELDS
-                    } else {
-                        USER_FIELDS
-                    },
-                    &resource_ctx,
-                )?;
-                let name_sensitive = field_sensitive("name");
-                let name =
-                    static_string(&r.with, "name", &scope, &resource_ctx, true, name_sensitive)?;
-                if !crate::accounts::valid_account_name(&name) {
-                    return Err(SinterError::schema(format!(
-                        "{}: {} name {} is not a valid account name",
-                        resource_ctx,
-                        kind,
-                        if name_sensitive {
-                            "(value redacted)".to_string()
-                        } else {
-                            format!("{:?}", name)
-                        }
-                    )));
-                }
-                if let Some(owner) =
-                    account_name_owner.insert((kind.to_string(), name.clone()), r.id.clone())
-                {
-                    return Err(SinterError::schema(format!(
-                        "conflicting ownership of {} {} by resources {} and {}",
-                        kind,
-                        if name_sensitive {
-                            "(value redacted)"
-                        } else {
-                            name.as_str()
-                        },
-                        owner,
-                        r.id
-                    )));
-                }
-                fr.account_name = Some(name);
-                if r.with.contains_key("state") {
-                    validate_desired_enum(
-                        &r.with,
-                        "state",
-                        &["present", "absent"],
-                        &resource_ctx,
-                        &format!("{} state must be present or absent", kind),
-                    )?;
-                }
-                crate::accounts::validate_account_literals(
-                    kind,
-                    &r.with,
-                    &resource_ctx,
-                    r.sensitive || name_sensitive,
-                )?;
-                // `password_hash: { secret: <path> }`: resolve and confine the
-                // reference. Nothing is decrypted while loading.
-                if let Some(ph) = r.with.get("password_hash") {
-                    if let Ok(crate::secret_source::ContentShape::Secret(reference)) =
-                        crate::secret_source::content_shape(ph)
-                    {
-                        fr.secret = Some(crate::secret_source::resolve_reference_with(
-                            state.refs,
-                            &r.origin,
-                            reference,
-                            &resource_ctx,
-                            r.sensitive || name_sensitive,
-                        )?);
-                    }
-                }
-            }
-            other => {
-                return Err(SinterError::schema(format!(
-                    "{}: unknown resource type {}",
-                    resource_ctx, other
-                )));
-            }
-        }
 
-        // Ownership conflicts for filesystem resources.
-        if matches!(r.type_.as_str(), "file" | "template" | "directory" | "link") {
-            if let Some(p) = &fr.path {
-                if let Some(prev) = path_owner.insert(p.clone(), r.id.clone()) {
-                    return Err(SinterError::schema(format!(
-                        "conflicting ownership of path {} by resources {} and {}",
-                        p, prev, r.id
-                    )));
+            // Conservative static sensitivity used for early diagnostics. Computed
+            // BEFORE template body validation so body-derived values are redacted
+            // whenever sensitivity is explicit OR inherited from a sensitive
+            // variable in a `with` field or in the `when` condition (DESIGN §31).
+            // Iterate the FROZEN `with` (which already carries the merged
+            // recipe-wide `env`), not the raw one: a default environment derived
+            // from a sensitive variable must make the resource sensitive for early
+            // diagnostics too.
+            let mut derived_from_with = r.sensitive;
+            for v in fr.with.values() {
+                if value_references_sensitive_var(v, &sensitive_var_names) {
+                    derived_from_with = true;
                 }
             }
-        }
-
-        // Conservative static sensitivity used for early diagnostics. Computed
-        // BEFORE template body validation so body-derived values are redacted
-        // whenever sensitivity is explicit OR inherited from a sensitive
-        // variable in a `with` field or in the `when` condition (DESIGN §31).
-        // Iterate the FROZEN `with` (which already carries the merged
-        // recipe-wide `env`), not the raw one: a default environment derived
-        // from a sensitive variable must make the resource sensitive for early
-        // diagnostics too.
-        let mut derived_from_with = r.sensitive;
-        for v in fr.with.values() {
-            if value_references_sensitive_var(v, &sensitive_var_names) {
-                derived_from_with = true;
-            }
-        }
-        // A `when` condition that references a sensitive variable makes the
-        // whole resource's diagnostics sensitive: the raw expression tokens
-        // must never surface, including from later runtime evaluation of the
-        // condition itself.
-        if let Some(w) = &r.when {
-            if value_may_be_sensitive(&Value::Str(w.clone()), &sensitive_var_names) {
-                derived_from_with = true;
-            }
-        }
-        let template_sensitive = r.sensitive || derived_from_with;
-
-        // Template bodies can reference registers; those references require the
-        // same direct-dependency validation as `with`/`when` interpolations.
-        if fr.type_ == "template" {
-            if let Some(src) = &fr.controller_source {
-                let body = std::fs::read_to_string(src).map_err(|e| {
-                    if template_sensitive {
-                        SinterError::schema(format!(
-                            "{}: cannot read template (value redacted): {}",
-                            resource_ctx,
-                            e.kind()
-                        ))
-                    } else {
-                        SinterError::schema(format!(
-                            "{}: cannot read template {}: {}",
-                            resource_ctx,
-                            src.display(),
-                            e
-                        ))
-                    }
-                })?;
-                if let Some(tag) = crate::expressions::unsupported_template_tag(&body) {
-                    return Err(SinterError::schema(if template_sensitive {
-                        format!("{}: template: {}", resource_ctx, tag.describe())
-                    } else {
-                        format!(
-                            "{}: template {}: {}",
-                            resource_ctx,
-                            src.display(),
-                            tag.describe()
-                        )
-                    }));
+            // A `when` condition that references a sensitive variable makes the
+            // whole resource's diagnostics sensitive: the raw expression tokens
+            // must never surface, including from later runtime evaluation of the
+            // condition itself.
+            if let Some(w) = &r.when {
+                if value_may_be_sensitive(&Value::Str(w.clone()), &sensitive_var_names) {
+                    derived_from_with = true;
                 }
-                let mut body_regs: BTreeSet<String> = BTreeSet::new();
-                for tok in extract_interpolation_exprs(&body) {
-                    let expr = parse_expr(&tok).map_err(|e| {
-                        // DESIGN §31: body-derived fragments (including numeric
-                        // literals) are sensitive when the resource is sensitive
-                        // explicitly or through derived sensitivity.
+            }
+            let template_sensitive = r.sensitive || derived_from_with;
+
+            // Template bodies can reference registers; those references require the
+            // same direct-dependency validation as `with`/`when` interpolations.
+            // Its messages name the template file, whose path is the `source`.
+            stage = Stage::Field("source");
+            if fr.type_ == "template" {
+                if let Some(src) = &fr.controller_source {
+                    let body = std::fs::read_to_string(src).map_err(|e| {
                         if template_sensitive {
                             SinterError::schema(format!(
-                                "{}: invalid template interpolation (value redacted): {}",
+                                "{}: cannot read template (value redacted): {}",
                                 resource_ctx,
-                                e.category()
+                                e.kind()
                             ))
                         } else {
                             SinterError::schema(format!(
-                                "{}: invalid template interpolation: {}",
-                                resource_ctx, e
+                                "{}: cannot read template {}: {}",
+                                resource_ctx,
+                                src.display(),
+                                e
                             ))
                         }
                     })?;
-                    let mut names = BTreeSet::new();
-                    collect_register_refs(&expr, &mut body_regs, &mut names);
-                }
-                for reg in &body_regs {
-                    let producer = register_producers.get(reg).ok_or_else(|| {
-                        if template_sensitive {
-                            SinterError::schema(format!(
-                                "{}: template references unknown register (value redacted)",
-                                resource_ctx
-                            ))
+                    if let Some(tag) = crate::expressions::unsupported_template_tag(&body) {
+                        return Err(SinterError::schema(if template_sensitive {
+                            format!("{}: template: {}", resource_ctx, tag.describe())
                         } else {
-                            SinterError::schema(format!(
-                                "{}: template references unknown register {}",
-                                resource_ctx, reg
-                            ))
-                        }
-                    })?;
-                    if !r.depends_on.contains(producer) {
-                        return Err(if template_sensitive {
-                            SinterError::schema(format!(
+                            format!(
+                                "{}: template {}: {}",
+                                resource_ctx,
+                                src.display(),
+                                tag.describe()
+                            )
+                        }));
+                    }
+                    let mut body_regs: BTreeSet<String> = BTreeSet::new();
+                    for tok in extract_interpolation_exprs(&body) {
+                        let expr = parse_expr(&tok).map_err(|e| {
+                            // DESIGN §31: body-derived fragments (including numeric
+                            // literals) are sensitive when the resource is sensitive
+                            // explicitly or through derived sensitivity.
+                            if template_sensitive {
+                                SinterError::schema(format!(
+                                    "{}: invalid template interpolation (value redacted): {}",
+                                    resource_ctx,
+                                    e.category()
+                                ))
+                            } else {
+                                SinterError::schema(format!(
+                                    "{}: invalid template interpolation: {}",
+                                    resource_ctx, e
+                                ))
+                            }
+                        })?;
+                        let mut names = BTreeSet::new();
+                        collect_register_refs(&expr, &mut body_regs, &mut names);
+                    }
+                    for reg in &body_regs {
+                        let producer = register_producers.get(reg).ok_or_else(|| {
+                            if template_sensitive {
+                                SinterError::schema(format!(
+                                    "{}: template references unknown register (value redacted)",
+                                    resource_ctx
+                                ))
+                            } else {
+                                SinterError::schema(format!(
+                                    "{}: template references unknown register {}",
+                                    resource_ctx, reg
+                                ))
+                            }
+                        })?;
+                        if !r.depends_on.contains(producer) {
+                            return Err(if template_sensitive {
+                                SinterError::schema(format!(
                                 "{}: template register must be listed directly in depends_on (value redacted)",
                                 resource_ctx
                             ))
-                        } else {
-                            SinterError::schema(format!(
+                            } else {
+                                SinterError::schema(format!(
                                 "{}: template register {} must be listed directly in depends_on",
                                 resource_ctx, reg
                             ))
-                        });
-                    }
-                }
-            }
-        }
-
-        // Full conservative static sensitivity: explicit flag, any sensitive
-        // variable referenced by interpolated fields, or a sensitive variable in
-        // a template body.
-        let mut derived = derived_from_with;
-        // A resource that holds a secret is sensitive whatever it declares.
-        if fr.secret.is_some() {
-            derived = true;
-        }
-        if let Some(src) = &fr.controller_source {
-            if let Ok(body) = std::fs::read_to_string(src) {
-                for tok in extract_interpolation_exprs(&body) {
-                    if let Ok(expr) = parse_expr(&tok) {
-                        if expr_references_sensitive_var(&expr, &sensitive_var_names) {
-                            derived = true;
+                            });
                         }
                     }
                 }
             }
-        }
-        fr.derived_sensitive = derived;
 
-        frozen.push(fr);
+            // Full conservative static sensitivity: explicit flag, any sensitive
+            // variable referenced by interpolated fields, or a sensitive variable in
+            // a template body.
+            let mut derived = derived_from_with;
+            // A resource that holds a secret is sensitive whatever it declares.
+            if fr.secret.is_some() {
+                derived = true;
+            }
+            if let Some(src) = &fr.controller_source {
+                if let Ok(body) = std::fs::read_to_string(src) {
+                    for tok in extract_interpolation_exprs(&body) {
+                        if let Ok(expr) = parse_expr(&tok) {
+                            if expr_references_sensitive_var(&expr, &sensitive_var_names) {
+                                derived = true;
+                            }
+                        }
+                    }
+                }
+            }
+            fr.derived_sensitive = derived;
+            Ok(fr)
+        })();
+        match checked {
+            Ok(fr) => frozen.push(fr),
+            Err(e) if overrides.is_empty() => return Err(e),
+            Err(e) => {
+                return Err(withhold_override_values(
+                    r, &stage, &refs, &peer_refs, overrides, e,
+                ))
+            }
+        }
+        peer_refs.insert(r.id.clone(), refs);
     }
 
     // Static loop input must be statically known: already guaranteed by IR being
@@ -2212,45 +2579,53 @@ fn validate_file_common(
     ctx: &str,
     fr: &mut FrozenResource,
     sensitive_vars: &BTreeSet<String>,
+    stage: &mut Stage,
 ) -> Result<()> {
-    let content = with.get("content");
-    let source = with.get("source");
-    if content.is_some() && source.is_some() {
-        return Err(SinterError::schema(format!(
-            "{}: content and source are mutually exclusive",
-            ctx
-        )));
-    }
-    if let Some(Value::Str(s)) = with.get("mode") {
-        let _ = parse_mode(s).map_err(|e| {
-            if fr.sensitive {
-                SinterError::schema(format!("{}: invalid mode", ctx))
-            } else {
-                SinterError::schema(format!("{}: {}", ctx, e.message))
-            }
-        })?;
-    } else if let Some(v) = with.get("mode") {
-        if !v.is_null() {
+    // Literal checks only: the written mode/owner/group text is checked, no
+    // variable value is evaluated.
+    staged(stage, Stage::ValueFree, || {
+        let content = with.get("content");
+        let source = with.get("source");
+        if content.is_some() && source.is_some() {
             return Err(SinterError::schema(format!(
-                "{}: mode must be a quoted four-digit octal string",
+                "{}: content and source are mutually exclusive",
                 ctx
             )));
         }
-    }
-    if let Some(Value::Str(s)) = with.get("owner") {
-        if crate::value::has_nul(s) || s.is_empty() {
-            return Err(SinterError::schema(format!("{}: invalid owner", ctx)));
+        if let Some(Value::Str(s)) = with.get("mode") {
+            let _ = parse_mode(s).map_err(|e| {
+                if fr.sensitive {
+                    SinterError::schema(format!("{}: invalid mode", ctx))
+                } else {
+                    SinterError::schema(format!("{}: {}", ctx, e.message))
+                }
+            })?;
+        } else if let Some(v) = with.get("mode") {
+            if !v.is_null() {
+                return Err(SinterError::schema(format!(
+                    "{}: mode must be a quoted four-digit octal string",
+                    ctx
+                )));
+            }
         }
-    }
-    if let Some(Value::Str(s)) = with.get("group") {
-        if crate::value::has_nul(s) || s.is_empty() {
-            return Err(SinterError::schema(format!("{}: invalid group", ctx)));
+        if let Some(Value::Str(s)) = with.get("owner") {
+            if crate::value::has_nul(s) || s.is_empty() {
+                return Err(SinterError::schema(format!("{}: invalid owner", ctx)));
+            }
         }
-    }
+        if let Some(Value::Str(s)) = with.get("group") {
+            if crate::value::has_nul(s) || s.is_empty() {
+                return Err(SinterError::schema(format!("{}: invalid group", ctx)));
+            }
+        }
+        Ok(())
+    })?;
     // Validate that `source` is static when present.
-    if source.is_some() {
+    if with.get("source").is_some() {
         let sens = fr.sensitive || value_may_be_sensitive(&with["source"], sensitive_vars);
-        let _ = static_string(with, "source", scope, ctx, true, sens)?;
+        staged(stage, Stage::Field("source"), || {
+            static_string(with, "source", scope, ctx, true, sens)
+        })?;
     }
     Ok(())
 }
@@ -2261,145 +2636,154 @@ fn validate_command_fields(
     ctx: &str,
     fr: &mut FrozenResource,
     sensitive_vars: &BTreeSet<String>,
+    stage: &mut Stage,
 ) -> Result<()> {
-    if let Some(v) = with.get("args") {
-        match v {
-            Value::List(items) => {
-                for i in items {
-                    if !matches!(i, Value::Str(_)) {
-                        return Err(SinterError::schema(format!(
-                            "{}: command args must be strings",
-                            ctx
-                        )));
-                    }
-                    if let Value::Str(s) = i {
-                        if crate::value::has_nul(s) {
+    // Literal checks only: the written args, numbers and changed_when text.
+    staged(stage, Stage::ValueFree, || {
+        if let Some(v) = with.get("args") {
+            match v {
+                Value::List(items) => {
+                    for i in items {
+                        if !matches!(i, Value::Str(_)) {
                             return Err(SinterError::schema(format!(
-                                "{}: command args may not contain NUL",
+                                "{}: command args must be strings",
                                 ctx
                             )));
                         }
-                    }
-                }
-            }
-            _ => {
-                return Err(SinterError::schema(format!(
-                    "{}: command args must be a list of strings",
-                    ctx
-                )))
-            }
-        }
-    }
-    if let Some(v) = with.get("timeout_seconds") {
-        match v.as_int() {
-            Some(n) if (1..=86400).contains(&n) => {}
-            _ => {
-                return Err(SinterError::schema(format!(
-                    "{}: timeout_seconds must be an integer in 1..86400",
-                    ctx
-                )))
-            }
-        }
-    }
-    if let Some(v) = with.get("success_codes") {
-        match v {
-            Value::List(items) if !items.is_empty() => {
-                for i in items {
-                    match i.as_int() {
-                        Some(n) if (0..=255).contains(&n) => {}
-                        _ => {
-                            return Err(SinterError::schema(format!(
-                                "{}: success_codes must be integers in 0..255",
-                                ctx
-                            )))
+                        if let Value::Str(s) = i {
+                            if crate::value::has_nul(s) {
+                                return Err(SinterError::schema(format!(
+                                    "{}: command args may not contain NUL",
+                                    ctx
+                                )));
+                            }
                         }
                     }
                 }
-            }
-            _ => {
-                return Err(SinterError::schema(format!(
-                    "{}: success_codes must be a non-empty list of integers",
-                    ctx
-                )))
-            }
-        }
-    }
-    if let Some(v) = with.get("changed_when") {
-        if !v.is_null() {
-            match v.as_str() {
-                Some(s) => {
-                    // A changed_when expression is sensitive when the resource
-                    // is sensitive or the expression references (or textually
-                    // names) a sensitive variable: its tokens must never reach
-                    // diagnostics on any parse/validation path.
-                    let cw_sensitive = fr.sensitive
-                        || value_may_be_sensitive(&Value::Str(s.to_string()), sensitive_vars);
-                    let expr = parse_expr(s).map_err(|e| {
-                        if cw_sensitive {
-                            SinterError::schema(format!(
-                                "{}: invalid changed_when (value redacted): {}",
-                                ctx,
-                                e.category()
-                            ))
-                        } else {
-                            SinterError::schema(format!("{}: invalid changed_when: {}", ctx, e))
-                        }
-                    })?;
-                    validate_changed_when(&expr, ctx, cw_sensitive)?;
-                }
-                None => {
+                _ => {
                     return Err(SinterError::schema(format!(
-                        "{}: changed_when must be a string or null",
+                        "{}: command args must be a list of strings",
                         ctx
                     )))
                 }
             }
         }
-    }
-    if fr.creates.is_some() && fr.removes.is_some() {
-        return Err(SinterError::schema(format!(
-            "{}: creates and removes are mutually exclusive",
-            ctx
-        )));
-    }
+        if let Some(v) = with.get("timeout_seconds") {
+            match v.as_int() {
+                Some(n) if (1..=86400).contains(&n) => {}
+                _ => {
+                    return Err(SinterError::schema(format!(
+                        "{}: timeout_seconds must be an integer in 1..86400",
+                        ctx
+                    )))
+                }
+            }
+        }
+        if let Some(v) = with.get("success_codes") {
+            match v {
+                Value::List(items) if !items.is_empty() => {
+                    for i in items {
+                        match i.as_int() {
+                            Some(n) if (0..=255).contains(&n) => {}
+                            _ => {
+                                return Err(SinterError::schema(format!(
+                                    "{}: success_codes must be integers in 0..255",
+                                    ctx
+                                )))
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    return Err(SinterError::schema(format!(
+                        "{}: success_codes must be a non-empty list of integers",
+                        ctx
+                    )))
+                }
+            }
+        }
+        if let Some(v) = with.get("changed_when") {
+            if !v.is_null() {
+                match v.as_str() {
+                    Some(s) => {
+                        // A changed_when expression is sensitive when the resource
+                        // is sensitive or the expression references (or textually
+                        // names) a sensitive variable: its tokens must never reach
+                        // diagnostics on any parse/validation path.
+                        let cw_sensitive = fr.sensitive
+                            || value_may_be_sensitive(&Value::Str(s.to_string()), sensitive_vars);
+                        let expr = parse_expr(s).map_err(|e| {
+                            if cw_sensitive {
+                                SinterError::schema(format!(
+                                    "{}: invalid changed_when (value redacted): {}",
+                                    ctx,
+                                    e.category()
+                                ))
+                            } else {
+                                SinterError::schema(format!("{}: invalid changed_when: {}", ctx, e))
+                            }
+                        })?;
+                        validate_changed_when(&expr, ctx, cw_sensitive)?;
+                    }
+                    None => {
+                        return Err(SinterError::schema(format!(
+                            "{}: changed_when must be a string or null",
+                            ctx
+                        )))
+                    }
+                }
+            }
+        }
+        if fr.creates.is_some() && fr.removes.is_some() {
+            return Err(SinterError::schema(format!(
+                "{}: creates and removes are mutually exclusive",
+                ctx
+            )));
+        }
+        Ok(())
+    })?;
     // Validate cwd statically if present (must be an absolute path, no facts
     // permitted for the identifier, no sensitive).
     if let Some(v) = with.get("cwd") {
         if !v.is_null() {
             let sens = fr.sensitive || value_may_be_sensitive(v, sensitive_vars);
-            let s = static_string(with, "cwd", scope, ctx, true, sens)?;
-            validate_path(&s)
-                .map_err(|e| SinterError::schema(format!("{}: cwd: {}", ctx, e.message)))?;
+            staged(stage, Stage::Field("cwd"), || {
+                let s = static_string(with, "cwd", scope, ctx, true, sens)?;
+                validate_path(&s)
+                    .map_err(|e| SinterError::schema(format!("{}: cwd: {}", ctx, e.message)))
+            })?;
         }
     }
     // env: keys must be strings, reserved names rejected.
-    if let Some(v) = with.get("env") {
-        match v {
-            Value::Map(m) => {
-                for (k, val) in m {
-                    if RESERVED_ENV.contains(&k.as_str()) {
-                        return Err(SinterError::schema(format!(
-                            "{}: env name {} is reserved by the command baseline",
-                            ctx, k
-                        )));
-                    }
-                    if !matches!(val, Value::Str(_)) {
-                        return Err(SinterError::schema(format!(
-                            "{}: env values must be strings",
-                            ctx
-                        )));
+    staged(stage, Stage::ValueFree, || {
+        if let Some(v) = with.get("env") {
+            match v {
+                Value::Map(m) => {
+                    for (k, val) in m {
+                        if RESERVED_ENV.contains(&k.as_str()) {
+                            return Err(SinterError::schema(format!(
+                                "{}: env name {} is reserved by the command baseline",
+                                ctx, k
+                            )));
+                        }
+                        if !matches!(val, Value::Str(_)) {
+                            return Err(SinterError::schema(format!(
+                                "{}: env values must be strings",
+                                ctx
+                            )));
+                        }
                     }
                 }
-            }
-            _ => {
-                return Err(SinterError::schema(format!(
-                    "{}: env must be a map of strings",
-                    ctx
-                )))
+                _ => {
+                    return Err(SinterError::schema(format!(
+                        "{}: env must be a map of strings",
+                        ctx
+                    )))
+                }
             }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 pub(crate) const RESERVED_ENV: &[&str] = &["PATH", "LANG", "LC_ALL", "HOME"];
@@ -2812,5 +3196,617 @@ mod tests {
             "version: 1\nvars:\n  p:\n    value: /tmp/x\n    sensitive: true\nresources:\n  - id: f\n    type: file\n    with:\n      path: \"{{ vars.p }}\"\n",
         );
         assert!(load_model(&p).is_err());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WP-VARS (DESIGN §19.5): prepare / freeze_with and value-free diagnostics.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod vars_tests {
+    use super::*;
+
+    /// A fictitious value that must never reach a diagnostic.
+    const CANARY: &str = "SINTER_VARS_CANARY_DO_NOT_PRINT_20261019";
+
+    fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    fn s(v: &str) -> Value {
+        Value::Str(v.to_string())
+    }
+
+    /// Overrides, all from one layer.
+    fn ov(pairs: &[(&str, Value)], layer: &str) -> VarOverrides {
+        let mut o = VarOverrides::default();
+        for (n, v) in pairs {
+            o.insert(n, v.clone(), layer);
+        }
+        o
+    }
+
+    fn dbg(r: &Result<Model>) -> String {
+        match r {
+            Ok(m) => format!("OK {m:?}"),
+            Err(e) => format!("ERR {:?} {}", e.kind, e.message),
+        }
+    }
+
+    fn files_under(root: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(root) else {
+            return;
+        };
+        let mut v: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        v.sort();
+        for p in v {
+            if p.is_dir() {
+                if p.file_name().is_some_and(|n| n == "node_modules") {
+                    continue;
+                }
+                files_under(&p, out);
+            } else if matches!(
+                p.extension().and_then(|e| e.to_str()),
+                Some("yaml" | "yml" | "toml")
+            ) {
+                out.push(p);
+            }
+        }
+    }
+
+    /// Every shipped recipe and fixture: freezing a copy without overrides
+    /// equals the established path, errors included.
+    #[test]
+    fn freeze_with_no_overrides_equals_load_model_on_every_shipped_file() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        for d in ["examples", "tests/fixtures", "docs-site/src", "release"] {
+            files_under(&root.join(d), &mut files);
+        }
+        let mut compared = 0;
+        for f in &files {
+            let established = dbg(&load_model(f));
+            match prepare(f) {
+                Ok(p) => {
+                    assert_eq!(
+                        dbg(&p.freeze_with(&VarOverrides::default())),
+                        established,
+                        "{}",
+                        f.display()
+                    );
+                    assert_eq!(dbg(&p.freeze_default()), established, "{}", f.display());
+                    compared += 1;
+                }
+                Err(e) => assert_eq!(format!("ERR {:?} {}", e.kind, e.message), established),
+            }
+        }
+        assert!(compared > 30, "compared {compared}");
+        eprintln!(
+            "WP-VARS: {} files, {compared} prepared and compared",
+            files.len()
+        );
+    }
+
+    const SITE: &str = "version: 1\ntargets: { groups: [web] }\nvars:\n  site_root: { value: \"CHANGE_ME\" }\n  port: { value: 80 }\nresources:\n  - id: index\n    type: file\n    with: { path: \"{{ vars.site_root }}/index.html\", content: \"listen {{ vars.port }}\\n\" }\n";
+
+    #[test]
+    fn a_failing_default_is_never_frozen_when_overridden() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write(d.path(), "site.yaml", SITE);
+        assert!(load_model(&p)
+            .unwrap_err()
+            .message
+            .contains("path must be absolute"));
+        let m = prepare(&p)
+            .unwrap()
+            .freeze_with(&ov(&[("site_root", s("/srv/a"))], "hosts.web01"))
+            .unwrap();
+        assert_eq!(m.resources[0].path.as_deref(), Some("/srv/a/index.html"));
+        assert_eq!(m.vars["site_root"].value, s("/srv/a"));
+        assert_eq!(m.vars["port"].value, Value::Int(80));
+    }
+
+    #[test]
+    fn one_prepared_recipe_many_hosts_without_mixing() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write(d.path(), "site.yaml", SITE);
+        let pr = prepare(&p).unwrap();
+        let a = ov(
+            &[("site_root", s("/srv/a")), ("port", Value::Int(8081))],
+            "hosts.a",
+        );
+        let a1 = pr.freeze_with(&a).unwrap();
+        let b = pr
+            .freeze_with(&ov(&[("site_root", s("/srv/b"))], "hosts.b"))
+            .unwrap();
+        let a2 = pr.freeze_with(&a).unwrap();
+        assert_eq!(b.resources[0].path.as_deref(), Some("/srv/b/index.html"));
+        assert_eq!(b.vars["port"].value, Value::Int(80));
+        assert_eq!(a1.vars["port"].value, Value::Int(8081));
+        assert_eq!(format!("{a1:?}"), format!("{a2:?}"));
+        assert_ne!(format!("{a1:?}"), format!("{b:?}"));
+        // The prepared recipe keeps its defaults.
+        let defaults: BTreeMap<&str, &Value> = pr.declared().map(|(n, v, _)| (n, v)).collect();
+        assert_eq!(defaults["site_root"], &s("CHANGE_ME"));
+        assert_eq!(defaults["port"], &Value::Int(80));
+        drop(a1);
+        assert_eq!(a2.resources[0].path.as_deref(), Some("/srv/a/index.html"));
+    }
+
+    #[test]
+    fn concurrent_freezes_of_one_prepared_recipe_stay_separate() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write(d.path(), "site.yaml", SITE);
+        let pr = prepare(&p).unwrap();
+        let hosts: Vec<String> = (0..16).map(|i| format!("h{i:02}")).collect();
+        let models: Vec<(String, Model)> = std::thread::scope(|sc| {
+            let handles: Vec<_> = hosts
+                .iter()
+                .map(|h| {
+                    let pr = &pr;
+                    sc.spawn(move || {
+                        let o = ov(
+                            &[
+                                ("site_root", s(&format!("/srv/{h}"))),
+                                ("port", Value::Int(h[1..].parse::<i64>().unwrap() + 9000)),
+                            ],
+                            &format!("hosts.{h}"),
+                        );
+                        (h.clone(), pr.freeze_with(&o).unwrap())
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|j| j.join().unwrap()).collect()
+        });
+        for (h, m) in &models {
+            assert_eq!(
+                m.resources[0].path.as_deref(),
+                Some(format!("/srv/{h}/index.html").as_str())
+            );
+            assert_eq!(
+                m.vars["port"].value,
+                Value::Int(h[1..].parse::<i64>().unwrap() + 9000)
+            );
+        }
+    }
+
+    #[test]
+    fn override_rules_name_types_never_values() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write(
+            d.path(),
+            "r.yaml",
+            "version: 1\nvars:\n  a: { value: \"x\" }\n  n: { value: 1 }\n  tok: { value: \"t\", sensitive: true }\nresources: []\n",
+        );
+        let pr = prepare(&p).unwrap();
+        for (o, want) in [
+            (ov(&[("nope", s(CANARY))], "vars"), "is not declared"),
+            (
+                ov(&[("tok", s(CANARY))], "vars"),
+                "is sensitive and cannot be overridden",
+            ),
+            (
+                ov(&[("a", Value::List(vec![s(CANARY)]))], "vars"),
+                "must be string, not list",
+            ),
+            (
+                ov(&[("n", Value::Float(1.5))], "vars"),
+                "must be integer, not float",
+            ),
+        ] {
+            let e = pr.freeze_with(&o).unwrap_err();
+            assert!(e.message.contains(want), "{}", e.message);
+            assert!(!e.message.contains(CANARY), "{}", e.message);
+        }
+    }
+
+    /// The error of `body` frozen with `overrides` from `hosts.web01`.
+    fn override_error(dir: &Path, body: &str, overrides: &[(&str, Value)]) -> SinterError {
+        let p = write(dir, "r.yaml", body);
+        prepare(&p)
+            .unwrap()
+            .freeze_with(&ov(overrides, "hosts.web01"))
+            .unwrap_err()
+    }
+
+    fn assert_withheld(e: &SinterError, id: &str, check: &str, var: &str) {
+        let m = &e.message;
+        assert!(!m.contains(CANARY), "LEAK: {m}");
+        assert!(m.starts_with(&format!("{id}: ")), "{m}");
+        assert!(m.contains(check), "want {check:?}: {m}");
+        assert!(m.contains(&format!("{var} (hosts.web01)")), "{m}");
+        assert!(m.ends_with("the value is withheld"), "{m}");
+        let json = serde_json::json!({ "error": { "kind": "schema", "message": m } }).to_string();
+        assert!(!json.contains(CANARY));
+        assert!(!crate::diff::sanitize_line(m).contains(CANARY));
+    }
+
+    /// The same failure with the canary as the recipe's own default prints
+    /// it (established behavior, unchanged): proves each case reaches a
+    /// message that would carry the value.
+    fn established_prints_value(dir: &Path, body: &str) {
+        let p = write(dir, "base.yaml", body);
+        let e = load_model(&p).unwrap_err();
+        assert!(e.message.contains(CANARY), "{}", e.message);
+    }
+
+    fn one_var(name: &str, default: &str, resources: &str) -> String {
+        format!("version: 1\nvars:\n  {name}: {{ value: \"{default}\" }}\nresources:\n{resources}")
+    }
+
+    #[test]
+    fn invalid_paths_of_every_path_resource_are_withheld() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "t.tmpl", "x\n");
+        for (id, ty, extra) in [
+            ("f", "file", "content: x"),
+            ("dir", "directory", "state: present"),
+            ("ln", "link", "target: /etc/hosts"),
+            ("tpl", "template", "source: t.tmpl"),
+        ] {
+            let res = format!(
+                "  - id: {id}\n    type: {ty}\n    with: {{ path: \"{{{{ vars.root }}}}/x\", {extra} }}\n"
+            );
+            established_prints_value(d.path(), &one_var("root", CANARY, &res));
+            let e = override_error(
+                d.path(),
+                &one_var("root", "/ok", &res),
+                &[("root", s(CANARY))],
+            );
+            assert_withheld(&e, id, "field path", "root");
+        }
+    }
+
+    #[test]
+    fn command_fields_are_withheld() {
+        let d = tempfile::tempdir().unwrap();
+        for field in ["creates", "removes", "cwd"] {
+            let res = format!(
+                "  - id: cmd\n    type: command\n    with: {{ program: /bin/true, {field}: \"{{{{ vars.c }}}}\" }}\n"
+            );
+            established_prints_value(d.path(), &one_var("c", CANARY, &res));
+            let e = override_error(d.path(), &one_var("c", "/ok", &res), &[("c", s(CANARY))]);
+            assert_withheld(&e, "cmd", &format!("field {field}"), "c");
+        }
+        // program: written text must start with "/" (a value-free declaration
+        // check, message kept); a value of the wrong shape is attributed.
+        let res = "  - id: cmd\n    type: command\n    with: { program: \"{{ vars.c }}\" }\n";
+        let p = write(d.path(), "r.yaml", &one_var("c", "/bin/true", res));
+        let established = load_model(&p).unwrap_err().message;
+        assert_eq!(established, "cmd: program must be an absolute path");
+        let e = override_error(
+            d.path(),
+            &one_var("c", "/bin/true", res),
+            &[("c", s(CANARY))],
+        );
+        assert_eq!(e.message, established);
+        let res = "  - id: cmd\n    type: command\n    with: { program: \"/opt/{{ vars.c }}\" }\n";
+        let body = "version: 1\nvars:\n  c: { value: [a] }\nresources:\n".to_string() + res;
+        let e = override_error(d.path(), &body, &[("c", Value::List(vec![s(CANARY)]))]);
+        assert_withheld(&e, "cmd", "field program", "c");
+    }
+
+    #[test]
+    fn names_of_packages_accounts_and_roles_are_withheld() {
+        let d = tempfile::tempdir().unwrap();
+        let bad = format!("bad name {CANARY}");
+        for (id, res) in [
+            ("pkg", "  - id: pkg\n    type: package\n    with: { name: \"{{ vars.n }}\", state: present }\n"),
+            ("u", "  - id: u\n    type: user\n    with: { name: \"{{ vars.n }}\" }\n"),
+            ("g", "  - id: g\n    type: group\n    with: { name: \"{{ vars.n }}\" }\n"),
+            ("role", "  - id: role\n    type: postgresql_role\n    with: { name: \"{{ vars.n }}\" }\n"),
+        ] {
+            established_prints_value(d.path(), &one_var("n", &bad, res));
+            let e = override_error(d.path(), &one_var("n", "ok", res), &[("n", s(&bad))]);
+            assert_withheld(&e, id, "field name", "n");
+        }
+        // A service name cannot fail on a string; a wrong shape still is
+        // attributed (the evaluator names only types).
+        let res = "  - id: svc\n    type: service\n    with: { name: \"{{ vars.n }}\", state: running }\n";
+        let body = "version: 1\nvars:\n  n: { value: [a] }\nresources:\n".to_string() + res;
+        let e = override_error(d.path(), &body, &[("n", Value::List(vec![s(CANARY)]))]);
+        assert_withheld(&e, "svc", "field name", "n");
+    }
+
+    #[test]
+    fn ownership_conflicts_are_withheld_on_either_side() {
+        let d = tempfile::tempdir().unwrap();
+        let leak = format!("/srv/{CANARY}");
+        // Both sides from the file.
+        let two = "version: 1\nvars:\n  a: { value: \"/srv/x\" }\n  b: { value: \"/srv/y\" }\nresources:\n  - id: ra\n    type: file\n    with: { path: \"{{ vars.a }}\", content: a }\n  - id: rb\n    type: file\n    with: { path: \"{{ vars.b }}\", content: b }\n";
+        established_prints_value(
+            d.path(),
+            &two.replace("/srv/x", &leak).replace("/srv/y", &leak),
+        );
+        let e = override_error(d.path(), two, &[("a", s(&leak)), ("b", s(&leak))]);
+        assert_withheld(&e, "rb", "conflicts with resource ra", "b");
+        assert!(e.message.contains("a (hosts.web01)"), "{}", e.message);
+        // Only the other side from the file: the literal equals its value.
+        let peer = format!("version: 1\nvars:\n  a: {{ value: \"/srv/x\" }}\nresources:\n  - id: ra\n    type: file\n    with: {{ path: \"{{{{ vars.a }}}}\", content: a }}\n  - id: rb\n    type: file\n    with: {{ path: \"{leak}\", content: b }}\n");
+        let e = override_error(d.path(), &peer, &[("a", s(&leak))]);
+        assert!(!e.message.contains(CANARY), "{}", e.message);
+        assert!(e
+            .message
+            .contains("ownership of field path (conflicts with resource ra)"));
+        // Accounts and roles.
+        for (ty, extra) in [("user", ""), ("group", ""), ("postgresql_role", "")] {
+            let body = format!("version: 1\nvars:\n  a: {{ value: x }}\n  b: {{ value: y }}\nresources:\n  - id: one\n    type: {ty}\n    with: {{ name: \"{{{{ vars.a }}}}\"{extra} }}\n  - id: two\n    type: {ty}\n    with: {{ name: \"{{{{ vars.b }}}}\"{extra} }}\n");
+            let name = format!("n{}", &CANARY.to_ascii_lowercase()[..20]);
+            let e = override_error(d.path(), &body, &[("a", s(&name)), ("b", s(&name))]);
+            assert!(!e.message.contains(&name), "{ty}: {}", e.message);
+            assert!(
+                e.message
+                    .contains("ownership of field name (conflicts with resource one)"),
+                "{ty}: {}",
+                e.message
+            );
+        }
+    }
+
+    #[test]
+    fn template_sources_are_withheld() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "ok.tmpl", "x\n");
+        let res = "  - id: conf\n    type: template\n    with: { path: /etc/x.conf, source: \"{{ vars.t }}\" }\n";
+        // Missing source.
+        established_prints_value(d.path(), &one_var("t", &format!("{CANARY}.tmpl"), res));
+        let e = override_error(
+            d.path(),
+            &one_var("t", "ok.tmpl", res),
+            &[("t", s(&format!("{CANARY}.tmpl")))],
+        );
+        assert_withheld(&e, "conf", "field source", "t");
+        // A source that exists but cannot be read as a template (a directory).
+        std::fs::create_dir(d.path().join(format!("{CANARY}.d"))).unwrap();
+        established_prints_value(d.path(), &one_var("t", &format!("{CANARY}.d"), res));
+        let e = override_error(
+            d.path(),
+            &one_var("t", "ok.tmpl", res),
+            &[("t", s(&format!("{CANARY}.d")))],
+        );
+        assert_withheld(&e, "conf", "field source", "t");
+        // An unsupported tag in a body the file selects names the file.
+        write(d.path(), &format!("{CANARY}.tmpl"), "{% if x %}\n");
+        let e = override_error(
+            d.path(),
+            &one_var("t", "ok.tmpl", res),
+            &[("t", s(&format!("{CANARY}.tmpl")))],
+        );
+        assert_withheld(&e, "conf", "field source", "t");
+        // file.source: only its shape is checked while loading.
+        let res =
+            "  - id: f\n    type: file\n    with: { path: /etc/f, source: \"{{ vars.t }}\" }\n";
+        let body = "version: 1\nvars:\n  t: { value: [a] }\nresources:\n".to_string() + res;
+        let e = override_error(d.path(), &body, &[("t", Value::List(vec![s(CANARY)]))]);
+        assert_withheld(&e, "f", "field source", "t");
+    }
+
+    #[test]
+    fn evaluation_failures_carry_no_value_with_or_without_the_boundary() {
+        let d = tempfile::tempdir().unwrap();
+        let body = "version: 1\nvars:\n  l: { value: [\"a\"] }\nresources:\n  - id: f\n    type: file\n    with: { path: \"/x/{{ vars.l }}\", content: x }\n";
+        let e = override_error(d.path(), body, &[("l", Value::List(vec![s(CANARY)]))]);
+        assert_withheld(&e, "f", "field path", "l");
+        let p = write(
+            d.path(),
+            "r.yaml",
+            &body.replace("[\"a\"]", &format!("[\"{CANARY}\"]")),
+        );
+        assert!(!load_model(&p).unwrap_err().message.contains(CANARY));
+    }
+
+    #[test]
+    fn value_free_checks_keep_their_message_on_a_resource_that_uses_the_file() {
+        let d = tempfile::tempdir().unwrap();
+        for (body, want) in [
+            // Unknown field.
+            ("version: 1\nvars:\n  r: { value: /ok }\nresources:\n  - id: f\n    type: file\n    with: { path: \"{{ vars.r }}\", content: x, colour: red }\n", "unknown field"),
+            // Unknown dependency.
+            ("version: 1\nvars:\n  r: { value: /ok }\nresources:\n  - id: f\n    type: file\n    depends_on: [nope]\n    with: { path: \"{{ vars.r }}\", content: x }\n", "depends_on references unknown"),
+            // Invalid enumeration.
+            ("version: 1\nvars:\n  n: { value: jq }\nresources:\n  - id: p\n    type: package\n    with: { name: \"{{ vars.n }}\", state: sideways }\n", "package state"),
+            // Invalid literal mode.
+            ("version: 1\nvars:\n  r: { value: /ok }\nresources:\n  - id: f\n    type: file\n    with: { path: \"{{ vars.r }}\", content: x, mode: \"999\" }\n", "mode"),
+        ] {
+            let p = write(d.path(), "r.yaml", body);
+            let established = load_model(&p).unwrap_err().message;
+            assert!(established.contains(want), "{established}");
+            let name = if body.contains("vars.n") { "n" } else { "r" };
+            let value = if name == "n" { s("curl") } else { s("/srv/other") };
+            let e = prepare(&p)
+                .unwrap()
+                .freeze_with(&ov(&[(name, value)], "hosts.web01"))
+                .unwrap_err();
+            assert_eq!(e.message, established);
+        }
+    }
+
+    #[test]
+    fn checks_on_fields_without_file_values_keep_their_message() {
+        let d = tempfile::tempdir().unwrap();
+        let body = "version: 1\nvars:\n  port: { value: 80 }\nresources:\n  - id: f\n    type: file\n    with: { path: relative/path, content: \"{{ vars.port }}\" }\n";
+        let p = write(d.path(), "r.yaml", body);
+        let established = load_model(&p).unwrap_err().message;
+        let e = prepare(&p)
+            .unwrap()
+            .freeze_with(&ov(&[("port", Value::Int(9))], "groups.web"))
+            .unwrap_err();
+        assert_eq!(e.message, established);
+    }
+
+    #[test]
+    fn an_unattributed_failure_withholds_when_the_resource_uses_the_file() {
+        let r = RawResource {
+            id: "f".into(),
+            type_: "file".into(),
+            with: BTreeMap::from([
+                ("path".to_string(), s("{{ vars.root }}/x")),
+                ("content".to_string(), s("plain")),
+            ]),
+            when: None,
+            depends_on: vec![],
+            notify: vec![],
+            sensitive: false,
+            origin: "r.yaml".into(),
+            loop_index: None,
+            loop_item: None,
+            register_refs: BTreeSet::new(),
+        };
+        let o = ov(&[("root", s(CANARY))], "hosts.web01");
+        let refs = override_refs(&r.with, &o);
+        let original = || SinterError::schema(format!("f: something about {CANARY}"));
+        let e = withhold_override_values(
+            &r,
+            &Stage::Unattributed,
+            &refs,
+            &BTreeMap::new(),
+            &o,
+            original(),
+        );
+        assert_withheld(&e, "f", "check not attributed to one field", "root");
+        // Value-free keeps; a field without file values keeps.
+        let e = withhold_override_values(
+            &r,
+            &Stage::ValueFree,
+            &refs,
+            &BTreeMap::new(),
+            &o,
+            original(),
+        );
+        assert!(e.message.contains("something about"));
+        let e = withhold_override_values(
+            &r,
+            &Stage::Field("content"),
+            &refs,
+            &BTreeMap::new(),
+            &o,
+            original(),
+        );
+        assert!(e.message.contains("something about"));
+    }
+
+    #[test]
+    fn a_check_that_succeeds_returns_the_stage_to_unattributed() {
+        let mut stage = Stage::Unattributed;
+        staged(&mut stage, Stage::ValueFree, || Ok(())).unwrap();
+        assert!(matches!(stage, Stage::Unattributed));
+        let _ = staged(&mut stage, Stage::Field("path"), || -> Result<()> {
+            Err(SinterError::schema("x"))
+        });
+        assert!(matches!(stage, Stage::Field("path")));
+    }
+
+    #[test]
+    fn diagnostics_differ_per_layer_and_carry_no_value() {
+        let d = tempfile::tempdir().unwrap();
+        let body = "version: 1\nvars:\n  root: { value: /ok }\nresources:\n  - id: index\n    type: file\n    with: { path: \"{{ vars.root }}/i\", content: x }\n";
+        let p = write(d.path(), "r.yaml", body);
+        let pr = prepare(&p).unwrap();
+        let mut agg: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+        for host in ["web01", "web02", "web03"] {
+            let e = pr
+                .freeze_with(&ov(
+                    &[("root", s(&format!("{CANARY}-{host}")))],
+                    &format!("hosts.{host}"),
+                ))
+                .unwrap_err();
+            agg.entry(e.message).or_default().push(host);
+        }
+        assert_eq!(agg.len(), 3);
+        assert!(!serde_json::to_string(&agg).unwrap().contains(CANARY));
+        // Same layer, different values: one message.
+        let mut agg: BTreeSet<String> = BTreeSet::new();
+        for v in ["a", "b"] {
+            agg.insert(
+                pr.freeze_with(&ov(&[("root", s(&format!("{CANARY}{v}")))], "vars"))
+                    .unwrap_err()
+                    .message,
+            );
+        }
+        assert_eq!(agg.len(), 1);
+    }
+
+    #[test]
+    fn overridden_values_never_change_sensitivity() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write(d.path(), "site.yaml", SITE);
+        let pr = prepare(&p).unwrap();
+        let m = pr
+            .freeze_with(&ov(&[("site_root", s("/srv/a"))], "hosts.web01"))
+            .unwrap();
+        assert!(!m.resources[0].sensitive);
+        assert!(!m.resources[0].derived_sensitive);
+        assert!(!m.vars["site_root"].sensitive);
+        // A resource that is sensitive through another variable stays so.
+        let body = "version: 1\nvars:\n  root: { value: /srv }\n  tok: { value: t, sensitive: true }\nresources:\n  - id: f\n    type: file\n    with: { path: \"{{ vars.root }}/f\", content: \"{{ vars.tok }}\" }\n";
+        let p = write(d.path(), "s.yaml", body);
+        let pr = prepare(&p).unwrap();
+        let base = pr.clone().freeze_default().unwrap();
+        let m = pr
+            .freeze_with(&ov(&[("root", s("/srv/b"))], "vars"))
+            .unwrap();
+        assert!(base.resources[0].derived_sensitive && m.resources[0].derived_sensitive);
+        assert!(m.vars["tok"].sensitive);
+    }
+
+    #[test]
+    fn include_declared_variables_are_overridden_by_name() {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "part.yaml",
+            "version: 1\nvars:\n  inner: { value: /srv/default }\nresources:\n  - id: f\n    type: file\n    with: { path: \"{{ vars.inner }}/f\", content: x }\n",
+        );
+        let p = write(
+            d.path(),
+            "main.yaml",
+            "version: 1\ninclude:\n  - part.yaml\nvars:\n  outer: { value: 1 }\nresources: []\n",
+        );
+        let pr = prepare(&p).unwrap();
+        let names: BTreeSet<&str> = pr.declared().map(|(n, _, _)| n).collect();
+        assert_eq!(names, BTreeSet::from(["inner", "outer"]));
+        let m = pr
+            .freeze_with(&ov(&[("inner", s("/srv/h1"))], "hosts.h1"))
+            .unwrap();
+        assert_eq!(m.resources[0].path.as_deref(), Some("/srv/h1/f"));
+    }
+
+    #[test]
+    fn secret_references_are_untouched_by_overrides() {
+        let d = tempfile::tempdir().unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/secrets/go-recipient.age");
+        std::fs::copy(&fixture, d.path().join("secret.age")).unwrap();
+        let p = write(
+            d.path(),
+            "r.yaml",
+            "version: 1\nvars:\n  root: { value: /srv }\nresources:\n  - id: f\n    type: file\n    with: { path: \"{{ vars.root }}/f\", content: { secret: secret.age } }\n",
+        );
+        let pr = prepare(&p).unwrap();
+        let base = pr.clone().freeze_default().unwrap();
+        let m = pr
+            .freeze_with(&ov(&[("root", s("/srv/h1"))], "hosts.h1"))
+            .unwrap();
+        assert_eq!(m.resources[0].path.as_deref(), Some("/srv/h1/f"));
+        assert_eq!(
+            format!("{:?}", m.resources[0].secret),
+            format!("{:?}", base.resources[0].secret)
+        );
+        assert!(m.resources[0].secret.is_some() && m.resources[0].derived_sensitive);
+        // A reference is a static literal: a variable can never select it.
+        let p = write(
+            d.path(),
+            "dyn.yaml",
+            "version: 1\nvars:\n  ref: { value: secret.age }\nresources:\n  - id: f\n    type: file\n    with: { path: /etc/f, content: { secret: \"{{ vars.ref }}\" } }\n",
+        );
+        let established = load_model(&p).unwrap_err().message;
+        let e = prepare(&p)
+            .map(|pr| pr.freeze_with(&ov(&[("ref", s(CANARY))], "vars")))
+            .and_then(|r| r.map(|_| ()))
+            .unwrap_err();
+        assert_eq!(e.message, established);
+        assert!(!e.message.contains(CANARY));
     }
 }

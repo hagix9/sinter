@@ -36,4 +36,5 @@ pub mod targetfs;
 pub mod targets;
 pub mod toml_front;
 pub mod value;
+pub mod varsfile;
 pub mod yaml;

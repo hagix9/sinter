@@ -22,9 +22,11 @@
 //!     hosts: [web01, web02]
 //! ```
 //!
-//! Deliberately absent: nested groups, group or host variables, patterns,
-//! an implicit "all" group, dynamic inventory, per-host sudo (privilege is
-//! an invocation-level `--sudo`, DESIGN §21).
+//! Deliberately absent: nested groups, variables in the inventory file,
+//! patterns, an implicit "all" group, dynamic inventory, per-host sudo
+//! (privilege is an invocation-level `--sudo`, DESIGN §21). Group and host
+//! variable values come from a separate variables file
+//! ([`crate::varsfile`], DESIGN §19.5) that refers to these names.
 
 use crate::document::{valid_name, TargetSelector};
 use crate::error::{Result, SinterError};

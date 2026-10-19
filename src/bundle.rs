@@ -17,7 +17,7 @@
 
 use crate::document::{only_fields, parse_file_value, valid_name};
 use crate::error::{Result, SinterError};
-use crate::model::{load_model_with, Model};
+use crate::model::{load_model_with, prepare_with, Model, Prepared};
 use crate::secret_source::ReferenceCheck;
 use crate::value::Value;
 use std::path::{Path, PathBuf};
@@ -74,13 +74,106 @@ pub fn load_source(path: &Path) -> Result<Source> {
 /// [`load_source`] with an explicit secret-reference mode (strict for every
 /// caller except `secrets list --recipe`).
 pub(crate) fn load_source_with(path: &Path, refs: ReferenceCheck) -> Result<Source> {
+    Ok(match walk_source(path, |p| load_model_with(p, refs))? {
+        Walked::Recipe(u) => Source::Recipe(u.into_unit()),
+        Walked::Bundle { name, path, units } => Source::Bundle(Bundle {
+            name,
+            path,
+            recipes: units.into_iter().map(Loaded::into_unit).collect(),
+        }),
+    })
+}
+
+/// One recipe of a source, loaded as `T` (a [`Model`] or a [`Prepared`]).
+#[derive(Clone)]
+pub struct Loaded<T> {
+    pub label: String,
+    pub path: PathBuf,
+    pub item: T,
+}
+
+impl Loaded<Model> {
+    fn into_unit(self) -> RecipeUnit {
+        RecipeUnit {
+            label: self.label,
+            path: self.path,
+            model: self.item,
+        }
+    }
+}
+
+enum Walked<T> {
+    Recipe(Loaded<T>),
+    Bundle {
+        name: String,
+        path: PathBuf,
+        units: Vec<Loaded<T>>,
+    },
+}
+
+/// A recipe or bundle whose recipes are parsed and include-expanded but not
+/// frozen: the variables-file path (DESIGN §19.5) freezes each (recipe, host)
+/// execution with its own values.
+#[derive(Clone)]
+pub struct PreparedSource {
+    /// `(name, path)` of the bundle; `None` for a plain recipe.
+    pub bundle: Option<(String, PathBuf)>,
+    pub units: Vec<Loaded<Prepared>>,
+}
+
+impl PreparedSource {
+    /// The [`Source`] to display and report with, given one frozen model per
+    /// recipe (in order). Every part of a model it is read for — `targets`,
+    /// `backups`, secret references — is static, so any host's model serves.
+    pub fn into_source(self, models: Vec<Model>) -> Source {
+        let units: Vec<RecipeUnit> = self
+            .units
+            .into_iter()
+            .zip(models)
+            .map(|(u, model)| RecipeUnit {
+                label: u.label,
+                path: u.path,
+                model,
+            })
+            .collect();
+        match self.bundle {
+            None => Source::Recipe(units.into_iter().next().expect("one recipe")),
+            Some((name, path)) => Source::Bundle(Bundle {
+                name,
+                path,
+                recipes: units,
+            }),
+        }
+    }
+}
+
+/// Load a recipe or bundle like [`load_source`], without freezing: the same
+/// files are read in the same order and fail with the same errors, except the
+/// errors that belong to freezing.
+pub fn prepare_source(path: &Path) -> Result<PreparedSource> {
+    Ok(
+        match walk_source(path, |p| prepare_with(p, ReferenceCheck::Strict))? {
+            Walked::Recipe(u) => PreparedSource {
+                bundle: None,
+                units: vec![u],
+            },
+            Walked::Bundle { name, path, units } => PreparedSource {
+                bundle: Some((name, path)),
+                units,
+            },
+        },
+    )
+}
+
+/// Walk a recipe or bundle, loading each recipe with `load` in order.
+fn walk_source<T>(path: &Path, load: impl Fn(&Path) -> Result<T>) -> Result<Walked<T>> {
     let value = parse_file_value(path)?;
     if !is_bundle_value(&value) {
-        let model = load_model_with(path, refs)?;
-        return Ok(Source::Recipe(RecipeUnit {
+        let item = load(path)?;
+        return Ok(Walked::Recipe(Loaded {
             label: stem(path),
             path: path.to_path_buf(),
-            model,
+            item,
         }));
     }
     let ctx = format!("bundle {}", path.display());
@@ -145,18 +238,18 @@ pub(crate) fn load_source_with(path: &Path, refs: ReferenceCheck) -> Result<Sour
                 p.display()
             )));
         }
-        let model = load_model_with(&canon, refs)?;
-        recipes.push(RecipeUnit {
+        let item = load(&canon)?;
+        recipes.push(Loaded {
             label: stem(&p),
             path: p,
-            model,
+            item,
         });
     }
-    Ok(Source::Bundle(Bundle {
+    Ok(Walked::Bundle {
         name,
         path: path.to_path_buf(),
-        recipes,
-    }))
+        units: recipes,
+    })
 }
 
 #[cfg(test)]

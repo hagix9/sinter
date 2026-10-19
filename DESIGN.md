@@ -300,6 +300,8 @@ handler IDs
 
 Facts and registered results may not be used to form these identifiers.
 
+A variable used in one of these fields may take its value from a variables file (§19.5). That value is a literal fixed for each (recipe, host) execution before anything connects, so the identifier is still static for the execution; it may differ between hosts.
+
 4.10 Canonical filesystem path syntax
 
 Managed filesystem paths and command guard paths must be absolute UTF-8 paths.
@@ -486,7 +488,7 @@ result.<field> inside changed_when
 
 Bare variable names are not allowed.
 
-v0.1 variable values are literals only. Variable values are not expressions and do not interpolate other variables. Therefore variable forward references and variable cycles do not exist.
+v0.1 variable values are literals only. Variable values are not expressions and do not interpolate other variables. Therefore variable forward references and variable cycles do not exist. A variables file (§19.5) may replace a declared variable's literal for a run, per host or group; the replacement is a literal of the same type and is fixed before anything connects.
 
 Template-local values are exposed only as template.<name> and do not shadow vars, facts, registers, or item.
 
@@ -1167,7 +1169,7 @@ groups:
   web:
     hosts: [web01]
 
-Host fields, all optional: address (default: the host name, which may be an OpenSSH `Host` alias), port, user, known_hosts, identity_files. `groups.<name>.hosts` is a non-empty list of defined hosts without repeats. Names match `[A-Za-z0-9._-]`, start alphanumeric, at most 64 characters. Unknown fields, undefined group members, an empty host set, and parse errors are validation errors (exit 2). There are no nested groups, variables, patterns, dynamic inventory, per-host sudo, or implicit "all" group.
+Host fields, all optional: address (default: the host name, which may be an OpenSSH `Host` alias), port, user, known_hosts, identity_files. `groups.<name>.hosts` is a non-empty list of defined hosts without repeats. Names match `[A-Za-z0-9._-]`, start alphanumeric, at most 64 characters. Unknown fields, undefined group members, an empty host set, and parse errors are validation errors (exit 2). There are no nested groups, variables, patterns, dynamic inventory, per-host sudo, or implicit "all" group. An inventory file never carries variables: per-group and per-host variable values come from a separate variables file (§19.5), which may only refer to hosts and groups the inventory defines and never selects, adds or removes a host.
 
 A recipe names the hosts it may run on with a top-level `targets` map:
 
@@ -1213,7 +1215,37 @@ The invocation exit code is the most severe exit code among executions that ran,
 
 Text output shows the target resolution (MATCH with reasons / SKIP per host and recipe) before running and an execution summary after. JSON output is one document for the invocation with the resolution and, per execution, the recipe, the target identity (inventory name, address, port, user), status, exit code, the single-target document or error, and an execution-level backup record (§4.12): null when the recipe declares no backup or in audit; otherwise its status (planned, completed, failed, not_started, not_run) with run id, run directory and per-path entries — never content.
 
-`validate` accepts every target option and ignores it; it reads no inventory.
+`validate` accepts every target option and ignores it; it reads no inventory and no variables file (§19.5).
+
+19.5 Variables files (common, group and host variables)
+
+A variables file gives recipe variables (§7.3) other values for a run, in common, per inventory group, and per host. It is passed to plan/apply/audit with `--vars-file <path>` (relative to the current directory, like `--inventory`). Without `--vars-file` nothing in this section applies and every behavior, output and error is exactly as before.
+
+version: 1
+vars:                 # common: every host
+  app_port: 8080
+groups:               # inventory group names
+  web:
+    app_port: 8081
+hosts:                # inventory host names (--host: the --host string; local target: localhost)
+  web01:
+    app_root: /srv/web01
+
+File. A regular file of at most 1 MiB, UTF-8, YAML (`.yaml`, `.yml`) or TOML (`.toml`) by extension; any other extension is an error. The top level allows exactly `version` (required, 1), `vars`, `groups` and `hosts`; each layer is a map of variable name to value; `groups` and `hosts` map a name (§19.2 name rules) to such a map. Variable names are `[A-Za-z0-9_]`, 1–128 characters. Values are literals (§7.3): never null, never interpolated (`{{ … }}` is plain text). Unknown keys are errors; nothing is ignored. There is one variables file per invocation.
+
+Overrides. Every variable the file names must be declared by at least one recipe of the invocation (the recipe, or any recipe of the bundle, includes included). For every recipe that declares it, the value must have the type of the declared default (string, integer, float, boolean, list, map; integer and float are distinct), and a variable declared `sensitive: true` cannot be overridden at all. A recipe that does not declare a name is not affected by it; recipes of a bundle that declare the same name receive the same value. A bundle has no variables of its own, and there is no command-line variable layer.
+
+Precedence, lowest to highest: the recipe default, `vars` (common), `groups`, `hosts.<name>`. The group layer of a host is every inventory group that contains the host, independent of which `targets` selected it. Group order never decides anything: when two of the host's groups give the same variable different values (type and value compared), it is an error for every host the run selects unless `hosts.<name>` sets that variable.
+
+Modes. With `--inventory`, every `groups` key and every `hosts` key must name an inventory group or host (checked even for hosts no recipe selects), and a host's name is its inventory name. With `--host <H>` or on the local target there is no group membership: a non-empty `groups` layer is an error (a one-host inventory gives a single host its groups), `vars` applies, and `hosts.<H>` applies where `<H>` is the `--host` string (`localhost` for the local target); other `hosts` entries are ignored.
+
+Per-host models. Every (recipe, host) execution is frozen (static target identifiers §4.9, conflicting ownership §4.11, template and secret-reference checks, the recipe-wide env merge) with its own variable values, from the recipe as loaded; nothing evaluated for one host is reused for another, except that executions of one recipe with identical overrides may share one frozen model. With a variables file, a recipe's default values are frozen only for executions that override nothing, so a placeholder default that would fail static validation is accepted when every execution overrides it. Variables files resolve before anything connects; identifiers still never depend on facts or registers (§36).
+
+Static gate. Before anything connects, in this order: every recipe is loaded; the inventory is loaded; the variables file is read; targets are resolved; the file is checked against the recipes, the inventory and the mode; every execution's model is frozen. An unreadable or unparsable file stops at once; otherwise every schema problem, every override problem and every per-execution static failure is collected (identical messages are reported once with their hosts; at most 50 are listed, then a count). One problem anywhere is exit 2 for plan, audit and apply alike, and then no `ssh -G` runs, no host is contacted and no local executor starts. Only when every execution of every host passes does target resolution (§19.1) and execution (§19.4) begin. Runtime failures — expressions over facts or registers, template rendering, secret decryption, connection, privilege, the target's own state — remain per execution, and apply stays fail-fast without rollback (§19.4). With `--vars-file`, a freeze-time error of a recipe (for example a duplicate resource id) is reported after every recipe, the inventory and the variables file have loaded, so it can follow a later recipe's parse error; without `--vars-file` the order is unchanged.
+
+Diagnostics never contain a value from the variables file, nor any part of one. A syntax error is reported with a fixed description, the file and the line and column; a structural YAML problem found after parsing (duplicate key, anchor, alias, merge key, tag, out-of-range number, several documents) or a TOML datetime or non-finite number is reported with a fixed description and no position. Schema and override errors name only the layer, group, host, variable, recipe and types; an unknown top-level key, and a key that is not a valid variable, group or host name, is never shown. Keys in name positions that are valid names are shown as names (for example an undeclared variable), so a value must never be written as a key. A static check that fails on a field whose value references a variable supplied by the file is reported by resource id and type, the field and check (with the other resource for an ownership conflict), and the variables with their layers, and states that the value is withheld; its original message is not used. Whether a check depends on such a variable is decided from the recipe (which fields reference which overridden variables) and from the stage of the check, never by reading the error text. A check that evaluates no value (field names, enumerations, literal syntax, references between resources) keeps its message; a check that is not attributed to a field is treated as depending on every overridden variable the resource references.
+
+Secrets. A variables file is plaintext and is not a place for secrets; it cannot override a sensitive variable, and it never changes how encrypted secret references (`content: { secret: … }` and the like) are confined, opened or redacted. A value that passes the checks is an ordinary non-sensitive value: like any non-sensitive recipe variable it appears in plan diffs, run results, identifiers and runtime messages. `sensitive: false` declares that a value may be displayed; it does not make a value safe to display. Template bodies and secret files are read when each model is frozen and again at run time, as without a variables file.
 
 20. Remote argv contract
 
@@ -1697,7 +1729,7 @@ A recipe may declare a top-level env map of strings. It is a base for the enviro
 
 Precedence is per variable name: a name the resource sets in its own env overrides the recipe default; every other name of the default still applies. The default never replaces an explicit resource value. Merging happens when the resource is frozen, so the merged map is an ordinary env value: interpolation and sensitivity behave exactly as if the resource had written it (a value derived from a sensitive variable makes the inheriting resource sensitive and is redacted everywhere).
 
-Names are case-sensitive, as on Linux; Sinter passes exactly the names given and does not fold case (HTTP_PROXY and http_proxy are distinct; dnf/apt honor both). The names PATH, LANG, LC_ALL and HOME are reserved and rejected, because Sinter always sets the baseline itself. env may be declared only in the recipe that is run, never in an included file. There is no per-host env: the inventory has no host variables (§19.2), and per-host variation is expressed with a separate recipe or include.
+Names are case-sensitive, as on Linux; Sinter passes exactly the names given and does not fold case (HTTP_PROXY and http_proxy are distinct; dnf/apt honor both). The names PATH, LANG, LC_ALL and HOME are reserved and rejected, because Sinter always sets the baseline itself. env may be declared only in the recipe that is run, never in an included file. The inventory has no host variables (§19.2); a per-host or per-group env value is expressed by interpolating a variable whose value a variables file sets per host or group (§19.5), or with a separate recipe or include.
 
 28. Service resource
 
@@ -2384,7 +2416,7 @@ add shell as a separate v0.1 resource
 
 add generic handlers, roles, plugins, orchestration, or scripting
 
-add inventory features beyond §19.2–19.4 (no host or group variables, nested groups, patterns, implicit all-hosts selection, dynamic inventory, or parallel execution)
+add inventory features beyond §19.2–19.5 (no variables in the inventory file, nested groups, patterns, implicit all-hosts selection, dynamic inventory, or parallel execution; host and group variables exist only as the variables file of §19.5)
 
 add automatic rollback or restore of §4.12 backups
 
