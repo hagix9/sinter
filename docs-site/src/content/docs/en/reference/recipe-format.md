@@ -134,7 +134,7 @@ vars:
   `value` for a run, an inventory group or one host; a `sensitive` variable
   cannot be set that way. See
   [Host and group variables](/en/reference/cli/#host-and-group-variables)
-  (available in releases after v1.5.2).
+  (available from v1.6.0).
 
 ## resources
 

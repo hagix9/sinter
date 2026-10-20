@@ -19,7 +19,7 @@ See [Core MCP](/en/reference/mcp/) for the `mcp` subcommand and `--targets-file`
 and [sinter secrets](/en/reference/secrets/) for the `secrets`
 subcommand.
 
-`sinter --version` prints the version (e.g. `sinter 1.5.2`).
+`sinter --version` prints the version (e.g. `sinter 1.6.0`).
 
 ## validate
 
@@ -223,7 +223,7 @@ the single-target behavior and ignores `targets`.
 
 There are no nested groups, patterns, an implicit "all" group, dynamic
 inventory or parallel runs. Host and group variables come from a separate
-file (available in releases after v1.5.2): see
+file (available from v1.6.0): see
 [Host and group variables](#host-and-group-variables).
 
 ### Bundles
@@ -273,7 +273,7 @@ inventory, each recipe runs in order on the one `--host` (or localhost).
 
 ### Host and group variables
 
-*Available in releases after v1.5.2.*
+*Available from v1.6.0.*
 
 `--vars-file <PATH>` sets the variables that recipes declare under `vars` to
 other values: for the whole run, for the hosts of an inventory group, or for
