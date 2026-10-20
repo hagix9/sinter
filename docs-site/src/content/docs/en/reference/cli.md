@@ -145,7 +145,7 @@ Two interactions with the commands above:
 ## Target options
 
 Accepted by `validate`, `plan`, `apply` and `audit`; `validate` ignores them,
-except `--vars-file` and the `--inventory` and `--host` that go with it.
+except `--vars-file`, `--limit` and the `--inventory` and `--host` that go with them.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -337,10 +337,26 @@ the bundle order, and JSON marks the recipe in `resolution` with `excluded_by:
 "limit"`. `validate` lists it as `skip` (text) or with `excluded_by` and null
 counts (JSON). Without `--limit` every recipe is checked as before.
 
+Two things follow from "no value is applied". The type of a value in a layer
+that every recipe sees (the common `vars`, the selected hosts' layers) is still
+checked against the skipped recipe's declaration, as without `--limit` (an
+integer variable given a string is exit 2). And the check of a field that
+references a variable judges only what holds for any value: a failure that
+depends on a value is left to the time a host runs the recipe. It does so with
+a neutral value of each variable's declared type (and every combination of the
+booleans the field names, up to 8), so an expression whose short circuit is
+decided by a comparison, such as `vars.x == 'a' || vars.s` (an operand of `||`
+must be a boolean), can be refused although a value of `x` would make it
+valid. This applies only to a recipe that already fails with its own defaults;
+a recipe that freezes with them is never refused, and the refusal is never a
+leak of a value. Give the variable a default that freezes, or avoid building
+an identifier (a path, a name, a `source`) from such an expression.
+
 With `--vars-file`, what concerns the structure is checked for the whole file
 and inventory as before (syntax, schema, that every `groups` and `hosts` key
 exists, the common `vars`, and the refusal to set a sensitive variable in any
-layer, even for a host left out). What concerns a host is checked for the
+layer, even for a host left out: this ban takes precedence over "a host that
+is left out does not stop the run"). What concerns a host is checked for the
 hosts that run: their own values, the values of their groups, group conflicts
 that affect them. A wrong value that only a host left out would receive does
 not stop the run, and neither does a misspelled variable name in the layer of
@@ -587,6 +603,8 @@ output is empty.
 
 **Other commands**
 
+- `validate --vars-file` rejects an invalid `--host` value (a space, `user@host`)
+  with exit 2, as `plan` does.
 - `validate` without `--vars-file` ignores every target option and checks the
   recipe with its own values. With `--vars-file` it runs these same checks and
   contacts no host (see [validate](#validate)).

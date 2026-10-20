@@ -65,8 +65,12 @@ All notable changes to Sinter are documented in this file.
   (3) `--host` together with `--inventory` is exit 2; (4) with `--inventory`
   every recipe must declare `targets`; (5) a missing or broken `--inventory`
   is exit 2; (6) a variable the recipe does not declare is exit 2 (a file
-  shared by several recipes must be given with the bundle). Without
-  `--vars-file`, `validate` is unchanged.
+  shared by several recipes must be given with the bundle); (7) an invalid
+  `--host` value (a space, `user@host`) is exit 2, as with `plan`. Without
+  `--vars-file`, `validate` is unchanged. For library users, `--limit` also adds
+  public items without changing existing ones: `varsfile::Scope`,
+  `varsfile::freeze_executions_in`,
+  `parse_limit`, `match_limit`, `ParsedLimit`, `LimitItem` and constants.
 
 ## [1.6.0] - 2026-10-20
 

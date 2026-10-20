@@ -3928,6 +3928,94 @@ mod vars_tests {
         prepare(&p).unwrap().check_structure().unwrap();
     }
 
+    /// A freeze that runs a recipe never leaves a field out. A field that only
+    /// *mentions* an overridden variable (its name in literal text, or an
+    /// operand `||` never reads) evaluates with the empty scope of that
+    /// freeze, so only `Tolerance::on` keeps its other failure a failure.
+    #[test]
+    fn freeze_with_never_leaves_a_failing_field_out() {
+        let d = tempfile::tempdir().unwrap();
+        for (what, path) in [
+            ("name in literal text", "rel/vars.root"),
+            ("dot-dot beside the name", "/etc/../vars.root"),
+            ("operand never read", "rel/{{ true || vars.root }}"),
+        ] {
+            let p = write(
+                d.path(),
+                "r.yaml",
+                &format!(
+                    "version: 1\nvars:\n  root: {{ value: /srv }}\nresources:\n  - {{ id: a, type: file, with: {{ path: \"{path}\", content: y }} }}\n"
+                ),
+            );
+            let prepared = prepare(&p).unwrap();
+            let e = prepared
+                .freeze_with(&ov(&[("root", s("/x"))], "hosts.web01"))
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("{what}: a failing field was left out of a running freeze")
+                });
+            assert!(e.message.contains("withheld"), "{what}: {}", e.message);
+            // The structure check, which does not run the recipe, leaves it.
+            prepared
+                .check_structure()
+                .unwrap_or_else(|e| panic!("{what}: {}", e.message));
+        }
+    }
+
+    /// The probe holds the empty string for a string variable. A comparison
+    /// with the empty string decides which side of `||` is read, so a failure
+    /// only the other side raises depends on the value and is left undecided
+    /// (the declared default `prod` is not empty).
+    #[test]
+    fn check_structure_probes_a_string_variable_with_the_empty_string() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write(
+            d.path(),
+            "r.yaml",
+            "version: 1\nvars:\n  s: { value: prod }\n  n: { value: 7 }\nresources:\n  - { id: a, type: file, with: { path: \"/a/{{ vars.s == '' || vars.n }}\", content: y } }\n",
+        );
+        // It fails with its own default (an integer is no operand of `||`) ...
+        assert!(load_model(&p).is_err());
+        // ... and holds for a variable that is empty.
+        prepare(&p).unwrap().check_structure().unwrap();
+    }
+
+    /// A failure left out resets the stage, so that a check added later
+    /// without a stage of its own is treated conservatively (`staged`).
+    #[test]
+    fn a_field_left_out_resets_the_stage() {
+        let with: BTreeMap<String, Value> =
+            BTreeMap::from([("path".to_string(), s("{{ vars.root }}/x"))]);
+        let refs: BTreeMap<String, BTreeSet<String>> =
+            BTreeMap::from([("path".to_string(), BTreeSet::from(["root".to_string()]))]);
+        let probe: BTreeMap<String, EvalVal> =
+            BTreeMap::from([("root".to_string(), EvalVal::known(s("")))]);
+        let tol = Tolerance {
+            on: true,
+            refs: &refs,
+            probe_vars: &probe,
+            item: None,
+            with: &with,
+            ctx: "a",
+        };
+        let mut stage = Stage::ValueFree;
+        let left_out = staged_field(&mut stage, &tol, "path", || {
+            Err::<(), _>(SinterError::schema("fails for this value"))
+        });
+        assert!(matches!(left_out, Ok(None)));
+        assert!(matches!(stage, Stage::Unattributed), "{stage:?}");
+        // A failure that holds whatever the variables hold keeps its message.
+        let with: BTreeMap<String, Value> =
+            BTreeMap::from([("path".to_string(), s("{{ vars.nope }}/x"))]);
+        let tol = Tolerance { with: &with, ..tol };
+        let mut stage = Stage::Unattributed;
+        assert!(staged_field(&mut stage, &tol, "path", || Err::<(), _>(
+            SinterError::schema("x")
+        ))
+        .is_err());
+        assert!(matches!(stage, Stage::ValueFree), "{stage:?}");
+    }
+
     /// A conflict a variable takes part in is left undecided, on whichever
     /// side the variable is, and the resource's later checks still run.
     #[test]
