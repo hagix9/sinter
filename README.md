@@ -139,7 +139,9 @@ ssh-agent); host keys must still already be in `known_hosts`.
 
 From v1.1.0, `validate` checks only the recipe: `--host`, `--inventory` and SSH options are
 accepted on every command and ignored by `validate`, so one command line works
-for every phase. Status words are colored on a terminal only (never in pipes,
+for every phase. (In the next release, `validate --vars-file <file>` also checks the recipes
+with the values of that variables file, exactly as `plan` does before it contacts a host,
+and still contacts nothing.) Status words are colored on a terminal only (never in pipes,
 with `NO_COLOR`, or in `--format json`).
 
 *Available since v1.3.0.*

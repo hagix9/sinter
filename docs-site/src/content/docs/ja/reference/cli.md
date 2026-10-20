@@ -34,6 +34,22 @@ sinter validate <RECIPE|BUNDLE> [--format text|json] [ターゲットオプシ�
 インベントリ・鍵・`known_hosts` の読み込み、`ssh` の実行は一切
 行いません）。未知のオプションや綴り間違いは従来どおりエラーです。
 
+*次のリリースから。* `--vars-file <PATH>` を付けると、`validate` は、`plan`、
+`apply`、`audit` がホストに接続する前に行うのと同じ方法で、そのファイルが
+与える値でレシピを検査します（[ホスト変数とグループ変数](#ホスト変数とグループ変数)
+を参照）。変数ファイルと、`--inventory` があればインベントリを読み、各レシピの
+`targets` をインベントリに当てます。`--host` と `--inventory` は引き続き同時に
+指定できません。ホストへの接続も `ssh` の実行もファイルの書き込みもありません。
+問題があれば、`plan` と同じ診断で終了コード 2 です。診断にファイルの値は出ません。
+インベントリがなければ対象は `localhost`（または `--host`）で、`hosts.<名前>` は
+その名前にだけ当たり、`groups` は `plan` と同じく拒否されます。`ssh` や接続が要る
+こと、環境に依存すること（`--host` のアドレスを OpenSSH がどう解決するか、2 つの
+インベントリのホストが同じアドレスに解決されること、`USER` や `HOME` が未設定で
+あること）と、実行中にしか起きないこと（facts と register、テンプレートの描画、
+シークレット）は検査しません。成功時の出力に
+`ok: variables file <path> checked: N execution(s)` の 1 行が加わり、
+`--format json` では `variables` オブジェクト（`file`、`executions`）が加わります。
+
 ## plan
 
 ```sh
@@ -108,7 +124,8 @@ sinter secrets list    [--format text|json] [--recipe <FILE>...] [<PATH>...]
 
 ## ターゲットオプション
 
-`validate`、`plan`、`apply`、`audit` が受け付けます（`validate` は無視します）。
+`validate`、`plan`、`apply`、`audit` が受け付けます（`validate` は無視します。
+ただし `--vars-file` と、それに伴う `--inventory`・`--host` は別です）。
 
 | フラグ | デフォルト | 説明 |
 |--------|-----------|------|
@@ -398,7 +415,7 @@ listen_port = 8081
 
 どのホストに接続するより前に、選ばれたすべてのホストについて検査します。
 対象は、ファイル自体、レシピに対する値、そして各ホストの値を使った各レシピです。
-問題があれば `plan`、`apply`、`audit` は終了コード 2 で終わり、標準エラーに
+問題があれば `plan`、`apply`、`audit`（と `validate --vars-file`）は終了コード 2 で終わり、標準エラーに
 問題を列挙して、最後に
 `variables: the static checks failed (problems listed above); no host was contacted`
 と出力します。`ssh -G` は実行されず、どこにも接続しません。`--format json`
@@ -424,7 +441,7 @@ listen_port = 8081
   ください。
 - レシピは、各実行が受け取る値で検査されます。それ単独では検査に通らない既定値
   （仮置きのパスなど）も、すべての実行で上書きされていれば受け入れられます。
-  レシピ自身の値で検査する `validate` は、引き続きそれを報告します。実行中に
+  `--vars-file` なしの `validate` は、レシピ自身の値で検査するので、引き続きそれを報告します。実行中に
   しか起きない失敗（facts と register、テンプレートの描画、シークレット、接続）
   はこの検査の対象外で、従来どおり実行ごとに起きます。
 
@@ -441,8 +458,9 @@ listen_port = 8081
 
 **その他のコマンド**
 
-- `validate` は `--vars-file` を受け付けますが無視します。ファイルは読まれず、
-  レシピは自身の値で検査されます。
+- `--vars-file` なしの `validate` はターゲットオプションをすべて無視し、レシピを
+  自身の値で検査します。`--vars-file` ありでは、ここと同じ検査を行い、ホストには
+  接続しません（[validate](#validate) を参照）。
 - `--vars-file` は 1 回だけ指定できます。`sinter mcp` に変数ファイルはありません。
 - `version: 1` だけのファイルは、値も結果も変えません。変わるのはレシピの一部の
   静的エラーの報告のしかただけです（`recipe <recipe> @ <host>:` の前置き、最後の
@@ -830,7 +848,9 @@ v1.0.0 以降、この節に記載した内容は 1.x 系全体を通じて安�
 | `resources` | integer | recipe 内のリソース数 |
 | `handlers` | integer | handler 数 |
 | `vars` | integer | var 数 |
-| `warnings` | array of strings | 空でないときだけ出力します（v1.5.1 から）。`template.vars` の中の `{{ … }}` のような、エラーではない指摘です。bundle の文書では、各レシピの項目がそれぞれ `warnings` を持ちます。 |
+| `warnings` | array of strings | 空でないときだけ出力します（v1.5.1 から）。`template.vars` の中の `{{ … }}` のような、エラーではない指摘です。bundle の文書では、各レシピの項目がそれぞれ `warnings` を持ちます。`--vars-file` ありでは、検査したすべての実行を対象に、同じものは 1 回だけ、レシピごとに最大 50 件です。 |
+| `warnings_omitted` | integer | `--vars-file` ありで、あるレシピの警告が 50 件を超えたときだけ出力します。値は `warnings` に載せきれなかった件数です（次のリリースから）。bundle の文書ではレシピの項目ごとです。 |
+| `variables` | object | `--vars-file` ありのときだけ出力します（次のリリースから）。`file`（string。指定されたとおりのパス）と `executions`（integer。検査した (recipe, host) の実行の数）。 |
 
 ### plan と apply
 

@@ -43,7 +43,11 @@ enum Command {
     /// Only the recipe (or bundle and its recipes) is checked. Target options
     /// (--host, --inventory, --user, --port, --identity, ...) are accepted for
     /// a uniform command line and ignored: no host, inventory, key or
-    /// known_hosts file is read.
+    /// known_hosts file is read. With --vars-file the recipes are checked with
+    /// the values that file gives, exactly as plan, apply and audit check them
+    /// before contacting a host; the variables file and, with --inventory, the
+    /// inventory are then read (and --host and --inventory stay exclusive).
+    /// Nothing is contacted and ssh is not run.
     Validate(ValidateArgs),
     /// Preview changes against a target without mutating it.
     Plan(TargetArgs),
@@ -136,7 +140,8 @@ struct McpArgs {
 
 /// Execution-target options shared by validate, plan, apply and audit.
 /// Every phase accepts the same set; each uses only what it needs
-/// (validate uses none of them).
+/// (validate uses none of them, except --vars-file and what that needs:
+/// --inventory and --host).
 #[derive(Args, Debug, Default, Clone)]
 struct ExecOpts {
     /// SSH host or ~/.ssh/config Host alias. If omitted (and no inventory is
@@ -187,7 +192,8 @@ struct ValidateArgs {
     /// Accepted for a uniform command line; validate output is unchanged.
     #[arg(long)]
     verbose: bool,
-    /// Accepted and ignored by validate.
+    /// Accepted by validate and ignored, except --vars-file (with --inventory
+    /// or --host), which validate checks.
     #[command(flatten)]
     exec: ExecOpts,
 }
@@ -296,13 +302,90 @@ fn secrets_command(a: SecretsArgs) -> Result<u8, SinterError> {
     }
 }
 
-/// Static validation only: `a.exec` and `a.verbose` are intentionally unused.
+/// What `validate --vars-file` reports besides the usual document: the file
+/// as given, how many (recipe, host) executions were checked with it, and
+/// each recipe's warnings over all of them (DESIGN §19.5).
+struct VarsReport {
+    file: String,
+    executions: usize,
+    /// Per recipe, in order: its executions' warnings, without repeats.
+    warnings: Vec<Vec<String>>,
+}
+
+/// Most warnings of one recipe `validate --vars-file` lists; the rest are
+/// counted (`warnings_omitted`).
+const MAX_VALIDATE_WARNINGS: usize = 50;
+
+/// Static validation. Without `--vars-file` only the recipe (or bundle) is
+/// checked and every target option is accepted and ignored: no inventory, key
+/// or known_hosts file is read. With `--vars-file` the recipes are checked
+/// with the values the file gives, by the very static gate `plan`, `apply`
+/// and `audit` run before they contact a host (DESIGN §19.5): the
+/// variables file and, with `--inventory`, the inventory are read, and still
+/// nothing is contacted and no `ssh -G` runs.
 fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
     let format = parse_format(&a.format)?;
-    let source = load_source(&a.recipe)?;
+    let Some(vars_path) = &a.exec.vars_file else {
+        let source = load_source(&a.recipe)?;
+        return print_validate(&source, format, None);
+    };
+    exclusive_target_options(&a.exec)?;
+    let gate = vars_gate(&a.recipe, &a.exec, vars_path)?;
+    // The first thing `plan` checks of `--host` after the gate (a pure check).
+    if let Some(host) = &a.exec.host {
+        sinter::sshconfig::validate_host_arg(host)?;
+    }
+    let mut warnings: Vec<Vec<String>> = vec![Vec::new(); gate.source.units().len()];
+    for f in &gate.frozen {
+        if let Some(list) = warnings.get_mut(f.unit) {
+            for w in &f.model.warnings {
+                if !list.contains(w) {
+                    list.push(w.clone());
+                }
+            }
+        }
+    }
+    let report = VarsReport {
+        file: vars_path.display().to_string(),
+        executions: gate.frozen.len(),
+        warnings,
+    };
+    print_validate(&gate.source, format, Some(&report))
+}
+
+/// A recipe's warnings to show, and how many more are left out.
+fn shown_warnings(vars: Option<&VarsReport>, i: usize, u: &RecipeUnit) -> (Vec<String>, usize) {
+    match vars {
+        None => (u.model.warnings.clone(), 0),
+        Some(v) => {
+            let all = v.warnings.get(i).cloned().unwrap_or_default();
+            let omitted = all.len().saturating_sub(MAX_VALIDATE_WARNINGS);
+            (
+                all.into_iter().take(MAX_VALIDATE_WARNINGS).collect(),
+                omitted,
+            )
+        }
+    }
+}
+
+/// `variables` is present only when `--vars-file` was given.
+fn add_variables(doc: &mut serde_json::Value, vars: Option<&VarsReport>) {
+    if let Some(v) = vars {
+        doc["variables"] = serde_json::json!({
+            "file": v.file,
+            "executions": v.executions,
+        });
+    }
+}
+
+fn print_validate(
+    source: &Source,
+    format: OutputFormat,
+    vars: Option<&VarsReport>,
+) -> Result<u8, SinterError> {
     let color = style::stdout_color();
     let counts = |m: &Model| (m.resources.len(), m.handlers.len(), m.vars.len());
-    match (&source, format) {
+    match (source, format) {
         (Source::Recipe(u), OutputFormat::Json) => {
             let (r, h, v) = counts(&u.model);
             let mut doc = serde_json::json!({
@@ -312,14 +395,23 @@ fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
                 "handlers": h,
                 "vars": v,
             });
-            if !u.model.warnings.is_empty() {
-                doc["warnings"] = serde_json::json!(u.model.warnings);
+            let (warnings, omitted) = shown_warnings(vars, 0, u);
+            if !warnings.is_empty() {
+                doc["warnings"] = serde_json::json!(warnings);
+                if omitted > 0 {
+                    doc["warnings_omitted"] = serde_json::json!(omitted);
+                }
             }
+            add_variables(&mut doc, vars);
             println!("{}", serde_json::to_string_pretty(&doc).unwrap());
         }
         (Source::Recipe(u), OutputFormat::Text) => {
-            for w in &u.model.warnings {
+            let (warnings, omitted) = shown_warnings(vars, 0, u);
+            for w in &warnings {
                 eprintln!("warning: {}", sanitize_line(w));
+            }
+            if omitted > 0 {
+                eprintln!("warning: ... and {omitted} more warning(s)");
             }
             let (r, h, v) = counts(&u.model);
             println!(
@@ -334,7 +426,8 @@ fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
             let recipes: Vec<serde_json::Value> = b
                 .recipes
                 .iter()
-                .map(|u| {
+                .enumerate()
+                .map(|(i, u)| {
                     let (r, h, v) = counts(&u.model);
                     let mut rec = serde_json::json!({
                         "recipe": u.label,
@@ -347,15 +440,19 @@ fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
                             "groups": t.groups,
                         })),
                     });
-                    if !u.model.warnings.is_empty() {
-                        rec["warnings"] = serde_json::json!(u.model.warnings);
+                    let (warnings, omitted) = shown_warnings(vars, i, u);
+                    if !warnings.is_empty() {
+                        rec["warnings"] = serde_json::json!(warnings);
+                        if omitted > 0 {
+                            rec["warnings_omitted"] = serde_json::json!(omitted);
+                        }
                     }
                     rec
                 })
                 .collect();
             let total =
                 |f: fn(&Model) -> usize| b.recipes.iter().map(|u| f(&u.model)).sum::<usize>();
-            let doc = serde_json::json!({
+            let mut doc = serde_json::json!({
                 "command": "validate",
                 "status": "ok",
                 "resources": total(|m| m.resources.len()),
@@ -364,12 +461,20 @@ fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
                 "bundle": b.name,
                 "recipes": recipes,
             });
+            add_variables(&mut doc, vars);
             println!("{}", serde_json::to_string_pretty(&doc).unwrap());
         }
         (Source::Bundle(b), OutputFormat::Text) => {
-            for u in &b.recipes {
-                for w in &u.model.warnings {
+            for (i, u) in b.recipes.iter().enumerate() {
+                let (warnings, omitted) = shown_warnings(vars, i, u);
+                for w in &warnings {
                     eprintln!("warning: {}: {}", sanitize_line(&u.label), sanitize_line(w));
+                }
+                if omitted > 0 {
+                    eprintln!(
+                        "warning: {}: ... and {omitted} more warning(s)",
+                        sanitize_line(&u.label)
+                    );
                 }
             }
             println!(
@@ -399,6 +504,14 @@ fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
                 );
             }
         }
+    }
+    if let (Some(v), OutputFormat::Text) = (vars, format) {
+        println!(
+            "{}: variables file {} checked: {} execution(s)",
+            style::status("ok", color),
+            sanitize_line(&v.file),
+            v.executions
+        );
     }
     Ok(0)
 }
@@ -533,17 +646,24 @@ fn run_phase(phase: Phase, a: &TargetArgs) -> Result<u8, SinterError> {
     run_phase_with(phase, a, format, &progress)
 }
 
+/// `--host` names one target and `--inventory` selects several through the
+/// recipes' `targets`: giving both is a validation error (exit 2).
+fn exclusive_target_options(exec: &ExecOpts) -> Result<(), SinterError> {
+    if exec.host.is_some() && exec.inventory.is_some() {
+        return Err(SinterError::schema(
+            "--host and --inventory (--hosts) are mutually exclusive: give one host, or select hosts through the recipe targets and an inventory",
+        ));
+    }
+    Ok(())
+}
+
 fn run_phase_with(
     phase: Phase,
     a: &TargetArgs,
     format: OutputFormat,
     progress: &ProgressOptions,
 ) -> Result<u8, SinterError> {
-    if a.exec.host.is_some() && a.exec.inventory.is_some() {
-        return Err(SinterError::schema(
-            "--host and --inventory (--hosts) are mutually exclusive: give one host, or select hosts through the recipe targets and an inventory",
-        ));
-    }
+    exclusive_target_options(&a.exec)?;
     let ro = RenderOptions {
         verbose: a.verbose,
         format,
@@ -577,7 +697,7 @@ fn run_one_target(
     // Checked before `ssh -G` or anything else runs: exactly one model per
     // recipe, frozen for this very target, in recipe order.
     let mut models = match frozen {
-        Some(f) => Some(models_for_one_target(f, source, one_target_name(a))?.into_iter()),
+        Some(f) => Some(models_for_one_target(f, source, one_target_name(&a.exec))?.into_iter()),
         None => None,
     };
     match source {
@@ -636,22 +756,28 @@ fn run_one_target(
     }
 }
 
-/// A run with a variables file (DESIGN §19.5). Before `ssh -G` or any
+/// The static gate of a run with a variables file (DESIGN §19.5), shared by
+/// `plan`, `apply`, `audit` and `validate --vars-file`. Before `ssh -G` or any
 /// contact with a host, in this order: every recipe is loaded unfrozen, the
 /// inventory is loaded, the variables file is read, targets are resolved,
 /// and every (recipe, host) execution is checked and frozen with its own
-/// values. One problem anywhere stops the run (exit 2) with nothing
-/// contacted; then the run proceeds exactly as without a variables file.
-fn run_phase_vars(
-    phase: Phase,
-    a: &TargetArgs,
-    vars_path: &Path,
-    ro: &RenderOptions,
-    progress: &ProgressOptions,
-) -> Result<u8, SinterError> {
+/// values. One problem anywhere is exit 2 with nothing contacted.
+struct VarsGate {
+    /// The recipes, each with its first execution's model: the static parts a
+    /// display or report reads.
+    source: Source,
+    inventory: Option<Inventory>,
+    /// Inventory mode: the recipes' target resolutions. Single mode: empty.
+    resolutions: Vec<Resolution>,
+    /// One model per (recipe, host) execution, bound to the pair it was
+    /// frozen for.
+    frozen: Vec<FrozenExecution>,
+}
+
+fn vars_gate(recipe: &Path, exec: &ExecOpts, vars_path: &Path) -> Result<VarsGate, SinterError> {
     use sinter::varsfile::{freeze_executions, load_vars_file, Mode as VarsMode};
-    let prepared = prepare_source(&a.recipe)?;
-    let inventory = match &a.exec.inventory {
+    let prepared = prepare_source(recipe)?;
+    let inventory = match &exec.inventory {
         Some(p) => Some(load_inventory(p)?),
         None => None,
     };
@@ -673,7 +799,7 @@ fn run_phase_vars(
             (resolutions, pairs)
         }
         None => {
-            let name = one_target_name(a);
+            let name = one_target_name(exec);
             let pairs = (0..prepared.units.len())
                 .map(|i| (i, name.to_string()))
                 .collect();
@@ -708,6 +834,29 @@ fn run_phase_vars(
         .collect::<Option<Vec<Model>>>()
         .ok_or_else(|| model_mismatch("a recipe of this run has no frozen model"))?;
     let source = prepared.into_source(first);
+    Ok(VarsGate {
+        source,
+        inventory,
+        resolutions,
+        frozen,
+    })
+}
+
+/// A run with a variables file (DESIGN §19.5): the static gate, then the run
+/// proceeds exactly as without a variables file.
+fn run_phase_vars(
+    phase: Phase,
+    a: &TargetArgs,
+    vars_path: &Path,
+    ro: &RenderOptions,
+    progress: &ProgressOptions,
+) -> Result<u8, SinterError> {
+    let VarsGate {
+        source,
+        inventory,
+        resolutions,
+        frozen,
+    } = vars_gate(&a.recipe, &a.exec, vars_path)?;
     let Some(inv) = inventory else {
         return run_one_target(phase, &source, Some(frozen), a, ro, progress);
     };
@@ -817,8 +966,8 @@ fn models_for_one_target(
 }
 
 /// The name of the one explicit target: the `--host` string, or localhost.
-fn one_target_name(a: &TargetArgs) -> &str {
-    a.exec.host.as_deref().unwrap_or("localhost")
+fn one_target_name(exec: &ExecOpts) -> &str {
+    exec.host.as_deref().unwrap_or("localhost")
 }
 
 fn unit_label(units: &[RecipeUnit], unit: usize) -> String {
@@ -3181,6 +3330,55 @@ mod tests {
             assert!(run.result.is_ok(), "{src} {mode:?}: {:?}", run.result.err());
             assert_eq!(run.untouched_targets, 0);
             assert_eq!(run.models.len(), *n);
+        }
+    }
+
+    #[allow(clippy::ptr_arg)] // a `Tamper`
+    fn drop_all(f: &mut Vec<FrozenExecution>) {
+        f.clear();
+    }
+
+    /// `validate --vars-file` goes through the same gate, including its
+    /// check that every recipe has a model bound to the pair it was frozen
+    /// for: an inconsistency is an internal error (exit 2) and nothing is
+    /// reported.
+    #[test]
+    fn validate_with_a_variables_file_stops_on_an_inconsistent_gate() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", VARS_RECIPE);
+        let inv = inventory(&dir);
+        let v = write(
+            &dir,
+            "v.yaml",
+            "version: 1\nhosts:\n  web01: { name: one }\n  web02: { name: two }\n",
+        );
+        let a = match Cli::try_parse_from([
+            "sinter",
+            "validate",
+            &r,
+            "--vars-file",
+            &v,
+            "--hosts",
+            &inv,
+        ])
+        .unwrap()
+        .command
+        {
+            Command::Validate(a) => a,
+            _ => unreachable!(),
+        };
+        assert!(validate(&a).is_ok(), "untampered");
+        for (what, tamper) in [("no recipe", no_recipe as Tamper), ("drop all", drop_all)] {
+            TAMPER.with(|t| t.set(Some(tamper)));
+            let result = validate(&a);
+            TAMPER.with(|t| t.set(None));
+            let e = result.expect_err(what);
+            assert_eq!(e.kind, ErrorKind::Schema, "{what}");
+            assert!(
+                e.message.starts_with("internal error:"),
+                "{what}: {}",
+                e.message
+            );
         }
     }
 

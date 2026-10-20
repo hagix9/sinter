@@ -34,6 +34,24 @@ for every phase, and are ignored — no host is contacted, no inventory,
 key, or `known_hosts` file is read, and `ssh` is not run. Unknown or
 misspelled options are still rejected.
 
+*New in the next release.* With `--vars-file <PATH>`, `validate` checks the
+recipes with the values that file gives, the way `plan`, `apply` and `audit`
+do before they contact a host (see
+[Host and group variables](#host-and-group-variables)). The variables file and,
+with `--inventory`, the inventory are read, and each recipe's `targets` are
+resolved against it; `--host` and `--inventory` stay mutually exclusive.
+Nothing is contacted, `ssh` is not run and nothing is written. A problem is
+exit 2 with the same diagnostics `plan` prints, none of which shows a value
+from the file. Without an inventory the target is `localhost` (or `--host`):
+`hosts.<name>` applies to that name and `groups` are refused, as with `plan`.
+Not checked are what needs `ssh` or a connection or the environment (how
+OpenSSH resolves the `--host` address, two inventory hosts resolving to one
+address, `USER` or `HOME` not being set) and what happens only while running
+(facts and registers, template rendering, secrets).
+On success the output adds `ok: variables file <path> checked: N
+execution(s)` and, with `--format json`, a `variables` object (`file`,
+`executions`).
+
 ## plan
 
 ```sh
@@ -105,7 +123,8 @@ Two interactions with the commands above:
 
 ## Target options
 
-Accepted by `validate`, `plan`, `apply` and `audit`; `validate` ignores them.
+Accepted by `validate`, `plan`, `apply` and `audit`; `validate` ignores them,
+except `--vars-file` and the `--inventory` and `--host` that go with it.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -397,8 +416,8 @@ For each host and variable: the recipe's `value` < `vars` < `groups` <
 
 Every selected host is checked before any host is contacted: the file, its
 values against the recipes, and every recipe with each host's values. If
-anything fails, `plan`, `apply` and `audit` exit 2 and list the problems on
-standard error, ending with
+anything fails, `plan`, `apply` and `audit` (and `validate --vars-file`) exit 2
+and list the problems on standard error, ending with
 `variables: the static checks failed (problems listed above); no host was contacted`.
 `ssh -G` is not run, nothing connects, and with `--format json` standard
 output is empty.
@@ -426,8 +445,8 @@ output is empty.
   belongs.
 - The recipes are checked with the values each execution receives. A
   default that would fail on its own, such as a placeholder path, is
-  accepted when every execution overrides it; `validate`, which uses the
-  recipe's own values, still reports it. Failures that can only happen while
+  accepted when every execution overrides it; `validate` without
+  `--vars-file`, which uses the recipe's own values, still reports it. Failures that can only happen while
   running (facts and registers, template rendering, secrets, the connection)
   are not part of these checks and occur per execution as before.
 
@@ -444,8 +463,9 @@ output is empty.
 
 **Other commands**
 
-- `validate` accepts `--vars-file` and ignores it; the file is not read, and
-  the recipe is checked with its own values.
+- `validate` without `--vars-file` ignores every target option and checks the
+  recipe with its own values. With `--vars-file` it runs these same checks and
+  contacts no host (see [validate](#validate)).
 - `--vars-file` may be given once. `sinter mcp` has no variables file.
 - A file with only `version: 1` changes no value or result; only the way
   some static recipe errors are reported differs (a `recipe <recipe> @ <host>:`
@@ -850,7 +870,9 @@ the whole 1.x series. `sinter mcp` is governed by the
 | `resources` | integer | Number of resources in the recipe. |
 | `handlers` | integer | Number of handlers. |
 | `vars` | integer | Number of vars. |
-| `warnings` | array of strings | Present only when non-empty (since v1.5.1): non-fatal findings such as `{{ … }}` in `template.vars`. In a bundle document each recipe entry carries its own `warnings`. |
+| `warnings` | array of strings | Present only when non-empty (since v1.5.1): non-fatal findings such as `{{ … }}` in `template.vars`. In a bundle document each recipe entry carries its own `warnings`. With `--vars-file` they cover every checked execution, each listed once, at most 50 per recipe. |
+| `warnings_omitted` | integer | Present only with `--vars-file` and only when a recipe has more than 50 warnings; the value is the number left out of `warnings` (next release). In a bundle document it is per recipe entry. |
+| `variables` | object | Present only with `--vars-file` (next release): `file` (string, the path as given) and `executions` (integer, the number of (recipe, host) executions checked). |
 
 ### plan and apply
 

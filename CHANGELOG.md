@@ -2,6 +2,30 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **`validate --vars-file` now checks the variables file.** Until now
+  `validate` accepted the option and ignored it. With `--vars-file`, `validate`
+  checks the recipes with the values that file gives, by the same code and with
+  the same diagnostics as the static checks `plan`, `apply` and `audit` run
+  before they contact a host (the file's syntax, schema and types, undeclared
+  and sensitive variables, the precedence of `vars`, `groups` and `hosts`,
+  group conflicts, the inventory's groups and hosts, and every execution's
+  static checks). It contacts no host, runs no `ssh -G` and writes nothing, and
+  no message shows a value from the file. The success output adds one line
+  (text) or a `variables` object (`file`, `executions`) and, over all checked
+  executions, each warning once, at most 50 per recipe (`warnings_omitted`).
+  What changes for a command line that already passes `--vars-file` to
+  `validate`: (1) a missing, broken or ill-typed variables file is now exit 2;
+  (2) a file with `groups` is exit 2 without `--inventory`, as with `plan`;
+  (3) `--host` together with `--inventory` is exit 2; (4) with `--inventory`
+  every recipe must declare `targets`; (5) a missing or broken `--inventory`
+  is exit 2; (6) a variable the recipe does not declare is exit 2 (a file
+  shared by several recipes must be given with the bundle). Without
+  `--vars-file`, `validate` is unchanged.
+
 ## [1.6.0] - 2026-10-20
 
 ### Added
