@@ -50,6 +50,13 @@ sinter validate <RECIPE|BUNDLE> [--format text|json] [ターゲットオプシ�
 `ok: variables file <path> checked: N execution(s)` の 1 行が加わり、
 `--format json` では `variables` オブジェクト（`file`、`executions`）が加わります。
 
+*次のリリースから。* `--vars-file` と `--inventory` に `--limit` を加えると、検査は
+選ばれたホストだけに絞られます（`plan` と同じです。[実行の絞り込み](#実行の絞り込み)
+を参照）。除外されたホスト固有の誤った値では `validate` は失敗しません。出力には
+JSON の `limit`（項目）と `variables.targeted_executions`、text の
+`ok: --limit <items> selects N of M execution(s)` の行が加わります。`--vars-file`
+がない `validate` は、他の target オプションと同様 `--limit` を無視します。
+
 ## plan
 
 ```sh
@@ -131,6 +138,7 @@ sinter secrets list    [--format text|json] [--recipe <FILE>...] [<PATH>...]
 |--------|-----------|------|
 | `--host <HOST>` | localhost | SSH ホスト、または `~/.ssh/config` の `Host` 別名。省略でローカル実行。 |
 | `--inventory <PATH>`（別名 `--hosts`） | — | ホストとグループの定義。各レシピは自身の `targets` が選んだホストでだけ実行されます。[複数ホスト](#複数ホスト)参照。`--host` とは併用不可。 |
+| `--limit <ITEMS>` | — | `--inventory` と併用: これらのホストだけで実行します（ホスト名、グループ名、`host:<name>`、`group:<name>`、パターンのカンマ区切り）。[実行の絞り込み](#実行の絞り込み)参照。 |
 | `--vars-file <PATH>` | — | 変数ファイル（YAML または TOML）。レシピが宣言した変数に、実行全体・インベントリのグループ・ホストごとの値を与えます。[ホスト変数とグループ変数](#ホスト変数とグループ変数)参照。 |
 | `--port <PORT>` | インベントリ、ssh_config の `Port`、なければ `22` | SSH ポート。 |
 | `--user <USER>` | インベントリ、ssh_config の `User`、なければ `$USER` | SSH ユーザ。 |
@@ -241,10 +249,88 @@ executions: 2 (1 recipe(s), 3 host(s))
 インベントリ使用時だけ意味を持ちます。`--host`（または指定なし＝localhost）
 は従来どおりの単一ターゲット動作で、`targets` を無視します。
 
-ネストしたグループ、パターン、暗黙の "all" グループ、動的インベントリ、
-並列実行はありません。ホスト変数・グループ変数は別のファイルで与えます
+ネストしたグループ、暗黙の "all" グループ、動的インベントリ、並列実行は
+ありません。`targets` はホストとグループを正確な名前で指定し、パターンは
+`--limit` にだけあります。ホスト変数・グループ変数は別のファイルで与えます
 （v1.6.0 から利用できます）。
 [ホスト変数とグループ変数](#ホスト変数とグループ変数)を参照してください。
+
+### 実行の絞り込み
+
+*次のリリースから。*
+
+`--limit <ITEMS>` は、レシピの `targets` が選んだホストの一部だけで実行します。
+`--inventory` が必要で、`--host` やローカル実行では終了コード 2 です。ホストを
+増やすことはありません。ホストが実行されるのは、レシピの `targets` が選び、
+**かつ** `--limit` が指すときだけです。
+
+```sh
+sinter plan  nginx.yaml --inventory hosts.yaml --limit web01
+sinter apply nginx.yaml --inventory hosts.yaml --limit web01,web02
+sinter apply nginx.yaml --inventory hosts.yaml --limit group:web
+sinter audit nginx.yaml --inventory hosts.yaml --limit 'web*'
+```
+
+`<ITEMS>` はカンマ区切りです（256 項目まで、各 64 文字まで、空白なし）。項目は
+次のいずれかです。
+
+| 項目 | 選ぶもの |
+|------|---------|
+| `web01` | ホスト `web01`、またはグループ `web01` のホスト |
+| `host:web01` | ホスト `web01` だけ |
+| `group:web` | グループ `web` のホストだけ |
+| `web*`、`web0?` | 名前が一致するホスト。`*` は任意の文字列、`?` は 1 文字。パターンはグループには一致しません。`host:web*` も同じです。 |
+
+ホストとグループの両方にある名前を修飾なしで書くとあいまいなのでエラーです
+（`host:` か `group:` を付けます）。除外（`!`）はなく、オプションは 1 回だけ指定
+できます。パターンはシェルに展開されないよう引用符で囲んでください。
+
+対象の選択は最初に、OpenSSH 設定の読み込み（`ssh -G`。`Match exec` でローカル
+コマンドが動き得ます）、接続、ホスト固有の変数の解決のいずれよりも前に行います。
+除外されたホストには接続せず、SSH 設定も評価せず、ファイルも変更しません。
+次はいずれも、何にも接触せず終了コード 2 です。
+
+- 空の指定や空の項目、ホスト名の規則にない文字、区切りの重複
+- インベントリのホストでもグループでもない名前、どのホストにも一致しないパターン
+- どのレシピも選ばないホストだけを指す項目（何も実行されないため）
+- ホストとグループの両方にある名前を `host:`/`group:` なしで書いたもの
+
+バンドルでは、各レシピは自分が対象とするホストのうち選ばれたものだけで実行
+します。選ばれたホストがないレシピは実行されません。変数ファイルがあるとき、
+そのレシピはレシピ自身の既定値だけで検査されるので、既定値が単独では静的検査を
+通らない（たとえば相対パス）と終了コード 2 になります。除外されたホストの値でも、
+ファイルの `vars` の層でも補いません。
+
+`--vars-file` では、構造に関すること（構文、スキーマ、`groups`・`hosts` のキーが
+存在すること、共通の `vars`、どの層でも sensitive な変数を設定しないこと。除外
+されたホストでも同じです）はこれまでどおりファイルとインベントリ全体で検査します。
+ホストに関すること（そのホスト自身の値、所属グループの値、そのホストに関わる
+グループの衝突）は、実行するホストについてだけ検査します。除外されたホストだけが
+受け取る誤った値では停止しません。除外されたホストの層にある変数名の綴り間違いも
+報告されません（その値が使われたり表示されたりすることはありません）。`--limit`
+がなければ、すべての層を従来どおり検査します。
+
+設計上、`--limit` が扱わないもの:
+
+- 2 つのホストが同じアドレスとポートに解決されないことの検査は、実行するホスト
+  同士でだけ行います。
+- `--limit` を付けた `audit` が終了コード 0 でも、除外したホストについては何も
+  言っていません（インベントリ全体が clean という意味ではありません）。
+- `excluded_by` の値は今は `"limit"` だけです。新しいフィールドと同様、知らない値は
+  無視してください。
+
+text 出力には `limit:` の行が加わり、除外されたホストが示されます。
+
+```text
+== target resolution ==
+limit: web01
+recipe nginx (nginx.yaml)
+  db01   SKIP   no matching target
+  web01  MATCH  group:web
+  web02  SKIP   excluded by --limit (matched: group:web)
+  selected 1, excluded 2 (1 by --limit)
+executions: 1 (1 recipe(s), 3 host(s))
+```
 
 ### バンドル
 
@@ -955,7 +1041,8 @@ handler オブジェクトのフィールド:
 | `exit_code` | 整数 | 実行全体の終了コード。 |
 | `bundle` | オブジェクトまたは null | バンドルの `name`、`path`。 |
 | `inventory` | 文字列または null | インベントリのパス。 |
-| `resolution` | 配列または null | インベントリ使用時、レシピごとに `recipe`、`path`、`hosts`（インベントリの全ホスト: `name`、`selected`（真偽値）、`reasons`（例 `"group:web"`））。 |
+| `resolution` | 配列または null | インベントリ使用時、レシピごとに `recipe`、`path`、`hosts`（インベントリの全ホスト: `name`、`selected`（真偽値）、`reasons`（例 `"group:web"`）。`--limit` が除外したホストにだけ `excluded_by`（`"limit"`）が付き、その `selected` は false、`reasons` は残ります）。 |
+| `limit` | 配列 | `--limit` があるときだけ: 指定された項目（重複を除く）。 |
 | `executions` | 配列 | （レシピ, ホスト）ごとに 1 オブジェクト、実行順。 |
 
 実行オブジェクト: `recipe`（文字列）、`target`（`name` と `host`、`port`、

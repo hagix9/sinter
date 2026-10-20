@@ -1,10 +1,13 @@
+mod limited;
+
 use clap::{Args, Parser, Subcommand};
+use limited::Limited;
 use sinter::audit::{run_audit, AuditReport};
 use sinter::bundle::{load_source, prepare_source, RecipeUnit, Source};
 use sinter::diff::sanitize_line;
 use sinter::engine::{Engine, Mode, RunOptions, RunReport, SshSpec, TargetSpec};
 use sinter::error::{ErrorKind, SinterError};
-use sinter::inventory::{load_inventory, Inventory, Resolution};
+use sinter::inventory::{load_inventory, parse_limit, Inventory, ParsedLimit, Resolution};
 use sinter::model::Model;
 use sinter::output::{
     audit_report_json, render_apply, render_audit, render_plan, run_report_json, OutputFormat,
@@ -141,7 +144,7 @@ struct McpArgs {
 /// Execution-target options shared by validate, plan, apply and audit.
 /// Every phase accepts the same set; each uses only what it needs
 /// (validate uses none of them, except --vars-file and what that needs:
-/// --inventory and --host).
+/// --inventory, --host and --limit).
 #[derive(Args, Debug, Default, Clone)]
 struct ExecOpts {
     /// SSH host or ~/.ssh/config Host alias. If omitted (and no inventory is
@@ -180,6 +183,15 @@ struct ExecOpts {
     /// text: never put secrets in it; sensitive variables cannot be set here.
     #[arg(long, value_name = "PATH")]
     vars_file: Option<PathBuf>,
+    /// Run only on these inventory hosts (needs --inventory). A comma-separated
+    /// list of host names, group names, `host:NAME`, `group:NAME` and patterns
+    /// (`*`, `?`; quote them) that match host names only. It narrows what the
+    /// recipes' `targets` select, never widens it; a host left out is not
+    /// resolved or contacted, and a problem found only in its host-specific
+    /// variables does not stop the run. validate checks it only together with
+    /// --vars-file.
+    #[arg(long, value_name = "ITEMS")]
+    limit: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -193,7 +205,7 @@ struct ValidateArgs {
     #[arg(long)]
     verbose: bool,
     /// Accepted by validate and ignored, except --vars-file (with --inventory
-    /// or --host), which validate checks.
+    /// or --host), which validate checks, and --limit with it.
     #[command(flatten)]
     exec: ExecOpts,
 }
@@ -310,6 +322,15 @@ struct VarsReport {
     executions: usize,
     /// Per recipe, in order: its executions' warnings, without repeats.
     warnings: Vec<Vec<String>>,
+    /// `--limit`, checked with the file.
+    limit: Option<LimitReport>,
+}
+
+/// What `--limit` selected among what the recipes' `targets` select.
+struct LimitReport {
+    items: Vec<String>,
+    /// (recipe, host) executions before `--limit`.
+    targeted: usize,
 }
 
 /// Most warnings of one recipe `validate --vars-file` lists; the rest are
@@ -330,7 +351,8 @@ fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
         return print_validate(&source, format, None);
     };
     exclusive_target_options(&a.exec)?;
-    let gate = vars_gate(&a.recipe, &a.exec, vars_path)?;
+    let limit = limit_option(&a.exec)?;
+    let gate = vars_gate(&a.recipe, &a.exec, vars_path, &limit)?;
     // The first thing `plan` checks of `--host` after the gate (a pure check).
     if let Some(host) = &a.exec.host {
         sinter::sshconfig::validate_host_arg(host)?;
@@ -345,10 +367,22 @@ fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
             }
         }
     }
+    let limit_report = gate.limited.as_ref().and_then(|l| {
+        let items = limit.given().then(|| limit.items())?;
+        Some(LimitReport {
+            items,
+            targeted: l
+                .resolutions()
+                .iter()
+                .map(|r| r.hosts.iter().filter(|h| h.targeted()).count())
+                .sum(),
+        })
+    });
     let report = VarsReport {
         file: vars_path.display().to_string(),
         executions: gate.frozen.len(),
         warnings,
+        limit: limit_report,
     };
     print_validate(&gate.source, format, Some(&report))
 }
@@ -375,6 +409,10 @@ fn add_variables(doc: &mut serde_json::Value, vars: Option<&VarsReport>) {
             "file": v.file,
             "executions": v.executions,
         });
+        if let Some(l) = &v.limit {
+            doc["limit"] = serde_json::json!(l.items);
+            doc["variables"]["targeted_executions"] = serde_json::json!(l.targeted);
+        }
     }
 }
 
@@ -512,6 +550,15 @@ fn print_validate(
             sanitize_line(&v.file),
             v.executions
         );
+        if let Some(l) = &v.limit {
+            println!(
+                "{}: --limit {} selects {} of {} execution(s)",
+                style::status("ok", color),
+                sanitize_line(&l.items.join(",")),
+                v.executions,
+                l.targeted
+            );
+        }
     }
     Ok(0)
 }
@@ -657,6 +704,18 @@ fn exclusive_target_options(exec: &ExecOpts) -> Result<(), SinterError> {
     Ok(())
 }
 
+/// `--limit` (DESIGN §19.2): its syntax, and that an inventory is there to
+/// narrow. Nothing is read and nothing is contacted.
+fn limit_option(exec: &ExecOpts) -> Result<ParsedLimit, SinterError> {
+    let parsed = parse_limit(exec.limit.as_deref())?;
+    if parsed.given() && exec.inventory.is_none() {
+        return Err(SinterError::schema(
+            "--limit needs --inventory: a single target (--host or the local host) has nothing to narrow",
+        ));
+    }
+    Ok(parsed)
+}
+
 fn run_phase_with(
     phase: Phase,
     a: &TargetArgs,
@@ -664,20 +723,21 @@ fn run_phase_with(
     progress: &ProgressOptions,
 ) -> Result<u8, SinterError> {
     exclusive_target_options(&a.exec)?;
+    let limit = limit_option(&a.exec)?;
     let ro = RenderOptions {
         verbose: a.verbose,
         format,
         color: format == OutputFormat::Text && style::stdout_color(),
     };
     if let Some(vars) = &a.exec.vars_file {
-        return run_phase_vars(phase, a, vars, &ro, progress);
+        return run_phase_vars(phase, a, vars, &limit, &ro, progress);
     }
     let source = load_source(&a.recipe)?;
     if let Some(inv) = &a.exec.inventory {
         // Several executions follow, so target resolution is a progress scope
         // of its own; each execution then gets its own.
         let session = progress.begin(source_info(phase, &source));
-        let planned = inventory_plan(&source, a, inv, &session);
+        let planned = inventory_plan(&source, a, inv, &limit, &session);
         session.end(scope_outcome(&planned));
         return run_executions(phase, &source, planned?, a, &ro, progress);
     }
@@ -749,6 +809,7 @@ fn run_one_target(
             let plan = ExecutionPlan {
                 inventory: None,
                 resolutions: Vec::new(),
+                limit: None,
                 executions,
             };
             run_executions(phase, source, plan, a, ro, progress)
@@ -767,22 +828,28 @@ struct VarsGate {
     /// display or report reads.
     source: Source,
     inventory: Option<Inventory>,
-    /// Inventory mode: the recipes' target resolutions. Single mode: empty.
-    resolutions: Vec<Resolution>,
+    /// Inventory mode: the recipes' target resolutions with `--limit` applied.
+    /// Single mode: none.
+    limited: Option<Limited>,
     /// One model per (recipe, host) execution, bound to the pair it was
     /// frozen for.
     frozen: Vec<FrozenExecution>,
 }
 
-fn vars_gate(recipe: &Path, exec: &ExecOpts, vars_path: &Path) -> Result<VarsGate, SinterError> {
-    use sinter::varsfile::{freeze_executions, load_vars_file, Mode as VarsMode};
+fn vars_gate(
+    recipe: &Path,
+    exec: &ExecOpts,
+    vars_path: &Path,
+    limit: &ParsedLimit,
+) -> Result<VarsGate, SinterError> {
+    use sinter::varsfile::{freeze_executions_in, load_vars_file, Mode as VarsMode, Scope};
     let prepared = prepare_source(recipe)?;
     let inventory = match &exec.inventory {
         Some(p) => Some(load_inventory(p)?),
         None => None,
     };
     let vars = load_vars_file(vars_path).map_err(static_failure)?;
-    let (resolutions, pairs): (Vec<Resolution>, Vec<(usize, String)>) = match &inventory {
+    let (limited, pairs): (Option<Limited>, Vec<(usize, String)>) = match &inventory {
         Some(inv) => {
             let resolutions = resolve_targets(
                 inv,
@@ -791,27 +858,39 @@ fn vars_gate(recipe: &Path, exec: &ExecOpts, vars_path: &Path) -> Result<VarsGat
                     .iter()
                     .map(|u| (u.label.as_str(), u.item.targets())),
             )?;
-            let pairs = resolutions
+            // Which hosts run is settled here, before any variable of a host
+            // is resolved and long before `ssh -G`; `selected()` is what is
+            // left after `--limit`.
+            let limited = limited::limit(inv, resolutions, limit)?;
+            let pairs = limited
+                .resolutions()
                 .iter()
                 .enumerate()
                 .flat_map(|(i, r)| r.selected().map(move |h| (i, h.to_string())))
                 .collect();
-            (resolutions, pairs)
+            (Some(limited), pairs)
         }
         None => {
             let name = one_target_name(exec);
             let pairs = (0..prepared.units.len())
                 .map(|i| (i, name.to_string()))
                 .collect();
-            (Vec::new(), pairs)
+            (None, pairs)
         }
     };
     let mode = match &inventory {
         Some(inv) => VarsMode::Inventory(inv),
         None => VarsMode::Single,
     };
-    let models =
-        freeze_executions(&prepared.units, &vars, &mode, &pairs).map_err(static_failure)?;
+    // Without `--limit` every layer of the file is checked, as ever; with it,
+    // only the layers of the hosts that run (DESIGN §19.5).
+    let scope = if limit.given() {
+        Scope::Selected
+    } else {
+        Scope::All
+    };
+    let models = freeze_executions_in(&prepared.units, &vars, &mode, &pairs, scope)
+        .map_err(static_failure)?;
     // From here on a model travels with the (recipe, host) it was frozen
     // for; it is only ever assigned by that key, never by position alone.
     #[allow(unused_mut)]
@@ -829,6 +908,20 @@ fn vars_gate(recipe: &Path, exec: &ExecOpts, vars_path: &Path) -> Result<VarsGat
             None => return Err(model_mismatch("a model belongs to no recipe of this run")),
         }
     }
+    // A recipe no host runs it on (`--limit` left every host of its targets
+    // out) has no frozen model. It is listed with its own default values, which
+    // must stand on their own; no host's value is used, since none of the
+    // left-out hosts' variables is resolved.
+    for (slot, u) in first.iter_mut().zip(&prepared.units) {
+        if slot.is_none() && limit.given() {
+            *slot = Some(u.item.clone().freeze_default().map_err(|_| {
+                SinterError::schema(format!(
+                    "recipe {}: --limit leaves no host to run it on, and its own default values do not validate on their own, so it cannot even be listed; give it a host with --limit or fix its defaults",
+                    u.label
+                ))
+            })?);
+        }
+    }
     let first = first
         .into_iter()
         .collect::<Option<Vec<Model>>>()
@@ -837,7 +930,7 @@ fn vars_gate(recipe: &Path, exec: &ExecOpts, vars_path: &Path) -> Result<VarsGat
     Ok(VarsGate {
         source,
         inventory,
-        resolutions,
+        limited,
         frozen,
     })
 }
@@ -848,20 +941,23 @@ fn run_phase_vars(
     phase: Phase,
     a: &TargetArgs,
     vars_path: &Path,
+    limit: &ParsedLimit,
     ro: &RenderOptions,
     progress: &ProgressOptions,
 ) -> Result<u8, SinterError> {
     let VarsGate {
         source,
         inventory,
-        resolutions,
+        limited,
         frozen,
-    } = vars_gate(&a.recipe, &a.exec, vars_path)?;
+    } = vars_gate(&a.recipe, &a.exec, vars_path, limit)?;
     let Some(inv) = inventory else {
         return run_one_target(phase, &source, Some(frozen), a, ro, progress);
     };
+    let limited =
+        limited.ok_or_else(|| model_mismatch("an inventory run has no host selection"))?;
     let session = progress.begin(source_info(phase, &source));
-    let planned = inventory_targets(&inv, resolutions, a, &session);
+    let planned = inventory_targets(&inv, limited, a, &session);
     session.end(scope_outcome(&planned));
     let mut plan = planned?;
     // Checked in every build, before any execution connects.
@@ -1099,8 +1195,12 @@ struct Execution {
 
 struct ExecutionPlan {
     inventory: Option<PathBuf>,
-    /// Per recipe (same order as the source's units), inventory mode only.
+    /// Per recipe (same order as the source's units), inventory mode only,
+    /// with `--limit` applied.
     resolutions: Vec<Resolution>,
+    /// The items of `--limit`, as given and without repeats; `None` without
+    /// `--limit`.
+    limit: Option<Vec<String>>,
     executions: Vec<Execution>,
 }
 
@@ -1109,7 +1209,7 @@ struct ExecutionPlan {
 /// * every recipe must declare `targets`, naming only inventory hosts and
 ///   groups, and select at least one host;
 /// * every *selected* host is resolved (`ssh -G` included); hosts no recipe
-///   selects are never resolved or contacted;
+///   selects, and hosts `--limit` leaves out, are never resolved or contacted;
 /// * two selected hosts may not resolve to the same address and port.
 ///
 /// Executions are recipe-major (bundle order), hosts in name order.
@@ -1117,6 +1217,7 @@ fn inventory_plan(
     source: &Source,
     a: &TargetArgs,
     inv_path: &Path,
+    limit: &ParsedLimit,
     session: &ProgressSession,
 ) -> Result<ExecutionPlan, SinterError> {
     let inv = load_inventory(inv_path)?;
@@ -1127,7 +1228,8 @@ fn inventory_plan(
             .iter()
             .map(|u| (u.label.as_str(), u.model.targets.as_ref())),
     )?;
-    inventory_targets(&inv, resolutions, a, session)
+    let limited = limited::limit(&inv, resolutions, limit)?;
+    inventory_targets(&inv, limited, a, session)
 }
 
 /// Resolve each recipe's `targets` (label, selector) against the inventory,
@@ -1145,10 +1247,16 @@ fn resolve_targets<'a>(
 /// recipe-major, hosts in name order.
 fn inventory_targets(
     inv: &Inventory,
-    resolutions: Vec<Resolution>,
+    limited: Limited,
     a: &TargetArgs,
     session: &ProgressSession,
 ) -> Result<ExecutionPlan, SinterError> {
+    // The option as the caller got it must agree with what was applied: a
+    // `--limit` that was somehow not applied must not run on every host.
+    if a.exec.limit.is_some() != limited.allowed().is_some() {
+        return Err(limit_mismatch("--limit was not applied to the selection"));
+    }
+    let (resolutions, allowed, limit_items) = limited.into_parts();
     let mut targets: BTreeMap<String, Target> = BTreeMap::new();
     // `Resolve` stage: one item per distinct selected host, each of which costs
     // a local `ssh -G` evaluation. Absent when that evaluation is skipped.
@@ -1160,9 +1268,18 @@ fn inventory_targets(
             if targets.contains_key(name) {
                 continue;
             }
+            // Last check before `ssh -G` (which can run local commands through
+            // an OpenSSH `Match exec`): the host is one `--limit` allows.
+            if allowed.as_ref().is_some_and(|al| !al.contains(name)) {
+                return Err(limit_mismatch(
+                    "a host --limit leaves out was about to be resolved",
+                ));
+            }
             if let Some(stage) = stage.as_mut() {
                 stage.host_started();
             }
+            #[cfg(test)]
+            tests::resolving(name);
             let h = &inv.hosts[name];
             let req = TargetRequest {
                 label: name.to_string(),
@@ -1203,6 +1320,7 @@ fn inventory_targets(
     if let Some(stage) = stage {
         stage.end();
     }
+    #[allow(unused_mut)]
     let mut executions = Vec::new();
     for (i, r) in resolutions.iter().enumerate() {
         for name in r.selected() {
@@ -1213,11 +1331,39 @@ fn inventory_targets(
             });
         }
     }
+    #[cfg(test)]
+    tests::tamper_executions(&mut executions);
+    // Every execution is on a host its recipe's `targets` select and `--limit`
+    // allows; nothing connects before this holds.
+    for ex in &executions {
+        let targeted = resolutions.get(ex.unit).is_some_and(|r| {
+            r.hosts
+                .iter()
+                .any(|h| h.name == ex.target.name && h.targeted())
+        });
+        let allowed_here = allowed
+            .as_ref()
+            .is_none_or(|al| al.contains(&ex.target.name));
+        if !targeted || !allowed_here {
+            return Err(limit_mismatch(
+                "an execution is on a host its recipe does not target or --limit leaves out",
+            ));
+        }
+    }
     Ok(ExecutionPlan {
         inventory: Some(inv.path.clone()),
         resolutions,
+        limit: limit_items,
         executions,
     })
+}
+
+/// An internal inconsistency between `--limit` and the hosts about to run.
+/// Exit 2 like every static failure; no host has been resolved or contacted.
+fn limit_mismatch(detail: &str) -> SinterError {
+    SinterError::schema(format!(
+        "internal error: the hosts selected by --limit do not match the hosts about to run ({detail}); no host was contacted"
+    ))
 }
 
 fn print_resolution(source: &Source, plan: &ExecutionPlan, ro: &RenderOptions) {
@@ -1230,6 +1376,9 @@ fn print_resolution(source: &Source, plan: &ExecutionPlan, ro: &RenderOptions) {
     }
     if plan.inventory.is_some() {
         println!("== target resolution ==");
+        if let Some(items) = &plan.limit {
+            println!("limit: {}", sanitize_line(&items.join(",")));
+        }
         for (u, r) in source.units().iter().zip(&plan.resolutions) {
             println!(
                 "recipe {} ({})",
@@ -1245,15 +1394,30 @@ fn print_resolution(source: &Source, plan: &ExecutionPlan, ro: &RenderOptions) {
                         style::status("MATCH", ro.color),
                         h.reasons.join(", ")
                     );
+                } else if h.excluded_by_limit() {
+                    println!(
+                        "  {:width$}  SKIP   excluded by --limit (matched: {})",
+                        h.name,
+                        h.reasons.join(", ")
+                    );
                 } else {
                     println!("  {:width$}  SKIP   no matching target", h.name);
                 }
             }
             let selected = r.selected().count();
+            let by_limit = if plan.limit.is_some() {
+                format!(
+                    " ({} by --limit)",
+                    r.hosts.iter().filter(|h| h.excluded_by_limit()).count()
+                )
+            } else {
+                String::new()
+            };
             println!(
-                "  selected {}, excluded {}",
+                "  selected {}, excluded {}{}",
                 selected,
-                r.hosts.len() - selected
+                r.hosts.len() - selected,
+                by_limit
             );
         }
     }
@@ -1515,11 +1679,17 @@ fn run_executions(
                     serde_json::json!({
                         "recipe": u.label,
                         "path": u.path.display().to_string(),
-                        "hosts": r.hosts.iter().map(|h| serde_json::json!({
-                            "name": h.name,
-                            "selected": h.selected(),
-                            "reasons": h.reasons,
-                        })).collect::<Vec<_>>(),
+                        "hosts": r.hosts.iter().map(|h| {
+                            let mut o = serde_json::json!({
+                                "name": h.name,
+                                "selected": h.selected(),
+                                "reasons": h.reasons,
+                            });
+                            if h.excluded_by_limit() {
+                                o["excluded_by"] = serde_json::json!("limit");
+                            }
+                            o
+                        }).collect::<Vec<_>>(),
                     })
                 })
                 .collect()
@@ -1531,7 +1701,7 @@ fn run_executions(
             }),
             Source::Recipe(_) => serde_json::Value::Null,
         };
-        let doc = serde_json::json!({
+        let mut doc = serde_json::json!({
             "mode": phase.name(),
             "exit_code": overall,
             "bundle": bundle,
@@ -1539,6 +1709,9 @@ fn run_executions(
             "resolution": resolution,
             "executions": executions,
         });
+        if let Some(items) = &plan.limit {
+            doc["limit"] = serde_json::json!(items);
+        }
         println!("{}", serde_json::to_string_pretty(&doc).unwrap());
     }
     Ok(overall)
@@ -1683,6 +1856,31 @@ mod tests {
 
     /// Corrupts a run's frozen models (may add or remove some, so a `Vec`).
     type Tamper = fn(&mut Vec<FrozenExecution>);
+
+    /// Corrupts an inventory run's executions (may add or remove some).
+    type ExecTamper = fn(&mut Vec<Execution>);
+
+    thread_local! {
+        /// Corrupts the executions of an inventory run right before they are
+        /// checked against `--limit`, to prove the check stops the run
+        /// (tests only).
+        static EXEC_TAMPER: std::cell::Cell<Option<ExecTamper>> =
+            const { std::cell::Cell::new(None) };
+        /// Every host whose SSH configuration was about to be evaluated
+        /// (`ssh -G` runs right after), in order (tests only).
+        pub(super) static RESOLVING: std::cell::RefCell<Vec<String>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn resolving(host: &str) {
+        RESOLVING.with(|r| r.borrow_mut().push(host.to_string()));
+    }
+
+    pub(super) fn tamper_executions(executions: &mut Vec<Execution>) {
+        if let Some(f) = EXEC_TAMPER.with(std::cell::Cell::get) {
+            f(executions);
+        }
+    }
 
     pub(super) fn tamper_frozen(frozen: &mut Vec<FrozenExecution>) {
         if let Some(f) = TAMPER.with(std::cell::Cell::get) {
@@ -2784,6 +2982,8 @@ mod tests {
     const VARS_RECIPE: &str = "version: 1\ntargets:\n  groups: [web]\nvars:\n  name: { value: CHANGE_ME }\n  port: { value: 80 }\nresources:\n  - id: a\n    type: file\n    with:\n      path: \"/etc/perf/{{ vars.name }}\"\n      content: \"port {{ vars.port }}\\n\"\n";
 
     struct VarsRun {
+        /// Hosts whose SSH configuration was about to be evaluated.
+        resolving: Vec<String>,
         result: Result<u8, SinterError>,
         /// Scripted targets nobody consumed (each execution consumes one).
         untouched_targets: usize,
@@ -2796,10 +2996,13 @@ mod tests {
         let w = wiring(ProgressMode::Disabled);
         FAKE_TARGETS.with(|f| *f.borrow_mut() = (0..targets).map(|_| base()).collect());
         EXECUTED_MODELS.with(|m| m.borrow_mut().clear());
+        RESOLVING.with(|r| r.borrow_mut().clear());
         let result = run_phase_with(phase, &a, format, &w.opts);
         let untouched_targets = FAKE_TARGETS.with(|f| f.borrow_mut().drain(..).count());
         let models = EXECUTED_MODELS.with(|m| std::mem::take(&mut *m.borrow_mut()));
+        let resolving = RESOLVING.with(|r| std::mem::take(&mut *r.borrow_mut()));
         VarsRun {
+            resolving,
             result,
             untouched_targets,
             models,
@@ -3055,6 +3258,467 @@ mod tests {
         assert_eq!(left, 1);
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].resources[0].package_name.as_deref(), Some("curl"));
+    }
+
+    // -----------------------------------------------------------------------
+    // `--limit` (DESIGN §19.2): the real wiring, driven in-process.
+    // -----------------------------------------------------------------------
+
+    /// `VARS_RECIPE` plus a sensitive variable.
+    fn limit_recipe() -> String {
+        VARS_RECIPE.replace(
+            "port: { value: 80 }\n",
+            "port: { value: 80 }\n  tok: { value: s, sensitive: true }\n",
+        )
+    }
+
+    /// web01, web02 (group web), db01 (group db) and ops = [web01, db01].
+    fn limit_inventory(dir: &tempfile::TempDir) -> String {
+        let kh = write(dir, "known_hosts", "");
+        let host = |port: u16| {
+            format!(
+                "    address: 127.0.0.1\n    port: {port}\n    user: u\n    known_hosts: {kh}\n"
+            )
+        };
+        write(
+            dir,
+            "limit-hosts.yaml",
+            &format!(
+                "hosts:\n  web01:\n{}  web02:\n{}  db01:\n{}groups:\n  web:\n    hosts: [web01, web02]\n  db:\n    hosts: [db01]\n  ops:\n    hosts: [web01, db01]\n",
+                host(20101),
+                host(20102),
+                host(20103)
+            ),
+        )
+    }
+
+    const LIMIT_VARS: &str = "version: 1\nhosts:\n  web01: { name: one }\n  web02: { name: two }\n";
+
+    fn drive_limit(
+        phase: Phase,
+        recipe: &str,
+        inv: &str,
+        vars: &str,
+        limit: Option<&str>,
+        targets: usize,
+    ) -> VarsRun {
+        let mut argv = vec![
+            recipe,
+            "--hosts",
+            inv,
+            "--vars-file",
+            vars,
+            "--no-ssh-config",
+            "--format",
+            "json",
+        ];
+        if let Some(l) = limit {
+            argv.extend(["--limit", l]);
+        }
+        drive_vars(phase, &argv, targets)
+    }
+
+    #[test]
+    fn limit_runs_only_the_named_hosts_in_every_phase() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", VARS_RECIPE);
+        let inv = limit_inventory(&dir);
+        let v = write(&dir, "v.yaml", LIMIT_VARS);
+        let cases: &[(&str, &[&str])] = &[
+            ("web01", &["/etc/perf/one"]),
+            ("host:web02", &["/etc/perf/two"]),
+            ("web01,web02", &["/etc/perf/one", "/etc/perf/two"]),
+            ("web02,web01", &["/etc/perf/one", "/etc/perf/two"]),
+            ("web", &["/etc/perf/one", "/etc/perf/two"]),
+            ("group:web", &["/etc/perf/one", "/etc/perf/two"]),
+            ("web0*", &["/etc/perf/one", "/etc/perf/two"]),
+            ("*", &["/etc/perf/one", "/etc/perf/two"]),
+            ("?eb02", &["/etc/perf/two"]),
+            ("web01,web01,host:web01", &["/etc/perf/one"]),
+        ];
+        for (limit, want) in cases {
+            let mut seen = Vec::new();
+            for phase in [Phase::Plan, Phase::Audit, Phase::Apply] {
+                // One spare target: it must stay unused.
+                let run = drive_limit(phase, &r, &inv, &v, Some(limit), want.len() + 1);
+                assert!(
+                    run.result.is_ok(),
+                    "{limit} {phase:?}: {:?}",
+                    run.result.err()
+                );
+                assert_eq!(run.untouched_targets, 1, "{limit} {phase:?}");
+                assert_eq!(paths(&run.models), *want, "{limit} {phase:?}");
+                // Only the hosts that run had their SSH configuration read.
+                assert_eq!(run.resolving.len(), want.len(), "{limit} {phase:?}");
+                seen.push(format!("{:?}", run.models));
+            }
+            // plan, audit and apply agree on the hosts and their values.
+            assert!(seen.windows(2).all(|w| w[0] == w[1]), "{limit}");
+        }
+    }
+
+    #[test]
+    fn without_limit_every_targeted_host_still_runs() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", VARS_RECIPE);
+        let inv = limit_inventory(&dir);
+        let v = write(&dir, "v.yaml", LIMIT_VARS);
+        for phase in [Phase::Plan, Phase::Audit, Phase::Apply] {
+            let run = drive_limit(phase, &r, &inv, &v, None, 2);
+            assert!(run.result.is_ok());
+            assert_eq!(run.untouched_targets, 0);
+            assert_eq!(paths(&run.models), ["/etc/perf/one", "/etc/perf/two"]);
+        }
+        // `--limit` naming every targeted host is the same as no `--limit`.
+        let all = drive_limit(Phase::Plan, &r, &inv, &v, Some("web"), 2);
+        let none = drive_limit(Phase::Plan, &r, &inv, &v, None, 2);
+        assert_eq!(format!("{:?}", all.models), format!("{:?}", none.models));
+    }
+
+    #[test]
+    fn limit_scopes_host_specific_variable_checks_to_the_selected_hosts() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", &limit_recipe());
+        let inv = limit_inventory(&dir);
+        // (vars-file body, `--limit web01` passes?, passes without `--limit`?)
+        let cases: &[(&str, bool, bool)] = &[
+            // an unselected host's or group's own values
+            (
+                "hosts: { web01: { name: a }, db01: { port: x } }",
+                true,
+                false,
+            ),
+            (
+                "hosts: { web01: { name: a }, web02: { port: x } }",
+                true,
+                false,
+            ),
+            (
+                "hosts: { web01: { name: a } }\ngroups: { db: { port: x } }",
+                true,
+                false,
+            ),
+            (
+                "hosts: { web01: { name: a }, db01: { nope: 1 } }",
+                true,
+                false,
+            ),
+            // the selected host's own values and its groups' values
+            ("hosts: { web01: { name: a, port: x } }", false, false),
+            (
+                "hosts: { web01: { name: a } }\ngroups: { web: { port: x } }",
+                false,
+                false,
+            ),
+            (
+                "hosts: { web01: { name: a } }\ngroups: { ops: { port: x } }",
+                false,
+                false,
+            ),
+            // the common layer
+            (
+                "vars: { port: x }\nhosts: { web01: { name: a } }",
+                false,
+                false,
+            ),
+            (
+                "vars: { nope: 1 }\nhosts: { web01: { name: a } }",
+                false,
+                false,
+            ),
+            // structure is global
+            (
+                "hosts: { web01: { name: a }, ghost: { name: b } }",
+                false,
+                false,
+            ),
+            (
+                "hosts: { web01: { name: a } }\ngroups: { nosuch: { port: 1 } }",
+                false,
+                false,
+            ),
+            // sensitive overrides are refused in every layer (D-16)
+            (
+                "hosts: { web01: { name: a }, db01: { tok: t } }",
+                false,
+                false,
+            ),
+            (
+                "hosts: { web01: { name: a } }\ngroups: { db: { tok: t } }",
+                false,
+                false,
+            ),
+            (
+                "vars: { tok: t }\nhosts: { web01: { name: a } }",
+                false,
+                false,
+            ),
+            ("hosts: { web01: { name: a, tok: t } }", false, false),
+            // group conflicts: only where a selected host is affected
+            (
+                "hosts: { web01: { name: a } }\ngroups: { web: { port: 1 }, ops: { port: 2 } }",
+                false,
+                false,
+            ),
+        ];
+        for (body, limited_ok, plain_ok) in cases {
+            let v = write(&dir, "v.yaml", &format!("version: 1\n{body}\n"));
+            for phase in [Phase::Plan, Phase::Audit, Phase::Apply] {
+                // web02 is not selected; supply targets for what may run.
+                let limited = drive_limit(phase, &r, &inv, &v, Some("web01"), 2);
+                assert_eq!(
+                    limited.result.is_ok(),
+                    *limited_ok,
+                    "{body} {phase:?} limit"
+                );
+                if *limited_ok {
+                    assert_eq!(limited.models.len(), 1, "{body}");
+                    assert_eq!(limited.untouched_targets, 1, "{body}");
+                } else {
+                    let e = limited.result.unwrap_err();
+                    assert_eq!(e.kind, ErrorKind::Schema, "{body}");
+                    assert_eq!(limited.untouched_targets, 2, "{body}: contacted");
+                    assert!(limited.models.is_empty(), "{body}");
+                }
+                let plain = drive_limit(phase, &r, &inv, &v, None, 2);
+                assert_eq!(plain.result.is_ok(), *plain_ok, "{body} {phase:?} plain");
+                if !*plain_ok {
+                    assert_eq!(plain.untouched_targets, 2, "{body}: contacted");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_group_conflict_only_matters_where_a_selected_host_is_affected() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", &limit_recipe());
+        let inv = limit_inventory(&dir);
+        // web01 is in web and ops: the two disagree. web02 is only in web.
+        let v = write(
+            &dir,
+            "v.yaml",
+            "version: 1\nhosts: { web01: { name: a }, web02: { name: b } }\ngroups: { web: { port: 1 }, ops: { port: 2 } }\n",
+        );
+        let on_web02 = drive_limit(Phase::Plan, &r, &inv, &v, Some("web02"), 1);
+        assert!(on_web02.result.is_ok(), "{:?}", on_web02.result.err());
+        assert_eq!(paths(&on_web02.models), ["/etc/perf/b"]);
+        let on_web01 = drive_limit(Phase::Plan, &r, &inv, &v, Some("web01"), 1);
+        assert_eq!(on_web01.result.unwrap_err().kind, ErrorKind::Schema);
+        assert_eq!(on_web01.untouched_targets, 1);
+        // The host's own value resolves the conflict.
+        let v = write(
+            &dir,
+            "v2.yaml",
+            "version: 1\nhosts: { web01: { name: a, port: 3 } }\ngroups: { web: { port: 1 }, ops: { port: 2 } }\n",
+        );
+        let ok = drive_limit(Phase::Plan, &r, &inv, &v, Some("web01"), 1);
+        assert!(ok.result.is_ok(), "{:?}", ok.result.err());
+    }
+
+    #[test]
+    fn a_limit_that_cannot_be_resolved_runs_nothing() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", VARS_RECIPE);
+        let inv = limit_inventory(&dir);
+        let v = write(&dir, "v.yaml", LIMIT_VARS);
+        for limit in [
+            "nosuch",
+            "host:web",
+            "group:web01",
+            "zz*",
+            "web01,nosuch",
+            // db01 exists, but the recipe targets group web only
+            "db01",
+            "db",
+            "web01,db01",
+            "",
+            "web01,",
+            "!web01",
+            "web01 web02",
+            "group:web*",
+        ] {
+            for phase in [Phase::Plan, Phase::Audit, Phase::Apply] {
+                let run = drive_limit(phase, &r, &inv, &v, Some(limit), 3);
+                let e = run.result.expect_err(limit);
+                assert_eq!(e.kind, ErrorKind::Schema, "{limit}");
+                assert!(e.message.contains("--limit"), "{limit}: {}", e.message);
+                assert_eq!(run.untouched_targets, 3, "{limit}: a host was contacted");
+                assert!(run.models.is_empty(), "{limit}");
+            }
+        }
+    }
+
+    #[test]
+    fn limit_needs_an_inventory_and_excludes_host() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", RECIPE);
+        let inv = limit_inventory(&dir);
+        for (argv, what) in [
+            (vec![r.as_str(), "--limit", "web01"], "no inventory"),
+            (
+                vec![r.as_str(), "--host", "h", "--limit", "web01"],
+                "--host without inventory",
+            ),
+            (
+                vec![
+                    r.as_str(),
+                    "--host",
+                    "h",
+                    "--hosts",
+                    inv.as_str(),
+                    "--limit",
+                    "web01",
+                ],
+                "--host with inventory",
+            ),
+        ] {
+            for phase in [Phase::Plan, Phase::Audit, Phase::Apply] {
+                let run = drive_vars(phase, &argv, 2);
+                let e = run.result.expect_err(what);
+                assert_eq!(e.kind, ErrorKind::Schema, "{what}");
+                assert_eq!(run.untouched_targets, 2, "{what}");
+            }
+        }
+    }
+
+    #[test]
+    fn two_limit_options_are_refused_by_the_parser() {
+        let argv = [
+            "sinter", "plan", "r.yaml", "--hosts", "h.yaml", "--limit", "a", "--limit", "b",
+        ];
+        assert!(Cli::try_parse_from(argv).is_err());
+    }
+
+    /// Hooks that corrupt the outcome of `--limit` stop the run before any
+    /// host is resolved or contacted (the structural guards of DESIGN §19.2).
+    #[test]
+    fn a_limit_that_was_not_applied_is_stopped_before_anything_is_contacted() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", VARS_RECIPE);
+        let inv = limit_inventory(&dir);
+        let v = write(&dir, "v.yaml", LIMIT_VARS);
+        for tamper in [
+            limited::tests::Tamper::DropMarks,
+            limited::tests::Tamper::ForgetAllowed,
+        ] {
+            for phase in [Phase::Plan, Phase::Audit, Phase::Apply] {
+                limited::tests::set(tamper);
+                let run = drive_limit(phase, &r, &inv, &v, Some("web01"), 2);
+                limited::tests::set(limited::tests::Tamper::None);
+                let e = run.result.expect_err("tampered");
+                assert!(e.message.contains("internal error"), "{}", e.message);
+                assert!(e.message.contains("no host was contacted"), "{}", e.message);
+                assert_eq!(run.untouched_targets, 2, "a host was contacted");
+                assert!(run.models.is_empty());
+                // web01 is allowed and may be reached before the guard trips;
+                // web02 must never be.
+                assert!(
+                    run.resolving.iter().all(|h| h == "web01"),
+                    "{phase:?}: ssh -G would have run for {:?}",
+                    run.resolving
+                );
+            }
+        }
+        // The same wiring, untampered, runs one host.
+        let ok = drive_limit(Phase::Plan, &r, &inv, &v, Some("web01"), 2);
+        assert!(ok.result.is_ok());
+        assert_eq!(ok.untouched_targets, 1);
+    }
+
+    fn add_excluded_host(executions: &mut Vec<Execution>) {
+        executions.push(Execution {
+            unit: executions[0].unit,
+            target: Target {
+                name: "web02".to_string(),
+                spec: executions[0].target.spec.clone(),
+            },
+            model: None,
+        });
+    }
+
+    fn add_untargeted_host(executions: &mut Vec<Execution>) {
+        executions.push(Execution {
+            unit: executions[0].unit,
+            target: Target {
+                name: "db01".to_string(),
+                spec: executions[0].target.spec.clone(),
+            },
+            model: None,
+        });
+    }
+
+    #[test]
+    fn an_execution_on_a_host_limit_leaves_out_is_stopped_before_anything_connects() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", VARS_RECIPE);
+        let inv = limit_inventory(&dir);
+        let v = write(&dir, "v.yaml", LIMIT_VARS);
+        for (limit, tamper) in [
+            // web02 is targeted but left out by --limit
+            (Some("web01"), add_excluded_host as fn(&mut Vec<Execution>)),
+            // db01 is not targeted by the recipe, with or without --limit
+            (Some("web01"), add_untargeted_host),
+            (None, add_untargeted_host),
+        ] {
+            // With a variables file the binding check would also notice an
+            // extra execution; without one only the `--limit` check does.
+            for with_vars in [true, false] {
+                for phase in [Phase::Plan, Phase::Audit, Phase::Apply] {
+                    let mut argv = vec![r.as_str(), "--hosts", &inv, "--no-ssh-config"];
+                    if with_vars {
+                        argv.extend(["--vars-file", &v]);
+                    }
+                    if let Some(l) = limit {
+                        argv.extend(["--limit", l]);
+                    }
+                    EXEC_TAMPER.with(|t| t.set(Some(tamper)));
+                    let run = drive_vars(phase, &argv, 3);
+                    EXEC_TAMPER.with(|t| t.set(None));
+                    let ctx = format!("{limit:?} vars={with_vars} {phase:?}");
+                    let e = run.result.expect_err(&ctx);
+                    assert!(e.message.contains("internal error"), "{ctx}: {}", e.message);
+                    assert!(e.message.contains("--limit"), "{ctx}: {}", e.message);
+                    assert!(e.message.contains("no host was contacted"), "{ctx}");
+                    assert_eq!(run.untouched_targets, 3, "{ctx}: a host was contacted");
+                    assert!(run.models.is_empty(), "{ctx}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_bundle_runs_each_recipe_on_the_hosts_it_targets_within_the_limit() {
+        let dir = fixture();
+        write(&dir, "web.yaml", VARS_RECIPE);
+        write(
+            &dir,
+            "db.yaml",
+            &VARS_RECIPE
+                .replace("groups: [web]", "groups: [db]")
+                .replace("/etc/perf/", "/etc/perf/db-"),
+        );
+        let bundle = write(&dir, "b.yaml", "version: 1\nrecipes: [web.yaml, db.yaml]\n");
+        let inv = limit_inventory(&dir);
+        let v = write(
+            &dir,
+            "v.yaml",
+            "version: 1\nhosts:\n  web01: { name: one }\n  web02: { name: two }\n  db01: { name: three }\n",
+        );
+        // web01 is reached by the first recipe only; the second recipe has no
+        // selected execution and is shown with its defaults.
+        let run = drive_limit(Phase::Plan, &bundle, &inv, &v, Some("web01"), 2);
+        assert!(run.result.is_ok(), "{:?}", run.result.err());
+        assert_eq!(run.untouched_targets, 1);
+        assert_eq!(paths(&run.models), ["/etc/perf/one"]);
+        // Every item must reach some recipe: db01 is the second recipe's.
+        let both = drive_limit(Phase::Plan, &bundle, &inv, &v, Some("web01,db01"), 2);
+        assert!(both.result.is_ok(), "{:?}", both.result.err());
+        assert_eq!(paths(&both.models), ["/etc/perf/one", "/etc/perf/db-three"]);
+        // Without --limit all three run.
+        let all = drive_limit(Phase::Plan, &bundle, &inv, &v, None, 3);
+        assert!(all.result.is_ok());
+        assert_eq!(all.models.len(), 3);
     }
 
     // -----------------------------------------------------------------------

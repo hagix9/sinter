@@ -268,19 +268,46 @@ fn layer(ctx: &str, label: &str, v: &Value, problems: &mut Vec<String>) -> BTree
     out
 }
 
+/// Which layer of a variables file a value is in.
+#[derive(Debug, Clone, Copy)]
+enum Layer<'a> {
+    Common,
+    Group(&'a str),
+    Host(&'a str),
+}
+
+/// How much of the file's host-specific layers the static gate checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// Every layer of the file, whichever hosts run (the checks of v1.6.0;
+    /// what a run without `--limit` uses).
+    All,
+    /// Only the layers that apply to the hosts in `pairs`: the common layer,
+    /// the groups those hosts belong to and the hosts themselves. A type
+    /// mismatch or an undeclared name in any other `groups.*`/`hosts.*` layer
+    /// is not a reason to stop (DESIGN §19.5, `--limit`). The structure of
+    /// the file and the inventory, the common layer, the ban on overriding a
+    /// sensitive variable (in every layer) and group conflicts of the listed
+    /// hosts are checked as always.
+    Selected,
+}
+
 impl VarsFile {
-    /// Every (layer label, name, value) of the file, in a fixed order.
-    fn entries(&self) -> Vec<(String, &String, &Value)> {
-        let mut out: Vec<(String, &String, &Value)> = self
+    /// Every (layer, label, name, value) of the file, in a fixed order.
+    fn entries(&self) -> Vec<(Layer<'_>, String, &String, &Value)> {
+        let mut out: Vec<(Layer<'_>, String, &String, &Value)> = self
             .common
             .iter()
-            .map(|(n, v)| ("vars".to_string(), n, v))
+            .map(|(n, v)| (Layer::Common, "vars".to_string(), n, v))
             .collect();
-        for (key, layers) in [("groups", &self.groups), ("hosts", &self.hosts)] {
-            for (g, vars) in layers {
-                for (n, v) in vars {
-                    out.push((format!("{key}.{g}"), n, v));
-                }
+        for (g, vars) in &self.groups {
+            for (n, v) in vars {
+                out.push((Layer::Group(g), format!("groups.{g}"), n, v));
+            }
+        }
+        for (h, vars) in &self.hosts {
+            for (n, v) in vars {
+                out.push((Layer::Host(h), format!("hosts.{h}"), n, v));
             }
         }
         out
@@ -346,6 +373,30 @@ pub fn freeze_executions(
     mode: &Mode,
     pairs: &[(usize, String)],
 ) -> Result<Vec<Model>, Problems> {
+    freeze_executions_in(units, vf, mode, pairs, Scope::All)
+}
+
+/// [`freeze_executions`] with a choice of how many host-specific layers of
+/// the file are checked ([`Scope`]).
+pub fn freeze_executions_in(
+    units: &[Loaded<Prepared>],
+    vf: &VarsFile,
+    mode: &Mode,
+    pairs: &[(usize, String)],
+    scope: Scope,
+) -> Result<Vec<Model>, Problems> {
+    // The layers that apply to the executions of `pairs`.
+    let applicable: Option<(BTreeSet<&str>, BTreeSet<String>)> = match scope {
+        Scope::All => None,
+        Scope::Selected => {
+            let hosts: BTreeSet<&str> = pairs.iter().map(|(_, h)| h.as_str()).collect();
+            let groups = match mode {
+                Mode::Inventory(inv) => hosts.iter().flat_map(|h| groups_of(inv, h)).collect(),
+                Mode::Single => BTreeSet::new(),
+            };
+            Some((hosts, groups))
+        }
+    };
     let declared: Vec<BTreeMap<&str, (&Value, bool)>> = units
         .iter()
         .map(|u| u.item.declared().map(|(n, v, s)| (n, (v, s))).collect())
@@ -353,7 +404,12 @@ pub fn freeze_executions(
 
     // Override problems: names, types, sensitivity, layers and the mode.
     let mut problems = Vec::new();
-    for (label, name, value) in vf.entries() {
+    for (layer, label, name, value) in vf.entries() {
+        let in_scope = match (&applicable, layer) {
+            (None, _) | (Some(_), Layer::Common) => true,
+            (Some((hosts, _)), Layer::Host(h)) => hosts.contains(h),
+            (Some((_, groups)), Layer::Group(g)) => groups.contains(g),
+        };
         let mut declaring = 0;
         for (u, decl) in units.iter().zip(&declared) {
             let Some((default, sensitive)) = decl.get(name.as_str()) else {
@@ -366,7 +422,7 @@ pub fn freeze_executions(
                      file cannot override a sensitive variable",
                     u.label
                 ));
-            } else if default.type_name() != value.type_name() {
+            } else if in_scope && default.type_name() != value.type_name() {
                 problems.push(format!(
                     "{label}: variable {name}: recipe {} declares {} {}, the variables file \
                      gives {} {}",
@@ -378,7 +434,7 @@ pub fn freeze_executions(
                 ));
             }
         }
-        if declaring == 0 {
+        if in_scope && declaring == 0 {
             problems.push(format!(
                 "{label}: variable {name} is not declared by any recipe of this run"
             ));
@@ -794,6 +850,84 @@ mod tests {
             assert_eq!(var(&m[1], "root"), s(w2));
             assert_eq!(var(&m[0], "port"), Value::Int(80), "default kept");
         }
+    }
+
+    /// `Scope::Selected` checks only the layers that apply to the hosts in
+    /// `pairs`; everything structural, the common layer and the ban on
+    /// overriding a sensitive variable stay global. `Scope::All` is v1.6.0.
+    #[test]
+    fn a_selected_scope_checks_only_the_layers_of_the_selected_hosts() {
+        let d = tempfile::tempdir().unwrap();
+        let sens = "version: 1\nvars:\n  root: { value: /ok }\n  port: { value: 80 }\n  tok: { value: s, sensitive: true }\nresources:\n  - id: index\n    type: file\n    with: { path: \"{{ vars.root }}/index.html\", content: \"{{ vars.port }} {{ vars.tok }}\" }\n";
+        let units = vec![recipe(&d, "site.yaml", &SITE.replace("CHANGE_ME", "/ok"))];
+        let sunits = vec![recipe(&d, "sens.yaml", sens)];
+        let inv = inventory(&[
+            ("web", &["web01", "web02"]),
+            ("db", &["db01"]),
+            ("linux", &["web01", "web02", "db01"]),
+            ("ops", &["web01"]),
+        ]);
+        let mode = Mode::Inventory(&inv);
+        let web = pairs(&[(0, "web01"), (0, "web02")]);
+        let run = |units: &[Loaded<Prepared>], body: &str, scope: Scope| {
+            freeze_executions_in(units, &vars(body), &mode, &web, scope)
+        };
+        // (file, outcome with Scope::Selected, outcome with Scope::All) for
+        // the hosts web01 and web02; true = accepted.
+        let cases: [(&str, bool, bool); 12] = [
+            // db01 is not selected: its own layer and its group's layer are
+            // not checked ...
+            ("version: 1\nhosts: { db01: { port: x } }\n", true, false),
+            ("version: 1\ngroups: { db: { port: x } }\n", true, false),
+            ("version: 1\nhosts: { db01: { typo: 1 } }\n", true, false),
+            // ... a selected host's, a selected group's and the common layer are.
+            ("version: 1\nhosts: { web01: { port: x } }\n", false, false),
+            ("version: 1\ngroups: { web: { port: x } }\n", false, false),
+            ("version: 1\ngroups: { ops: { port: x } }\n", false, false),
+            ("version: 1\ngroups: { linux: { port: x } }\n", false, false),
+            ("version: 1\nvars: { port: x }\n", false, false),
+            ("version: 1\nvars: { nope: 1 }\n", false, false),
+            // The structure stays global: a host the inventory does not
+            // define, a group it does not define.
+            ("version: 1\nhosts: { ghost: { port: 1 } }\n", false, false),
+            ("version: 1\ngroups: { ghost: { port: 1 } }\n", false, false),
+            // Valid values for an unselected host change nothing.
+            ("version: 1\nhosts: { db01: { port: 9 } }\n", true, true),
+        ];
+        for (i, (body, selected, all)) in cases.iter().enumerate() {
+            assert_eq!(
+                run(&units, body, Scope::Selected).is_ok(),
+                *selected,
+                "selected, case {i}"
+            );
+            assert_eq!(run(&units, body, Scope::All).is_ok(), *all, "all, case {i}");
+        }
+        // A sensitive variable cannot be overridden in any layer, selected or not.
+        for body in [
+            "version: 1\nhosts: { db01: { tok: x } }\n",
+            "version: 1\ngroups: { db: { tok: x } }\n",
+            "version: 1\nvars: { tok: x }\n",
+        ] {
+            for scope in [Scope::Selected, Scope::All] {
+                let p = run(&sunits, body, scope).unwrap_err().0;
+                assert!(p.iter().any(|l| l.contains("sensitive")), "{body}: {p:?}");
+            }
+        }
+        // Group conflicts are only looked for in the selected hosts.
+        let conflict = "version: 1\ngroups: { web: { port: 1 }, ops: { port: 2 } }\n";
+        assert!(
+            run(&units, conflict, Scope::Selected).is_err(),
+            "web01 is in both"
+        );
+        let only_web02 = pairs(&[(0, "web02")]);
+        assert!(
+            freeze_executions_in(&units, &vars(conflict), &mode, &only_web02, Scope::Selected)
+                .is_ok(),
+            "web02 is only in web"
+        );
+        assert!(
+            freeze_executions_in(&units, &vars(conflict), &mode, &only_web02, Scope::All).is_ok()
+        );
     }
 
     #[test]

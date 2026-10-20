@@ -4,6 +4,26 @@ All notable changes to Sinter are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`--limit` narrows a run to some hosts of an inventory.** `plan`, `apply`,
+  `audit` and `validate --vars-file` take `--limit <ITEMS>` with `--inventory`:
+  a comma-separated list of host names, group names, `host:<name>`,
+  `group:<name>` and patterns (`*`, `?`, matching host names), for example
+  `--limit web01`, `--limit web01,web02` or `--limit 'web-*'`. Only hosts a
+  recipe's `targets` select and `--limit` names run; the others get no
+  `ssh -G`, no connection, no command and no file change, and their
+  host-specific variable errors do not stop the run (structure, shared
+  definitions and the ban on overriding a sensitive variable still apply to
+  the whole file). A `--limit` that names nothing, is ambiguous (a name that
+  is both a host and a group), or would run nothing is exit 2. Without
+  `--limit`, nothing changes. Text output adds a `limit:` line; JSON adds
+  `limit` and `excluded_by` on the hosts left out; with `validate --vars-file`
+  it also adds `variables.targeted_executions`. For library users,
+  `inventory::HostMatch` gains a private field (build it with `resolve`, not a
+  struct literal) and `Resolution::selected()` now means "targeted and not left
+  out by `--limit`"; `targeted()` is the selection before `--limit`.
+
 ### Changed
 
 - **`validate --vars-file` now checks the variables file.** Until now

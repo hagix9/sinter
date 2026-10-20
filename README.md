@@ -191,6 +191,8 @@ sinter apply nginx.yaml --inventory hosts.yaml
 - A host in the inventory is never a target by itself: with `--inventory`, a
   recipe without `targets` is an error, and hosts no recipe selects are never
   contacted.
+- `--limit web01` (or `web01,web02`, `group:web`, `'web-*'`) runs only those of
+  the selected hosts; the rest are never contacted.
 - A bundle (`version: 1` + `recipes: [common.yaml, nginx.yaml]`) runs several
   recipes; each is resolved against its own `targets`.
 - `apply` stops at the first execution that exits non-zero (for any reason)

@@ -52,6 +52,14 @@ On success the output adds `ok: variables file <path> checked: N
 execution(s)` and, with `--format json`, a `variables` object (`file`,
 `executions`).
 
+*New in the next release.* With `--vars-file` and `--inventory`, `--limit`
+narrows the check to the hosts it selects, exactly as it does for `plan` (see
+[Limiting a run](#limiting-a-run)): a wrong host-specific value of a host that
+is left out does not fail `validate`. The output adds `limit` (the items) and
+`variables.targeted_executions` in JSON, and a line `ok: --limit <items>
+selects N of M execution(s)` in text. Without `--vars-file`, `validate` ignores
+`--limit`, as it ignores the other target options.
+
 ## plan
 
 ```sh
@@ -130,6 +138,7 @@ except `--vars-file` and the `--inventory` and `--host` that go with it.
 |------|---------|-------------|
 | `--host <HOST>` | localhost | SSH host or `~/.ssh/config` `Host` alias. Omit for local execution. |
 | `--inventory <PATH>` (alias `--hosts`) | — | Hosts and groups; each recipe runs only on the hosts its `targets` select. See [Multiple hosts](#multiple-hosts). Mutually exclusive with `--host`. |
+| `--limit <ITEMS>` | — | With `--inventory`: run only on these hosts (a comma-separated list of host names, group names, `host:<name>`, `group:<name>` and patterns). See [Limiting a run](#limiting-a-run). |
 | `--vars-file <PATH>` | — | Variables file (YAML or TOML) with values for the whole run, per inventory group and per host, for variables the recipes declare. See [Host and group variables](#host-and-group-variables). |
 | `--port <PORT>` | inventory, ssh_config `Port`, else `22` | SSH port. |
 | `--user <USER>` | inventory, ssh_config `User`, else `$USER` | SSH user. |
@@ -240,10 +249,93 @@ Hosts that no recipe selects are never resolved or contacted. `targets`
 only apply with an inventory: `--host` (or no host, i.e. localhost) keeps
 the single-target behavior and ignores `targets`.
 
-There are no nested groups, patterns, an implicit "all" group, dynamic
-inventory or parallel runs. Host and group variables come from a separate
+There are no nested groups, an implicit "all" group, dynamic inventory or
+parallel runs; `targets` names hosts and groups exactly, and patterns exist
+only in `--limit`. Host and group variables come from a separate
 file (available from v1.6.0): see
 [Host and group variables](#host-and-group-variables).
+
+### Limiting a run
+
+*New in the next release.*
+
+`--limit <ITEMS>` runs a recipe on some of the hosts its `targets` select
+instead of all of them. It needs `--inventory`; with `--host` or a local run it
+is an error (exit 2). It never adds a host: a host runs only if a recipe's
+`targets` select it **and** `--limit` names it.
+
+```sh
+sinter plan  nginx.yaml --inventory hosts.yaml --limit web01
+sinter apply nginx.yaml --inventory hosts.yaml --limit web01,web02
+sinter apply nginx.yaml --inventory hosts.yaml --limit group:web
+sinter audit nginx.yaml --inventory hosts.yaml --limit 'web*'
+```
+
+`<ITEMS>` is a comma-separated list (at most 256 items of at most 64
+characters, with no spaces). Each item is one of:
+
+| Item | Selects |
+|------|---------|
+| `web01` | the host `web01`, or the hosts of the group `web01` |
+| `host:web01` | the host `web01` only |
+| `group:web` | the hosts of the group `web` only |
+| `web*`, `web0?` | the hosts whose names match; `*` is any run of characters, `?` one character. A pattern never matches a group; `host:web*` is the same. |
+
+A bare name that is both a host and a group is ambiguous: write `host:` or
+`group:`. There is no exclusion (`!`), and the option may be given once. Quote
+a pattern so your shell does not expand it.
+
+The selection is made first, before the OpenSSH configuration is read (`ssh
+-G`, which can run local commands through `Match exec`), before any
+connection and before any variable of a host is resolved, so a host left out
+is never contacted, never has its SSH configuration evaluated and never has a
+file changed. Each of these is exit 2, with nothing contacted:
+
+- an empty list or item, a character outside host-name rules, or a repeated
+  separator;
+- a name that is neither a host nor a group of the inventory, and a pattern
+  that matches no host;
+- an item that reaches no host any recipe selects (it would run nothing);
+- a name that is both a host and a group, written without `host:`/`group:`.
+
+In a bundle each recipe runs on the selected hosts it targets; a recipe with
+no selected host is not run. With a variables file such a recipe is checked
+with its own defaults only, so a default that does not pass the static checks
+by itself (a relative path, say) makes the run exit 2. The value of a host
+that was left out is never used to fill it in, and neither is the `vars` layer
+of the file.
+
+With `--vars-file`, what concerns the structure is checked for the whole file
+and inventory as before (syntax, schema, that every `groups` and `hosts` key
+exists, the common `vars`, and the refusal to set a sensitive variable in any
+layer, even for a host left out). What concerns a host is checked for the
+hosts that run: their own values, the values of their groups, group conflicts
+that affect them. A wrong value that only a host left out would receive does
+not stop the run, and neither does a misspelled variable name in the layer of
+a host that is left out (the value is never used or printed). Without
+`--limit` every layer is checked, as before.
+
+What `--limit` does not cover, by design:
+
+- The check that two hosts do not resolve to the same address and port
+  compares only the hosts that run.
+- An `audit --limit` that exits 0 says nothing about the hosts left out; it is
+  not a statement that the whole inventory is clean.
+- `excluded_by` currently has the single value `"limit"`; ignore values you do
+  not know, as with any new field.
+
+The text output adds a `limit:` line and marks the hosts left out:
+
+```text
+== target resolution ==
+limit: web01
+recipe nginx (nginx.yaml)
+  db01   SKIP   no matching target
+  web01  MATCH  group:web
+  web02  SKIP   excluded by --limit (matched: group:web)
+  selected 1, excluded 2 (1 by --limit)
+executions: 1 (1 recipe(s), 3 host(s))
+```
 
 ### Bundles
 
@@ -972,7 +1064,8 @@ document for the whole invocation once every execution has been attempted:
 | `exit_code` | integer | The invocation exit code. |
 | `bundle` | object or null | `name`, `path` for a bundle. |
 | `inventory` | string or null | Inventory path. |
-| `resolution` | array or null | With an inventory: per recipe, `recipe`, `path`, and `hosts` (every inventory host: `name`, `selected` boolean, `reasons` such as `"group:web"`). |
+| `resolution` | array or null | With an inventory: per recipe, `recipe`, `path`, and `hosts` (every inventory host: `name`, `selected` boolean, `reasons` such as `"group:web"`; `excluded_by`, `"limit"`, only on a host that `--limit` left out, whose `selected` is then false and whose `reasons` are kept). |
+| `limit` | array | Only with `--limit`: the items as given, without repeats. |
 | `executions` | array | One object per (recipe, host), in execution order. |
 
 Execution object: `recipe` (string), `target` (`name`, and `host`, `port`,
