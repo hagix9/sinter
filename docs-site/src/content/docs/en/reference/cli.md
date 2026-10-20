@@ -57,8 +57,21 @@ narrows the check to the hosts it selects, exactly as it does for `plan` (see
 [Limiting a run](#limiting-a-run)): a wrong host-specific value of a host that
 is left out does not fail `validate`. The output adds `limit` (the items) and
 `variables.targeted_executions` in JSON, and a line `ok: --limit <items>
-selects N of M execution(s)` in text. Without `--vars-file`, `validate` ignores
-`--limit`, as it ignores the other target options.
+selects N of M execution(s)` in text.
+
+*New in the next release.* `--limit` is checked by `validate` with or without
+`--vars-file`. Without a variables file, `validate --inventory <PATH> --limit
+<ITEMS>` reads the inventory, resolves each recipe's `targets` against it and
+evaluates `--limit`, the way `plan` does before it contacts a host: a bad
+`--limit` (syntax, an unknown host or group, an ambiguous name, a pattern that
+matches nothing, an item no recipe's `targets` reach), a missing or broken
+inventory, a recipe without `targets` and `--host` together with `--inventory`
+are exit 2, with the messages `plan` prints. It resolves no variable beyond
+what loading a recipe does for the recipes some host runs, contacts no host,
+runs no `ssh` and writes nothing. The JSON document adds `limit` (the items),
+`selected_executions` and `targeted_executions`; the text output adds the
+`ok: --limit … selects N of M execution(s)` line. Without `--limit`, `validate`
+reads no inventory and ignores the other target options, as before.
 
 ## plan
 
@@ -298,12 +311,29 @@ file changed. Each of these is exit 2, with nothing contacted:
 - an item that reaches no host any recipe selects (it would run nothing);
 - a name that is both a host and a group, written without `host:`/`group:`.
 
-In a bundle each recipe runs on the selected hosts it targets; a recipe with
-no selected host is not run. With a variables file such a recipe is checked
-with its own defaults only, so a default that does not pass the static checks
-by itself (a relative path, say) makes the run exit 2. The value of a host
-that was left out is never used to fill it in, and neither is the `vars` layer
-of the file.
+In a bundle each recipe runs on the selected hosts it targets. A recipe that
+`--limit` leaves without a host is **skipped**: no value from the variables
+file or from a host is applied to it, no model is built for running it, no
+execution is planned for it and its hosts get no `ssh -G`. So a placeholder default, or a value the variables file does not give
+it, no longer stops the hosts that do run. It is still held to what does not
+depend on the value of a variable: it is read as a document (syntax, schema,
+includes, variable declarations, its `targets` against the inventory, its place
+in the bundle) and its structure is checked as when it runs (unknown resource
+types and fields, duplicate ids, `depends_on` and `notify` references and
+cycles, secret references, variables that are not declared, and the other
+static checks of a resource). The ban on setting a sensitive variable it
+declares still applies. What is left out is a resource whose static check fails
+on a field that references a variable the recipe declares (a path built from a
+placeholder, say): that check is not made, and neither are the checks after it
+for that resource, whatever field they concern and even when the cause is not
+the variable's value (a second, undeclared variable in the same path, an empty
+`owner`, `content` together with `source`, a secret reference in another field,
+a conflict over what two resources own). All of them are made, with the
+recipe's real values, when a host runs the recipe. Text output shows `SKIP   recipe
+not run: --limit leaves no host for it` under the recipe, the resolution keeps
+the bundle order, and JSON marks the recipe in `resolution` with `excluded_by:
+"limit"`. `validate` lists it as `skip` (text) or with `excluded_by` and null
+counts (JSON). Without `--limit` every recipe is checked as before.
 
 With `--vars-file`, what concerns the structure is checked for the whole file
 and inventory as before (syntax, schema, that every `groups` and `hosts` key
@@ -964,7 +994,10 @@ the whole 1.x series. `sinter mcp` is governed by the
 | `vars` | integer | Number of vars. |
 | `warnings` | array of strings | Present only when non-empty (since v1.5.1): non-fatal findings such as `{{ … }}` in `template.vars`. In a bundle document each recipe entry carries its own `warnings`. With `--vars-file` they cover every checked execution, each listed once, at most 50 per recipe. |
 | `warnings_omitted` | integer | Present only with `--vars-file` and only when a recipe has more than 50 warnings; the value is the number left out of `warnings` (next release). In a bundle document it is per recipe entry. |
-| `variables` | object | Present only with `--vars-file` (next release): `file` (string, the path as given) and `executions` (integer, the number of (recipe, host) executions checked). |
+| `variables` | object | Present only with `--vars-file` (next release): `file` (string, the path as given) and `executions` (integer, the number of (recipe, host) executions checked; with `--limit`, those it leaves) and, with `--limit`, `targeted_executions` (before `--limit`). |
+| `limit` | array of strings | Present only with `--limit` (next release): the items as given. |
+| `selected_executions`, `targeted_executions` | integer | Present only with `--limit` and no `--vars-file` (next release): the (recipe, host) executions `--limit` leaves, and those the recipes' `targets` select. |
+| `excluded_by` | string | In a bundle document, on the entry of a recipe no host runs because of `--limit` (next release): `"limit"`; its `resources`, `handlers` and `vars` are then `null`, and it is not counted in the totals. |
 
 ### plan and apply
 
@@ -1064,7 +1097,7 @@ document for the whole invocation once every execution has been attempted:
 | `exit_code` | integer | The invocation exit code. |
 | `bundle` | object or null | `name`, `path` for a bundle. |
 | `inventory` | string or null | Inventory path. |
-| `resolution` | array or null | With an inventory: per recipe, `recipe`, `path`, and `hosts` (every inventory host: `name`, `selected` boolean, `reasons` such as `"group:web"`; `excluded_by`, `"limit"`, only on a host that `--limit` left out, whose `selected` is then false and whose `reasons` are kept). |
+| `resolution` | array or null | With an inventory: per recipe, `recipe`, `path`, and `hosts` (every inventory host: `name`, `selected` boolean, `reasons` such as `"group:web"`; `excluded_by`, `"limit"`, only on a host that `--limit` left out, whose `selected` is then false and whose `reasons` are kept; the recipe entry itself carries `excluded_by: "limit"` when `--limit` leaves it no host and it is skipped). |
 | `limit` | array | Only with `--limit`: the items as given, without repeats. |
 | `executions` | array | One object per (recipe, host), in execution order. |
 

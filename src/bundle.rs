@@ -31,6 +31,11 @@ pub struct RecipeUnit {
     pub label: String,
     pub path: PathBuf,
     pub model: Model,
+    /// The recipe was parsed and checked but not frozen, because no host runs
+    /// it (`--limit` left every host of its `targets` out): `model` is then
+    /// [`Model::unfrozen_stub`], which carries only `targets`. Such a recipe
+    /// has no execution.
+    pub unfrozen: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +103,7 @@ impl Loaded<Model> {
             label: self.label,
             path: self.path,
             model: self.item,
+            unfrozen: false,
         }
     }
 }
@@ -126,14 +132,25 @@ impl PreparedSource {
     /// recipe (in order). Every part of a model it is read for — `targets`,
     /// `backups`, secret references — is static, so any host's model serves.
     pub fn into_source(self, models: Vec<Model>) -> Source {
+        self.into_source_partial(models.into_iter().map(Some).collect())
+    }
+
+    /// Like [`PreparedSource::into_source`], where a recipe with no model
+    /// (`None`: no host runs it) is kept unfrozen, with a stub that carries
+    /// only its `targets` (see [`Model::unfrozen_stub`]).
+    pub fn into_source_partial(self, models: Vec<Option<Model>>) -> Source {
         let units: Vec<RecipeUnit> = self
             .units
             .into_iter()
             .zip(models)
-            .map(|(u, model)| RecipeUnit {
-                label: u.label,
-                path: u.path,
-                model,
+            .map(|(u, model)| {
+                let unfrozen = model.is_none();
+                RecipeUnit {
+                    model: model.unwrap_or_else(|| Model::unfrozen_stub(u.item.targets().cloned())),
+                    label: u.label,
+                    path: u.path,
+                    unfrozen,
+                }
             })
             .collect();
         match self.bundle {

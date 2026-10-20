@@ -19,10 +19,27 @@ All notable changes to Sinter are documented in this file.
   is both a host and a group), or would run nothing is exit 2. Without
   `--limit`, nothing changes. Text output adds a `limit:` line; JSON adds
   `limit` and `excluded_by` on the hosts left out; with `validate --vars-file`
-  it also adds `variables.targeted_executions`. For library users,
+  it also adds `variables.targeted_executions`. A recipe of a bundle that
+  `--limit` leaves without a host is skipped: no value from the variables
+  file or a host is applied to it and no model is built for running it, so a
+  placeholder default or a value the variables file does not give it no longer
+  stops the hosts that run. It is still read as a document and its structure is
+  checked (unknown resource types and fields, duplicate ids,
+  `depends_on`/`notify`, secret references, undeclared variables); only a
+  resource whose static check fails on a field referencing a variable the
+  recipe declares is left to the time a host runs the recipe, together with
+  the checks after it for that resource. Text shows `SKIP   recipe not run: --limit leaves no host for it`,
+  JSON `excluded_by: "limit"` on its `resolution` entry, and `validate` a
+  `skip` line. `validate` checks an explicit `--limit` with or without
+  `--vars-file` (the inventory, the recipes' `targets` and the selection; JSON
+  adds `limit`, `selected_executions`, `targeted_executions`). For library users,
   `inventory::HostMatch` gains a private field (build it with `resolve`, not a
   struct literal) and `Resolution::selected()` now means "targeted and not left
   out by `--limit`"; `targeted()` is the selection before `--limit`.
+  `bundle::RecipeUnit` gains a public `unfrozen` field (a recipe no host runs;
+  its `model` is then `Model::unfrozen_stub`, which has only `targets`), so
+  struct literals need it; `PreparedSource::into_source_partial` and
+  `Prepared::check_structure` are new.
 
 ### Changed
 

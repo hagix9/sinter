@@ -818,7 +818,7 @@ fn validate_with_a_limit_checks_the_selected_hosts_only() {
         listeners.0.accepted() + listeners.1.accepted() + listeners.2.accepted(),
         0
     );
-    assert_eq!(snapshot(f.dir.path()), before);
+    assert!(snapshot(f.dir.path()) == before, "a file changed");
 }
 
 #[test]
@@ -908,78 +908,6 @@ fn a_bundle_runs_each_recipe_where_it_is_targeted_and_limited() {
 }
 
 #[test]
-fn a_bundle_recipe_with_nothing_selected_needs_values_that_stand_alone() {
-    let f = Fx::new();
-    let ports = common::ClosedPorts::reserve(3);
-    let inv = f.inventory([ports.port(0), ports.port(1), ports.port(2)]);
-    // The db recipe has no default for `root`.
-    f.write("web.yaml", WEB);
-    f.write(
-        "db.yaml",
-        "version: 1\ntargets:\n  groups: [db]\nvars:\n  root: { value: CHANGE_ME }\nresources:\n  - id: db\n    type: file\n    with: { path: \"{{ vars.root }}/db.conf\", content: y }\n",
-    );
-    let b = f.write("b.yaml", "version: 1\nrecipes: [web.yaml, db.yaml]\n");
-    let v = f.write("v.yaml", "version: 1\nhosts: { db01: { root: /srv/db } }\n");
-    // Without --limit db01 supplies its own value.
-    let o = f.run(&[
-        "plan",
-        &b,
-        "--inventory",
-        &inv,
-        "--vars-file",
-        &v,
-        "--no-ssh-config",
-    ]);
-    assert_eq!(o.status.code(), Some(3), "{}", text(&o.stderr));
-    // With --limit web01 the db recipe has no execution; db01's value is not
-    // used to fill it in, so its own defaults must stand alone (D-15).
-    let o = f.run(&[
-        "plan",
-        &b,
-        "--inventory",
-        &inv,
-        "--vars-file",
-        &v,
-        "--limit",
-        "web01",
-        "--no-ssh-config",
-    ]);
-    assert_eq!(o.status.code(), Some(2), "{}", text(&o.stderr));
-    assert!(
-        text(&o.stderr).contains("recipe db: --limit leaves no host to run it on"),
-        "{}",
-        text(&o.stderr)
-    );
-    assert!(!text(&o.stderr).contains("/srv/db"));
-    assert!(f.ssh_log().is_empty());
-    // Defaults that stand alone make the same command line work, and then the
-    // bundle with a variables file contacts only the selected host.
-    f.write(
-        "db.yaml",
-        &std::fs::read_to_string(f.path("db.yaml"))
-            .unwrap()
-            .replace("CHANGE_ME", "/srv/default"),
-    );
-    let o = f.run(&[
-        "plan",
-        &b,
-        "--inventory",
-        &inv,
-        "--vars-file",
-        &v,
-        "--limit",
-        "web01",
-    ]);
-    assert_eq!(o.status.code(), Some(3), "{}", text(&o.stderr));
-    let log = f.ssh_log();
-    assert_eq!(log.len(), 1, "{log:?}");
-    assert!(
-        log[0].contains(&format!("-p {} --", ports.port(0))),
-        "{log:?}"
-    );
-}
-
-#[test]
 fn help_describes_the_option() {
     let f = Fx::new();
     for cmd in PHASES {
@@ -987,4 +915,732 @@ fn help_describes_the_option() {
         let h = text(&o.stdout);
         assert!(h.contains("--limit <ITEMS>"), "{cmd}: {h}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2.5, D-15: a recipe no host runs is not frozen
+// ---------------------------------------------------------------------------
+
+/// A recipe for group `db` whose own default cannot be frozen (a relative
+/// path): it only works where a variables file or a host gives `root`.
+const PLACEHOLDER_DB: &str = "version: 1\ntargets:\n  groups: [db]\nvars:\n  root: { value: CHANGE_ME }\n  dbtok: { value: s, sensitive: true }\nresources:\n  - id: db\n    type: file\n    with: { path: \"{{ vars.root }}/db.conf\", content: y }\n";
+
+/// web, db (placeholder default), mon (group web): in bundle order.
+fn three_recipe_bundle(f: &Fx, db: &str) -> String {
+    f.write("web.yaml", WEB);
+    f.write("db.yaml", db);
+    f.write("mon.yaml", &WEB.replace("id: index", "id: mon"));
+    f.write(
+        "b.yaml",
+        "version: 1\nrecipes: [web.yaml, db.yaml, mon.yaml]\n",
+    )
+}
+
+fn recipe_names(o: &Output) -> Vec<String> {
+    json(o)["resolution"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["recipe"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn a_recipe_no_host_runs_does_not_stop_the_run_with_or_without_a_variables_file() {
+    let f = Fx::new();
+    let ports = common::ClosedPorts::reserve(3);
+    let inv = f.inventory([ports.port(0), ports.port(1), ports.port(2)]);
+    let b = three_recipe_bundle(&f, PLACEHOLDER_DB);
+    let nothing = f.write("nothing.yaml", "version: 1\n");
+    let common = f.write("common.yaml", "version: 1\nvars: { root: /common }\n");
+    // No file; a file without a value for `root`; a file with a common value.
+    for vars in [None, Some(&nothing), Some(&common)] {
+        for phase in PHASES {
+            let mut args = vec![
+                phase,
+                &b,
+                "--inventory",
+                &inv,
+                "--limit",
+                "web01",
+                "--no-ssh-config",
+                "--format",
+                "json",
+            ];
+            if let Some(v) = vars {
+                args.extend(["--vars-file", v]);
+            }
+            let o = f.run(&args);
+            // Closed ports: web and mon are attempted on web01 and fail to connect.
+            assert_eq!(
+                o.status.code(),
+                Some(3),
+                "{vars:?} {phase}: {}",
+                text(&o.stderr)
+            );
+            let doc = json(&o);
+            // Bundle order is kept; db is listed, with the reason, and not run.
+            assert_eq!(recipe_names(&o), ["web", "db", "mon"]);
+            let res = doc["resolution"].as_array().unwrap();
+            assert!(res[0].get("excluded_by").is_none());
+            assert_eq!(res[1]["excluded_by"], "limit");
+            assert!(res[2].get("excluded_by").is_none());
+            let ran: Vec<(String, String)> = doc["executions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| {
+                    (
+                        e["recipe"].as_str().unwrap().to_string(),
+                        e["target"]["name"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect();
+            let want: &[(&str, &str)] = &[("web", "web01"), ("mon", "web01")];
+            let want: Vec<(String, String)> = want
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect();
+            // apply stops at the first failure and reports the rest not_run.
+            assert_eq!(ran, want, "{vars:?} {phase}");
+            // The hosts of the db recipe all carry the reason that is theirs.
+            for h in res[1]["hosts"].as_array().unwrap() {
+                assert_eq!(h["selected"], false);
+                if h["name"] == "db01" {
+                    assert_eq!(h["excluded_by"], "limit");
+                    assert_eq!(h["reasons"], serde_json::json!(["group:db"]));
+                }
+            }
+        }
+    }
+    // The text output says so.
+    let o = f.run(&[
+        "plan",
+        &b,
+        "--inventory",
+        &inv,
+        "--limit",
+        "web01",
+        "--no-ssh-config",
+    ]);
+    let out = text(&o.stdout);
+    let (w, d, m) = (
+        out.find("recipe web (").unwrap(),
+        out.find("recipe db (").unwrap(),
+        out.find("recipe mon (").unwrap(),
+    );
+    assert!(w < d && d < m, "{out}");
+    assert!(
+        out.contains("SKIP   recipe not run: --limit leaves no host for it"),
+        "{out}"
+    );
+    assert!(
+        out.contains("executions: 2 (3 recipe(s), 3 host(s))"),
+        "{out}"
+    );
+}
+
+#[test]
+fn without_limit_a_placeholder_default_is_checked_as_before() {
+    let f = Fx::new();
+    let ports = common::ClosedPorts::reserve(3);
+    let inv = f.inventory([ports.port(0), ports.port(1), ports.port(2)]);
+    let b = three_recipe_bundle(&f, PLACEHOLDER_DB);
+    let nothing = f.write("nothing.yaml", "version: 1\n");
+    let common = f.write("common.yaml", "version: 1\nvars: { root: /common }\n");
+    let o = f.run(&["plan", &b, "--inventory", &inv, "--no-ssh-config"]);
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o.stderr));
+    assert!(text(&o.stderr).contains("path must be absolute: CHANGE_ME/db.conf"));
+    let o = f.run(&[
+        "plan",
+        &b,
+        "--inventory",
+        &inv,
+        "--vars-file",
+        &nothing,
+        "--no-ssh-config",
+    ]);
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o.stderr));
+    // A value in the file makes every execution valid: 4 executions, all attempted.
+    let o = f.run(&[
+        "plan",
+        &b,
+        "--inventory",
+        &inv,
+        "--vars-file",
+        &common,
+        "--no-ssh-config",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(o.status.code(), Some(3), "{}", text(&o.stderr));
+    assert_eq!(executed(&o), ["web01", "web02", "db01", "web01", "web02"]);
+    // And `--limit` that selects the recipe freezes it: its default must hold.
+    let o = f.run(&[
+        "plan",
+        &b,
+        "--inventory",
+        &inv,
+        "--limit",
+        "db01",
+        "--no-ssh-config",
+    ]);
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o.stderr));
+    assert!(text(&o.stderr).contains("path must be absolute: CHANGE_ME/db.conf"));
+}
+
+#[test]
+fn a_recipe_no_host_runs_is_still_parsed_and_its_declarations_still_count() {
+    let f = Fx::new();
+    let ports = common::ClosedPorts::reserve(3);
+    let inv = f.inventory([ports.port(0), ports.port(1), ports.port(2)]);
+    let common = f.write("common.yaml", "version: 1\n");
+    // What loading a recipe checks stays an error although no host runs it.
+    let broken: &[(&str, &str)] = &[
+        (
+            "yaml syntax",
+            "version: 1\ntargets: { groups: [db] }\nresources: [\n",
+        ),
+        (
+            "unknown field",
+            "version: 1\ntargets: { groups: [db] }\nbogus: 1\nresources: []\n",
+        ),
+        (
+            "bad version",
+            "version: 2\ntargets: { groups: [db] }\nresources: []\n",
+        ),
+        (
+            "unknown target group",
+            "version: 1\ntargets: { groups: [nosuch] }\nresources: []\n",
+        ),
+        ("no targets", "version: 1\nresources: []\n"),
+        (
+            "bad interpolation",
+            "version: 1\ntargets: { groups: [db] }\nresources:\n  - { id: d, type: file, with: { path: /x, content: \"{{ secret.nosuch }}\" } }\n",
+        ),
+        // What does not depend on a variable's value is checked too.
+        (
+            "unknown resource type",
+            "version: 1\ntargets: { groups: [db] }\nresources:\n  - { id: d, type: nosuchtype, with: {} }\n",
+        ),
+        (
+            "unknown resource field",
+            "version: 1\ntargets: { groups: [db] }\nresources:\n  - { id: d, type: file, with: { path: /x, nosuch: 1 } }\n",
+        ),
+        (
+            "duplicate resource id",
+            "version: 1\ntargets: { groups: [db] }\nresources:\n  - { id: d, type: file, with: { path: /x, content: y } }\n  - { id: d, type: file, with: { path: /y, content: y } }\n",
+        ),
+        (
+            "unknown depends_on",
+            "version: 1\ntargets: { groups: [db] }\nresources:\n  - { id: d, type: file, depends_on: [zz], with: { path: /x, content: y } }\n",
+        ),
+        (
+            "unknown notify handler",
+            "version: 1\ntargets: { groups: [db] }\nresources:\n  - { id: d, type: file, notify: [zz], with: { path: /x, content: y } }\n",
+        ),
+        (
+            "dependency cycle",
+            "version: 1\ntargets: { groups: [db] }\nresources:\n  - { id: a, type: file, depends_on: [b], with: { path: /x, content: y } }\n  - { id: b, type: file, depends_on: [a], with: { path: /y, content: y } }\n",
+        ),
+        (
+            "missing secret file",
+            "version: 1\ntargets: { groups: [db] }\nresources:\n  - { id: d, type: file, with: { path: /x, content: { secret: nosuch.age } } }\n",
+        ),
+        (
+            "undefined variable",
+            "version: 1\ntargets: { groups: [db] }\nresources:\n  - { id: d, type: file, with: { path: \"{{ vars.nope }}/x\", content: y } }\n",
+        ),
+        (
+            "literal relative path",
+            "version: 1\ntargets: { groups: [db] }\nresources:\n  - { id: d, type: file, with: { path: rel/x, content: y } }\n",
+        ),
+        (
+            "structure error next to a variable",
+            "version: 1\ntargets: { groups: [db] }\nvars: { root: { value: CHANGE_ME } }\nresources:\n  - { id: d, type: nosuchtype, with: { path: \"{{ vars.root }}/x\" } }\n",
+        ),
+    ];
+    for (what, body) in broken {
+        let b = three_recipe_bundle(&f, body);
+        for vars in [None, Some(&common)] {
+            for cmd in ["plan", "validate"] {
+                let mut args = vec![cmd, &b, "--inventory", &inv, "--limit", "web01"];
+                if let Some(v) = vars {
+                    args.extend(["--vars-file", v]);
+                }
+                if cmd == "plan" {
+                    args.push("--no-ssh-config");
+                }
+                let o = f.run(&args);
+                assert_eq!(
+                    o.status.code(),
+                    Some(2),
+                    "{what} {vars:?} {cmd}: {}",
+                    text(&o.stderr)
+                );
+                assert!(o.stdout.is_empty(), "{what} {vars:?} {cmd}");
+            }
+        }
+    }
+    // A missing recipe file of the bundle.
+    f.write("web.yaml", WEB);
+    let b = f.write(
+        "missing.yaml",
+        "version: 1\nrecipes: [web.yaml, nosuch.yaml]\n",
+    );
+    let o = f.run(&[
+        "plan",
+        &b,
+        "--inventory",
+        &inv,
+        "--limit",
+        "web01",
+        "--no-ssh-config",
+    ]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(f.ssh_log().is_empty());
+}
+
+#[test]
+fn sensitive_overrides_for_a_recipe_no_host_runs_are_refused() {
+    let f = Fx::new();
+    let ports = common::ClosedPorts::reserve(3);
+    let inv = f.inventory([ports.port(0), ports.port(1), ports.port(2)]);
+    // `dbtok` is declared sensitive only by the db recipe, which `--limit
+    // web01` leaves without a host.
+    let b = three_recipe_bundle(&f, PLACEHOLDER_DB);
+    for (what, body) in [
+        ("common", format!("vars: {{ dbtok: \"{CANARY}\" }}")),
+        (
+            "db01",
+            format!("hosts: {{ db01: {{ dbtok: \"{CANARY}\" }} }}"),
+        ),
+        (
+            "web01",
+            format!("hosts: {{ web01: {{ dbtok: \"{CANARY}\" }} }}"),
+        ),
+        (
+            "group db",
+            format!("groups: {{ db: {{ dbtok: \"{CANARY}\" }} }}"),
+        ),
+    ] {
+        let v = f.write("v.yaml", &format!("version: 1\n{body}\n"));
+        for phase in ["plan", "validate"] {
+            for format in ["text", "json"] {
+                let o = f.run(&[
+                    phase,
+                    &b,
+                    "--inventory",
+                    &inv,
+                    "--vars-file",
+                    &v,
+                    "--limit",
+                    "web01",
+                    "--no-ssh-config",
+                    "--format",
+                    format,
+                ]);
+                assert_eq!(o.status.code(), Some(2), "{what} {phase} {format}");
+                assert!(o.stdout.is_empty(), "{what} {phase} {format}");
+                let err = text(&o.stderr);
+                assert!(err.contains("sensitive"), "{what}: {err}");
+                assert!(!err.contains(CANARY), "LEAK {what} {phase} {format}");
+            }
+        }
+    }
+    assert!(f.ssh_log().is_empty());
+}
+
+#[test]
+fn a_recipe_no_host_runs_is_never_contacted_resolved_or_changed() {
+    let f = Fx::new();
+    let closed = common::ClosedPorts::reserve(1);
+    let (l2, l3) = (Listener::new(), Listener::new());
+    // web01 refuses at once; web02 and db01 listen and would be counted.
+    let inv = f.inventory([closed.port(0), l2.port(), l3.port()]);
+    let b = three_recipe_bundle(&f, PLACEHOLDER_DB);
+    let common = f.write("common.yaml", "version: 1\nvars: { root: /common }\n");
+    let before = snapshot(f.dir.path());
+    let _ = std::fs::remove_file(f.path("ssh.log"));
+    for phase in PHASES {
+        let o = f.run(&[
+            phase,
+            &b,
+            "--inventory",
+            &inv,
+            "--vars-file",
+            &common,
+            "--limit",
+            "web01",
+        ]);
+        assert_eq!(o.status.code(), Some(3), "{phase}: {}", text(&o.stderr));
+    }
+    assert_eq!(
+        l2.accepted() + l3.accepted(),
+        0,
+        "an excluded host was contacted"
+    );
+    // `ssh -G` ran for web01 only: 3 phases x 1 host (web and mon share it).
+    let log = f.ssh_log();
+    assert_eq!(log.len(), 3, "{log:?}");
+    assert!(
+        log.iter()
+            .all(|l| l.contains(&format!("-p {} --", closed.port(0)))),
+        "{log:?}"
+    );
+    assert!(snapshot(f.dir.path()) == before, "a file changed");
+}
+
+#[test]
+fn json_of_validate_and_plan_agree_on_what_is_skipped() {
+    let f = Fx::new();
+    let ports = common::ClosedPorts::reserve(3);
+    let inv = f.inventory([ports.port(0), ports.port(1), ports.port(2)]);
+    let common = f.write("common.yaml", "version: 1\nvars: { root: /common }\n");
+    // The skipped recipe is not frozen whether its own default would freeze
+    // or not.
+    let valid_db = PLACEHOLDER_DB.replace("CHANGE_ME", "/srv/db");
+    for (db, vars) in [
+        (PLACEHOLDER_DB, None),
+        (PLACEHOLDER_DB, Some(&common)),
+        (valid_db.as_str(), None),
+        (valid_db.as_str(), Some(&common)),
+    ] {
+        let b = three_recipe_bundle(&f, db);
+        let mut args = vec![
+            "validate",
+            &b,
+            "--inventory",
+            &inv,
+            "--limit",
+            "web01",
+            "--format",
+            "json",
+        ];
+        if let Some(v) = vars {
+            args.extend(["--vars-file", v]);
+        }
+        let o = f.run(&args);
+        assert_eq!(o.status.code(), Some(0), "{vars:?}: {}", text(&o.stderr));
+        let doc = json(&o);
+        let recipes = doc["recipes"].as_array().unwrap();
+        assert_eq!(recipes.len(), 3);
+        assert_eq!(recipes[1]["recipe"], "db");
+        assert_eq!(recipes[1]["excluded_by"], "limit");
+        assert!(recipes[1]["resources"].is_null() && recipes[1]["vars"].is_null());
+        assert!(recipes[0].get("excluded_by").is_none());
+        assert_eq!(recipes[0]["resources"], 1);
+        assert_eq!(doc["limit"], serde_json::json!(["web01"]));
+        // Totals count the recipes that are checked.
+        assert_eq!(doc["resources"], 2);
+        match vars {
+            Some(_) => {
+                assert_eq!(doc["variables"]["executions"], 2);
+                assert_eq!(doc["variables"]["targeted_executions"], 5);
+            }
+            None => {
+                assert_eq!(doc["selected_executions"], 2);
+                assert_eq!(doc["targeted_executions"], 5);
+                assert!(doc.get("variables").is_none());
+            }
+        }
+        let t = f.run(&{
+            let mut t = args.clone();
+            t[0] = "plan";
+            t.push("--no-ssh-config");
+            t
+        });
+        assert_eq!(t.status.code(), Some(3));
+        assert_eq!(recipe_names(&t), ["web", "db", "mon"]);
+    }
+    // Text.
+    let b = three_recipe_bundle(&f, PLACEHOLDER_DB);
+    let o = f.run(&["validate", &b, "--inventory", &inv, "--limit", "web01"]);
+    let out = text(&o.stdout);
+    assert!(
+        out.contains("skip  db: excluded by --limit, not frozen"),
+        "{out}"
+    );
+    assert!(
+        out.contains("ok: --limit web01 selects 2 of 5 execution(s)"),
+        "{out}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2.5, D-16: the ban on overriding a sensitive variable is global
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_sensitive_override_is_refused_in_every_layer_with_or_without_limit() {
+    let f = Fx::new();
+    let ports = common::ClosedPorts::reserve(3);
+    let inv = f.inventory([ports.port(0), ports.port(1), ports.port(2)]);
+    let r = f.write("r.yaml", WEB);
+    let layers = [
+        ("common", format!("vars: {{ tok: \"{CANARY}\" }}")),
+        (
+            "selected host",
+            format!("hosts: {{ web01: {{ tok: \"{CANARY}\" }} }}"),
+        ),
+        (
+            "unselected host",
+            format!("hosts: {{ web02: {{ tok: \"{CANARY}\" }} }}"),
+        ),
+        (
+            "host no recipe targets",
+            format!("hosts: {{ db01: {{ tok: \"{CANARY}\" }} }}"),
+        ),
+        (
+            "group of the host",
+            format!("groups: {{ web: {{ tok: \"{CANARY}\" }} }}"),
+        ),
+        (
+            "group of unselected hosts",
+            format!("groups: {{ db: {{ tok: \"{CANARY}\" }} }}"),
+        ),
+    ];
+    for (what, body) in &layers {
+        let v = f.write("v.yaml", &format!("version: 1\n{body}\n"));
+        for limit in [None, Some("web01"), Some("web02"), Some("web")] {
+            for phase in ["plan", "validate"] {
+                for format in ["text", "json"] {
+                    let mut args = vec![
+                        phase,
+                        &r,
+                        "--inventory",
+                        &inv,
+                        "--vars-file",
+                        &v,
+                        "--no-ssh-config",
+                        "--format",
+                        format,
+                    ];
+                    if let Some(l) = limit {
+                        args.extend(["--limit", l]);
+                    }
+                    let o = f.run(&args);
+                    let ctx = format!("{what} {limit:?} {phase} {format}");
+                    assert_eq!(o.status.code(), Some(2), "{ctx}: {}", text(&o.stderr));
+                    assert!(o.stdout.is_empty(), "{ctx}");
+                    assert!(text(&o.stderr).contains("sensitive"), "{ctx}");
+                    assert!(
+                        !text(&o.stderr).contains(CANARY) && !text(&o.stdout).contains(CANARY),
+                        "LEAK {ctx}"
+                    );
+                }
+            }
+        }
+    }
+    // An ordinary variable of an unselected host stays D-2: it does not stop a
+    // limited run (and does without --limit).
+    let v = f.write("v.yaml", "version: 1\nhosts: { web02: { root: 5 } }\n");
+    let o = f.run(&[
+        "plan",
+        &r,
+        "--inventory",
+        &inv,
+        "--vars-file",
+        &v,
+        "--no-ssh-config",
+        "--limit",
+        "web01",
+    ]);
+    assert_eq!(o.status.code(), Some(3));
+    let o = f.run(&[
+        "plan",
+        &r,
+        "--inventory",
+        &inv,
+        "--vars-file",
+        &v,
+        "--no-ssh-config",
+    ]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(f.ssh_log().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2.5, D-6: `validate --limit` checks the selection without a variables file
+// ---------------------------------------------------------------------------
+
+#[test]
+fn validate_with_a_limit_and_no_variables_file_checks_the_selection() {
+    let f = Fx::new();
+    let listeners = (Listener::new(), Listener::new(), Listener::new());
+    let inv = f.inventory([listeners.0.port(), listeners.1.port(), listeners.2.port()]);
+    let r = f.write("r.yaml", WEB);
+    let bad = f.write("bad.yaml", "hosts: [\n");
+    let plain = f.write("plain.yaml", "version: 1\nresources: []\n");
+    let before = snapshot(f.dir.path());
+    let v = |args: &[&str]| f.run(&[&["validate", &r][..], args].concat());
+    // Good selections.
+    for (limit, selected) in [
+        ("web01", 1),
+        ("host:web02", 1),
+        ("web", 2),
+        ("group:web", 2),
+        ("web0*", 2),
+        ("w?b01,web02", 2),
+        ("web01,web01", 1),
+    ] {
+        let o = v(&["--inventory", &inv, "--limit", limit]);
+        assert_eq!(o.status.code(), Some(0), "{limit}: {}", text(&o.stderr));
+        assert!(
+            text(&o.stdout).contains(&format!("selects {selected} of 2 execution(s)")),
+            "{limit}: {}",
+            text(&o.stdout)
+        );
+        let o = v(&["--inventory", &inv, "--limit", limit, "--format", "json"]);
+        let doc = json(&o);
+        assert_eq!(doc["selected_executions"], selected, "{limit}");
+        assert_eq!(doc["targeted_executions"], 2);
+        assert!(doc.get("variables").is_none());
+        assert_eq!(doc["status"], "ok");
+    }
+    // Refused selections, and the same text `plan` prints.
+    for limit in [
+        "",
+        "!!!",
+        "a,,b",
+        "web01,",
+        "group:web*",
+        "host:",
+        "-web",
+        "web 01",
+        "nosuch",
+        "host:web",
+        "group:web01",
+        "zz*",
+        "web01,nosuch",
+        "db01",
+        "group:db",
+    ] {
+        let o = v(&["--inventory", &inv, "--limit", limit]);
+        assert_eq!(o.status.code(), Some(2), "{limit:?}: {}", text(&o.stderr));
+        assert!(o.stdout.is_empty(), "{limit:?}");
+        let p = f.run(&[
+            "plan",
+            &r,
+            "--inventory",
+            &inv,
+            "--limit",
+            limit,
+            "--no-ssh-config",
+        ]);
+        assert_eq!(p.status.code(), Some(2), "{limit:?}");
+        // clap's own usage errors name the command; every other text is shared.
+        if !text(&o.stderr).starts_with("error: unexpected argument") {
+            assert_eq!(
+                text(&o.stderr),
+                text(&p.stderr),
+                "{limit:?}: validate and plan differ"
+            );
+        }
+    }
+    // An inventory is needed, and `--host` cannot be combined with it.
+    let o = v(&["--limit", "web01"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(
+        text(&o.stderr).contains("--limit needs --inventory"),
+        "{}",
+        text(&o.stderr)
+    );
+    let o = v(&["--host", "h", "--limit", "web01"]);
+    assert_eq!(o.status.code(), Some(2));
+    let o = v(&["--host", "h", "--inventory", &inv, "--limit", "web01"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(
+        text(&o.stderr).contains("mutually exclusive"),
+        "{}",
+        text(&o.stderr)
+    );
+    // The inventory must exist and be well formed; the recipe must declare targets.
+    let o = v(&["--inventory", "/nonexistent/hosts.yaml", "--limit", "web01"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert_eq!(
+        v(&["--inventory", &bad, "--limit", "web01"]).status.code(),
+        Some(2)
+    );
+    let o = f.run(&["validate", &plain, "--inventory", &inv, "--limit", "web01"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(
+        text(&o.stderr).contains("declares no targets"),
+        "{}",
+        text(&o.stderr)
+    );
+    // Two options at once are a parse error (exit 2) as for plan.
+    let o = v(&["--inventory", &inv, "--limit", "a", "--limit", "b"]);
+    assert_eq!(o.status.code(), Some(2));
+    // validate never connects, never runs ssh and never writes.
+    assert!(f.ssh_log().is_empty(), "{:?}", f.ssh_log());
+    assert_eq!(
+        listeners.0.accepted() + listeners.1.accepted() + listeners.2.accepted(),
+        0
+    );
+    assert!(snapshot(f.dir.path()) == before, "validate changed a file");
+}
+
+#[test]
+fn validate_without_a_limit_is_the_validate_it_was() {
+    let f = Fx::new();
+    let r = f.write("r.yaml", WEB);
+    // Target options are accepted and ignored, even contradicting ones, and no
+    // inventory is read.
+    for args in [
+        vec![],
+        vec!["--host", "h"],
+        vec!["--inventory", "/nonexistent/hosts.yaml"],
+        vec!["--host", "h", "--inventory", "/nonexistent/hosts.yaml"],
+    ] {
+        let o = f.run(&[&["validate", &r][..], &args[..]].concat());
+        assert_eq!(o.status.code(), Some(0), "{args:?}: {}", text(&o.stderr));
+        assert_eq!(
+            text(&o.stdout),
+            "ok: 1 resource(s), 0 handler(s), 2 var(s)\n",
+            "{args:?}"
+        );
+    }
+    let o = f.run(&["validate", &r, "--format", "json"]);
+    let doc = json(&o);
+    for key in [
+        "limit",
+        "selected_executions",
+        "targeted_executions",
+        "variables",
+    ] {
+        assert!(doc.get(key).is_none(), "{key}");
+    }
+    assert!(f.ssh_log().is_empty());
+}
+
+#[test]
+fn validate_with_a_limit_checks_the_recipes_some_host_runs_as_loading_does() {
+    let f = Fx::new();
+    let ports = common::ClosedPorts::reserve(3);
+    let inv = f.inventory([ports.port(0), ports.port(1), ports.port(2)]);
+    let b = three_recipe_bundle(&f, PLACEHOLDER_DB);
+    // Without --limit validate of the bundle fails on the placeholder, as ever.
+    let o = f.run(&["validate", &b]);
+    assert_eq!(o.status.code(), Some(2));
+    // --limit web01: the db recipe is not frozen, so the bundle validates.
+    let o = f.run(&["validate", &b, "--inventory", &inv, "--limit", "web01"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    // --limit db01: the db recipe runs, so its default must freeze.
+    let o = f.run(&["validate", &b, "--inventory", &inv, "--limit", "db01"]);
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o.stderr));
+    assert!(text(&o.stderr).contains("path must be absolute: CHANGE_ME/db.conf"));
+    // A variables file supplies the value: the same selection passes.
+    let common = f.write("common.yaml", "version: 1\nvars: { root: /common }\n");
+    let o = f.run(&[
+        "validate",
+        &b,
+        "--inventory",
+        &inv,
+        "--limit",
+        "db01",
+        "--vars-file",
+        &common,
+    ]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
 }

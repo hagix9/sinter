@@ -55,7 +55,20 @@ sinter validate <RECIPE|BUNDLE> [--format text|json] [ターゲットオプシ�
 を参照）。除外されたホスト固有の誤った値では `validate` は失敗しません。出力には
 JSON の `limit`（項目）と `variables.targeted_executions`、text の
 `ok: --limit <items> selects N of M execution(s)` の行が加わります。`--vars-file`
-がない `validate` は、他の target オプションと同様 `--limit` を無視します。
+がなくても `--limit` は検査されます。
+
+*次のリリースから。* `validate` は `--vars-file` の有無にかかわらず `--limit` を
+検査します。変数ファイルがないときの `validate --inventory <PATH> --limit <ITEMS>`
+は、インベントリを読み、各レシピの `targets` をそれに当て、`plan` がホストに接続
+する前に行うのと同じ方法で `--limit` を評価します。不正な `--limit`（構文、未知の
+ホストやグループ、あいまいな名前、何にも一致しないパターン、どのレシピの
+`targets` も選ばない項目）、存在しない・壊れたインベントリ、`targets` のない
+レシピ、`--host` と `--inventory` の併用は、`plan` と同じメッセージで終了コード 2
+です。ホストが実行するレシピについて、レシピを読み込むときに行う以上の変数の解決
+はしません。ホストへの接続も `ssh` の実行もファイルの書き込みもありません。JSON
+には `limit`（項目）、`selected_executions`、`targeted_executions` が加わり、text
+には `ok: --limit … selects N of M execution(s)` の行が加わります。`--limit` が
+なければ、従来どおりインベントリを読まず、他の target オプションを無視します。
 
 ## plan
 
@@ -296,10 +309,26 @@ sinter audit nginx.yaml --inventory hosts.yaml --limit 'web*'
 - ホストとグループの両方にある名前を `host:`/`group:` なしで書いたもの
 
 バンドルでは、各レシピは自分が対象とするホストのうち選ばれたものだけで実行
-します。選ばれたホストがないレシピは実行されません。変数ファイルがあるとき、
-そのレシピはレシピ自身の既定値だけで検査されるので、既定値が単独では静的検査を
-通らない（たとえば相対パス）と終了コード 2 になります。除外されたホストの値でも、
-ファイルの `vars` の層でも補いません。
+します。`--limit` によってホストがなくなったレシピは**スキップ**します。変数ファイルや
+ホストの値は適用せず、実行用のモデルも作らず、実行も計画せず、そのホストに
+`ssh -G` も走りません。
+したがって、プレースホルダの既定値や、変数ファイルが与えない値があっても、実行する
+ホストは止まりません。変数の値に依存しない検査は引き続き課します。文書としての
+読み込みと検査（構文、スキーマ、include、変数の宣言、インベントリに対する
+`targets`、バンドル内の位置）に加え、レシピが実行されるときと同じ構造の検査
+（未知のリソースの種類やフィールド、id の重複、`depends_on`・`notify` の参照と
+循環、シークレット参照、宣言されていない変数、リソースのその他の静的検査）を行い、
+そのレシピが宣言する sensitive な変数を設定する禁止も有効です。行わないのは、
+そのレシピが宣言する変数を参照するフィールドで静的検査が失敗したリソースです
+（プレースホルダから組み立てたパスなど）。その検査は行わず、そのリソースの以降の
+検査も、どのフィールドに関するものでも、原因が変数の値でなくても行いません
+（同じパスの中の宣言されていない 2 つ目の変数、空の `owner`、`content` と `source`
+の併用、別のフィールドのシークレット参照、2 つのリソースが所有するものの衝突）。
+これらはすべて、ホストがそのレシピを実行するときに、レシピの実際の値で行います。text 出力ではレシピの下に
+`SKIP   recipe not run: --limit leaves no host for it` が出て、resolution はバンドル
+の順序を保ち、JSON では `resolution` のそのレシピに `excluded_by: "limit"` が付き
+ます。`validate` は text で `skip`、JSON で `excluded_by` と null の件数として示し
+ます。`--limit` がなければ、すべてのレシピをこれまでどおり検査します。
 
 `--vars-file` では、構造に関すること（構文、スキーマ、`groups`・`hosts` のキーが
 存在すること、共通の `vars`、どの層でも sensitive な変数を設定しないこと。除外
@@ -936,7 +965,10 @@ v1.0.0 以降、この節に記載した内容は 1.x 系全体を通じて安�
 | `vars` | integer | var 数 |
 | `warnings` | array of strings | 空でないときだけ出力します（v1.5.1 から）。`template.vars` の中の `{{ … }}` のような、エラーではない指摘です。bundle の文書では、各レシピの項目がそれぞれ `warnings` を持ちます。`--vars-file` ありでは、検査したすべての実行を対象に、同じものは 1 回だけ、レシピごとに最大 50 件です。 |
 | `warnings_omitted` | integer | `--vars-file` ありで、あるレシピの警告が 50 件を超えたときだけ出力します。値は `warnings` に載せきれなかった件数です（次のリリースから）。bundle の文書ではレシピの項目ごとです。 |
-| `variables` | object | `--vars-file` ありのときだけ出力します（次のリリースから）。`file`（string。指定されたとおりのパス）と `executions`（integer。検査した (recipe, host) の実行の数）。 |
+| `variables` | object | `--vars-file` ありのときだけ出力します（次のリリースから）。`file`（string。指定されたとおりのパス）と `executions`（integer。検査した (recipe, host) の実行の数。`--limit` があれば残った分）、`--limit` があれば `targeted_executions`（`--limit` 前の数）。 |
+| `limit` | 文字列の配列 | `--limit` ありのときだけ出力します（次のリリースから）: 指定された項目。 |
+| `selected_executions`、`targeted_executions` | integer | `--limit` ありで `--vars-file` なしのときだけ出力します（次のリリースから）: `--limit` が残した (recipe, host) の実行の数と、レシピの `targets` が選んだ数。 |
+| `excluded_by` | string | バンドルの文書で、`--limit` によって実行するホストがなくなったレシピの項目に付きます（次のリリースから）: `"limit"`。そのレシピの `resources`・`handlers`・`vars` は `null` で、合計には数えません。 |
 
 ### plan と apply
 
@@ -1041,7 +1073,7 @@ handler オブジェクトのフィールド:
 | `exit_code` | 整数 | 実行全体の終了コード。 |
 | `bundle` | オブジェクトまたは null | バンドルの `name`、`path`。 |
 | `inventory` | 文字列または null | インベントリのパス。 |
-| `resolution` | 配列または null | インベントリ使用時、レシピごとに `recipe`、`path`、`hosts`（インベントリの全ホスト: `name`、`selected`（真偽値）、`reasons`（例 `"group:web"`）。`--limit` が除外したホストにだけ `excluded_by`（`"limit"`）が付き、その `selected` は false、`reasons` は残ります）。 |
+| `resolution` | 配列または null | インベントリ使用時、レシピごとに `recipe`、`path`、`hosts`（インベントリの全ホスト: `name`、`selected`（真偽値）、`reasons`（例 `"group:web"`）。`--limit` が除外したホストにだけ `excluded_by`（`"limit"`）が付き、その `selected` は false、`reasons` は残ります。`--limit` によってホストがなくなりスキップしたレシピの項目自体にも `excluded_by: "limit"` が付きます）。 |
 | `limit` | 配列 | `--limit` があるときだけ: 指定された項目（重複を除く）。 |
 | `executions` | 配列 | （レシピ, ホスト）ごとに 1 オブジェクト、実行順。 |
 

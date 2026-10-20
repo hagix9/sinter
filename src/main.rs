@@ -188,8 +188,8 @@ struct ExecOpts {
     /// (`*`, `?`; quote them) that match host names only. It narrows what the
     /// recipes' `targets` select, never widens it; a host left out is not
     /// resolved or contacted, and a problem found only in its host-specific
-    /// variables does not stop the run. validate checks it only together with
-    /// --vars-file.
+    /// variables does not stop the run. validate checks it, with or without
+    /// --vars-file; a recipe it leaves no host is skipped, not frozen.
     #[arg(long, value_name = "ITEMS")]
     limit: Option<String>,
 }
@@ -322,24 +322,41 @@ struct VarsReport {
     executions: usize,
     /// Per recipe, in order: its executions' warnings, without repeats.
     warnings: Vec<Vec<String>>,
-    /// `--limit`, checked with the file.
-    limit: Option<LimitReport>,
 }
 
 /// What `--limit` selected among what the recipes' `targets` select.
 struct LimitReport {
     items: Vec<String>,
+    /// (recipe, host) executions `--limit` leaves.
+    selected: usize,
     /// (recipe, host) executions before `--limit`.
     targeted: usize,
+}
+
+impl LimitReport {
+    fn of(limited: &Limited, limit: &ParsedLimit) -> Option<LimitReport> {
+        limit.given().then(|| {
+            let rs = limited.resolutions();
+            LimitReport {
+                items: limit.items(),
+                selected: rs.iter().map(|r| r.selected().count()).sum(),
+                targeted: rs.iter().map(|r| r.targeted().count()).sum(),
+            }
+        })
+    }
 }
 
 /// Most warnings of one recipe `validate --vars-file` lists; the rest are
 /// counted (`warnings_omitted`).
 const MAX_VALIDATE_WARNINGS: usize = 50;
 
-/// Static validation. Without `--vars-file` only the recipe (or bundle) is
-/// checked and every target option is accepted and ignored: no inventory, key
-/// or known_hosts file is read. With `--vars-file` the recipes are checked
+/// Static validation. Without `--vars-file` and `--limit` only the recipe (or
+/// bundle) is checked and every target option is accepted and ignored: no
+/// inventory, key or known_hosts file is read. With `--limit` (and no
+/// variables file) the inventory is read as well, the recipes' `targets` are
+/// resolved and `--limit` is evaluated, as `plan` does before it contacts a
+/// host; no variable is resolved beyond what loading a recipe does for the
+/// recipes some host runs. With `--vars-file` the recipes are checked
 /// with the values the file gives, by the very static gate `plan`, `apply`
 /// and `audit` run before they contact a host (DESIGN §19.5): the
 /// variables file and, with `--inventory`, the inventory are read, and still
@@ -347,8 +364,17 @@ const MAX_VALIDATE_WARNINGS: usize = 50;
 fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
     let format = parse_format(&a.format)?;
     let Some(vars_path) = &a.exec.vars_file else {
-        let source = load_source(&a.recipe)?;
-        return print_validate(&source, format, None);
+        if a.exec.limit.is_none() {
+            let source = load_source(&a.recipe)?;
+            return print_validate(&source, format, None, None);
+        }
+        // An explicit `--limit` is checked even without a variables file: its
+        // syntax, the inventory and which hosts it selects (DESIGN §19.2).
+        exclusive_target_options(&a.exec)?;
+        let limit = limit_option(&a.exec)?;
+        let gate = limit_source(&a.recipe, &a.exec, &limit)?;
+        let report = LimitReport::of(&gate.limited, &limit);
+        return print_validate(&gate.source, format, None, report.as_ref());
     };
     exclusive_target_options(&a.exec)?;
     let limit = limit_option(&a.exec)?;
@@ -367,24 +393,16 @@ fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
             }
         }
     }
-    let limit_report = gate.limited.as_ref().and_then(|l| {
-        let items = limit.given().then(|| limit.items())?;
-        Some(LimitReport {
-            items,
-            targeted: l
-                .resolutions()
-                .iter()
-                .map(|r| r.hosts.iter().filter(|h| h.targeted()).count())
-                .sum(),
-        })
-    });
+    let limit_report = gate
+        .limited
+        .as_ref()
+        .and_then(|l| LimitReport::of(l, &limit));
     let report = VarsReport {
         file: vars_path.display().to_string(),
         executions: gate.frozen.len(),
         warnings,
-        limit: limit_report,
     };
-    print_validate(&gate.source, format, Some(&report))
+    print_validate(&gate.source, format, Some(&report), limit_report.as_ref())
 }
 
 /// A recipe's warnings to show, and how many more are left out.
@@ -402,16 +420,27 @@ fn shown_warnings(vars: Option<&VarsReport>, i: usize, u: &RecipeUnit) -> (Vec<S
     }
 }
 
-/// `variables` is present only when `--vars-file` was given.
-fn add_variables(doc: &mut serde_json::Value, vars: Option<&VarsReport>) {
+/// `variables` is present only when `--vars-file` was given, `limit` only
+/// when `--limit` was.
+fn add_variables(
+    doc: &mut serde_json::Value,
+    vars: Option<&VarsReport>,
+    limit: Option<&LimitReport>,
+) {
     if let Some(v) = vars {
         doc["variables"] = serde_json::json!({
             "file": v.file,
             "executions": v.executions,
         });
-        if let Some(l) = &v.limit {
-            doc["limit"] = serde_json::json!(l.items);
-            doc["variables"]["targeted_executions"] = serde_json::json!(l.targeted);
+    }
+    if let Some(l) = limit {
+        doc["limit"] = serde_json::json!(l.items);
+        match vars {
+            Some(_) => doc["variables"]["targeted_executions"] = serde_json::json!(l.targeted),
+            None => {
+                doc["selected_executions"] = serde_json::json!(l.selected);
+                doc["targeted_executions"] = serde_json::json!(l.targeted);
+            }
         }
     }
 }
@@ -420,6 +449,7 @@ fn print_validate(
     source: &Source,
     format: OutputFormat,
     vars: Option<&VarsReport>,
+    limit: Option<&LimitReport>,
 ) -> Result<u8, SinterError> {
     let color = style::stdout_color();
     let counts = |m: &Model| (m.resources.len(), m.handlers.len(), m.vars.len());
@@ -440,7 +470,7 @@ fn print_validate(
                     doc["warnings_omitted"] = serde_json::json!(omitted);
                 }
             }
-            add_variables(&mut doc, vars);
+            add_variables(&mut doc, vars, limit);
             println!("{}", serde_json::to_string_pretty(&doc).unwrap());
         }
         (Source::Recipe(u), OutputFormat::Text) => {
@@ -478,6 +508,13 @@ fn print_validate(
                             "groups": t.groups,
                         })),
                     });
+                    if u.unfrozen {
+                        // Not frozen: no host runs it, so nothing is counted.
+                        rec["resources"] = serde_json::Value::Null;
+                        rec["handlers"] = serde_json::Value::Null;
+                        rec["vars"] = serde_json::Value::Null;
+                        rec["excluded_by"] = serde_json::json!("limit");
+                    }
                     let (warnings, omitted) = shown_warnings(vars, i, u);
                     if !warnings.is_empty() {
                         rec["warnings"] = serde_json::json!(warnings);
@@ -499,7 +536,7 @@ fn print_validate(
                 "bundle": b.name,
                 "recipes": recipes,
             });
-            add_variables(&mut doc, vars);
+            add_variables(&mut doc, vars, limit);
             println!("{}", serde_json::to_string_pretty(&doc).unwrap());
         }
         (Source::Bundle(b), OutputFormat::Text) => {
@@ -531,6 +568,15 @@ fn print_validate(
                         t.groups.join(", ")
                     ),
                 };
+                if u.unfrozen {
+                    println!(
+                        "  {}  {}: excluded by --limit, not frozen; {}",
+                        style::status("skip", color),
+                        sanitize_line(&u.label),
+                        targets
+                    );
+                    continue;
+                }
                 println!(
                     "  {}  {}: {} resource(s), {} handler(s), {} var(s); {}",
                     style::status("ok", color),
@@ -543,19 +589,21 @@ fn print_validate(
             }
         }
     }
-    if let (Some(v), OutputFormat::Text) = (vars, format) {
-        println!(
-            "{}: variables file {} checked: {} execution(s)",
-            style::status("ok", color),
-            sanitize_line(&v.file),
-            v.executions
-        );
-        if let Some(l) = &v.limit {
+    if format == OutputFormat::Text {
+        if let Some(v) = vars {
+            println!(
+                "{}: variables file {} checked: {} execution(s)",
+                style::status("ok", color),
+                sanitize_line(&v.file),
+                v.executions
+            );
+        }
+        if let Some(l) = limit {
             println!(
                 "{}: --limit {} selects {} of {} execution(s)",
                 style::status("ok", color),
                 sanitize_line(&l.items.join(",")),
-                v.executions,
+                l.selected,
                 l.targeted
             );
         }
@@ -732,6 +780,17 @@ fn run_phase_with(
     if let Some(vars) = &a.exec.vars_file {
         return run_phase_vars(phase, a, vars, &limit, &ro, progress);
     }
+    if limit.given() {
+        let LimitGate {
+            source,
+            inventory,
+            limited,
+        } = limit_source(&a.recipe, &a.exec, &limit)?;
+        let session = progress.begin(source_info(phase, &source));
+        let planned = inventory_targets(&inventory, limited, a, &session);
+        session.end(scope_outcome(&planned));
+        return run_executions(phase, &source, planned?, a, &ro, progress);
+    }
     let source = load_source(&a.recipe)?;
     if let Some(inv) = &a.exec.inventory {
         // Several executions follow, so target resolution is a progress scope
@@ -836,6 +895,71 @@ struct VarsGate {
     frozen: Vec<FrozenExecution>,
 }
 
+/// What a run or `validate` with `--limit` and no variables file needs from
+/// the static side: the recipes (those some host runs frozen with their own
+/// values, the others only parsed and checked), the inventory and the
+/// selection `--limit` made, in this order, before `ssh -G` or any contact
+/// with a host.
+struct LimitGate {
+    source: Source,
+    inventory: Inventory,
+    limited: Limited,
+}
+
+fn limit_source(
+    recipe: &Path,
+    exec: &ExecOpts,
+    limit: &ParsedLimit,
+) -> Result<LimitGate, SinterError> {
+    let prepared = prepare_source(recipe)?;
+    let inv_path = exec
+        .inventory
+        .as_ref()
+        .ok_or_else(|| model_mismatch("--limit without an inventory"))?;
+    let inventory = load_inventory(inv_path)?;
+    let resolutions = resolve_targets(
+        &inventory,
+        prepared
+            .units
+            .iter()
+            .map(|u| (u.label.as_str(), u.item.targets())),
+    )?;
+    let limited = limited::limit(&inventory, resolutions, limit)?;
+    // A recipe no host runs is not frozen (DESIGN §19.2); the others are, with
+    // their own values, exactly as loading them without `--limit` would.
+    let unrun = unrun_units(Some(&limited), prepared.units.len());
+    let models = prepared
+        .units
+        .iter()
+        .zip(&unrun)
+        .map(|(u, unrun)| {
+            if *unrun {
+                u.item.check_structure().map(|()| None)
+            } else {
+                u.item.clone().freeze_default().map(Some)
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(LimitGate {
+        source: prepared.into_source_partial(models),
+        inventory,
+        limited,
+    })
+}
+
+/// Per recipe: no host runs it (`--limit` left every host of its `targets`
+/// out). Without `--limit`, or without an inventory, every recipe runs.
+fn unrun_units(limited: Option<&Limited>, units: usize) -> Vec<bool> {
+    match limited {
+        Some(l) if l.allowed().is_some() => l
+            .resolutions()
+            .iter()
+            .map(|r| r.selected().count() == 0)
+            .collect(),
+        _ => vec![false; units],
+    }
+}
+
 fn vars_gate(
     recipe: &Path,
     exec: &ExecOpts,
@@ -908,25 +1032,23 @@ fn vars_gate(
             None => return Err(model_mismatch("a model belongs to no recipe of this run")),
         }
     }
-    // A recipe no host runs it on (`--limit` left every host of its targets
-    // out) has no frozen model. It is listed with its own default values, which
-    // must stand on their own; no host's value is used, since none of the
-    // left-out hosts' variables is resolved.
-    for (slot, u) in first.iter_mut().zip(&prepared.units) {
-        if slot.is_none() && limit.given() {
-            *slot = Some(u.item.clone().freeze_default().map_err(|_| {
-                SinterError::schema(format!(
-                    "recipe {}: --limit leaves no host to run it on, and its own default values do not validate on their own, so it cannot even be listed; give it a host with --limit or fix its defaults",
-                    u.label
-                ))
-            })?);
+    // A recipe no host runs it on (`--limit` left every host of its `targets`
+    // out) is not frozen: no variable of it is resolved, nothing is planned or
+    // run. It was parsed when it was loaded and its structure is checked
+    // below (what does not depend on a variable's value). It is listed as
+    // skipped. Anything else without a model is an inconsistency.
+    let unrun = unrun_units(limited.as_ref(), prepared.units.len());
+    for ((slot, unrun), u) in first.iter().zip(&unrun).zip(&prepared.units) {
+        if slot.is_none() != *unrun {
+            return Err(model_mismatch(
+                "a recipe's model does not match whether any host runs it",
+            ));
+        }
+        if *unrun {
+            u.item.check_structure()?;
         }
     }
-    let first = first
-        .into_iter()
-        .collect::<Option<Vec<Model>>>()
-        .ok_or_else(|| model_mismatch("a recipe of this run has no frozen model"))?;
-    let source = prepared.into_source(first);
+    let source = prepared.into_source_partial(first);
     Ok(VarsGate {
         source,
         inventory,
@@ -1419,6 +1541,12 @@ fn print_resolution(source: &Source, plan: &ExecutionPlan, ro: &RenderOptions) {
                 r.hosts.len() - selected,
                 by_limit
             );
+            if u.unfrozen {
+                println!(
+                    "  {}   recipe not run: --limit leaves no host for it",
+                    style::status("SKIP", ro.color)
+                );
+            }
         }
     }
     let hosts = plan.resolutions.first().map(|r| r.hosts.len()).unwrap_or(1);
@@ -1527,6 +1655,16 @@ fn run_executions(
 ) -> Result<u8, SinterError> {
     let text = ro.format == OutputFormat::Text;
     let units = source.units();
+    // A recipe no host runs was never frozen: nothing may run it.
+    if plan
+        .executions
+        .iter()
+        .any(|ex| units.get(ex.unit).is_none_or(|u| u.unfrozen))
+    {
+        return Err(limit_mismatch(
+            "an execution names a recipe that no host was selected to run",
+        ));
+    }
     if text {
         print_resolution(source, &plan, ro);
     }
@@ -1676,7 +1814,7 @@ fn run_executions(
                 .iter()
                 .zip(&plan.resolutions)
                 .map(|(u, r)| {
-                    serde_json::json!({
+                    let mut rec = serde_json::json!({
                         "recipe": u.label,
                         "path": u.path.display().to_string(),
                         "hosts": r.hosts.iter().map(|h| {
@@ -1690,7 +1828,11 @@ fn run_executions(
                             }
                             o
                         }).collect::<Vec<_>>(),
-                    })
+                    });
+                    if u.unfrozen {
+                        rec["excluded_by"] = serde_json::json!("limit");
+                    }
+                    rec
                 })
                 .collect()
         });
@@ -3721,6 +3863,105 @@ mod tests {
         assert_eq!(all.models.len(), 3);
     }
 
+    /// A recipe for group `db` whose own default cannot be frozen.
+    const PLACEHOLDER_DB: &str = "version: 1\ntargets:\n  groups: [db]\nvars:\n  root: { value: CHANGE_ME }\nresources:\n  - id: d\n    type: file\n    with: { path: \"{{ vars.root }}/db\", content: y }\n";
+
+    #[test]
+    fn a_recipe_no_host_runs_is_never_frozen_resolved_or_run() {
+        let dir = fixture();
+        write(&dir, "web.yaml", VARS_RECIPE);
+        write(&dir, "db.yaml", PLACEHOLDER_DB);
+        let bundle = write(&dir, "b.yaml", "version: 1\nrecipes: [web.yaml, db.yaml]\n");
+        let inv = limit_inventory(&dir);
+        let nothing = write(&dir, "n.yaml", "version: 1\n");
+        let common = write(&dir, "c.yaml", "version: 1\nvars: { root: /common }\n");
+        for vars in [&nothing, &common] {
+            for phase in [Phase::Plan, Phase::Audit, Phase::Apply] {
+                let run = drive_limit(phase, &bundle, &inv, vars, Some("web01"), 2);
+                assert!(run.result.is_ok(), "{phase:?}: {:?}", run.result.err());
+                // Only web01, for the web recipe: one model, one `ssh -G`.
+                assert_eq!(run.models.len(), 1, "{phase:?}");
+                assert_eq!(run.resolving, ["web01"], "{phase:?}");
+                assert_eq!(run.untouched_targets, 1, "{phase:?}");
+            }
+        }
+        // Without --limit db01 needs `root`: nothing supplies it -> exit 2.
+        let run = drive_limit(Phase::Plan, &bundle, &inv, &nothing, None, 3);
+        assert!(run.result.is_err());
+        assert_eq!(run.untouched_targets, 3);
+        // With --limit selecting the db recipe, it is frozen and must hold.
+        let run = drive_limit(Phase::Plan, &bundle, &inv, &nothing, Some("db01"), 2);
+        assert!(run.result.is_err());
+        assert!(run.resolving.is_empty());
+        assert_eq!(run.untouched_targets, 2);
+    }
+
+    fn drop_every_model_of_the_first_recipe(f: &mut Vec<FrozenExecution>) {
+        f.retain(|e| e.unit != 0);
+    }
+
+    #[test]
+    fn a_recipe_without_a_model_that_some_host_runs_stops_the_run() {
+        let dir = fixture();
+        write(&dir, "web.yaml", VARS_RECIPE);
+        write(&dir, "db.yaml", &PLACEHOLDER_DB.replace("CHANGE_ME", "/ok"));
+        let bundle = write(&dir, "b.yaml", "version: 1\nrecipes: [web.yaml, db.yaml]\n");
+        let inv = limit_inventory(&dir);
+        let v = write(&dir, "v.yaml", LIMIT_VARS);
+        // The web recipe runs on web01, but its models are lost.
+        TAMPER.with(|t| t.set(Some(drop_every_model_of_the_first_recipe)));
+        let run = drive_limit(Phase::Plan, &bundle, &inv, &v, Some("web01"), 2);
+        TAMPER.with(|t| t.set(None));
+        assert!(run.result.is_err());
+        assert_eq!(run.untouched_targets, 2, "a host was contacted");
+        assert!(run.resolving.is_empty());
+    }
+
+    #[test]
+    fn an_execution_of_an_unfrozen_recipe_is_refused() {
+        let dir = fixture();
+        write(&dir, "web.yaml", VARS_RECIPE);
+        write(&dir, "db.yaml", PLACEHOLDER_DB);
+        let bundle = write(&dir, "b.yaml", "version: 1\nrecipes: [web.yaml, db.yaml]\n");
+        let prepared = sinter::bundle::prepare_source(Path::new(&bundle)).unwrap();
+        let web = prepared.units[0].item.clone().freeze_default().unwrap();
+        let source = prepared.into_source_partial(vec![Some(web), None]);
+        assert!(!source.units()[0].unfrozen && source.units()[1].unfrozen);
+        // The stub carries the targets and nothing else.
+        let stub = &source.units()[1].model;
+        assert!(stub.resources.is_empty() && stub.vars.is_empty());
+        assert_eq!(stub.targets.as_ref().unwrap().groups, ["db"]);
+        let a = target_args(Phase::Plan, &[&bundle]);
+        let w = wiring(ProgressMode::Disabled);
+        let ro = RenderOptions {
+            verbose: false,
+            format: OutputFormat::Json,
+            color: false,
+        };
+        let target = Target {
+            name: "web01".to_string(),
+            spec: TargetSpec { ssh: None },
+        };
+        for unit in [1usize, 7] {
+            let plan = ExecutionPlan {
+                inventory: None,
+                resolutions: Vec::new(),
+                limit: None,
+                executions: vec![Execution {
+                    unit,
+                    target: target.clone(),
+                    model: None,
+                }],
+            };
+            FAKE_TARGETS.with(|f| *f.borrow_mut() = vec![base()].into());
+            let r = run_executions(Phase::Plan, &source, plan, &a, &ro, &w.opts);
+            let left = FAKE_TARGETS.with(|f| f.borrow_mut().drain(..).count());
+            let e = r.expect_err("an unfrozen recipe must not run");
+            assert!(e.message.contains("no host was contacted"), "{}", e.message);
+            assert_eq!(left, 1, "a target was consumed");
+        }
+    }
+
     // -----------------------------------------------------------------------
     // WP-VARS A-1: models are bound to (recipe, host) and checked in every
     // build before anything connects.
@@ -3773,6 +4014,7 @@ mod tests {
                 label: format!("r{i}"),
                 path: PathBuf::from(format!("r{i}.yaml")),
                 model: tagged("display"),
+                unfrozen: false,
             })
             .collect()
     }

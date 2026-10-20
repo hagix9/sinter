@@ -96,6 +96,25 @@ pub struct RawResource {
 }
 
 impl Model {
+    /// A model of nothing: no resource, handler or variable, only the
+    /// recipe's `targets`. It stands in for a recipe that is parsed and
+    /// checked but never frozen because no host runs it (`--limit` left every
+    /// host of its `targets` out, DESIGN §19.2), so that display code has a
+    /// `Model` to read. It must never be executed: the recipe's unit is marked
+    /// [`crate::bundle::RecipeUnit::unfrozen`] and no execution may name it.
+    pub fn unfrozen_stub(targets: Option<TargetSelector>) -> Model {
+        Model {
+            vars: BTreeMap::new(),
+            resources: Vec::new(),
+            handlers: Vec::new(),
+            handler_index: BTreeMap::new(),
+            register_producers: BTreeMap::new(),
+            backups: Vec::new(),
+            targets,
+            warnings: Vec::new(),
+        }
+    }
+
     pub fn resource_index(&self) -> BTreeMap<String, usize> {
         let mut m = BTreeMap::new();
         for (i, r) in self.resources.iter().enumerate() {
@@ -176,6 +195,10 @@ pub struct Prepared {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct VarOverrides {
     entries: BTreeMap<String, (Value, String)>,
+    /// Only [`Prepared::check_structure`] sets it: a resource whose static
+    /// check fails *because of what a variable holds* is left out of the
+    /// check instead of failing it (every other failure still fails).
+    structure_only: bool,
 }
 
 impl VarOverrides {
@@ -214,6 +237,26 @@ impl Prepared {
             .vars
             .iter()
             .map(|v| (v.name.as_str(), &v.value, v.sensitive))
+    }
+
+    /// The checks that do not depend on what a variable holds: the recipe's
+    /// resources are frozen with the recipe's own defaults, and a resource
+    /// whose static check fails on a field that references a variable is
+    /// left out (its value is not this recipe's to judge here). Everything
+    /// else fails as it would when the recipe runs: unknown resource types
+    /// and fields, duplicate ids, `depends_on`/`notify` references and cycles,
+    /// secret references, declarations, and a check on a field that
+    /// references no variable. This is what a recipe no host runs is held to
+    /// (DESIGN §19.2): it is neither frozen nor given any variable value.
+    pub fn check_structure(&self) -> Result<()> {
+        let mut overrides = VarOverrides {
+            structure_only: true,
+            ..VarOverrides::default()
+        };
+        for v in self.state.vars.iter().filter(|v| !v.sensitive) {
+            overrides.insert(&v.name, v.value.clone(), "recipe default");
+        }
+        freeze(self.state.clone(), &self.entry, &overrides).map(|_| ())
     }
 
     /// Freeze with the recipe's own values: the established path.
@@ -2343,9 +2386,13 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
             Ok(fr) => frozen.push(fr),
             Err(e) if overrides.is_empty() => return Err(e),
             Err(e) => {
-                return Err(withhold_override_values(
-                    r, &stage, &refs, &peer_refs, overrides, e,
-                ))
+                let original = e.message.clone();
+                let e = withhold_override_values(r, &stage, &refs, &peer_refs, overrides, e);
+                // A structure check does not judge what a variable holds: a
+                // failure the boundary withheld is left out, any other stays.
+                if !(overrides.structure_only && e.message != original) {
+                    return Err(e);
+                }
             }
         }
         peer_refs.insert(r.id.clone(), refs);
@@ -2356,7 +2403,22 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
     let _ = entry;
 
     // Dependency graph must be acyclic. Detect it during static validation.
-    detect_dependency_cycle(&frozen)?;
+    if overrides.structure_only {
+        // Resources left out above have no frozen form: walk the declared
+        // graph instead (the same ids and edges).
+        let declared: Vec<(&str, &[String])> = state
+            .resources
+            .iter()
+            .map(|r| (r.id.as_str(), r.depends_on.as_slice()))
+            .collect();
+        detect_dependency_cycle(&declared)?;
+    } else {
+        let edges: Vec<(&str, &[String])> = frozen
+            .iter()
+            .map(|r| (r.id.as_str(), r.depends_on.as_slice()))
+            .collect();
+        detect_dependency_cycle(&edges)?;
+    }
 
     // R-3: `template.vars` values are passed to the template as written; a
     // `{{ ... }}` inside one is not evaluated and would be rendered literally.
@@ -2406,11 +2468,11 @@ fn value_has_interpolation(v: &Value) -> bool {
     }
 }
 
-fn detect_dependency_cycle(resources: &[FrozenResource]) -> Result<()> {
+fn detect_dependency_cycle(resources: &[(&str, &[String])]) -> Result<()> {
     let index: BTreeMap<&str, usize> = resources
         .iter()
         .enumerate()
-        .map(|(i, r)| (r.id.as_str(), i))
+        .map(|(i, (id, _))| (*id, i))
         .collect();
     #[derive(Clone, Copy, PartialEq)]
     enum Mark {
@@ -2421,20 +2483,20 @@ fn detect_dependency_cycle(resources: &[FrozenResource]) -> Result<()> {
     let mut marks = vec![Mark::White; resources.len()];
     fn visit(
         i: usize,
-        resources: &[FrozenResource],
+        resources: &[(&str, &[String])],
         index: &BTreeMap<&str, usize>,
         marks: &mut Vec<Mark>,
     ) -> Result<()> {
         marks[i] = Mark::Gray;
-        for d in &resources[i].depends_on {
+        for d in resources[i].1 {
             let di = *index.get(d.as_str()).ok_or_else(|| {
-                SinterError::schema(format!("{}: unknown dependency {}", resources[i].id, d))
+                SinterError::schema(format!("{}: unknown dependency {}", resources[i].0, d))
             })?;
             match marks[di] {
                 Mark::Gray => {
                     return Err(SinterError::schema(format!(
                         "dependency cycle detected involving {}",
-                        resources[di].id
+                        resources[di].0
                     )))
                 }
                 Mark::White => visit(di, resources, index, marks)?,
@@ -3290,6 +3352,76 @@ mod vars_tests {
     }
 
     const SITE: &str = "version: 1\ntargets: { groups: [web] }\nvars:\n  site_root: { value: \"CHANGE_ME\" }\n  port: { value: 80 }\nresources:\n  - id: index\n    type: file\n    with: { path: \"{{ vars.site_root }}/index.html\", content: \"listen {{ vars.port }}\\n\" }\n";
+
+    /// `check_structure` never refuses a recipe that freezes with its own
+    /// values (it is a subset of the same checks), on every shipped file.
+    #[test]
+    fn check_structure_accepts_every_recipe_that_freezes() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        for d in ["examples", "tests/fixtures", "docs-site/src", "release"] {
+            files_under(&root.join(d), &mut files);
+        }
+        let mut checked = 0;
+        for f in &files {
+            if load_model(f).is_ok() {
+                let p = prepare(f).unwrap();
+                p.check_structure()
+                    .unwrap_or_else(|e| panic!("{}: {}", f.display(), e.message));
+                checked += 1;
+            }
+        }
+        assert!(checked > 15, "checked {checked}");
+    }
+
+    #[test]
+    fn check_structure_judges_structure_and_not_a_variables_value() {
+        let d = tempfile::tempdir().unwrap();
+        // The placeholder default fails freezing, not the structure check.
+        let p = write(d.path(), "site.yaml", SITE);
+        assert!(load_model(&p).is_err());
+        prepare(&p).unwrap().check_structure().unwrap();
+        // Structure errors fail it, with or without a variable next to them.
+        let head = "version: 1\nvars:\n  root: { value: CHANGE_ME }\nresources:\n";
+        for (what, resources) in [
+            ("unknown type", "  - { id: d, type: nosuch, with: { path: \"{{ vars.root }}/x\" } }\n"),
+            ("unknown field", "  - { id: d, type: file, with: { path: \"{{ vars.root }}/x\", nosuch: 1 } }\n"),
+            ("duplicate id", "  - { id: d, type: file, with: { path: /x, content: y } }\n  - { id: d, type: file, with: { path: /y, content: y } }\n"),
+            ("unknown dependency", "  - { id: d, type: file, depends_on: [zz], with: { path: \"{{ vars.root }}/x\", content: y } }\n"),
+            ("unknown handler", "  - { id: d, type: file, notify: [zz], with: { path: \"{{ vars.root }}/x\", content: y } }\n"),
+            ("cycle", "  - { id: a, type: file, depends_on: [b], with: { path: \"{{ vars.root }}/x\", content: y } }\n  - { id: b, type: file, depends_on: [a], with: { path: \"{{ vars.root }}/y\", content: y } }\n"),
+            ("literal relative path", "  - { id: d, type: file, with: { path: rel/x, content: y } }\n"),
+            ("undeclared variable", "  - { id: d, type: file, with: { path: \"{{ vars.nope }}/x\", content: y } }\n"),
+        ] {
+            let p = write(d.path(), "r.yaml", &format!("{head}{resources}"));
+            let e = prepare(&p)
+                .and_then(|p| p.check_structure())
+                .expect_err(what);
+            assert_eq!(e.kind, crate::error::ErrorKind::Schema, "{what}");
+            assert!(!e.message.contains("withheld"), "{what}: {}", e.message);
+        }
+        // A recipe with no variable has nothing to leave out: it must freeze.
+        let p = write(
+            d.path(),
+            "novars.yaml",
+            "version: 1\nresources:\n  - { id: d, type: file, with: { path: rel/x, content: y } }\n",
+        );
+        assert!(prepare(&p).unwrap().check_structure().is_err());
+    }
+
+    /// A sensitive variable is never registered as a value to leave out: a
+    /// failure on a field built from one is kept, and its value is redacted.
+    #[test]
+    fn check_structure_keeps_a_failure_on_a_sensitive_variables_field() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write(
+            d.path(),
+            "r.yaml",
+            "version: 1\nvars:\n  tok: { value: relsecretvalue, sensitive: true }\nresources:\n  - { id: d, type: file, with: { path: \"{{ vars.tok }}/x\", content: y } }\n",
+        );
+        let e = prepare(&p).unwrap().check_structure().expect_err("kept");
+        assert!(!e.message.contains("relsecretvalue"), "{}", e.message);
+    }
 
     #[test]
     fn a_failing_default_is_never_frozen_when_overridden() {
