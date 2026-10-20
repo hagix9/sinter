@@ -322,14 +322,16 @@ in the bundle) and its structure is checked as when it runs (unknown resource
 types and fields, duplicate ids, `depends_on` and `notify` references and
 cycles, secret references, variables that are not declared, and the other
 static checks of a resource). The ban on setting a sensitive variable it
-declares still applies. What is left out is a resource whose static check fails
-on a field that references a variable the recipe declares (a path built from a
-placeholder, say): that check is not made, and neither are the checks after it
-for that resource, whatever field they concern and even when the cause is not
-the variable's value (a second, undeclared variable in the same path, an empty
-`owner`, `content` together with `source`, a secret reference in another field,
-a conflict over what two resources own). All of them are made, with the
-recipe's real values, when a host runs the recipe. Text output shows `SKIP   recipe
+declares still applies. What is left out is only what the value of a variable
+decides: a field that references a variable the recipe declares and fails its
+static check with the recipe's defaults (a path built from a placeholder, say),
+and a conflict over a path or a name that such a variable takes part in. They
+are checked, with the recipe's real values, when a host runs the recipe. The
+other checks of the same resource and of the other resources are made, whatever
+field they concern: an empty `owner`, `content` together with `source`, a secret
+reference, a conflict between two literal paths or names. So is a field that
+fails whatever the variables hold, such as a second, undeclared variable in the
+same path, a fact, a sensitive value or a variable of another type. Text output shows `SKIP   recipe
 not run: --limit leaves no host for it` under the recipe, the resolution keeps
 the bundle order, and JSON marks the recipe in `resolution` with `excluded_by:
 "limit"`. `validate` lists it as `skip` (text) or with `excluded_by` and null

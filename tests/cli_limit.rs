@@ -1644,3 +1644,328 @@ fn validate_with_a_limit_checks_the_recipes_some_host_runs_as_loading_does() {
     ]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
 }
+
+// ---- D-15: a recipe no host runs, checked past a field a variable decides ----
+
+/// The db recipe of a bundle: placeholder variable `root` (no usable default),
+/// the sensitive `tok` (default is the canary) and the given resources.
+fn db_with_resources(resources: &str) -> String {
+    format!(
+        "version: 1\ntargets:\n  groups: [db]\nvars:\n  root: {{ value: CHANGE_ME }}\n  tok: {{ value: {CANARY}, sensitive: true }}\n  n: {{ value: 7 }}\nresources:\n{resources}"
+    )
+}
+
+/// What does not depend on what a variable holds, written next to a field that
+/// does (the placeholder `root` fails that field's check with its default):
+/// (case, resources, text the error must carry).
+const BESIDE_A_VARIABLE: &[(&str, &str, &str)] = &[
+    (
+        "undeclared variable in the same field",
+        "  - { id: a, type: file, with: { path: \"{{ vars.root }}/{{ vars.nope }}/x\", content: y } }\n",
+        "undefined variable",
+    ),
+    (
+        "fact in the same field",
+        "  - { id: a, type: file, with: { path: \"{{ vars.root }}/{{ facts.os }}\", content: y } }\n",
+        "facts",
+    ),
+    (
+        "sensitive value in the same field",
+        "  - { id: a, type: file, with: { path: \"{{ vars.root }}/{{ vars.tok }}\", content: y } }\n",
+        "sensitive",
+    ),
+    (
+        "variable of another type in the same field",
+        "  - { id: a, type: file, with: { path: \"{{ vars.root }}/x\", source: \"{{ vars.n }}\" } }\n",
+        "must be a string",
+    ),
+    (
+        "empty owner",
+        "  - { id: a, type: file, with: { path: \"{{ vars.root }}/x\", owner: \"\", content: y } }\n",
+        "invalid owner",
+    ),
+    (
+        "empty group",
+        "  - { id: a, type: file, with: { path: \"{{ vars.root }}/x\", group: \"\", content: y } }\n",
+        "invalid group",
+    ),
+    (
+        "content and source",
+        "  - { id: a, type: file, with: { path: \"{{ vars.root }}/x\", content: y, source: s.txt } }\n",
+        "mutually exclusive",
+    ),
+    (
+        "mode",
+        "  - { id: a, type: file, with: { path: \"{{ vars.root }}/x\", mode: \"99\", content: y } }\n",
+        "mode",
+    ),
+    (
+        "secret reference",
+        "  - { id: a, type: file, with: { path: \"{{ vars.root }}/x\", content: { secret: ../bad.age } } }\n",
+        "secret reference",
+    ),
+    (
+        "second variable field of a command",
+        "  - { id: a, type: command, with: { program: /bin/true, creates: \"{{ vars.root }}/c\", removes: /r } }\n",
+        "mutually exclusive",
+    ),
+    (
+        "command cwd",
+        "  - { id: a, type: command, with: { program: /bin/true, creates: \"{{ vars.root }}/c\", cwd: rel } }\n",
+        "cwd",
+    ),
+    (
+        "package state",
+        "  - { id: a, type: package, with: { name: \"{{ vars.root }} bad\", state: sideways } }\n",
+        "state",
+    ),
+    (
+        "account literal",
+        "  - { id: a, type: user, with: { name: \"{{ vars.root }}\", uid: -5 } }\n",
+        "uid",
+    ),
+    (
+        "path owned twice (the first one fails a later field)",
+        "  - { id: a, type: template, with: { path: /etc/same, source: \"{{ vars.root }}/t.j2\" } }\n  - { id: b, type: file, with: { path: /etc/same, content: y } }\n",
+        "conflicting ownership",
+    ),
+    (
+        "template source file",
+        "  - { id: a, type: template, with: { path: \"{{ vars.root }}/x\", source: nosuch.j2 } }\n",
+        "not found",
+    ),
+    (
+        "template body",
+        "  - { id: a, type: template, with: { path: \"{{ vars.root }}/x\", source: bad.j2 } }\n",
+        "{%",
+    ),
+    (
+        "failing resource, then another resource",
+        "  - { id: a, type: file, with: { path: \"{{ vars.root }}/x\", content: y } }\n  - { id: b, type: file, with: { path: /y, content: y, owner: \"\" } }\n",
+        "invalid owner",
+    ),
+];
+
+#[test]
+fn a_recipe_no_host_runs_is_checked_past_a_field_a_variable_decides() {
+    let f = Fx::new();
+    let ports = common::ClosedPorts::reserve(3);
+    let inv = f.inventory([ports.port(0), ports.port(1), ports.port(2)]);
+    f.write("bad.j2", "{% if a %}x{% endif %}\n");
+    f.write("t.j2", "x\n");
+    let common = f.write("common.yaml", "version: 1\nvars: { root: /common }\n");
+    for (what, resources, want) in BESIDE_A_VARIABLE {
+        let b = three_recipe_bundle(&f, &db_with_resources(resources));
+        for vars in [None, Some(&common)] {
+            for cmd in ["plan", "audit", "apply", "validate"] {
+                for format in ["text", "json"] {
+                    let mut args = vec![
+                        cmd,
+                        &b,
+                        "--inventory",
+                        &inv,
+                        "--limit",
+                        "web01",
+                        "--format",
+                        format,
+                    ];
+                    if let Some(v) = vars {
+                        args.extend(["--vars-file", v]);
+                    }
+                    if cmd != "validate" {
+                        args.push("--no-ssh-config");
+                    }
+                    let o = f.run(&args);
+                    let err = text(&o.stderr);
+                    assert_eq!(o.status.code(), Some(2), "{what} {vars:?} {cmd}: {err}");
+                    assert!(o.stdout.is_empty(), "{what} {vars:?} {cmd} {format}");
+                    assert!(err.contains(want), "{what}: {err}");
+                    assert!(!err.contains("withheld"), "{what}: {err}");
+                    assert!(!err.contains(CANARY), "LEAK {what}: {err}");
+                }
+            }
+        }
+    }
+    // Nothing was resolved or contacted for any of them.
+    assert!(f.ssh_log().is_empty(), "{:?}", f.ssh_log());
+}
+
+#[test]
+fn a_defect_next_to_a_variable_stops_a_run_without_limit_as_before() {
+    let f = Fx::new();
+    let ports = common::ClosedPorts::reserve(3);
+    let inv = f.inventory([ports.port(0), ports.port(1), ports.port(2)]);
+    let common = f.write("common.yaml", "version: 1\nvars: { root: /common }\n");
+    for (what, resources, _) in BESIDE_A_VARIABLE {
+        let b = three_recipe_bundle(&f, &db_with_resources(resources));
+        // Without `--limit` the recipe runs on its hosts, so any error stops
+        // the run before a host is contacted; with a variables file as well.
+        for vars in [None, Some(&common)] {
+            let mut args = vec!["validate", &b, "--inventory", &inv];
+            if let Some(v) = vars {
+                args.extend(["--vars-file", v]);
+            }
+            let o = f.run(&args);
+            assert_eq!(o.status.code(), Some(2), "{what} {vars:?}");
+        }
+    }
+}
+
+/// Values only a variable decides stay undecided for a recipe no host runs:
+/// it is neither refused nor frozen, and it is checked when a host runs it.
+const NOT_FOR_A_SKIPPED_RECIPE_TO_JUDGE: &[(&str, &str)] = &[
+    (
+        "relative path",
+        "  - { id: a, type: file, with: { path: \"{{ vars.root }}/x\", content: y } }\n",
+    ),
+    (
+        "every kind of resource",
+        "  - { id: d, type: directory, with: { path: \"{{ vars.root }}/d\" } }\n  - { id: l, type: link, with: { path: \"{{ vars.root }}/l\", target: /t } }\n  - { id: t, type: template, with: { path: \"{{ vars.root }}/t\", source: \"{{ vars.root }}/t.j2\" } }\n  - { id: c, type: command, with: { program: \"/bin/{{ vars.root }}\", creates: \"{{ vars.root }}/c\", cwd: \"{{ vars.root }}\" } }\n  - { id: p, type: package, with: { name: \"{{ vars.root }} x\", state: present } }\n  - { id: s, type: service, with: { name: \"{{ vars.root }}\", state: running } }\n  - { id: u, type: user, with: { name: \"{{ vars.root }}\" } }\n  - { id: g, type: group, with: { name: \"{{ vars.root }}\" } }\n",
+    ),
+    (
+        "path owned twice, decided by a variable",
+        "  - { id: a, type: file, with: { path: \"{{ vars.root }}/x\", content: y } }\n  - { id: b, type: file, with: { path: \"{{ vars.root }}/x\", content: y } }\n",
+    ),
+    (
+        "account owned twice, decided by a variable",
+        "  - { id: a, type: user, with: { name: \"{{ vars.root }}\" } }\n  - { id: b, type: user, with: { name: \"{{ vars.root }}\" } }\n",
+    ),
+    (
+        "template file chosen by a variable",
+        "  - { id: a, type: template, with: { path: \"{{ vars.root }}/x\", source: \"{{ vars.root }}/t.j2\" } }\n",
+    ),
+];
+
+#[test]
+fn a_value_only_a_variable_decides_is_not_judged_for_a_recipe_no_host_runs() {
+    let f = Fx::new();
+    let ports = common::ClosedPorts::reserve(3);
+    let inv = f.inventory([ports.port(0), ports.port(1), ports.port(2)]);
+    let common = f.write("common.yaml", "version: 1\nvars: { root: /common }\n");
+    for (what, resources) in NOT_FOR_A_SKIPPED_RECIPE_TO_JUDGE {
+        let b = three_recipe_bundle(&f, &db_with_resources(resources));
+        for vars in [None, Some(&common)] {
+            for phase in PHASES {
+                let mut args = vec![
+                    phase,
+                    &b,
+                    "--inventory",
+                    &inv,
+                    "--limit",
+                    "web01",
+                    "--no-ssh-config",
+                    "--format",
+                    "json",
+                ];
+                if let Some(v) = vars {
+                    args.extend(["--vars-file", v]);
+                }
+                let o = f.run(&args);
+                // web and mon are attempted on web01 (closed port): exit 3.
+                assert_eq!(
+                    o.status.code(),
+                    Some(3),
+                    "{what} {vars:?} {phase}: {}",
+                    text(&o.stderr)
+                );
+                assert_eq!(json(&o)["resolution"][1]["excluded_by"], "limit", "{what}");
+            }
+        }
+    }
+    let o = f.run(&[
+        "validate",
+        &three_recipe_bundle(
+            &f,
+            &db_with_resources(NOT_FOR_A_SKIPPED_RECIPE_TO_JUDGE[1].1),
+        ),
+        "--inventory",
+        &inv,
+        "--limit",
+        "web01",
+    ]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    // The same recipe is refused where a host runs it with no value for `root`.
+    let o = f.run(&[
+        "validate",
+        &three_recipe_bundle(
+            &f,
+            &db_with_resources(NOT_FOR_A_SKIPPED_RECIPE_TO_JUDGE[0].1),
+        ),
+        "--inventory",
+        &inv,
+        "--limit",
+        "db01",
+    ]);
+    assert_eq!(o.status.code(), Some(2));
+}
+
+#[test]
+fn the_check_of_a_recipe_no_host_runs_is_the_same_in_toml() {
+    let f = Fx::new();
+    let ports = common::ClosedPorts::reserve(3);
+    let inv = f.inventory([ports.port(0), ports.port(1), ports.port(2)]);
+    f.write("web.yaml", WEB);
+    for (what, body, want) in [
+        (
+            "empty owner next to a variable",
+            "[[resources]]\nid = \"a\"\ntype = \"file\"\n[resources.with]\npath = \"{{ vars.root }}/x\"\nowner = \"\"\ncontent = \"y\"\n",
+            "invalid owner",
+        ),
+        (
+            "undeclared variable next to a variable",
+            "[[resources]]\nid = \"a\"\ntype = \"file\"\n[resources.with]\npath = \"{{ vars.root }}/{{ vars.nope }}\"\ncontent = \"y\"\n",
+            "undefined variable",
+        ),
+    ] {
+        f.write(
+            "db.toml",
+            &format!(
+                "version = 1\n[targets]\ngroups = [\"db\"]\n[vars]\nroot = {{ value = \"CHANGE_ME\" }}\n{body}"
+            ),
+        );
+        let b = f.write("b.yaml", "version: 1\nrecipes: [web.yaml, db.toml]\n");
+        let o = f.run(&["validate", &b, "--inventory", &inv, "--limit", "web01"]);
+        let err = text(&o.stderr);
+        assert_eq!(o.status.code(), Some(2), "{what}: {err}");
+        assert!(err.contains(want) && !err.contains("withheld"), "{what}: {err}");
+        // A placeholder alone is not refused.
+        f.write(
+            "db.toml",
+            "version = 1\n[targets]\ngroups = [\"db\"]\n[vars]\nroot = { value = \"CHANGE_ME\" }\n[[resources]]\nid = \"a\"\ntype = \"file\"\n[resources.with]\npath = \"{{ vars.root }}/x\"\ncontent = \"y\"\n",
+        );
+        let o = f.run(&["validate", &b, "--inventory", &inv, "--limit", "web01"]);
+        assert_eq!(o.status.code(), Some(0), "{what}: {}", text(&o.stderr));
+    }
+}
+
+#[test]
+fn a_single_recipe_is_never_left_without_a_host_and_so_never_skipped() {
+    let f = Fx::new();
+    let ports = common::ClosedPorts::reserve(3);
+    let inv = f.inventory([ports.port(0), ports.port(1), ports.port(2)]);
+    // A single recipe is not a bundle: when `--limit` leaves it no host the run
+    // is refused before the recipe is looked at (nothing would run), so there
+    // is no skipped single recipe whose structure could go unchecked. Where a
+    // host runs it, it is held to every check, defect or not.
+    let r = f.write(
+        "single.yaml",
+        &db_with_resources(
+            "  - { id: a, type: file, with: { path: \"{{ vars.root }}/x\", owner: \"\", content: y } }\n",
+        ),
+    );
+    let o = f.run(&["validate", &r, "--inventory", &inv, "--limit", "web01"]);
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o.stderr));
+    assert!(
+        text(&o.stderr).contains("would run nothing"),
+        "{}",
+        text(&o.stderr)
+    );
+    let o = f.run(&["validate", &r, "--inventory", &inv, "--limit", "db01"]);
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o.stderr));
+    assert!(
+        text(&o.stderr).contains("path must be absolute"),
+        "{}",
+        text(&o.stderr)
+    );
+    assert!(f.ssh_log().is_empty());
+}

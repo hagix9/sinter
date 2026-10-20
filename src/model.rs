@@ -195,9 +195,10 @@ pub struct Prepared {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct VarOverrides {
     entries: BTreeMap<String, (Value, String)>,
-    /// Only [`Prepared::check_structure`] sets it: a resource whose static
-    /// check fails *because of what a variable holds* is left out of the
-    /// check instead of failing it (every other failure still fails).
+    /// Only [`Prepared::check_structure`] sets it: a field whose static check
+    /// fails *because of what a variable holds* is left out of the check
+    /// instead of failing it, and the resource's other checks go on (see
+    /// [`Tolerance`]); every other failure still fails.
     structure_only: bool,
 }
 
@@ -240,13 +241,19 @@ impl Prepared {
     }
 
     /// The checks that do not depend on what a variable holds: the recipe's
-    /// resources are frozen with the recipe's own defaults, and a resource
-    /// whose static check fails on a field that references a variable is
-    /// left out (its value is not this recipe's to judge here). Everything
-    /// else fails as it would when the recipe runs: unknown resource types
-    /// and fields, duplicate ids, `depends_on`/`notify` references and cycles,
-    /// secret references, declarations, and a check on a field that
-    /// references no variable. This is what a recipe no host runs is held to
+    /// resources are frozen with the recipe's own defaults, and a field that
+    /// references a variable and fails its static check with them is left
+    /// out (its value is not this recipe's to judge here) unless it fails
+    /// whatever the variables hold (an undeclared variable, a fact, a
+    /// sensitive value, a variable of another type). The resource's other
+    /// checks go on, and so do those of the other resources. Everything else
+    /// fails as it would when the recipe runs: unknown resource types and
+    /// fields, duplicate ids, `depends_on`/`notify` references and cycles,
+    /// secret references, declarations, literal fields, ownership conflicts
+    /// no variable takes part in, and a check on a field that references no
+    /// variable. Not judged: a failure that depends on a variable's value, a
+    /// conflict over a path or a name that a variable decides, and a template
+    /// file a variable chooses. This is what a recipe no host runs is held to
     /// (DESIGN §19.2): it is neither frozen nor given any variable value.
     pub fn check_structure(&self) -> Result<()> {
         let mut overrides = VarOverrides {
@@ -324,6 +331,121 @@ fn staged<T>(stage: &mut Stage, at: Stage, check: impl FnOnce() -> Result<T>) ->
     let out = check()?;
     *stage = Stage::Unattributed;
     Ok(out)
+}
+
+/// What a structure-only check (DESIGN §19.2) may leave unjudged, so that a
+/// field it cannot judge does not stop the resource's other checks. Off for
+/// every freeze that runs a recipe: there a failure of any check fails.
+struct Tolerance<'a> {
+    on: bool,
+    /// Field -> declared variables its value references (this resource).
+    refs: &'a BTreeMap<String, BTreeSet<String>>,
+    /// The variables of a probe: every declared variable holds a neutral
+    /// value of its declared type, so only what holds for any value is left
+    /// to judge.
+    probe_vars: &'a BTreeMap<String, EvalVal>,
+    item: Option<&'a EvalVal>,
+    with: &'a BTreeMap<String, Value>,
+    ctx: &'a str,
+}
+
+/// The most boolean variables one field may name for [`Tolerance`] to try every
+/// combination of them; a field naming more is left undecided.
+const MAX_PROBED_BOOLS: usize = 8;
+
+impl Tolerance<'_> {
+    /// Whether a failure of the static check of `field` may depend on what a
+    /// variable holds. It does not when the field cannot be evaluated to a
+    /// string whatever the variables hold: an undeclared variable, a fact or
+    /// register, a sensitive value, a variable of another type. Evaluating
+    /// with neutral values is the same evaluation the check starts with, so
+    /// the answer never rests on a message. A boolean variable can decide
+    /// which side of `||` or `&&` is evaluated at all, so every combination of
+    /// the booleans the field names is tried: the failure holds whatever the
+    /// variables hold only if it holds for each of them.
+    fn may_depend_on_values(&self, field: &str) -> bool {
+        let Some(named) = self.refs.get(field).filter(|_| self.on) else {
+            return false;
+        };
+        let bools: Vec<&String> = named
+            .iter()
+            .filter(|n| {
+                matches!(
+                    self.probe_vars.get(*n).and_then(|v| v.val.as_ref()),
+                    Some(Value::Bool(_))
+                ) && self.probe_vars.get(*n).is_some_and(|v| !v.sensitive)
+            })
+            .collect();
+        if bools.len() > MAX_PROBED_BOOLS {
+            return true;
+        }
+        let mut vars = self.probe_vars.clone();
+        (0..1u32 << bools.len()).any(|combo| {
+            for (i, n) in bools.iter().enumerate() {
+                vars.insert(
+                    (*n).clone(),
+                    EvalVal::known(Value::Bool(combo >> i & 1 == 1)),
+                );
+            }
+            let scope = Scope::static_scope(&vars, self.item);
+            static_string(self.with, field, &scope, self.ctx, true, true).is_ok()
+        })
+    }
+}
+
+/// [`staged`] for a check of one `with` field. The judgement rests on
+/// `static_string` alone: a check of the field that is not a failure of
+/// `static_string` and does not depend on a variable's value would be left
+/// undecided too, so such a check belongs outside the closure given here.
+/// A structure-only check goes on
+/// past a failure that may depend on what a variable holds, and the field has
+/// no value (`None`); every other failure fails.
+fn staged_field<T>(
+    stage: &mut Stage,
+    tol: &Tolerance,
+    field: &'static str,
+    check: impl FnOnce() -> Result<T>,
+) -> Result<Option<T>> {
+    match staged(stage, Stage::Field(field), check) {
+        Ok(v) => Ok(Some(v)),
+        Err(_) if tol.may_depend_on_values(field) => {
+            *stage = Stage::Unattributed;
+            Ok(None)
+        }
+        Err(e) => {
+            // It fails whatever the variables hold: the boundary keeps it.
+            if tol.on {
+                *stage = Stage::ValueFree;
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Whether an ownership conflict over `field` with resource `peer` may depend
+/// on what a variable holds: the field of either side references one.
+fn ownership_may_depend_on_values(
+    tol: &Tolerance,
+    peer_refs: &BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    field: &str,
+    peer: &str,
+) -> bool {
+    tol.on
+        && (tol.refs.contains_key(field)
+            || peer_refs.get(peer).is_some_and(|m| m.contains_key(field)))
+}
+
+/// The neutral value of a declared type, for a [`Tolerance`] probe.
+fn neutral_value(v: &Value) -> Value {
+    match v {
+        Value::Null => Value::Null,
+        Value::Bool(_) => Value::Bool(false),
+        Value::Int(_) => Value::Int(0),
+        Value::Float(_) => Value::Float(0.0),
+        Value::Str(_) => Value::Str(String::new()),
+        Value::List(_) => Value::List(Vec::new()),
+        Value::Map(_) => Value::Map(BTreeMap::new()),
+    }
 }
 
 /// Field -> overridden variables its value references. Conservative: the
@@ -1577,6 +1699,24 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
         );
     }
     validate_declarations(&state.declarations, &state.handlers, &sensitive_var_names)?;
+    // The scope of a structure-only probe (see [`Tolerance`]); built for no
+    // other freeze.
+    let probe_vars: BTreeMap<String, EvalVal> = if overrides.structure_only {
+        state
+            .vars
+            .iter()
+            .map(|v| {
+                let val = if v.sensitive {
+                    EvalVal::known_sensitive(v.value.clone())
+                } else {
+                    EvalVal::known(neutral_value(&v.value))
+                };
+                (v.name.clone(), val)
+            })
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
 
     // Register producer map + validation of loop+register.
     let mut register_producers: BTreeMap<String, String> = BTreeMap::new();
@@ -1650,6 +1790,14 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                 item: item_eval.as_ref(),
                 result: None,
                 template: None,
+            };
+            let tol = Tolerance {
+                on: overrides.structure_only,
+                refs: &refs,
+                probe_vars: &probe_vars,
+                item: item_eval.as_ref(),
+                with: &r.with,
+                ctx: &r.id,
             };
 
             // Validate `when` parses and gather register references. Sensitive
@@ -1747,7 +1895,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         }
                         Ok(())
                     })?;
-                    let path = staged(&mut stage, Stage::Field("path"), || {
+                    let path = staged_field(&mut stage, &tol, "path", || {
                         let path = static_string(
                             &r.with,
                             "path",
@@ -1761,7 +1909,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         })?;
                         Ok(path)
                     })?;
-                    fr.path = Some(path);
+                    fr.path = path;
                     validate_file_common(
                         &r.with,
                         &scope,
@@ -1769,6 +1917,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         &mut fr,
                         &sensitive_var_names,
                         &mut stage,
+                        &tol,
                     )?;
                     // `content: { secret: <path> }`: resolve and confine the
                     // reference (a static literal). Nothing is decrypted while
@@ -1793,7 +1942,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                     staged(&mut stage, Stage::ValueFree, || {
                         validate_with_fields(&r.with, DIR_FIELDS, &resource_ctx)
                     })?;
-                    let path = staged(&mut stage, Stage::Field("path"), || {
+                    let path = staged_field(&mut stage, &tol, "path", || {
                         let path = static_string(
                             &r.with,
                             "path",
@@ -1807,13 +1956,13 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         })?;
                         Ok(path)
                     })?;
-                    fr.path = Some(path);
+                    fr.path = path;
                 }
                 "link" => {
                     staged(&mut stage, Stage::ValueFree, || {
                         validate_with_fields(&r.with, LINK_FIELDS, &resource_ctx)
                     })?;
-                    let path = staged(&mut stage, Stage::Field("path"), || {
+                    let path = staged_field(&mut stage, &tol, "path", || {
                         let path = static_string(
                             &r.with,
                             "path",
@@ -1827,7 +1976,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         })?;
                         Ok(path)
                     })?;
-                    fr.path = Some(path);
+                    fr.path = path;
                 }
                 "template" => {
                     staged(&mut stage, Stage::ValueFree, || {
@@ -1843,7 +1992,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         }
                         Ok(())
                     })?;
-                    let path = staged(&mut stage, Stage::Field("path"), || {
+                    let path = staged_field(&mut stage, &tol, "path", || {
                         let path = static_string(
                             &r.with,
                             "path",
@@ -1857,8 +2006,8 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         })?;
                         Ok(path)
                     })?;
-                    fr.path = Some(path);
-                    let controller_source = staged(&mut stage, Stage::Field("source"), || {
+                    fr.path = path;
+                    let controller_source = staged_field(&mut stage, &tol, "source", || {
                         let source = static_string(
                             &r.with,
                             "source",
@@ -1883,7 +2032,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                             }
                         })
                     })?;
-                    fr.controller_source = Some(controller_source);
+                    fr.controller_source = controller_source;
                     validate_file_common(
                         &r.with,
                         &scope,
@@ -1891,13 +2040,14 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         &mut fr,
                         &sensitive_var_names,
                         &mut stage,
+                        &tol,
                     )?;
                 }
                 "command" => {
                     staged(&mut stage, Stage::ValueFree, || {
                         validate_with_fields(&r.with, COMMAND_FIELDS, &resource_ctx)
                     })?;
-                    let program = staged(&mut stage, Stage::Field("program"), || {
+                    let program = staged_field(&mut stage, &tol, "program", || {
                         let program = static_string(
                             &r.with,
                             "program",
@@ -1914,10 +2064,10 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         }
                         Ok(program)
                     })?;
-                    fr.program = Some(program);
+                    fr.program = program;
                     if let Some(v) = r.with.get("creates") {
                         if !v.is_null() {
-                            let s = staged(&mut stage, Stage::Field("creates"), || {
+                            let s = staged_field(&mut stage, &tol, "creates", || {
                                 let s = static_string(
                                     &r.with,
                                     "creates",
@@ -1934,12 +2084,12 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                                 })?;
                                 Ok(s)
                             })?;
-                            fr.creates = Some(s);
+                            fr.creates = s;
                         }
                     }
                     if let Some(v) = r.with.get("removes") {
                         if !v.is_null() {
-                            let s = staged(&mut stage, Stage::Field("removes"), || {
+                            let s = staged_field(&mut stage, &tol, "removes", || {
                                 let s = static_string(
                                     &r.with,
                                     "removes",
@@ -1956,7 +2106,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                                 })?;
                                 Ok(s)
                             })?;
-                            fr.removes = Some(s);
+                            fr.removes = s;
                         }
                     }
                     validate_command_fields(
@@ -1966,6 +2116,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         &mut fr,
                         &sensitive_var_names,
                         &mut stage,
+                        &tol,
                     )?;
                 }
                 "package" => {
@@ -1977,7 +2128,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         Ok(())
                     })?;
                     let name_sensitive = field_sensitive("name");
-                    let name = staged(&mut stage, Stage::Field("name"), || {
+                    let name = staged_field(&mut stage, &tol, "name", || {
                         let name = static_string(
                             &r.with,
                             "name",
@@ -1999,7 +2150,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         validate_package_name(&name, &resource_ctx, name_sensitive)?;
                         Ok(name)
                     })?;
-                    fr.package_name = Some(name);
+                    fr.package_name = name;
                     staged(&mut stage, Stage::ValueFree, || {
                         validate_desired_enum(
                             &r.with,
@@ -2014,7 +2165,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                     staged(&mut stage, Stage::ValueFree, || {
                         validate_with_fields(&r.with, SERVICE_FIELDS, &resource_ctx)
                     })?;
-                    let name = staged(&mut stage, Stage::Field("name"), || {
+                    let name = staged_field(&mut stage, &tol, "name", || {
                         static_string(
                             &r.with,
                             "name",
@@ -2024,7 +2175,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                             field_sensitive("name"),
                         )
                     })?;
-                    fr.service_name = Some(name);
+                    fr.service_name = name;
                     staged(&mut stage, Stage::ValueFree, || {
                         let state = r.with.get("state");
                         let enabled = r.with.get("enabled");
@@ -2061,7 +2212,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         validate_with_fields(&r.with, crate::pgrole::PGROLE_FIELDS, &resource_ctx)
                     })?;
                     let name_sensitive = field_sensitive("name");
-                    let name = staged(&mut stage, Stage::Field("name"), || {
+                    let name = staged_field(&mut stage, &tol, "name", || {
                         let name = static_string(
                             &r.with,
                             "name",
@@ -2094,24 +2245,30 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         .map(|p| p.to_string())
                         // An omitted port is the server default, 5432.
                         .unwrap_or_else(|| "5432".to_string());
-                    if let Some(owner) = account_name_owner.insert(
-                        ("postgresql_role".to_string(), format!("{}@{}", name, port)),
-                        r.id.clone(),
-                    ) {
-                        stage = Stage::Ownership {
-                            field: "name",
-                            peer: owner.clone(),
-                        };
-                        return Err(SinterError::schema(format!(
-                            "conflicting ownership of PostgreSQL role {} by resources {} and {}",
-                            if name_sensitive {
-                                "(value redacted)"
-                            } else {
-                                name.as_str()
-                            },
-                            owner,
-                            r.id
-                        )));
+                    if let Some(name) = &name {
+                        if let Some(owner) = account_name_owner.insert(
+                            ("postgresql_role".to_string(), format!("{}@{}", name, port)),
+                            r.id.clone(),
+                        ) {
+                            // May depend on a variable: left unjudged, the
+                            // other checks go on.
+                            if !ownership_may_depend_on_values(&tol, &peer_refs, "name", &owner) {
+                                stage = Stage::Ownership {
+                                    field: "name",
+                                    peer: owner.clone(),
+                                };
+                                return Err(SinterError::schema(format!(
+                                    "conflicting ownership of PostgreSQL role {} by resources {} and {}",
+                                    if name_sensitive {
+                                        "(value redacted)"
+                                    } else {
+                                        name.as_str()
+                                    },
+                                    owner,
+                                    r.id
+                                )));
+                            }
+                        }
                     }
                     // `password_verifier: { secret: <path> }`: resolve and confine
                     // the reference. Nothing is decrypted while loading.
@@ -2145,7 +2302,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         )
                     })?;
                     let name_sensitive = field_sensitive("name");
-                    let name = staged(&mut stage, Stage::Field("name"), || {
+                    let name = staged_field(&mut stage, &tol, "name", || {
                         let name = static_string(
                             &r.with,
                             "name",
@@ -2168,26 +2325,32 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         }
                         Ok(name)
                     })?;
-                    if let Some(owner) =
-                        account_name_owner.insert((kind.to_string(), name.clone()), r.id.clone())
-                    {
-                        stage = Stage::Ownership {
-                            field: "name",
-                            peer: owner.clone(),
-                        };
-                        return Err(SinterError::schema(format!(
-                            "conflicting ownership of {} {} by resources {} and {}",
-                            kind,
-                            if name_sensitive {
-                                "(value redacted)"
-                            } else {
-                                name.as_str()
-                            },
-                            owner,
-                            r.id
-                        )));
+                    if let Some(name) = &name {
+                        if let Some(owner) = account_name_owner
+                            .insert((kind.to_string(), name.clone()), r.id.clone())
+                        {
+                            // May depend on a variable: left unjudged, the
+                            // other checks go on.
+                            if !ownership_may_depend_on_values(&tol, &peer_refs, "name", &owner) {
+                                stage = Stage::Ownership {
+                                    field: "name",
+                                    peer: owner.clone(),
+                                };
+                                return Err(SinterError::schema(format!(
+                                    "conflicting ownership of {} {} by resources {} and {}",
+                                    kind,
+                                    if name_sensitive {
+                                        "(value redacted)"
+                                    } else {
+                                        name.as_str()
+                                    },
+                                    owner,
+                                    r.id
+                                )));
+                            }
+                        }
                     }
-                    fr.account_name = Some(name);
+                    fr.account_name = name;
                     staged(&mut stage, Stage::ValueFree, || {
                         if r.with.contains_key("state") {
                             validate_desired_enum(
@@ -2236,14 +2399,18 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
             if matches!(r.type_.as_str(), "file" | "template" | "directory" | "link") {
                 if let Some(p) = &fr.path {
                     if let Some(prev) = path_owner.insert(p.clone(), r.id.clone()) {
-                        stage = Stage::Ownership {
-                            field: "path",
-                            peer: prev.clone(),
-                        };
-                        return Err(SinterError::schema(format!(
-                            "conflicting ownership of path {} by resources {} and {}",
-                            p, prev, r.id
-                        )));
+                        // May depend on a variable: left unjudged, the other
+                        // checks go on.
+                        if !ownership_may_depend_on_values(&tol, &peer_refs, "path", &prev) {
+                            stage = Stage::Ownership {
+                                field: "path",
+                                peer: prev.clone(),
+                            };
+                            return Err(SinterError::schema(format!(
+                                "conflicting ownership of path {} by resources {} and {}",
+                                p, prev, r.id
+                            )));
+                        }
                     }
                 }
             }
@@ -2404,8 +2571,9 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
 
     // Dependency graph must be acyclic. Detect it during static validation.
     if overrides.structure_only {
-        // Resources left out above have no frozen form: walk the declared
-        // graph instead (the same ids and edges).
+        // A resource whose check was left out at the boundary above has no
+        // frozen form: walk the declared graph instead (the same ids and
+        // edges).
         let declared: Vec<(&str, &[String])> = state
             .resources
             .iter()
@@ -2642,6 +2810,7 @@ fn validate_file_common(
     fr: &mut FrozenResource,
     sensitive_vars: &BTreeSet<String>,
     stage: &mut Stage,
+    tol: &Tolerance,
 ) -> Result<()> {
     // Literal checks only: the written mode/owner/group text is checked, no
     // variable value is evaluated.
@@ -2685,7 +2854,7 @@ fn validate_file_common(
     // Validate that `source` is static when present.
     if with.get("source").is_some() {
         let sens = fr.sensitive || value_may_be_sensitive(&with["source"], sensitive_vars);
-        staged(stage, Stage::Field("source"), || {
+        staged_field(stage, tol, "source", || {
             static_string(with, "source", scope, ctx, true, sens)
         })?;
     }
@@ -2699,6 +2868,7 @@ fn validate_command_fields(
     fr: &mut FrozenResource,
     sensitive_vars: &BTreeSet<String>,
     stage: &mut Stage,
+    tol: &Tolerance,
 ) -> Result<()> {
     // Literal checks only: the written args, numbers and changed_when text.
     staged(stage, Stage::ValueFree, || {
@@ -2796,7 +2966,10 @@ fn validate_command_fields(
                 }
             }
         }
-        if fr.creates.is_some() && fr.removes.is_some() {
+        // Written presence, not the frozen values: a structure-only check may
+        // have left one of them unjudged.
+        let written = |k: &str| with.get(k).is_some_and(|v| !v.is_null());
+        if written("creates") && written("removes") {
             return Err(SinterError::schema(format!(
                 "{}: creates and removes are mutually exclusive",
                 ctx
@@ -2809,7 +2982,7 @@ fn validate_command_fields(
     if let Some(v) = with.get("cwd") {
         if !v.is_null() {
             let sens = fr.sensitive || value_may_be_sensitive(v, sensitive_vars);
-            staged(stage, Stage::Field("cwd"), || {
+            staged_field(stage, tol, "cwd", || {
                 let s = static_string(with, "cwd", scope, ctx, true, sens)?;
                 validate_path(&s)
                     .map_err(|e| SinterError::schema(format!("{}: cwd: {}", ctx, e.message)))
@@ -3374,6 +3547,51 @@ mod vars_tests {
         assert!(checked > 15, "checked {checked}");
     }
 
+    /// A recipe that freezes with its own values passes the structure check
+    /// whatever its string variables hold: nothing a variable decides is
+    /// judged, on every shipped file.
+    #[test]
+    fn check_structure_accepts_a_valid_recipe_whatever_its_string_variables_hold() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        for d in ["examples", "tests/fixtures", "docs-site/src", "release"] {
+            files_under(&root.join(d), &mut files);
+        }
+        let (mut checked, mut changed) = (0, 0);
+        for f in &files {
+            if load_model(f).is_err() {
+                continue;
+            }
+            for held in [
+                "CHANGE_ME",
+                "",
+                "rel/path",
+                "has space",
+                "A!",
+                "/",
+                "\u{0}x",
+            ] {
+                let mut p = prepare(f).unwrap();
+                let mut any = false;
+                for v in p.state.vars.iter_mut().filter(|v| !v.sensitive) {
+                    if matches!(v.value, Value::Str(_)) {
+                        v.value = Value::Str(held.to_string());
+                        any = true;
+                    }
+                }
+                p.check_structure()
+                    .unwrap_or_else(|e| panic!("{} with {held:?}: {}", f.display(), e.message));
+                checked += 1;
+                changed += usize::from(any);
+            }
+        }
+        assert!(
+            checked > 100 && changed >= 14,
+            "checked {checked}, changed {changed}"
+        );
+        eprintln!("D-15: {checked} structure checks, {changed} with string variables changed");
+    }
+
     #[test]
     fn check_structure_judges_structure_and_not_a_variables_value() {
         let d = tempfile::tempdir().unwrap();
@@ -3421,6 +3639,351 @@ mod vars_tests {
         );
         let e = prepare(&p).unwrap().check_structure().expect_err("kept");
         assert!(!e.message.contains("relsecretvalue"), "{}", e.message);
+    }
+
+    /// A recipe with the placeholder variable `root` (no usable default), a
+    /// sensitive `tok` and an integer `n`, given resources, structure-checked.
+    fn structure_of(dir: &Path, resources: &str) -> Result<()> {
+        structure_holding(dir, "CHANGE_ME", resources)
+    }
+
+    /// [`structure_of`] with `root` holding `held` (a YAML scalar).
+    fn structure_holding(dir: &Path, held: &str, resources: &str) -> Result<()> {
+        let head = format!(
+            "version: 1\nvars:\n  root: {{ value: {held} }}\n  n: {{ value: 7 }}\n  flag: {{ value: false }}\n  flag2: {{ value: true }}\n  lst: {{ value: [a] }}\n  tok: {{ value: {CANARY}, sensitive: true }}\nresources:\n"
+        );
+        let p = write(dir, "r.yaml", &format!("{head}{resources}"));
+        prepare(&p).and_then(|p| p.check_structure())
+    }
+
+    /// The checks that follow a field a variable decides still run: a field
+    /// the check cannot judge (the placeholder fails it) is left out and
+    /// nothing else is.
+    #[test]
+    fn check_structure_goes_on_past_a_field_a_variable_decides() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "t.j2", "x\n");
+        write(d.path(), "bad.j2", "{% if a %}x{% endif %}\n");
+        let root = "\"{{ vars.root }}/x\"";
+        for (what, resources, want) in [
+            // Fails whatever the variables hold, in the same field.
+            ("undeclared variable", "  - { id: a, type: file, with: { path: \"{{ vars.root }}/{{ vars.nope }}\", content: y } }\n".to_string(), "undefined variable"),
+            ("sensitive value", "  - { id: a, type: file, with: { path: \"{{ vars.root }}/{{ vars.tok }}\", content: y } }\n".to_string(), "sensitive values"),
+            ("other type", format!("  - {{ id: a, type: file, with: {{ path: {root}, source: \"{{{{ vars.n }}}}\" }} }}\n"), "must be a string"),
+            // A later check of the same resource, per kind of resource.
+            ("file owner", format!("  - {{ id: a, type: file, with: {{ path: {root}, owner: \"\", content: y }} }}\n"), "invalid owner"),
+            ("file group", format!("  - {{ id: a, type: file, with: {{ path: {root}, group: \"\", content: y }} }}\n"), "invalid group"),
+            ("file content and source", format!("  - {{ id: a, type: file, with: {{ path: {root}, content: y, source: s }} }}\n"), "mutually exclusive"),
+            ("file secret", format!("  - {{ id: a, type: file, with: {{ path: {root}, content: {{ secret: ../b.age }} }} }}\n"), "secret reference"),
+            ("template mode", format!("  - {{ id: a, type: template, with: {{ path: {root}, source: \"{{{{ vars.root }}}}/t\", mode: \"99\" }} }}\n"), "mode"),
+            ("template literal source", format!("  - {{ id: a, type: template, with: {{ path: {root}, source: nosuch.j2 }} }}\n"), "not found"),
+            ("template body", format!("  - {{ id: a, type: template, with: {{ path: {root}, source: bad.j2 }} }}\n"), "{% ... %}"),
+            ("command removes", format!("  - {{ id: a, type: command, with: {{ program: /bin/true, creates: {root}, removes: /r }} }}\n"), "mutually exclusive"),
+            ("command cwd", format!("  - {{ id: a, type: command, with: {{ program: /bin/true, removes: {root}, cwd: rel }} }}\n"), "cwd"),
+            ("account secret", "  - { id: a, type: user, with: { name: \"{{ vars.root }}\", password_hash: { secret: ../b.age } } }\n".to_string(), "secret reference"),
+            ("group state", "  - { id: a, type: group, with: { name: \"{{ vars.root }}\", state: sideways } }\n".to_string(), "state"),
+            ("role secret", "  - { id: a, type: postgresql_role, with: { name: \"{{ vars.root }}\", password_verifier: { secret: ../b.age } } }\n".to_string(), "secret reference"),
+            // Ownership that the failing resource still holds.
+            ("path owner", "  - { id: a, type: template, with: { path: /etc/same, source: \"{{ vars.root }}/t\" } }\n  - { id: b, type: file, with: { path: /etc/same, content: y } }\n".to_string(), "conflicting ownership of path"),
+            // Another resource after the failing one.
+            ("next resource", format!("  - {{ id: a, type: file, with: {{ path: {root}, content: y }} }}\n  - {{ id: b, type: file, with: {{ path: /y, owner: \"\", content: y }} }}\n"), "invalid owner"),
+        ] {
+            let e = structure_of(d.path(), &resources)
+                .expect_err(&format!("{what}: not refused"));
+            assert_eq!(e.kind, crate::error::ErrorKind::Schema, "{what}");
+            assert!(!e.message.contains("withheld"), "{what}: {}", e.message);
+            assert!(e.message.contains(want), "{what}: {}", e.message);
+            assert!(!e.message.contains(CANARY), "{what}: {}", e.message);
+        }
+    }
+
+    /// What a variable may decide stays undecided, in every kind of resource,
+    /// and so does a conflict between things named by a variable.
+    #[test]
+    fn check_structure_leaves_what_a_variable_decides_undecided() {
+        let d = tempfile::tempdir().unwrap();
+        let root = "\"{{ vars.root }}/x\"";
+        let name = "\"{{ vars.root }}\"";
+        for (what, resources) in [
+            ("file", format!("  - {{ id: a, type: file, with: {{ path: {root}, content: y }} }}\n")),
+            ("directory", format!("  - {{ id: a, type: directory, with: {{ path: {root} }} }}\n")),
+            ("link", format!("  - {{ id: a, type: link, with: {{ path: {root}, target: /t }} }}\n")),
+            ("template", format!("  - {{ id: a, type: template, with: {{ path: {root}, source: \"{{{{ vars.root }}}}/t.j2\" }} }}\n")),
+            ("command", format!("  - {{ id: a, type: command, with: {{ program: /bin/true, creates: {root}, cwd: {root} }} }}\n")),
+            ("package", "  - { id: a, type: package, with: { name: \"{{ vars.root }} x\", state: present } }\n".to_string()),
+            ("service", format!("  - {{ id: a, type: service, with: {{ name: {name}, state: running }} }}\n")),
+            ("user", format!("  - {{ id: a, type: user, with: {{ name: {name} }} }}\n")),
+            ("group", format!("  - {{ id: a, type: group, with: {{ name: {name} }} }}\n")),
+            ("role", format!("  - {{ id: a, type: postgresql_role, with: {{ name: {name} }} }}\n")),
+            ("path owned twice", format!("  - {{ id: a, type: file, with: {{ path: {root}, content: y }} }}\n  - {{ id: b, type: file, with: {{ path: {root}, content: y }} }}\n")),
+            ("account owned twice", format!("  - {{ id: a, type: user, with: {{ name: {name} }} }}\n  - {{ id: b, type: user, with: {{ name: {name} }} }}\n")),
+            ("role owned twice", format!("  - {{ id: a, type: postgresql_role, with: {{ name: {name} }} }}\n  - {{ id: b, type: postgresql_role, with: {{ name: {name} }} }}\n")),
+        ] {
+            for held in [
+                "CHANGE_ME",
+                "\"\"",
+                "rel/path",
+                "\"has space\"",
+                "\"A!\"",
+                "\"/\"",
+                "/srv",
+            ] {
+                structure_holding(d.path(), held, &resources)
+                    .unwrap_or_else(|e| panic!("{what} with {held}: {}", e.message));
+            }
+        }
+        // The same conflicts are refused where the names are literal.
+        for (what, resources) in [
+            ("path", "  - { id: a, type: file, with: { path: /x, content: y } }\n  - { id: b, type: file, with: { path: /x, content: y } }\n"),
+            ("user", "  - { id: a, type: user, with: { name: dup } }\n  - { id: b, type: user, with: { name: dup } }\n"),
+            ("role", "  - { id: a, type: postgresql_role, with: { name: dup } }\n  - { id: b, type: postgresql_role, with: { name: dup } }\n"),
+        ] {
+            let e = structure_of(d.path(), resources).expect_err(what);
+            assert!(e.message.contains("conflicting ownership"), "{what}: {}", e.message);
+        }
+    }
+
+    /// What fails whatever the variables hold is refused at every field that
+    /// is checked on its own: leaving the field out would hide it.
+    #[test]
+    fn check_structure_keeps_what_fails_whatever_a_variable_holds_at_every_field() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "t.j2", "x\n");
+        let u = "\"{{ vars.root }}/{{ vars.nope }}\"";
+        let sole_list = "\"{{ vars.lst }}\"";
+        for (what, field, resources) in [
+            (
+                "file path",
+                u,
+                "  - { id: a, type: file, with: { path: FIELD, content: y } }\n",
+            ),
+            (
+                "file source",
+                u,
+                "  - { id: a, type: file, with: { path: /x, source: FIELD } }\n",
+            ),
+            (
+                "directory path",
+                u,
+                "  - { id: a, type: directory, with: { path: FIELD } }\n",
+            ),
+            (
+                "link path",
+                u,
+                "  - { id: a, type: link, with: { path: FIELD, target: /t } }\n",
+            ),
+            (
+                "template path",
+                u,
+                "  - { id: a, type: template, with: { path: FIELD, source: t.j2 } }\n",
+            ),
+            (
+                "template source",
+                u,
+                "  - { id: a, type: template, with: { path: /x, source: FIELD } }\n",
+            ),
+            (
+                "command program",
+                "\"/{{ vars.root }}/{{ vars.nope }}\"",
+                "  - { id: a, type: command, with: { program: FIELD } }\n",
+            ),
+            (
+                "command creates",
+                u,
+                "  - { id: a, type: command, with: { program: /bin/true, creates: FIELD } }\n",
+            ),
+            (
+                "command removes",
+                u,
+                "  - { id: a, type: command, with: { program: /bin/true, removes: FIELD } }\n",
+            ),
+            (
+                "command cwd",
+                u,
+                "  - { id: a, type: command, with: { program: /bin/true, cwd: FIELD } }\n",
+            ),
+            (
+                "package name",
+                u,
+                "  - { id: a, type: package, with: { name: FIELD, state: present } }\n",
+            ),
+            (
+                "service name",
+                u,
+                "  - { id: a, type: service, with: { name: FIELD, state: running } }\n",
+            ),
+            (
+                "user name",
+                u,
+                "  - { id: a, type: user, with: { name: FIELD } }\n",
+            ),
+            (
+                "group name",
+                u,
+                "  - { id: a, type: group, with: { name: FIELD } }\n",
+            ),
+            (
+                "role name",
+                u,
+                "  - { id: a, type: postgresql_role, with: { name: FIELD } }\n",
+            ),
+            // A variable of another type, used as the whole value.
+            (
+                "file path (list)",
+                sole_list,
+                "  - { id: a, type: file, with: { path: FIELD, content: y } }\n",
+            ),
+            (
+                "template source (list)",
+                sole_list,
+                "  - { id: a, type: template, with: { path: /x, source: FIELD } }\n",
+            ),
+            (
+                "command creates (list)",
+                sole_list,
+                "  - { id: a, type: command, with: { program: /bin/true, creates: FIELD } }\n",
+            ),
+            (
+                "package name (list)",
+                sole_list,
+                "  - { id: a, type: package, with: { name: FIELD, state: present } }\n",
+            ),
+            (
+                "user name (list)",
+                sole_list,
+                "  - { id: a, type: user, with: { name: FIELD } }\n",
+            ),
+            // The loop item takes part in the same field.
+            (
+                "loop item",
+                u,
+                "  - { id: a, type: file, loop: [x, y], with: { path: FIELD, content: y } }\n",
+            ),
+        ] {
+            let resources = resources.replace("FIELD", field);
+            let e = structure_of(d.path(), &resources).expect_err(&format!("{what}: not refused"));
+            assert!(!e.message.contains("withheld"), "{what}: {}", e.message);
+            assert!(!e.message.contains(CANARY), "{what}: {}", e.message);
+        }
+    }
+
+    /// A failure that depends on the value of a variable is left undecided,
+    /// whatever the type of the variable and the way the field is built.
+    #[test]
+    fn check_structure_leaves_undecided_what_a_value_a_boolean_or_an_item_decides() {
+        let d = tempfile::tempdir().unwrap();
+        let file = |path: &str| {
+            format!("  - {{ id: a, type: file, with: {{ path: \"{path}\", content: y }} }}\n")
+        };
+        // `||` and `&&` evaluate their right side only for some values.
+        for (what, resources) in [
+            ("or, right side only when false", file("/a/{{ vars.flag || vars.root }}")),
+            ("or, right side only when false (true)", file("{{ vars.root }}/{{ vars.flag2 || vars.root }}")),
+            ("and, right side only when true", file("/a/{{ vars.flag2 && vars.root }}")),
+            ("item and a variable", "  - { id: a, type: file, loop: [x, y], with: { path: \"{{ vars.root }}/{{ item }}\", content: y } }\n".to_string()),
+        ] {
+            structure_of(d.path(), &resources).unwrap_or_else(|e| panic!("{what}: {}", e.message));
+        }
+        // A NUL in a default is a value, not a structure.
+        structure_holding(d.path(), "\"a\\u0000b\"", &file("{{ vars.root }}/x"))
+            .unwrap_or_else(|e| panic!("nul: {}", e.message));
+        // What fails for every value of the booleans is refused (an integer is
+        // never an operand of `||` or `&&`).
+        let e = structure_of(d.path(), &file("/a/{{ vars.n || vars.flag }}")).expect_err("or int");
+        assert!(!e.message.contains("withheld"), "{}", e.message);
+        let e =
+            structure_of(d.path(), &file("/a/{{ vars.n && vars.flag2 }}")).expect_err("and int");
+        assert!(!e.message.contains("withheld"), "{}", e.message);
+        // Used as the whole value, `flag2 && root` is a boolean for every value.
+        let e = structure_of(
+            d.path(),
+            "  - { id: a, type: user, with: { name: \"{{ vars.flag2 && vars.root }}\" } }\n",
+        )
+        .expect_err("and, whole value");
+        assert!(!e.message.contains("withheld"), "{}", e.message);
+    }
+
+    /// A field that names more booleans than are tried is left undecided.
+    #[test]
+    fn check_structure_leaves_a_field_naming_many_booleans_undecided() {
+        let d = tempfile::tempdir().unwrap();
+        let names: Vec<String> = (1..=MAX_PROBED_BOOLS + 1)
+            .map(|i| format!("b{i}"))
+            .collect();
+        let decl: String = names
+            .iter()
+            .map(|n| format!("  {n}: {{ value: false }}\n"))
+            .collect();
+        let used: String = names
+            .iter()
+            .map(|n| format!("{{{{ vars.{n} }}}}"))
+            .collect();
+        let p = write(
+            d.path(),
+            "r.yaml",
+            &format!(
+                "version: 1\nvars:\n  root: {{ value: CHANGE_ME }}\n{decl}resources:\n  - {{ id: a, type: file, with: {{ path: \"{{{{ vars.root }}}}/{used}\", content: y }} }}\n"
+            ),
+        );
+        prepare(&p).unwrap().check_structure().unwrap();
+    }
+
+    /// A conflict a variable takes part in is left undecided, on whichever
+    /// side the variable is, and the resource's later checks still run.
+    #[test]
+    fn check_structure_leaves_a_conflict_a_variable_decides_and_goes_on() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "bad.j2", "{% if a %}x{% endif %}\n");
+        // `root` holds a usable value here: a and b collide with it, and with
+        // no other value they would not.
+        for (what, held, resources) in [
+            ("variable, then literal", "/srv", "  - { id: a, type: file, with: { path: \"{{ vars.root }}/x\", content: y } }\n  - { id: b, type: file, with: { path: /srv/x, content: y } }\n"),
+            ("literal, then variable", "/srv", "  - { id: a, type: file, with: { path: /srv/x, content: y } }\n  - { id: b, type: file, with: { path: \"{{ vars.root }}/x\", content: y } }\n"),
+            ("account, variable then literal", "dup", "  - { id: a, type: user, with: { name: \"{{ vars.root }}\" } }\n  - { id: b, type: user, with: { name: dup } }\n"),
+            ("account, literal then variable", "dup", "  - { id: a, type: user, with: { name: dup } }\n  - { id: b, type: user, with: { name: \"{{ vars.root }}\" } }\n"),
+            ("role, variable then literal", "dup", "  - { id: a, type: postgresql_role, with: { name: \"{{ vars.root }}\" } }\n  - { id: b, type: postgresql_role, with: { name: dup } }\n"),
+        ] {
+            structure_holding(d.path(), held, resources)
+                .unwrap_or_else(|e| panic!("{what}: {}", e.message));
+        }
+        for (what, held, resources, want) in [
+            ("template body after a path conflict", "/srv", "  - { id: a, type: file, with: { path: \"{{ vars.root }}/x\", content: y } }\n  - { id: b, type: template, with: { path: \"{{ vars.root }}/x\", source: bad.j2 } }\n", "{% ... %}"),
+            ("template body after a path conflict, literal first", "/srv", "  - { id: a, type: file, with: { path: /srv/x, content: y } }\n  - { id: b, type: template, with: { path: \"{{ vars.root }}/x\", source: bad.j2 } }\n", "{% ... %}"),
+            ("secret after an account conflict, literal first", "dup", "  - { id: a, type: user, with: { name: dup } }\n  - { id: b, type: user, with: { name: \"{{ vars.root }}\", password_hash: { secret: ../b.age } } }\n", "secret reference"),
+            ("secret after a role conflict, literal first", "dup", "  - { id: a, type: postgresql_role, with: { name: dup } }\n  - { id: b, type: postgresql_role, with: { name: \"{{ vars.root }}\", password_verifier: { secret: ../b.age } } }\n", "secret reference"),
+            ("secret after an account conflict", "dup", "  - { id: a, type: user, with: { name: \"{{ vars.root }}\" } }\n  - { id: b, type: user, with: { name: dup, password_hash: { secret: ../b.age } } }\n", "secret reference"),
+            ("secret after a role conflict", "dup", "  - { id: a, type: postgresql_role, with: { name: \"{{ vars.root }}\" } }\n  - { id: b, type: postgresql_role, with: { name: dup, password_verifier: { secret: ../b.age } } }\n", "secret reference"),
+        ] {
+            let e = structure_holding(d.path(), held, resources).expect_err(what);
+            assert!(e.message.contains(want), "{what}: {}", e.message);
+        }
+    }
+
+    /// A freeze that runs a recipe is the freeze it was: the same field that
+    /// the structure check leaves undecided fails there, and fails first.
+    #[test]
+    fn freezing_still_fails_on_the_first_failing_check() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write(
+            d.path(),
+            "r.yaml",
+            "version: 1\nvars:\n  root: { value: CHANGE_ME }\nresources:\n  - { id: a, type: file, with: { path: \"{{ vars.root }}/x\", owner: \"\", content: y } }\n",
+        );
+        let e = load_model(&p).unwrap_err();
+        assert!(e.message.contains("path must be absolute"), "{}", e.message);
+        let e = prepare(&p)
+            .unwrap()
+            .freeze_with(&ov(&[("root", s("/srv"))], "hosts.web01"))
+            .unwrap_err();
+        assert!(e.message.contains("invalid owner"), "{}", e.message);
+        // A field an override decides fails the freeze that runs it: it is
+        // never left out there.
+        let e = prepare(&p)
+            .unwrap()
+            .freeze_with(&ov(&[("root", s("rel"))], "hosts.web01"))
+            .unwrap_err();
+        assert!(e.message.contains("withheld"), "{}", e.message);
+        assert!(!e.message.contains("invalid owner"), "{}", e.message);
     }
 
     #[test]

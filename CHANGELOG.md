@@ -25,10 +25,15 @@ All notable changes to Sinter are documented in this file.
   placeholder default or a value the variables file does not give it no longer
   stops the hosts that run. It is still read as a document and its structure is
   checked (unknown resource types and fields, duplicate ids,
-  `depends_on`/`notify`, secret references, undeclared variables); only a
-  resource whose static check fails on a field referencing a variable the
-  recipe declares is left to the time a host runs the recipe, together with
-  the checks after it for that resource. Text shows `SKIP   recipe not run: --limit leaves no host for it`,
+  `depends_on`/`notify`, secret references, undeclared variables, literal
+  fields such as `owner` or `content` with `source`); only what a variable's
+  value decides is left to the time a host runs the recipe: a field that
+  references a variable the recipe declares and fails its static check with
+  the recipe's defaults (a path built from a placeholder, say), and a conflict
+  over a path or a name that such a variable takes part in. The other checks
+  of that resource, and of the other resources, are made, and so is a field
+  that fails whatever the variables hold (an undeclared variable next to a
+  declared one, a fact, a sensitive value). Text shows `SKIP   recipe not run: --limit leaves no host for it`,
   JSON `excluded_by: "limit"` on its `resolution` entry, and `validate` a
   `skip` line. `validate` checks an explicit `--limit` with or without
   `--vars-file` (the inventory, the recipes' `targets` and the selection; JSON
