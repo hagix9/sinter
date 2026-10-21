@@ -4177,18 +4177,41 @@ impl FakeExecutor {
                 stderr_truncated: false,
             };
         }
-        if args.iter().any(|a| a == "install") {
-            self.target.packages.insert(name);
-        } else if args.iter().any(|a| a == "remove") {
-            self.target.packages.remove(&name);
-        } else {
+        // `-o APT::Status-Fd=1` (Phase 2): a real apt-get writes these records
+        // to stdout while it works. Sinter adds the option only when a progress
+        // consumer is attached, so a run without progress still sees empty
+        // stdout here, exactly as before.
+        let status_fd = prog == "apt-get"
+            && args
+                .windows(2)
+                .any(|w| w[0] == "-o" && w[1] == "APT::Status-Fd=1");
+        let install = args.iter().any(|a| a == "install");
+        let remove = args.iter().any(|a| a == "remove");
+        if !install && !remove {
             return Self::exited(
                 1,
                 String::new(),
                 format!("fake {}: unsupported operation", prog),
             );
         }
-        Self::exited(0, String::new(), String::new())
+        let mut stdout = String::new();
+        if status_fd && install {
+            stdout.push_str("dlstatus:1:0.0000:Retrieving file 1 of 2\n");
+            stdout.push_str("dlstatus:1:50.0000:Retrieving file 2 of 2\n");
+            stdout.push_str("dlstatus:1:100.0000:Retrieving file 2 of 2\n");
+            stdout.push_str(&format!("pmstatus:{name}:20.0000:Preparing {name}\n"));
+            stdout.push_str(&format!("pmstatus:{name}:40.0000:Unpacking {name}\n"));
+            stdout.push_str(&format!("pmstatus:{name}:100.0000:Installed {name}\n"));
+        } else if status_fd && remove {
+            stdout.push_str(&format!("pmstatus:{name}:40.0000:Removing {name}\n"));
+            stdout.push_str(&format!("pmstatus:{name}:100.0000:Removing {name}\n"));
+        }
+        if install {
+            self.target.packages.insert(name);
+        } else {
+            self.target.packages.remove(&name);
+        }
+        Self::exited(0, stdout, String::new())
     }
 
     /// Route a filesystem command to the scripted filesystem when one is

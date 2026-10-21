@@ -51,6 +51,21 @@ impl PackageBackend {
         }
     }
 
+    /// Extra argv that makes the backend emit machine-readable progress on
+    /// its standard output, for the duration of one mutation.
+    ///
+    /// APT has a documented protocol (`APT::Status-Fd`): the records are
+    /// plain `dlstatus:`/`pmstatus:` lines on fd 1, which the existing capture
+    /// already reads over both the local pipes and SSH. DNF has no equivalent
+    /// (its non-TTY progress is disabled by design), so the list is empty and
+    /// Phase 3 parses its human-readable stage lines instead.
+    pub fn progress_args(&self) -> &'static [&'static str] {
+        match self {
+            Self::Apt => &["-o", "APT::Status-Fd=1"],
+            Self::Dnf => &[],
+        }
+    }
+
     /// Exact argv (excluding the program) for an install/remove mutation.
     ///
     /// DESIGN §27: no version pinning, and automatic repository metadata

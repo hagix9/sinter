@@ -504,3 +504,44 @@ fn the_observation_bound_is_per_stream() {
         "stderr has its own 1 MiB bound"
     );
 }
+
+#[test]
+fn a_mixed_apt_stream_keeps_the_measured_download_percent() {
+    let sink = RecordingSink::new();
+    let r = reporter(
+        Box::new(crate::package_progress::apt::AptProgressParser::new()),
+        sink.clone(),
+    )
+    .expect("enabled sink");
+    // The human markers would replace the measured 50% with a percent-less
+    // event if the parser let both sources through.
+    r.stdout(
+        b"dlstatus:1:50.0000:Retrieving file 1 of 2\n\
+          Need to get 80.1 MB of archives.\n",
+    );
+    r.finish();
+    let events = details(&sink.events());
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].percent, Some(50));
+}
+
+#[test]
+fn a_mixed_apt_stream_keeps_the_measured_install_percent() {
+    let sink = RecordingSink::new();
+    let r = reporter(
+        Box::new(crate::package_progress::apt::AptProgressParser::new()),
+        sink.clone(),
+    )
+    .expect("enabled sink");
+    r.stdout(
+        b"pmstatus:acl:40.0000:Unpacking acl\n\
+          Unpacking acl (2.3.2-1build1.1) ...\n\
+          Fetched 80.1 MB in 3s (23.0 MB/s)\n\
+          Setting up acl (2.3.2-1build1.1) ...\n",
+    );
+    r.finish();
+    let events = details(&sink.events());
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].percent, Some(40));
+    assert_eq!(events[0].package.as_deref(), Some("acl"));
+}

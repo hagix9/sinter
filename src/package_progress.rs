@@ -1,10 +1,10 @@
 //! Package-progress observation (WP-PKG-PROGRESS P1).
 //!
 //! This module is the seam between an execution's byte streams and the
-//! [`ProgressEvent::PackageDetail`] vocabulary. It deliberately contains **no**
-//! package-manager grammar: APT's `status-fd` records and DNF's stage lines are
-//! Phase 2 and Phase 3 work. What P1 fixes is the machinery every later parser
-//! must use, so the grammar can be added without reopening these decisions:
+//! [`ProgressEvent::PackageDetail`] vocabulary. The generic machinery lives
+//! here; the backend grammars live beside it. APT's status-fd grammar is
+//! [`apt::AptProgressParser`] (Phase 2). DNF's stage lines are Phase 3 work and
+//! still use [`SkeletonParser`], which recognizes nothing.
 //!
 //! 1. **A parser never sees raw strings.** [`LineSplitter`] frames bytes into
 //!    complete lines, caps a line at [`MAX_LINE`] bytes, drops over-long lines
@@ -45,6 +45,8 @@
 //! The reporter is an observation device only. It has no handle to the
 //! executor's result, cannot cancel anything, cannot retry anything and never
 //! writes to stdout or to the terminal.
+
+pub mod apt;
 
 use crate::executor::ExecObserver;
 use crate::platform::PackageBackend;

@@ -1,11 +1,14 @@
 use crate::engine::{command_register_map, unknown_result, Engine, Mode};
 use crate::error::{MutationState, Result, SinterError};
-use crate::executor::{Completion, ExecRequest, Output};
+use crate::executor::{Completion, ExecObserver, ExecRequest, Output};
 use crate::expressions::{eval_boolean, eval_value_interpolated, parse_expr, EvalVal, Scope};
 use crate::manager::ManagerInput;
 use crate::model::FrozenResource;
+use crate::package_progress::apt::AptProgressParser;
+use crate::package_progress::{PackageParser, PackageReporter};
 use crate::paths::{ancestor_dirs, mode_to_string, parent_and_name, parse_mode};
 use crate::platform::PackageBackend;
+use crate::progress::ItemRef;
 use crate::result::Diff;
 use crate::result::*;
 use crate::targetfs::{
@@ -13,6 +16,7 @@ use crate::targetfs::{
 };
 use crate::value::Value;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 /// Metadata desired for a filesystem object.
@@ -2906,6 +2910,31 @@ impl Engine {
     // -----------------------------------------------------------------------
     // package
     // -----------------------------------------------------------------------
+    /// The package-progress reporter for one mutation, or `None` when the
+    /// resource is sensitive, no consumer is attached, or the backend has no
+    /// progress grammar yet (DNF is Phase 3). One reporter per executed
+    /// command: the APT grammar's state never crosses a command boundary.
+    fn start_package_reporter(
+        &self,
+        backend: PackageBackend,
+        res: &FrozenResource,
+        sensitive: bool,
+    ) -> Option<Arc<PackageReporter>> {
+        if sensitive {
+            return None;
+        }
+        let parser: Box<dyn PackageParser> = match backend {
+            PackageBackend::Apt => Box::new(AptProgressParser::new()),
+            PackageBackend::Dnf => return None,
+        };
+        PackageReporter::start(
+            ItemRef::resource("package", &res.id),
+            backend,
+            parser,
+            Arc::clone(&self.progress),
+        )
+    }
+
     pub(crate) fn run_package(
         &mut self,
         res: &FrozenResource,
@@ -3047,6 +3076,19 @@ impl Engine {
         // bare `?` — but the mutation itself never ran, so there is no
         // mutation truth to preserve.
         let permit = self.fs.mutation_permit()?;
+        // Progress observation is additive: a reporter exists only when a
+        // consumer is attached and the resource is not sensitive, and the
+        // backend argv gains the machine-readable option only then. A run
+        // without progress therefore sends exactly the command it sent before.
+        // Creating it after the permit keeps the "created implies finished"
+        // property: the only `?` between here and the mutation is gone.
+        let reporter = self.start_package_reporter(backend, res, sensitive);
+        let extra = progress_argv(backend, reporter.is_some());
+        if !extra.is_empty() {
+            let mut args: Vec<String> = extra.iter().map(|arg| (*arg).to_string()).collect();
+            args.append(&mut req.args);
+            req.args = args;
+        }
         let out = if self.fs.fault() == Some("package_mutation_dispatch_fail") {
             Err(SinterError::apply(format!(
                 "injected {} {} dispatch failure",
@@ -3054,8 +3096,18 @@ impl Engine {
                 action
             )))
         } else {
-            self.fs.exec(&permit, &req)
+            let observer: Option<Arc<dyn ExecObserver>> = reporter
+                .as_ref()
+                .map(|r| Arc::clone(r) as Arc<dyn ExecObserver>);
+            self.fs.exec_with_observer(&permit, &req, observer)
         };
+        // The mutation is over: stop the reporter on every path (success,
+        // non-zero exit, signal, indeterminate, dispatch error) before any
+        // other command is sent to the target. `finish` is idempotent and
+        // bounded by the Phase 1 sink contract.
+        if let Some(reporter) = &reporter {
+            reporter.finish();
+        }
         // R2-02: the mutation completion state must be classified BEFORE any
         // further command is sent to the target. When the mutation's
         // completion cannot be established the remote process may still be
@@ -6688,6 +6740,17 @@ fn is_wrapped_header_continuation(t: &str) -> bool {
 /// repository), otherwise only the size of the withheld output. apt: its
 /// stderr, single-line, at most 300 characters, with any URL credentials
 /// (`scheme://user:pass@host`) redacted.
+/// The extra argv that makes the backend emit machine-readable progress, but
+/// only when a reporter will actually read it. A run without progress keeps
+/// the exact argv it had before.
+fn progress_argv(backend: PackageBackend, enabled: bool) -> &'static [&'static str] {
+    if enabled {
+        backend.progress_args()
+    } else {
+        &[]
+    }
+}
+
 fn package_failure_note(
     backend: crate::platform::PackageBackend,
     out: &Output,
@@ -9118,5 +9181,27 @@ mod snapshot_rpm_path_tests {
                 assert!(build_remote_command(&b, sudo, home).len() <= SNAPSHOT_RM_COMMAND_BYTES);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod progress_wiring_tests {
+    use super::*;
+
+    #[test]
+    fn progress_argv_is_added_only_when_a_reporter_reads_it() {
+        assert_eq!(
+            progress_argv(PackageBackend::Apt, true),
+            &["-o", "APT::Status-Fd=1"][..]
+        );
+        assert!(
+            progress_argv(PackageBackend::Apt, false).is_empty(),
+            "a run without progress must keep the exact argv it had before"
+        );
+        assert!(
+            progress_argv(PackageBackend::Dnf, true).is_empty(),
+            "DNF has no machine-readable progress protocol (Phase 3)"
+        );
+        assert!(PackageBackend::Apt.progress_args() == &["-o", "APT::Status-Fd=1"][..]);
     }
 }
