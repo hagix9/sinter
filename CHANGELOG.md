@@ -2,7 +2,7 @@
 
 All notable changes to Sinter are documented in this file.
 
-## [Unreleased]
+## [1.7.0] - 2026-10-21
 
 ### Added
 
@@ -33,7 +33,14 @@ All notable changes to Sinter are documented in this file.
   over a path or a name that such a variable takes part in. The other checks
   of that resource, and of the other resources, are made, and so is a field
   that fails whatever the variables hold (an undeclared variable next to a
-  declared one, a fact, a sensitive value). Text shows `SKIP   recipe not run: --limit leaves no host for it`,
+  declared one, a fact, a sensitive value). Known limit: the check evaluates
+  each variable with a neutral value of its declared type (and every
+  combination of the booleans a field names, up to 8), so a field whose short
+  circuit is decided by a comparison, such as `vars.x == 'a' || vars.s` (an
+  operand of `||` must be a boolean), can be refused although another value of
+  `x` would make it valid. This applies only to a recipe that already fails
+  with its own defaults; a recipe that freezes with them is never refused, and
+  no value is ever printed. Text shows `SKIP   recipe not run: --limit leaves no host for it`,
   JSON `excluded_by: "limit"` on its `resolution` entry, and `validate` a
   `skip` line. `validate` checks an explicit `--limit` with or without
   `--vars-file` (the inventory, the recipes' `targets` and the selection; JSON
@@ -71,6 +78,21 @@ All notable changes to Sinter are documented in this file.
   public items without changing existing ones: `varsfile::Scope`,
   `varsfile::freeze_executions_in`,
   `parse_limit`, `match_limit`, `ParsedLimit`, `LimitItem` and constants.
+
+### Security
+
+- **Gateway: rustls-webpki 0.103.16 and webpki-roots 1.0.10** for
+  RUSTSEC-2026-0382 and RUSTSEC-2026-0381 (CVE-2026-111943), in
+  `gateway/Cargo.lock` only: certificate paths through distrusted emSign G3
+  intermediates are rejected and the distrusted root is removed from the
+  bundled trust store. The `sinter` binary does not use rustls and is
+  unaffected. The gateway's API, configuration and TLS client settings are
+  unchanged.
+- **`basic-toml` 0.1.10 (RUSTSEC-2026-0374, unmaintained)** is reached only at
+  build time through `age`'s i18n proc-macros and is not linked into the
+  `sinter` binary. The dependency check excepts this one ID for the root
+  lockfile until 2027-01-31 and re-evaluates it when `i18n-config` or `age`
+  updates, a new advisory appears, or the exception expires.
 
 ## [1.6.0] - 2026-10-20
 
