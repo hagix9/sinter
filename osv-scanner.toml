@@ -1,0 +1,15 @@
+# osv-scanner configuration for the root Cargo.lock. It does not apply to
+# gateway/Cargo.lock, which has its own osv-scanner.toml (the rsa exception).
+# Used by .github/workflows/advisories.yml.
+#
+# RUSTSEC-2026-0374 (basic-toml is unmaintained) is excepted for the root
+# lockfile only. basic-toml has no patched version and is reachable only at
+# build time: age 0.12.1 -> i18n-embed-fl/i18n-embed-impl (proc-macro) ->
+# i18n-config 0.4.8 -> basic-toml. It is not linked into the sinter binary and
+# Sinter does not parse TOML with it (recipes use toml 0.8). ignoreUntil is
+# exclusive: the scan fails from that date on, and the exception must then be
+# reviewed and renewed or removed.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0374"
+ignoreUntil = 2027-01-31
+reason = "basic-toml 0.1.10 is unmaintained (RustSec INFO, no patched version). It is reachable only at build time: age 0.12.1 -> i18n-embed-fl/i18n-embed-impl (proc-macro) -> i18n-config 0.4.8 -> basic-toml; it is not linked into the sinter binary and Sinter does not parse TOML with it (recipes use toml 0.8). age is pinned at =0.12.1 (latest) and i18n-config 0.4.8 (latest) still requires basic-toml; cargo-i18n master has switched to toml but has not published i18n-config > 0.4.8. Re-evaluate when i18n-config > 0.4.8 is published, when age updates, a new advisory appears, or this exception expires."
