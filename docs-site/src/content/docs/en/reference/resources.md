@@ -1,9 +1,9 @@
 ---
 title: Resource Reference
-description: All Sinter resource types implemented in v1.6.0.
+description: All Sinter resource types implemented in v1.7.0.
 ---
 
-Sinter v1.6.0 implements ten resource types (`postgresql_role` is new in v1.5.1). Parameters below are the
+Sinter v1.7.0 implements ten resource types (`postgresql_role` is new in v1.5.1). Parameters below are the
 complete supported set — unknown `with` fields are schema errors.
 
 | Type | Purpose | Key parameters |

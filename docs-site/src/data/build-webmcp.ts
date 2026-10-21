@@ -134,12 +134,12 @@ export function buildWebmcp(locale: Locale) {
       requirements: requirementsI18n[locale],
     },
     installation: {
-      release: 'v1.6.0',
+      release: 'v1.7.0',
       artifacts: [
-        'sinter-v1.6.0-linux-x86_64.tar.gz',
+        'sinter-v1.7.0-linux-x86_64.tar.gz',
         'SHA256SUMS',
       ],
-      releaseUrl: 'https://github.com/hagix9/sinter/releases',
+      releaseUrl: 'https://github.com/hagix9/sinter/releases/tag/v1.7.0',
     },
   };
 }

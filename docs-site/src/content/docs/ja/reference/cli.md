@@ -19,7 +19,7 @@ Commands:
 `secrets`サブコマンドについては[sinter secrets](/ja/reference/secrets/)を
 参照してください。
 
-`sinter --version` はバージョンを表示します（例: `sinter 1.6.0`）。
+`sinter --version` はバージョンを表示します（例: `sinter 1.7.0`）。
 
 ## validate
 
@@ -34,7 +34,7 @@ sinter validate <RECIPE|BUNDLE> [--format text|json] [ターゲットオプシ�
 インベントリ・鍵・`known_hosts` の読み込み、`ssh` の実行は一切
 行いません）。未知のオプションや綴り間違いは従来どおりエラーです。
 
-*次のリリースから。* `--vars-file <PATH>` を付けると、`validate` は、`plan`、
+*v1.7.0 から利用できます。* `--vars-file <PATH>` を付けると、`validate` は、`plan`、
 `apply`、`audit` がホストに接続する前に行うのと同じ方法で、そのファイルが
 与える値でレシピを検査します（[ホスト変数とグループ変数](#ホスト変数とグループ変数)
 を参照）。変数ファイルと、`--inventory` があればインベントリを読み、各レシピの
@@ -50,14 +50,14 @@ sinter validate <RECIPE|BUNDLE> [--format text|json] [ターゲットオプシ�
 `ok: variables file <path> checked: N execution(s)` の 1 行が加わり、
 `--format json` では `variables` オブジェクト（`file`、`executions`）が加わります。
 
-*次のリリースから。* `--vars-file` と `--inventory` に `--limit` を加えると、検査は
+*v1.7.0 から利用できます。* `--vars-file` と `--inventory` に `--limit` を加えると、検査は
 選ばれたホストだけに絞られます（`plan` と同じです。[実行の絞り込み](#実行の絞り込み)
 を参照）。除外されたホスト固有の誤った値では `validate` は失敗しません。出力には
 JSON の `limit`（項目）と `variables.targeted_executions`、text の
 `ok: --limit <items> selects N of M execution(s)` の行が加わります。`--vars-file`
 がなくても `--limit` は検査されます。
 
-*次のリリースから。* `validate` は `--vars-file` の有無にかかわらず `--limit` を
+*v1.7.0 から利用できます。* `validate` は `--vars-file` の有無にかかわらず `--limit` を
 検査します。変数ファイルがないときの `validate --inventory <PATH> --limit <ITEMS>`
 は、インベントリを読み、各レシピの `targets` をそれに当て、`plan` がホストに接続
 する前に行うのと同じ方法で `--limit` を評価します。不正な `--limit`（構文、未知の
@@ -270,7 +270,7 @@ executions: 2 (1 recipe(s), 3 host(s))
 
 ### 実行の絞り込み
 
-*次のリリースから。*
+*v1.7.0 から利用できます。*
 
 `--limit <ITEMS>` は、レシピの `targets` が選んだホストの一部だけで実行します。
 `--inventory` が必要で、`--host` やローカル実行では終了コード 2 です。ホストを
@@ -980,11 +980,11 @@ v1.0.0 以降、この節に記載した内容は 1.x 系全体を通じて安�
 | `handlers` | integer | handler 数 |
 | `vars` | integer | var 数 |
 | `warnings` | array of strings | 空でないときだけ出力します（v1.5.1 から）。`template.vars` の中の `{{ … }}` のような、エラーではない指摘です。bundle の文書では、各レシピの項目がそれぞれ `warnings` を持ちます。`--vars-file` ありでは、検査したすべての実行を対象に、同じものは 1 回だけ、レシピごとに最大 50 件です。 |
-| `warnings_omitted` | integer | `--vars-file` ありで、あるレシピの警告が 50 件を超えたときだけ出力します。値は `warnings` に載せきれなかった件数です（次のリリースから）。bundle の文書ではレシピの項目ごとです。 |
-| `variables` | object | `--vars-file` ありのときだけ出力します（次のリリースから）。`file`（string。指定されたとおりのパス）と `executions`（integer。検査した (recipe, host) の実行の数。`--limit` があれば残った分）、`--limit` があれば `targeted_executions`（`--limit` 前の数）。 |
-| `limit` | 文字列の配列 | `--limit` ありのときだけ出力します（次のリリースから）: 指定された項目。 |
-| `selected_executions`、`targeted_executions` | integer | `--limit` ありで `--vars-file` なしのときだけ出力します（次のリリースから）: `--limit` が残した (recipe, host) の実行の数と、レシピの `targets` が選んだ数。 |
-| `excluded_by` | string | バンドルの文書で、`--limit` によって実行するホストがなくなったレシピの項目に付きます（次のリリースから）: `"limit"`。そのレシピの `resources`・`handlers`・`vars` は `null` で、合計には数えません。 |
+| `warnings_omitted` | integer | `--vars-file` ありで、あるレシピの警告が 50 件を超えたときだけ出力します。値は `warnings` に載せきれなかった件数です（v1.7.0 以降）。bundle の文書ではレシピの項目ごとです。 |
+| `variables` | object | `--vars-file` ありのときだけ出力します（v1.7.0 以降）。`file`（string。指定されたとおりのパス）と `executions`（integer。検査した (recipe, host) の実行の数。`--limit` があれば残った分）、`--limit` があれば `targeted_executions`（`--limit` 前の数）。 |
+| `limit` | 文字列の配列 | `--limit` ありのときだけ出力します（v1.7.0 以降）: 指定された項目。 |
+| `selected_executions`、`targeted_executions` | integer | `--limit` ありで `--vars-file` なしのときだけ出力します（v1.7.0 以降）: `--limit` が残した (recipe, host) の実行の数と、レシピの `targets` が選んだ数。 |
+| `excluded_by` | string | バンドルの文書で、`--limit` によって実行するホストがなくなったレシピの項目に付きます（v1.7.0 以降）: `"limit"`。そのレシピの `resources`・`handlers`・`vars` は `null` で、合計には数えません。 |
 
 ### plan と apply
 

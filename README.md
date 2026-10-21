@@ -10,7 +10,7 @@
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/hagix9/sinter?quickstart=1)
 
-Try Sinter v1.6.0 in a disposable Ubuntu container in your browser — nothing to
+Try Sinter v1.7.0 in a disposable Ubuntu container in your browser — nothing to
 install locally, no SSH, no servers. See the [start guide](examples/start/README.md).
 
 Sinter is a lightweight, agentless configuration-management tool inspired by Itamae.
@@ -83,7 +83,7 @@ inventory (hosts, flat groups, explicit per-recipe `targets`) — see
 
 ## Install
 
-Sinter **v1.7.0** is prepared for release as one
+Sinter **v1.7.0** ships one
 `sinter-v1.7.0-linux-x86_64.tar.gz` artifact covering every supported Linux
 x86_64 platform line: Ubuntu, Rocky Linux, RHEL 9 / 10, and AlmaLinux 9 / 10.
 
@@ -92,7 +92,7 @@ curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
 $HOME/.local/bin/sinter --version
 ```
 
-Acceptance-tested point releases (v1.6.0 release artifact): Ubuntu 24.04,
+Acceptance-tested point releases (v1.7.0 release artifact): Ubuntu 24.04,
 Ubuntu 26.04, Rocky Linux 9.8, Rocky Linux 10.2, RHEL 9.8, RHEL 10.2,
 AlmaLinux 9.8 and AlmaLinux 10.2, all x86_64. Other point releases have not
 each been independently accepted.
@@ -139,7 +139,7 @@ ssh-agent); host keys must still already be in `known_hosts`.
 
 From v1.1.0, `validate` checks only the recipe: `--host`, `--inventory` and SSH options are
 accepted on every command and ignored by `validate`, so one command line works
-for every phase. (In the next release, `validate --vars-file <file>` also checks the recipes
+for every phase. (Since v1.7.0, `validate --vars-file <file>` also checks the recipes
 with the values of that variables file, exactly as `plan` does before it contacts a host,
 and still contacts nothing.) Status words are colored on a terminal only (never in pipes,
 with `NO_COLOR`, or in `--format json`).
@@ -331,9 +331,9 @@ real-host acceptance matrix.
 Each release from v1.0.0 on is acceptance-tested as its exact release
 artifact on the eight supported targets before it is published, and its
 acceptance evidence (manifest, raw logs, checksums) is published with the
-release. The v1.6.0 release passed the Linux x86_64 validation gate and was
+release. The v1.7.0 release passed the Linux x86_64 validation gate and was
 then acceptance-tested as its exact release artifact
-(`sinter-v1.6.0-linux-x86_64.tar.gz`) on eight real x86_64 Linux hosts — the
+(`sinter-v1.7.0-linux-x86_64.tar.gz`) on eight real x86_64 Linux hosts — the
 exact point releases listed under [Install](#install). On every host the
 tarball and the extracted binary were verified byte-identical (SHA-256) and
 ran the release acceptance scenario: artifact identity, platform detection,
@@ -341,7 +341,7 @@ SSH command execution, `package` install and remove with independent native
 verification and idempotency, `file`, `service`, `command` guards, a
 pre-mutation failure, secret redaction, `audit`, and a no-residue check:
 **264 checks passed, 0 failed (33 per target)** (see the
-[v1.6.0 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.6.0)).
+[v1.7.0 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.7.0)).
 Sinter v1.5.2 passed the earlier eight-host acceptance (264 checks, 0 failed;
 [v1.5.2 evidence](https://github.com/hagix9/sinter/releases/tag/v1.5.2)).
 Sinter v1.5.1 passed the earlier eight-host acceptance (264 checks, 0 failed;

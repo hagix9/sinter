@@ -19,7 +19,7 @@ See [Core MCP](/en/reference/mcp/) for the `mcp` subcommand and `--targets-file`
 and [sinter secrets](/en/reference/secrets/) for the `secrets`
 subcommand.
 
-`sinter --version` prints the version (e.g. `sinter 1.6.0`).
+`sinter --version` prints the version (e.g. `sinter 1.7.0`).
 
 ## validate
 
@@ -34,7 +34,7 @@ for every phase, and are ignored — no host is contacted, no inventory,
 key, or `known_hosts` file is read, and `ssh` is not run. Unknown or
 misspelled options are still rejected.
 
-*New in the next release.* With `--vars-file <PATH>`, `validate` checks the
+*Available from v1.7.0.* With `--vars-file <PATH>`, `validate` checks the
 recipes with the values that file gives, the way `plan`, `apply` and `audit`
 do before they contact a host (see
 [Host and group variables](#host-and-group-variables)). The variables file and,
@@ -52,14 +52,14 @@ On success the output adds `ok: variables file <path> checked: N
 execution(s)` and, with `--format json`, a `variables` object (`file`,
 `executions`).
 
-*New in the next release.* With `--vars-file` and `--inventory`, `--limit`
+*Available from v1.7.0.* With `--vars-file` and `--inventory`, `--limit`
 narrows the check to the hosts it selects, exactly as it does for `plan` (see
 [Limiting a run](#limiting-a-run)): a wrong host-specific value of a host that
 is left out does not fail `validate`. The output adds `limit` (the items) and
 `variables.targeted_executions` in JSON, and a line `ok: --limit <items>
 selects N of M execution(s)` in text.
 
-*New in the next release.* `--limit` is checked by `validate` with or without
+*Available from v1.7.0.* `--limit` is checked by `validate` with or without
 `--vars-file`. Without a variables file, `validate --inventory <PATH> --limit
 <ITEMS>` reads the inventory, resolves each recipe's `targets` against it and
 evaluates `--limit`, the way `plan` does before it contacts a host: a bad
@@ -270,7 +270,7 @@ file (available from v1.6.0): see
 
 ### Limiting a run
 
-*New in the next release.*
+*Available from v1.7.0.*
 
 `--limit <ITEMS>` runs a recipe on some of the hosts its `targets` select
 instead of all of them. It needs `--inventory`; with `--host` or a local run it
@@ -1013,11 +1013,11 @@ the whole 1.x series. `sinter mcp` is governed by the
 | `handlers` | integer | Number of handlers. |
 | `vars` | integer | Number of vars. |
 | `warnings` | array of strings | Present only when non-empty (since v1.5.1): non-fatal findings such as `{{ … }}` in `template.vars`. In a bundle document each recipe entry carries its own `warnings`. With `--vars-file` they cover every checked execution, each listed once, at most 50 per recipe. |
-| `warnings_omitted` | integer | Present only with `--vars-file` and only when a recipe has more than 50 warnings; the value is the number left out of `warnings` (next release). In a bundle document it is per recipe entry. |
-| `variables` | object | Present only with `--vars-file` (next release): `file` (string, the path as given) and `executions` (integer, the number of (recipe, host) executions checked; with `--limit`, those it leaves) and, with `--limit`, `targeted_executions` (before `--limit`). |
-| `limit` | array of strings | Present only with `--limit` (next release): the items as given. |
-| `selected_executions`, `targeted_executions` | integer | Present only with `--limit` and no `--vars-file` (next release): the (recipe, host) executions `--limit` leaves, and those the recipes' `targets` select. |
-| `excluded_by` | string | In a bundle document, on the entry of a recipe no host runs because of `--limit` (next release): `"limit"`; its `resources`, `handlers` and `vars` are then `null`, and it is not counted in the totals. |
+| `warnings_omitted` | integer | Present only with `--vars-file` and only when a recipe has more than 50 warnings; the value is the number left out of `warnings` (since v1.7.0). In a bundle document it is per recipe entry. |
+| `variables` | object | Present only with `--vars-file` (since v1.7.0): `file` (string, the path as given) and `executions` (integer, the number of (recipe, host) executions checked; with `--limit`, those it leaves) and, with `--limit`, `targeted_executions` (before `--limit`). |
+| `limit` | array of strings | Present only with `--limit` (since v1.7.0): the items as given. |
+| `selected_executions`, `targeted_executions` | integer | Present only with `--limit` and no `--vars-file` (since v1.7.0): the (recipe, host) executions `--limit` leaves, and those the recipes' `targets` select. |
+| `excluded_by` | string | In a bundle document, on the entry of a recipe no host runs because of `--limit` (since v1.7.0): `"limit"`; its `resources`, `handlers` and `vars` are then `null`, and it is not counted in the totals. |
 
 ### plan and apply
 
