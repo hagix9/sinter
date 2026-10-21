@@ -61,3 +61,7 @@ axum = "0.8.9"
 base64 = "0.22"
 rsa = "0.9"
 pkcs8 = { version = "0.10", features = ["pem"] }
+# tests/tls_dependency_policy.rs reads the bundled trust store that reqwest's
+# rustls-tls feature uses. This crate is already in the graph; it is declared
+# here only so the test can name it.
+webpki-roots = "1.0.10"
