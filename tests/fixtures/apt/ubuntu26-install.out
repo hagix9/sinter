@@ -1,0 +1,24 @@
+Reading package lists...
+Building dependency tree...
+Reading state information...
+Solving dependencies...
+The following NEW packages will be installed:
+  hello
+0 upgraded, 1 newly installed, 0 to remove and 13 not upgraded.
+Need to get 0 B/26.1 kB of archives.
+After this operation, 106 kB of additional disk space will be used.
+pmstatus:dpkg-exec:0.0000:Running dpkg
+Selecting previously unselected package hello.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 127242 files and directories currently installed.)
+Preparing to unpack .../hello_2.10-5build1_amd64v3.deb ...
+pmstatus:hello:0.0000:Preparing hello (amd64)
+pmstatus:hello:20.0000:Unpacking hello (amd64)
+Unpacking hello (2.10-5build1) ...
+pmstatus:hello:40.0000:Installing hello (amd64)
+pmstatus:dpkg-exec:40.0000:Running dpkg
+Setting up hello (2.10-5build1) ...
+pmstatus:hello:40.0000:Preparing to configure hello (amd64)
+pmstatus:hello:60.0000:Configuring hello (amd64)
+pmstatus:hello:80.0000:Installed hello (amd64)
+Processing triggers for man-db (2.13.1-1build1) ...
+Processing triggers for install-info (7.2-5ubuntu2) ...

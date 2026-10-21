@@ -525,7 +525,13 @@ fn detail_fields(detail: &PackageProgress, elapsed: Option<Duration>) -> Vec<Fie
             priority: 0,
         }),
         (Some(percent), Some(PercentScope::TransactionOperation)) => fields.push(Field {
-            text: format!("install {percent}%"),
+            // A removal is the same transaction-wide percent, but calling it
+            // "install" would be wrong (found on the C1 Ubuntu hosts).
+            text: if detail.phase == PackagePhase::Removing {
+                format!("remove {percent}%")
+            } else {
+                format!("install {percent}%")
+            },
             priority: 0,
         }),
         // A percent without a scope must never reach a renderer (the validator

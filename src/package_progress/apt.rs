@@ -81,6 +81,14 @@ impl PackageParser for AptProgressParser {
             return Some(observation);
         }
         if let Some(rest) = line.strip_prefix("pmstatus:") {
+            // `dpkg-exec` is parsed for validation but not reported: see
+            // `package_status`.
+            if rest.split(':').next() == Some("dpkg-exec") {
+                if package_status(rest).is_some() {
+                    self.seen_package_status = true;
+                }
+                return None;
+            }
             let observation = package_status(rest)?;
             self.seen_package_status = true;
             return Some(observation);
@@ -128,31 +136,52 @@ fn package_status(rest: &str) -> Option<PackageObservation> {
     );
     obs.percent = Some(percent);
     obs.percent_scope = Some(PercentScope::TransactionOperation);
-    // `dpkg-exec` is an overall "running dpkg" marker, not a package. An
-    // invalid name is dropped without dropping the phase.
-    obs.package = if who == "dpkg-exec" {
-        None
-    } else {
-        sanitize_package_name(who)
-    };
+    // `dpkg-exec` is an overall "running dpkg" marker with no package and no
+    // direction: the same record appears in an install and in a remove. The
+    // direction cannot be known when it arrives, and the percent it carries is
+    // repeated by the next real package record (verified on 24.04 and 26.04),
+    // so it is not reported rather than guessing "installing".
+    if who == "dpkg-exec" {
+        return None;
+    }
+    // An invalid name is dropped without dropping the phase.
+    obs.package = sanitize_package_name(who);
     Some(obs)
 }
 
 /// The phase an APT `pmstatus` action describes. Unknown actions are ignored.
+///
+/// The strings are the ones `dpkgpm.cc` passes to `StatusChanged`: its state
+/// tables use `N_("Unpacking %s")`, `N_("Installing %s")`,
+/// `N_("Preparing to configure %s")`, `N_("Configuring %s")`,
+/// `N_("Installed %s")`, `N_("Preparing for removal of %s")`,
+/// `N_("Preparing to completely remove %s")`, `N_("Removing %s")`,
+/// `N_("Completely removing %s")`, `N_("Completely removed %s")` and
+/// `N_("Running post-installation trigger %s")`. Longest prefix first:
+/// "Preparing to configure" and "Preparing to completely remove" also start
+/// with "Preparing", and "Installed" vs "Installing" must not be confused.
 fn phase_of(action: &str) -> Option<PackagePhase> {
     let action = action.trim_start();
-    // Longest prefix first: "Preparing to configure" also starts with
-    // "Preparing".
     if action.starts_with("Preparing to configure")
         || action.starts_with("Configuring")
         || action.starts_with("Installed")
     {
         Some(PackagePhase::Configuring)
-    } else if action.starts_with("Unpacking") || action.starts_with("Preparing") {
-        Some(PackagePhase::Installing)
-    } else if action.starts_with("Removing") || action.starts_with("Purging") {
+    } else if action.starts_with("Preparing to completely remove")
+        || action.starts_with("Preparing for removal of")
+        || action.starts_with("Completely removing")
+        || action.starts_with("Completely removed")
+        || action.starts_with("Removing")
+        || action.starts_with("Purging")
+    {
         Some(PackagePhase::Removing)
-    } else if action.starts_with("Running dpkg") {
+    } else if action.starts_with("Running post-installation trigger") {
+        Some(PackagePhase::Triggering)
+    } else if action.starts_with("Unpacking")
+        || action.starts_with("Installing")
+        || action.starts_with("Preparing")
+        || action.starts_with("Running dpkg")
+    {
         Some(PackagePhase::Installing)
     } else {
         None
@@ -167,10 +196,14 @@ fn marker(parser: &AptProgressParser, line: &str) -> Option<PackageObservation> 
         if parser.seen_download_status || parser.seen_package_status {
             return None;
         }
-        let total = rest
-            .strip_suffix(" of archives.")
-            .and_then(last_size)
-            .or_else(|| last_size(rest))?;
+        let body = rest.strip_suffix(" of archives.").unwrap_or(rest);
+        let (needed, total) = need_sizes(body)?;
+        // `Need to get 0 B/26.0 kB` means everything is already in the cache:
+        // there is no download to report, and showing a download phase would
+        // be a phase that never happens.
+        if needed == 0 {
+            return None;
+        }
         let mut obs = PackageObservation::new(
             PackagePhase::Downloading,
             PackageScope::Transaction,
@@ -279,22 +312,27 @@ fn size_at(tokens: &[&str], at: usize) -> Option<u64> {
     None
 }
 
-/// The last `<number> <unit>` pair in a `Need to get` payload. A partially
-/// cached transaction prints `0 B/80.1 MB`, so the last pair is the total.
-fn last_size(text: &str) -> Option<u64> {
+/// The `(needed, total)` sizes of a `Need to get` payload. A partially
+/// cached transaction prints `12.3 MB/80.1 MB`; a fully cached one
+/// `0 B/80.1 MB`. With no slash, both are the same.
+fn need_sizes(text: &str) -> Option<(u64, u64)> {
     let cleaned = text.replace('/', " ");
     let tokens: Vec<&str> = cleaned.split_whitespace().collect();
+    let mut sizes = Vec::new();
     let mut i = 0;
-    let mut last = None;
     while i + 1 < tokens.len() {
         if let Some(value) = parse_size(tokens[i], tokens[i + 1]) {
-            last = Some(value);
+            sizes.push(value);
             i += 2;
         } else {
             i += 1;
         }
     }
-    last
+    match sizes.as_slice() {
+        [] => None,
+        [only] => Some((*only, *only)),
+        [needed, .., total] => Some((*needed, *total)),
+    }
 }
 
 /// Decimal (SI) units, the ones APT prints under `LC_ALL=C`.

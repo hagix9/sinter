@@ -1410,3 +1410,28 @@ fn detail_lines_are_bounded_per_stage() {
         .count();
     assert_eq!(detail_lines, MAX_STAGE_DETAIL_LINES as usize, "stage cap");
 }
+
+#[test]
+fn a_removal_detail_says_remove_not_install() {
+    let mem = Mem::default();
+    let mut core = mem.core(RunKind::Apply);
+    let t0 = Instant::now();
+    core.on_event(&stage_started(Stage::Resources, Some(1)), t0);
+    core.on_event(&package_item_started(Stage::Resources, 0, 1, "hello"), t0);
+    core.on_event(
+        &package_detail(
+            "hello",
+            33,
+            crate::progress::PackagePhase::Removing,
+            crate::progress::PercentScope::TransactionOperation,
+            None,
+        ),
+        t0 + secs(2),
+    );
+    let lines = mem.lines();
+    assert!(lines.iter().any(|l| l.contains("remove 33%")), "{lines:?}");
+    assert!(
+        !lines.iter().any(|l| l.contains("install 33%")),
+        "{lines:?}"
+    );
+}

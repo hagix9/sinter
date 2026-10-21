@@ -100,11 +100,10 @@ fn pmstatus_install_actions_are_transaction_wide() {
 }
 
 #[test]
-fn pmstatus_dpkg_exec_is_not_a_package_name() {
-    let obs = parse("pmstatus:dpkg-exec:60.0000:Running dpkg").expect("record");
-    assert_eq!(obs.package, None);
-    assert_eq!(obs.phase, PackagePhase::Installing);
-    assert_eq!(obs.percent, Some(60));
+fn dpkg_exec_marker_is_not_reported() {
+    // The same record appears in an install and a remove; its direction is
+    // unknown and its percent is repeated by the package record.
+    assert!(parse("pmstatus:dpkg-exec:60.0000:Running dpkg").is_none());
 }
 
 #[test]
@@ -143,8 +142,16 @@ fn need_to_get_reports_the_exact_total() {
 
 #[test]
 fn need_to_get_handles_a_partially_cached_transaction() {
-    let obs = parse("Need to get 0 B/80.1 MB of archives.").expect("marker");
+    let obs = parse("Need to get 12.3 MB/80.1 MB of archives.").expect("marker");
     assert_eq!(obs.bytes_total, Some(80_100_000));
+}
+
+#[test]
+fn need_to_get_with_nothing_to_fetch_is_not_a_download() {
+    // Real Ubuntu 24.04/26.04 output for an install whose .deb is cached:
+    // showing a download phase here would flash a phase that never happens.
+    assert!(parse("Need to get 0 B/26.0 kB of archives.").is_none());
+    assert!(parse("Need to get 0 B of archives.").is_none());
 }
 
 #[test]
@@ -283,4 +290,32 @@ fn an_invalid_status_record_does_not_make_the_fallback_stale() {
     let mut parser = AptProgressParser::new();
     assert!(parser.observe("pmstatus:acl:NaN:Unpacking acl").is_none());
     assert!(parser.observe("Unpacking acl (2.3.2) ...").is_some());
+}
+
+#[test]
+fn pmstatus_understands_the_messages_apt_actually_emits() {
+    // Source: apt-pkg/deb/dpkgpm.cc state tables (the strings passed to
+    // StatusChanged are these N_() messages).
+    for (action, phase) in [
+        ("Preparing acl", PackagePhase::Installing),
+        ("Unpacking acl (amd64)", PackagePhase::Installing),
+        ("Installing acl (amd64)", PackagePhase::Installing),
+        ("Preparing to configure acl", PackagePhase::Configuring),
+        ("Configuring acl", PackagePhase::Configuring),
+        ("Installed acl", PackagePhase::Configuring),
+        ("Preparing for removal of acl", PackagePhase::Removing),
+        ("Preparing to completely remove acl", PackagePhase::Removing),
+        ("Removing acl", PackagePhase::Removing),
+        ("Completely removing acl", PackagePhase::Removing),
+        ("Completely removed acl", PackagePhase::Removing),
+        (
+            "Running post-installation trigger acl",
+            PackagePhase::Triggering,
+        ),
+    ] {
+        let line = format!("pmstatus:acl:40.0000:{action}");
+        let obs = parse(&line).unwrap_or_else(|| panic!("{action}"));
+        assert_eq!(obs.phase, phase, "{action}");
+        assert_eq!(obs.package.as_deref(), Some("acl"), "{action}");
+    }
 }

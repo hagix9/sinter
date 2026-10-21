@@ -231,7 +231,11 @@ fn detail_body(detail: &PackageProgress, elapsed: Duration) -> String {
     let body = match (detail.percent, detail.percent_scope) {
         (Some(percent), Some(PercentScope::DownloadAggregate)) => format!("download {percent}%"),
         (Some(percent), Some(PercentScope::TransactionOperation)) => {
-            format!("install {percent}%")
+            if detail.phase == PackagePhase::Removing {
+                format!("remove {percent}%")
+            } else {
+                format!("install {percent}%")
+            }
         }
         _ => detail.phase.label().to_string(),
     };

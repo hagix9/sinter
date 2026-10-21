@@ -1873,3 +1873,31 @@ fn a_detail_does_not_print_its_elapsed_time_twice() {
     assert!(text.contains("download 72% 5s"), "{text:?}");
     assert_eq!(text.matches("5s").count(), 1, "{text:?}");
 }
+
+#[test]
+fn a_removal_detail_says_remove_not_install() {
+    let mut d = detail(
+        Some(33),
+        crate::progress::PackagePhase::Removing,
+        crate::progress::PercentScope::TransactionOperation,
+    );
+    if let ProgressEvent::PackageDetail(p) = &mut d {
+        p.resource = ItemRef {
+            kind: ItemKind::Package,
+            id: "hello".to_string(),
+        };
+        p.package = Some("hello".to_string());
+    }
+    let ev = [
+        started(Stage::Resources, Some(1)),
+        ProgressEvent::Progress {
+            stage: Stage::Resources,
+            done: 0,
+            total: Some(1),
+            current: item(ItemKind::Package, "hello"),
+        },
+        d,
+    ];
+    let text = line_detailed(&ev, None, Some(secs(2)), WIDE).unwrap();
+    assert_eq!(text, "apply 0/1 package:hello remove 33% hello 2s");
+}
