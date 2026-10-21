@@ -601,9 +601,23 @@ impl TargetFs {
     /// channel runs recipe commands, package mutations, service mutations,
     /// and handler actions. It therefore requires a `MutationPermit`, which
     /// only a mutation-enabled TargetFs can produce (RA-01).
-    pub(crate) fn exec(&mut self, _permit: &MutationPermit, req: &ExecRequest) -> Result<Output> {
+    pub(crate) fn exec(&mut self, permit: &MutationPermit, req: &ExecRequest) -> Result<Output> {
+        self.exec_with_observer(permit, req, None)
+    }
+
+    /// [`exec`](Self::exec) with an observation-only consumer of the raw
+    /// output chunks. The permit is required and checked exactly as for
+    /// `exec`; the observer only watches the bytes the command already
+    /// produces and cannot change the request, the result, the timeout or any
+    /// subsequent command.
+    pub(crate) fn exec_with_observer(
+        &mut self,
+        _permit: &MutationPermit,
+        req: &ExecRequest,
+        observer: Option<std::sync::Arc<dyn crate::executor::ExecObserver>>,
+    ) -> Result<Output> {
         self.identity_memo.clear();
-        self.ex.run(req)
+        self.ex.run_with_observer(req, observer)
     }
 
     /// The one read-only command channel `postgresql_role` observes a role

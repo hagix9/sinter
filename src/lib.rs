@@ -17,6 +17,7 @@ pub mod manager;
 pub mod mcp;
 pub mod model;
 pub mod output;
+pub mod package_progress;
 pub mod passwd_hash;
 pub mod paths;
 pub mod pgrole;

@@ -106,12 +106,15 @@
 //! write error nothing more is written, and no path that valid events take
 //! contains `unwrap`, `expect`, indexing or unchecked arithmetic.
 
-use crate::progress::{ItemRef, ProgressEvent, RunKind, RunOutcome, Stage, StageOutcome};
+use crate::progress::{
+    ItemRef, PackagePhase, PackageProgress, PercentScope, ProgressEvent, RunKind, RunOutcome,
+    Stage, StageOutcome,
+};
 use crate::progress_session::{
     AbandonLatch, ConsumerFactory, NullConsumer, ProgressConsumer, SessionInfo, MIN_WAKE,
 };
 use crate::progress_tty::{
-    format_elapsed, sanitize_display, stderr_surface, Surface, SurfaceFactory,
+    format_bytes, format_elapsed, sanitize_display, stderr_surface, Surface, SurfaceFactory,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -127,6 +130,14 @@ pub(crate) const HEARTBEAT_CAP: Duration = Duration::from_secs(300);
 
 /// How many count milestones a stage may print at most.
 pub(crate) const MILESTONES: u32 = 10;
+
+/// How many package-detail lines one resource may print at most.
+pub(crate) const MAX_RESOURCE_DETAIL_LINES: u32 = 24;
+
+/// How many package-detail lines one stage may print at most, across every
+/// resource. Keeps a log bounded independently of how many packages a recipe
+/// names.
+pub(crate) const MAX_STAGE_DETAIL_LINES: u32 = 200;
 
 /// The longest item id shown; a longer one is cut and ends in `...`.
 pub const MAX_ID_CHARS: usize = 64;
@@ -214,6 +225,44 @@ fn item_text(item: &ItemRef) -> String {
     format!("{}:{}", item.kind.label(), id)
 }
 
+/// The body of a package-detail line: the measured phase/percent plus only the
+/// quantities the source measured, then the elapsed time.
+fn detail_body(detail: &PackageProgress, elapsed: Duration) -> String {
+    let body = match (detail.percent, detail.percent_scope) {
+        (Some(percent), Some(PercentScope::DownloadAggregate)) => format!("download {percent}%"),
+        (Some(percent), Some(PercentScope::TransactionOperation)) => {
+            format!("install {percent}%")
+        }
+        _ => detail.phase.label().to_string(),
+    };
+    let mut extras: Vec<String> = Vec::new();
+    if matches!(
+        detail.phase,
+        PackagePhase::Installing
+            | PackagePhase::Configuring
+            | PackagePhase::Removing
+            | PackagePhase::Verifying
+            | PackagePhase::Waiting
+    ) {
+        if let Some(package) = detail.package.as_deref() {
+            extras.push(sanitize_display(package, MAX_ID_CHARS));
+        }
+    }
+    if let (Some(done), Some(total)) = (detail.files_done, detail.files_total) {
+        extras.push(format!("file {done}/{total}"));
+    } else if let (Some(done), Some(total)) = (detail.packages_done, detail.packages_total) {
+        extras.push(format!("package {done}/{total}"));
+    }
+    if let Some(bytes) = detail.bytes_downloaded {
+        extras.push(format_bytes(bytes));
+    }
+    if let Some(rate) = detail.rate_bps {
+        extras.push(format!("{}/s", format_bytes(rate)));
+    }
+    extras.push(format_elapsed(elapsed));
+    format!("{body} ({})", extras.join(", "))
+}
+
 /// The count at which milestone `k` (1-based) of a stage of `total` items is
 /// reached: `ceil(k * total / 10)`.
 fn milestone_threshold(k: u32, total: u32) -> u64 {
@@ -246,11 +295,29 @@ struct Active {
     total: Option<u32>,
     done: u32,
     current: Option<ItemRef>,
+    /// When the current item started; the package detail's elapsed text is
+    /// measured from here.
+    item_started: Instant,
     /// The last event of this stage (its start or an item start).
     last_progress: Instant,
     /// The next milestone (1-based) not yet reached; above [`MILESTONES`] when
     /// all were.
     next_milestone: u32,
+    /// Package-detail reporting state for the current item.
+    detail: Option<DetailState>,
+}
+
+/// How much of one item's package detail has been printed.
+#[derive(Debug)]
+struct DetailState {
+    phase: Option<PackagePhase>,
+    /// The last printed 10% bucket (0..=10).
+    bucket: u8,
+    /// Detail lines printed for this item (bounded by
+    /// [`MAX_RESOURCE_DETAIL_LINES`]).
+    lines: u32,
+    /// Completion-metric lines printed for this item (bounded to 2).
+    completions: u32,
 }
 
 /// Decides which lines exist; every method takes `now` explicitly, so all times
@@ -270,6 +337,9 @@ struct Core {
     /// A write failed, or the session muted the worker: nothing more is written.
     dead: bool,
     latch: AbandonLatch,
+    /// Package-detail lines printed in the current stage (bounded by
+    /// [`MAX_STAGE_DETAIL_LINES`]).
+    detail_lines: u32,
 }
 
 impl Core {
@@ -285,6 +355,7 @@ impl Core {
             finished: false,
             dead: false,
             latch: AbandonLatch::default(),
+            detail_lines: 0,
         }
     }
 
@@ -317,9 +388,12 @@ impl Core {
                     total: *total,
                     done: 0,
                     current: None,
+                    item_started: now,
                     last_progress: now,
                     next_milestone: 1,
+                    detail: None,
                 });
+                self.detail_lines = 0;
                 let label = stage_label(*stage, self.command);
                 let text = match total {
                     Some(total) => format!("{label}: start 0/{total}"),
@@ -333,6 +407,7 @@ impl Core {
                 total,
                 current,
             } => self.on_progress(*stage, *done, *total, current.as_ref(), now),
+            ProgressEvent::PackageDetail(detail) => self.on_package_detail(detail, now),
             ProgressEvent::StageEnded {
                 stage,
                 outcome,
@@ -383,21 +458,32 @@ impl Core {
         now: Instant,
     ) {
         // A stream that skipped `StageStarted` is tolerated, not trusted.
-        let active = match &mut self.active {
-            Some(a) if a.stage == stage => a,
-            slot => slot.insert(Active {
+        if self.active.as_ref().is_none_or(|a| a.stage != stage) {
+            self.detail_lines = 0;
+            self.active = Some(Active {
                 stage,
                 started: now,
                 total,
                 done,
                 current: None,
+                item_started: now,
                 last_progress: now,
                 next_milestone: 1,
-            }),
+                detail: None,
+            });
+        }
+        let active = match self.active.as_mut() {
+            Some(a) => a,
+            None => return,
         };
         active.done = done;
         if total.is_some() {
             active.total = total;
+        }
+        if active.current.as_ref() != current {
+            // A new item: its package detail starts from zero.
+            active.detail = None;
+            active.item_started = now;
         }
         active.current = current.cloned();
         active.last_progress = now;
@@ -417,6 +503,67 @@ impl Core {
                 "{label}: {done}/{total} ({})",
                 format_elapsed(now.saturating_duration_since(active.started))
             );
+            self.line(&text, now, true);
+        }
+    }
+
+    /// Package details are drawn as phase changes, 10% milestones and at most
+    /// two completion-metric lines per item, within the per-item and per-stage
+    /// caps. They never affect the item counters or the stage outcome.
+    fn on_package_detail(&mut self, detail: &PackageProgress, now: Instant) {
+        if self.detail_lines >= MAX_STAGE_DETAIL_LINES {
+            return;
+        }
+        let mut text = None;
+        if let Some(active) = self.active.as_mut() {
+            if active.stage != Stage::Resources {
+                return;
+            }
+            let Some(current) = active.current.clone() else {
+                return;
+            };
+            if current != detail.resource {
+                return;
+            }
+            let state = active.detail.get_or_insert(DetailState {
+                phase: None,
+                bucket: 0,
+                lines: 0,
+                completions: 0,
+            });
+            if state.lines >= MAX_RESOURCE_DETAIL_LINES {
+                return;
+            }
+            let bucket = detail.percent.map(|p| p / 10).unwrap_or(state.bucket);
+            let phase_changed = state.phase != Some(detail.phase);
+            let milestone = detail.percent.is_some() && bucket > state.bucket;
+            let complete = detail.phase == PackagePhase::Downloading
+                && matches!(
+                    (detail.bytes_downloaded, detail.bytes_total),
+                    (Some(done), Some(total)) if done == total && total > 0
+                );
+            let show_complete = complete && state.completions < 2;
+            if !(phase_changed || milestone || show_complete) {
+                return;
+            }
+            state.phase = Some(detail.phase);
+            if detail.percent.is_some() {
+                state.bucket = bucket;
+            }
+            state.lines += 1;
+            if show_complete {
+                state.completions += 1;
+            }
+            let elapsed = now.saturating_duration_since(active.item_started);
+            let label = stage_label(active.stage, self.command);
+            text = Some(format!(
+                "{label}: {}: {}",
+                item_text(&current),
+                detail_body(detail, elapsed)
+            ));
+        }
+        if let Some(text) = text {
+            self.detail_lines += 1;
             self.line(&text, now, true);
         }
     }

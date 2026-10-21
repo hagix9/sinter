@@ -58,27 +58,45 @@
 //!
 //! # Safe by construction
 //!
-//! An event is built from closed enums, `u32` counters and exactly one string:
-//! [`ItemRef::id`], a recipe-literal resource or handler id (`{{` is rejected
-//! in ids at parse time and a loop item never enters one). There is no message
-//! or reason field and no way to reach an error, a `ResourceResult`, a
+//! An event is built from closed enums, integer counters and at most two
+//! bounded strings: [`ItemRef::id`], a recipe-literal resource or handler id
+//! (`{{` is rejected in ids at parse time and a loop item never enters one),
+//! and [`PackageProgress::package`], a package name parsed from target output
+//! and capped at [`PACKAGE_NAME_MAX`] printable ASCII characters. There is no
+//! message or reason field and no way to reach an error, a `ResourceResult`, a
 //! `CommandStat`, a command line, a path, a hash, a secret reference or any
 //! SSH detail from an event. Backup items carry no `current` at all: a backup
 //! path is target data, not an id.
 //!
 //! # Sink contract
 //!
-//! [`ProgressSink::emit`] returns `()`, is called synchronously on the engine
-//! thread, and must be cheap, must not block and must not panic. The engine
-//! never reads anything back, so a sink cannot influence control flow, cannot
-//! cancel and cannot make a run fail. An observer may disappear at any time (a
-//! channel-backed sink must discard `SendError`, e.g. `let _ = tx.send(..)`).
-//! The engine adds **no** panic isolation of its own: a panicking sink unwinds
-//! through the engine. The production CLI path isolates the engine from a
-//! misbehaving consumer instead ([`progress_session`](crate::progress_session):
-//! a panic-free `ChannelSink`, a worker thread, bounded teardown); an
-//! arbitrary third-party sink passed to `new_with_progress` stays outside that
-//! guarantee.
+//! [`ProgressSink::emit`] returns `()` and must be cheap, must not block and
+//! must not panic. The engine never reads anything back, so a sink cannot
+//! influence control flow, cannot cancel and cannot make a run fail. An
+//! observer may disappear at any time (a channel-backed sink must discard
+//! `SendError`, e.g. `let _ = tx.send(..)`).
+//!
+//! **Which thread calls `emit`.** Two kinds of emitters exist:
+//!
+//! * The **engine** emits `StageStarted`, `Progress`, `StageEnded` and
+//!   `RunEnded` synchronously on the engine thread. The engine adds no panic
+//!   isolation of its own: a panicking sink unwinds through the engine. The
+//!   production CLI path isolates the engine from a misbehaving consumer
+//!   ([`progress_session`](crate::progress_session): a panic-free
+//!   `ChannelSink`, a worker thread, bounded teardown).
+//! * A **package reporter** ([`crate::package_progress`]) emits
+//!   [`ProgressEvent::PackageDetail`] from its own parser thread, never from
+//!   the engine thread and never from an executor drain thread. The executor
+//!   only hands raw chunks to a package reporter through an unbounded channel,
+//!   so a slow or panicking sink cannot stall the pipe/drain loop, cannot
+//!   delay the child process, and cannot change an exit code, a result or a
+//!   timeout. See `WP-PKG-PROGRESS` P1-C1 in the Phase 1 design record.
+//!
+//! A sink must therefore be prepared to receive events from more than one
+//! thread over a run, though never concurrently for the same event: the
+//! channel preserves order between an executor's detail events and the
+//! engine's later lifecycle events because the parser thread is joined before
+//! the resource returns.
 //!
 //! `Send + Sync` is required on purpose: `Engine` itself is `!Send`, but the
 //! sink is the only part a later consumer (a renderer thread, or the MCP
@@ -100,6 +118,10 @@
 //!   Nothing coordinates with prompts.
 
 use std::sync::{Arc, Mutex};
+
+/// The longest package name a [`PackageProgress`] may carry. Renderers use the
+/// same cap; the validator enforces it so an event is bounded by construction.
+pub const PACKAGE_NAME_MAX: usize = 64;
 
 /// Which command a run belongs to. Display names are a renderer concern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +263,160 @@ impl ItemRef {
     }
 }
 
+/// Which package-manager step a [`PackageDetail`](ProgressEvent::PackageDetail)
+/// describes. Observation only: a phase never implies success or failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PackagePhase {
+    Resolving,
+    Downloading,
+    Installing,
+    Configuring,
+    Triggering,
+    Removing,
+    Verifying,
+    Waiting,
+}
+
+impl PackagePhase {
+    /// The word a renderer shows for this phase. Fixed vocabulary; never
+    /// package-manager text.
+    pub fn label(self) -> &'static str {
+        match self {
+            PackagePhase::Resolving => "resolving",
+            PackagePhase::Downloading => "downloading",
+            PackagePhase::Installing => "installing",
+            PackagePhase::Configuring => "configuring",
+            PackagePhase::Triggering => "triggering",
+            PackagePhase::Removing => "removing",
+            PackagePhase::Verifying => "verifying",
+            PackagePhase::Waiting => "waiting",
+        }
+    }
+}
+
+/// Whether a detail is about one package's own step or the transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PackageScope {
+    Package,
+    Transaction,
+}
+
+/// What a [`PackageProgress::percent`] counts. The two are never
+/// interchangeable: a download percentage is never an install percentage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PercentScope {
+    /// Aggregate download progress (APT `dlstatus`; weighted bytes/items).
+    DownloadAggregate,
+    /// Transaction-wide install/remove/configure progress (APT `pmstatus`;
+    /// dpkg state operations over every package of the transaction).
+    TransactionOperation,
+}
+
+/// Which record produced a detail. A closed vocabulary: no raw text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProgressSource {
+    AptStatusFdDl,
+    AptStatusFdPm,
+    AptOutputMarker,
+    DnfDownloadLine,
+    DnfTransactionLine,
+    DnfOutputMarker,
+    StageFallback,
+}
+
+/// How the numbers in a detail were obtained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProgressConfidence {
+    /// Parsed directly from a documented record or line.
+    Measured,
+    /// Computed only from measured values (elapsed, or a rate from two
+    /// measured samples). Never guessed.
+    Derived,
+    /// The phase is known; the quantity is not.
+    Unknown,
+}
+
+/// Package-phase detail for the item currently in flight.
+///
+/// Every optional field is `None` when the source did not measure it; absent
+/// is never reported as zero. `percent` is only present when `percent_scope`
+/// says what it counts, and is never present for
+/// [`ProgressConfidence::Unknown`] or [`ProgressSource::StageFallback`].
+///
+/// A detail never changes the item counters (`done`/`total`), never ends a
+/// stage and never implies success: the resource result remains the
+/// authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PackageProgress {
+    /// Always [`Stage::Resources`].
+    pub stage: Stage,
+    /// The item in flight; `id` equals the active `Progress.current.id`.
+    pub resource: ItemRef,
+    pub backend: crate::platform::PackageBackend,
+    pub phase: PackagePhase,
+    pub scope: PackageScope,
+    /// The package currently being processed, sanitized and capped at 64
+    /// characters. `None` for a transaction-only record, for a sensitive
+    /// resource, or when the source did not name one.
+    pub package: Option<String>,
+    /// `0..=100`, only when measured.
+    pub percent: Option<u8>,
+    /// Present exactly when `percent` is present.
+    pub percent_scope: Option<PercentScope>,
+    pub files_done: Option<u32>,
+    pub files_total: Option<u32>,
+    pub packages_done: Option<u32>,
+    pub packages_total: Option<u32>,
+    pub bytes_downloaded: Option<u64>,
+    pub bytes_total: Option<u64>,
+    pub rate_bps: Option<u64>,
+    pub source: ProgressSource,
+    pub confidence: ProgressConfidence,
+    /// 1 for the first attempt. Reserved for a future retry/resume; Phase 1
+    /// always emits 1.
+    pub attempt: u32,
+}
+
+impl PackageProgress {
+    /// A detail with no measured quantity, for the given resource and phase.
+    /// Callers set the optional fields they actually measured.
+    pub fn new(
+        resource: ItemRef,
+        backend: crate::platform::PackageBackend,
+        phase: PackagePhase,
+        scope: PackageScope,
+        source: ProgressSource,
+        confidence: ProgressConfidence,
+    ) -> Self {
+        PackageProgress {
+            stage: Stage::Resources,
+            resource,
+            backend,
+            phase,
+            scope,
+            package: None,
+            percent: None,
+            percent_scope: None,
+            files_done: None,
+            files_total: None,
+            packages_done: None,
+            packages_total: None,
+            bytes_downloaded: None,
+            bytes_total: None,
+            rate_bps: None,
+            source,
+            confidence,
+            attempt: 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProgressEvent {
@@ -264,6 +440,11 @@ pub enum ProgressEvent {
         outcome: StageOutcome,
         done: u32,
     },
+    /// Package-phase detail for the item in flight. Additive: the item
+    /// counters, the stage lifecycle and the resource result are unchanged.
+    /// Emitted by a [`crate::package_progress::PackageReporter`]'s own thread;
+    /// see the module documentation.
+    PackageDetail(PackageProgress),
     /// Caller layer. Exactly once, last, whenever `RunStarted` occurred.
     RunEnded { outcome: RunOutcome },
 }
@@ -272,6 +453,29 @@ pub enum ProgressEvent {
 /// module documentation for the full contract.
 pub trait ProgressSink: Send + Sync {
     fn emit(&self, event: &ProgressEvent);
+
+    /// Whether events of this sink are worth producing at all. `false` lets
+    /// callers skip building a parser, an observer or a thread. Defaults to
+    /// `true`; the no-op sink is the one built-in `false`.
+    fn is_enabled(&self) -> bool {
+        true
+    }
+
+    /// Whether [`emit`](Self::emit) is guaranteed to return promptly: no
+    /// blocking I/O, no unbounded work and no wait a caller could not bound.
+    ///
+    /// A package reporter
+    /// ([`crate::package_progress::PackageReporter`]) uses this at the end of
+    /// an execution. For a sink that declares `true` (the production
+    /// `ChannelSink`, `NoopSink` and the test `RecordingSink`) the reporter
+    /// **joins** its parser thread, so every detail event is emitted before
+    /// the caller's next lifecycle event. For an unknown sink the default is
+    /// `false`: the reporter never waits for a sink call that may never
+    /// return; it stops the parser at the next safe point and detaches the
+    /// thread instead, so progress observation can never hang an execution.
+    fn is_non_blocking(&self) -> bool {
+        false
+    }
 }
 
 /// The default sink: observes nothing.
@@ -280,6 +484,14 @@ pub struct NoopSink;
 
 impl ProgressSink for NoopSink {
     fn emit(&self, _event: &ProgressEvent) {}
+
+    fn is_enabled(&self) -> bool {
+        false
+    }
+
+    fn is_non_blocking(&self) -> bool {
+        true
+    }
 }
 
 /// A sink that records every event in order. Meant for tests and diagnostics.
@@ -307,6 +519,10 @@ impl ProgressSink for RecordingSink {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(event.clone());
+    }
+
+    fn is_non_blocking(&self) -> bool {
+        true
     }
 }
 
@@ -393,6 +609,7 @@ pub fn validate_stream(events: &[ProgressEvent]) -> Result<(), String> {
         stage: Stage,
         total: Option<u32>,
         progress: u32,
+        current: Option<ItemRef>,
     }
     let mut run_started = false;
     let mut run_ended = false;
@@ -436,13 +653,14 @@ pub fn validate_stream(events: &[ProgressEvent]) -> Result<(), String> {
                     stage: *stage,
                     total: *total,
                     progress: 0,
+                    current: None,
                 });
             }
             ProgressEvent::Progress {
                 stage,
                 done,
                 total,
-                current: _,
+                current,
             } => {
                 let a = active
                     .as_mut()
@@ -468,6 +686,84 @@ pub fn validate_stream(events: &[ProgressEvent]) -> Result<(), String> {
                     return Err(format!("event {i}: Progress beyond total"));
                 }
                 a.progress += 1;
+                a.current = current.clone();
+            }
+            ProgressEvent::PackageDetail(detail) => {
+                let a = active
+                    .as_ref()
+                    .ok_or_else(|| format!("event {i}: PackageDetail outside a stage"))?;
+                if detail.stage != Stage::Resources {
+                    return Err(format!(
+                        "event {i}: PackageDetail stage must be Resources, got {:?}",
+                        detail.stage
+                    ));
+                }
+                if a.stage != Stage::Resources {
+                    return Err(format!(
+                        "event {i}: PackageDetail while {:?} is active",
+                        a.stage
+                    ));
+                }
+                let Some(current) = a.current.as_ref() else {
+                    return Err(format!("event {i}: PackageDetail before any Progress item"));
+                };
+                if current != &detail.resource {
+                    return Err(format!(
+                        "event {i}: PackageDetail for {:?}, active item is {:?}",
+                        detail.resource, current
+                    ));
+                }
+                if detail.resource.kind != ItemKind::Package {
+                    return Err(format!("event {i}: PackageDetail for a non-package item"));
+                }
+                if detail.attempt < 1 {
+                    return Err(format!("event {i}: PackageDetail attempt must be >= 1"));
+                }
+                if detail.percent.is_some_and(|p| p > 100) {
+                    return Err(format!("event {i}: PackageDetail percent > 100"));
+                }
+                if detail.percent.is_some() != detail.percent_scope.is_some() {
+                    return Err(format!(
+                        "event {i}: PackageDetail percent and percent_scope must appear together"
+                    ));
+                }
+                if detail.percent.is_some()
+                    && (detail.confidence == ProgressConfidence::Unknown
+                        || detail.source == ProgressSource::StageFallback)
+                {
+                    return Err(format!(
+                        "event {i}: unmeasured PackageDetail must not carry a percent"
+                    ));
+                }
+                if let (Some(done), Some(total)) = (detail.bytes_downloaded, detail.bytes_total) {
+                    if done > total {
+                        return Err(format!(
+                            "event {i}: PackageDetail bytes_downloaded > bytes_total"
+                        ));
+                    }
+                }
+                if let (Some(done), Some(total)) = (detail.files_done, detail.files_total) {
+                    if done > total {
+                        return Err(format!("event {i}: PackageDetail files_done > files_total"));
+                    }
+                }
+                if let (Some(done), Some(total)) = (detail.packages_done, detail.packages_total) {
+                    if done > total {
+                        return Err(format!(
+                            "event {i}: PackageDetail packages_done > packages_total"
+                        ));
+                    }
+                }
+                if let Some(name) = detail.package.as_ref() {
+                    if name.is_empty()
+                        || name.chars().count() > PACKAGE_NAME_MAX
+                        || !name.chars().all(|c| c.is_ascii_graphic())
+                    {
+                        return Err(format!(
+                            "event {i}: PackageDetail package name is not a bounded printable token"
+                        ));
+                    }
+                }
             }
             ProgressEvent::StageEnded {
                 stage,
@@ -535,7 +831,8 @@ mod tests {
     }
 
     /// Exhaustive, wildcard-free: adding a variant or a field forces this
-    /// review. Every payload is a closed enum, a counter, or `ItemRef::id`.
+    /// review. Every payload is a closed enum, an integer counter, `ItemRef`,
+    /// or the bounded package-name string.
     #[test]
     fn event_payload_is_closed_by_construction() {
         fn check(ev: &ProgressEvent) -> usize {
@@ -556,7 +853,7 @@ mod tests {
                 } => {
                     let _: (&Stage, &u32, &Option<u32>) = (stage, done, total);
                     match current {
-                        // `id` is the only free string an event can hold.
+                        // `id` is a recipe-literal string an event can hold.
                         Some(ItemRef { kind, id }) => {
                             let _: &ItemKind = kind;
                             let _: &String = id;
@@ -572,6 +869,30 @@ mod tests {
                 } => {
                     let _: (&Stage, &StageOutcome, &u32) = (stage, outcome, done);
                     0
+                }
+                ProgressEvent::PackageDetail(p) => {
+                    let _: (&Stage, &ItemRef, &crate::platform::PackageBackend) =
+                        (&p.stage, &p.resource, &p.backend);
+                    let _: (&PackagePhase, &PackageScope) = (&p.phase, &p.scope);
+                    let _: (&Option<u8>, &Option<PercentScope>) = (&p.percent, &p.percent_scope);
+                    let _: (&Option<u32>, &Option<u32>, &Option<u32>, &Option<u32>) = (
+                        &p.files_done,
+                        &p.files_total,
+                        &p.packages_done,
+                        &p.packages_total,
+                    );
+                    let _: (&Option<u64>, &Option<u64>, &Option<u64>) =
+                        (&p.bytes_downloaded, &p.bytes_total, &p.rate_bps);
+                    let _: (&ProgressSource, &ProgressConfidence, &u32) =
+                        (&p.source, &p.confidence, &p.attempt);
+                    // The only other free string, bounded and validated.
+                    match &p.package {
+                        Some(name) => {
+                            let _: &String = name;
+                            1
+                        }
+                        None => 0,
+                    }
                 }
                 ProgressEvent::RunEnded { outcome } => {
                     let _: &RunOutcome = outcome;
@@ -786,6 +1107,197 @@ mod tests {
             let err = validate_stream(&events).expect_err(needle);
             assert!(err.contains(needle), "{needle}: got {err}");
         }
+    }
+
+    #[test]
+    fn validator_accepts_package_details_between_progress_and_stage_end() {
+        let run = |inner: Vec<ProgressEvent>| {
+            let mut v = vec![ProgressEvent::RunStarted {
+                command: RunKind::Apply,
+            }];
+            v.extend(inner);
+            v.push(ProgressEvent::RunEnded {
+                outcome: RunOutcome::Completed,
+            });
+            v
+        };
+        let item = ItemRef::resource("package", "postgresql");
+        let evs = run(vec![
+            started(Stage::Resources, Some(1)),
+            ProgressEvent::Progress {
+                stage: Stage::Resources,
+                done: 0,
+                total: Some(1),
+                current: Some(item.clone()),
+            },
+            detail_for(&item, Some(9), Some(2), Some(3)),
+            detail_for(&item, Some(72), Some(2), Some(3)),
+            detail_for(&item, Some(100), None, None),
+            ended(Stage::Resources, StageOutcome::Completed, 1),
+        ]);
+        validate_stream(&evs).unwrap();
+    }
+
+    #[test]
+    fn validator_rejects_each_package_detail_violation() {
+        let item = ItemRef::resource("package", "postgresql");
+        let other = ItemRef::resource("package", "nginx");
+        let prefix = |ev: Vec<ProgressEvent>| {
+            let mut v = vec![
+                started(Stage::Resources, Some(1)),
+                ProgressEvent::Progress {
+                    stage: Stage::Resources,
+                    done: 0,
+                    total: Some(1),
+                    current: Some(item.clone()),
+                },
+            ];
+            v.extend(ev);
+            v
+        };
+        let bad: Vec<(&str, Vec<ProgressEvent>)> = vec![
+            (
+                "PackageDetail outside a stage",
+                vec![detail_for(&item, Some(1), None, None)],
+            ),
+            (
+                "before any Progress item",
+                vec![
+                    started(Stage::Resources, Some(1)),
+                    detail_for(&item, Some(1), None, None),
+                ],
+            ),
+            (
+                "active item is",
+                prefix(vec![detail_for(&other, Some(1), None, None)]),
+            ),
+            (
+                "percent > 100",
+                prefix(vec![
+                    ProgressEvent::PackageDetail(measured(&item, 101, Some(0), Some(1))),
+                    ended(Stage::Resources, StageOutcome::Completed, 1),
+                ]),
+            ),
+            (
+                "must appear together",
+                prefix(vec![
+                    ProgressEvent::PackageDetail(unscoped(&item, 50)),
+                    ended(Stage::Resources, StageOutcome::Completed, 1),
+                ]),
+            ),
+            (
+                "unmeasured PackageDetail",
+                prefix(vec![
+                    ProgressEvent::PackageDetail(unmeasured_with_percent(&item, 50)),
+                    ended(Stage::Resources, StageOutcome::Completed, 1),
+                ]),
+            ),
+            (
+                "bytes_downloaded > bytes_total",
+                prefix(vec![
+                    ProgressEvent::PackageDetail(measured(&item, 50, Some(9), Some(1))),
+                    ended(Stage::Resources, StageOutcome::Completed, 1),
+                ]),
+            ),
+            (
+                "attempt must be",
+                prefix(vec![
+                    ProgressEvent::PackageDetail(with_attempt(&item, 0)),
+                    ended(Stage::Resources, StageOutcome::Completed, 1),
+                ]),
+            ),
+            ("non-package item", {
+                let file = ItemRef::resource("file", "postgresql");
+                let mut p = base_detail(&file);
+                p.resource = file.clone();
+                vec![
+                    started(Stage::Resources, Some(1)),
+                    ProgressEvent::Progress {
+                        stage: Stage::Resources,
+                        done: 0,
+                        total: Some(1),
+                        current: Some(file),
+                    },
+                    ProgressEvent::PackageDetail(p),
+                ]
+            }),
+            (
+                "bounded printable token",
+                prefix(vec![
+                    ProgressEvent::PackageDetail(with_package(&item, "two words")),
+                    ended(Stage::Resources, StageOutcome::Completed, 1),
+                ]),
+            ),
+        ];
+        for (needle, events) in bad {
+            let err = validate_stream(&events).expect_err(needle);
+            assert!(err.contains(needle), "{needle}: got {err}");
+        }
+    }
+
+    fn base_detail(item: &ItemRef) -> PackageProgress {
+        PackageProgress::new(
+            item.clone(),
+            crate::platform::PackageBackend::Apt,
+            PackagePhase::Downloading,
+            PackageScope::Transaction,
+            ProgressSource::AptStatusFdDl,
+            ProgressConfidence::Measured,
+        )
+    }
+
+    fn detail_for(
+        item: &ItemRef,
+        percent: Option<u8>,
+        files_done: Option<u32>,
+        files_total: Option<u32>,
+    ) -> ProgressEvent {
+        let mut p = base_detail(item);
+        p.percent = percent;
+        p.percent_scope = percent.map(|_| PercentScope::DownloadAggregate);
+        p.files_done = files_done;
+        p.files_total = files_total;
+        ProgressEvent::PackageDetail(p)
+    }
+
+    fn measured(
+        item: &ItemRef,
+        percent: u8,
+        done: Option<u64>,
+        total: Option<u64>,
+    ) -> PackageProgress {
+        let mut p = base_detail(item);
+        p.percent = Some(percent);
+        p.percent_scope = Some(PercentScope::DownloadAggregate);
+        p.bytes_downloaded = done;
+        p.bytes_total = total;
+        p
+    }
+
+    fn unscoped(item: &ItemRef, percent: u8) -> PackageProgress {
+        let mut p = base_detail(item);
+        p.percent = Some(percent);
+        p.percent_scope = None;
+        p
+    }
+
+    fn unmeasured_with_percent(item: &ItemRef, percent: u8) -> PackageProgress {
+        let mut p = unscoped(item, percent);
+        p.percent_scope = Some(PercentScope::DownloadAggregate);
+        p.confidence = ProgressConfidence::Unknown;
+        p
+    }
+
+    fn with_attempt(item: &ItemRef, attempt: u32) -> PackageProgress {
+        let mut p = base_detail(item);
+        p.attempt = attempt;
+        p
+    }
+
+    fn with_package(item: &ItemRef, package: &str) -> PackageProgress {
+        let mut p = base_detail(item);
+        p.package = Some(package.to_string());
+        p
     }
 
     #[test]

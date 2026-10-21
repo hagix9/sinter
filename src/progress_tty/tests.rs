@@ -121,7 +121,7 @@ fn line(
     quiet: Option<Duration>,
     max: usize,
 ) -> Option<String> {
-    format_line(&view_of(kind, events), quiet, max)
+    format_line(&view_of(kind, events), quiet, None, max)
 }
 
 const WIDE: usize = 200;
@@ -534,7 +534,7 @@ fn the_formatter_never_panics_and_never_exceeds_the_budget() {
             for quiet in [None, Some(secs(0)), Some(secs(3)), Some(secs(100_000))] {
                 for max in (0..=130).chain([300, 1000]) {
                     let v = view_of(kind, std::slice::from_ref(&ev));
-                    if let Some(text) = format_line(&v, quiet, max) {
+                    if let Some(text) = format_line(&v, quiet, None, max) {
                         assert!(text.chars().count() <= max, "{ev:?} max={max} {text:?}");
                         assert!(is_printable_ascii(&text), "{ev:?} {text:?}");
                         assert!(!text.is_empty());
@@ -1575,4 +1575,301 @@ fn no_sensitive_value_reaches_the_transient_bytes_of_a_real_engine_stream() {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Package detail (WP-PKG-PROGRESS P1)
+// ---------------------------------------------------------------------------
+
+fn package_item(id: &str) -> Option<ItemRef> {
+    Some(ItemRef {
+        kind: ItemKind::Package,
+        id: id.to_string(),
+    })
+}
+
+/// A detail for `postgresql`, measured unless `percent` is `None`.
+fn detail(
+    percent: Option<u8>,
+    phase: crate::progress::PackagePhase,
+    percent_scope: crate::progress::PercentScope,
+) -> ProgressEvent {
+    let mut p = crate::progress::PackageProgress::new(
+        ItemRef {
+            kind: ItemKind::Package,
+            id: "postgresql".to_string(),
+        },
+        crate::platform::PackageBackend::Apt,
+        phase,
+        crate::progress::PackageScope::Transaction,
+        crate::progress::ProgressSource::AptStatusFdDl,
+        if percent.is_some() {
+            crate::progress::ProgressConfidence::Measured
+        } else {
+            crate::progress::ProgressConfidence::Unknown
+        },
+    );
+    p.percent = percent;
+    p.percent_scope = percent.map(|_| percent_scope);
+    ProgressEvent::PackageDetail(p)
+}
+
+fn line_detailed(
+    events: &[ProgressEvent],
+    quiet: Option<Duration>,
+    detail_elapsed: Option<Duration>,
+    max: usize,
+) -> Option<String> {
+    format_line(
+        &view_of(Some(RunKind::Apply), events),
+        quiet,
+        detail_elapsed,
+        max,
+    )
+}
+
+#[test]
+fn a_download_detail_shows_download_percent_files_and_elapsed() {
+    let mut ev = vec![
+        started(Stage::Resources, Some(1)),
+        ProgressEvent::Progress {
+            stage: Stage::Resources,
+            done: 0,
+            total: Some(1),
+            current: item(ItemKind::Package, "postgresql"),
+        },
+        {
+            let mut d = detail(
+                Some(72),
+                crate::progress::PackagePhase::Downloading,
+                crate::progress::PercentScope::DownloadAggregate,
+            );
+            if let ProgressEvent::PackageDetail(p) = &mut d {
+                p.files_done = Some(2);
+                p.files_total = Some(3);
+            }
+            d
+        },
+    ];
+    let text = line_detailed(&ev, None, Some(secs(12)), WIDE).unwrap();
+    assert_eq!(
+        text,
+        "apply 0/1 package:postgresql download 72% file 2/3 12s"
+    );
+    // The detail never turns a download percentage into an install one.
+    assert!(!text.contains("install"), "{text}");
+
+    // A new item clears the detail: the old percentage must not survive.
+    ev.push(ProgressEvent::Progress {
+        stage: Stage::Resources,
+        done: 0,
+        total: Some(2),
+        current: package_item("nginx"),
+    });
+    let text = line_detailed(&ev, None, Some(secs(12)), WIDE).unwrap();
+    assert_eq!(text, "apply 0/2 package:nginx");
+}
+
+#[test]
+fn an_install_detail_names_the_package_and_says_install() {
+    let mut d = detail(
+        Some(40),
+        crate::progress::PackagePhase::Installing,
+        crate::progress::PercentScope::TransactionOperation,
+    );
+    if let ProgressEvent::PackageDetail(p) = &mut d {
+        p.package = Some("postgresql-16".to_string());
+    }
+    let ev = [
+        started(Stage::Resources, Some(1)),
+        ProgressEvent::Progress {
+            stage: Stage::Resources,
+            done: 0,
+            total: Some(1),
+            current: item(ItemKind::Package, "postgresql"),
+        },
+        d,
+    ];
+    let text = line_detailed(&ev, None, Some(secs(18)), WIDE).unwrap();
+    assert_eq!(
+        text,
+        "apply 0/1 package:postgresql install 40% postgresql-16 18s"
+    );
+}
+
+#[test]
+fn a_phase_without_a_percentage_shows_only_the_phase_word() {
+    let ev = [
+        started(Stage::Resources, Some(1)),
+        ProgressEvent::Progress {
+            stage: Stage::Resources,
+            done: 0,
+            total: Some(1),
+            current: item(ItemKind::Package, "postgresql"),
+        },
+        detail(
+            None,
+            crate::progress::PackagePhase::Configuring,
+            crate::progress::PercentScope::TransactionOperation,
+        ),
+    ];
+    let text = line_detailed(&ev, None, Some(secs(3)), WIDE).unwrap();
+    assert_eq!(text, "apply 0/1 package:postgresql configuring 3s");
+}
+
+#[test]
+fn a_narrow_terminal_drops_detail_fields_whole_and_never_cuts_a_number() {
+    let mut d = detail(
+        Some(72),
+        crate::progress::PackagePhase::Downloading,
+        crate::progress::PercentScope::DownloadAggregate,
+    );
+    if let ProgressEvent::PackageDetail(p) = &mut d {
+        p.files_done = Some(2);
+        p.files_total = Some(3);
+        p.bytes_downloaded = Some(11_400_000);
+        p.rate_bps = Some(3_800_000);
+    }
+    let ev = [
+        started(Stage::Resources, Some(1)),
+        ProgressEvent::Progress {
+            stage: Stage::Resources,
+            done: 0,
+            total: Some(1),
+            current: item(ItemKind::Package, "postgresql"),
+        },
+        d,
+    ];
+    for max in 10..=90 {
+        let text = line_detailed(&ev, None, Some(secs(12)), max).unwrap();
+        assert!(text.chars().count() <= max, "max={max}: {text:?}");
+        assert!(is_printable_ascii(&text), "max={max}: {text:?}");
+        // A percentage that survives is shown in full.
+        if let Some(pos) = text.find("download ") {
+            assert!(text[pos..].starts_with("download 72%"), "{text:?}");
+        }
+        for number in ["72", "12", "11.4", "3.8"] {
+            if text.contains(number) {
+                assert!(!text.contains(&format!("{number}...")), "{text:?}");
+            }
+        }
+    }
+    // At a comfortable width every measured field is shown.
+    let wide = line_detailed(&ev, None, Some(secs(12)), WIDE).unwrap();
+    assert!(wide.contains("download 72%"), "{wide}");
+    assert!(wide.contains("file 2/3"), "{wide}");
+    assert!(wide.contains("11.4 MB"), "{wide}");
+    assert!(wide.contains("3.8 MB/s"), "{wide}");
+}
+
+#[test]
+fn a_detail_for_another_item_is_ignored() {
+    let ev = [
+        started(Stage::Resources, Some(1)),
+        ProgressEvent::Progress {
+            stage: Stage::Resources,
+            done: 0,
+            total: Some(1),
+            current: item(ItemKind::Package, "nginx"),
+        },
+        detail(
+            Some(72),
+            crate::progress::PackagePhase::Downloading,
+            crate::progress::PercentScope::DownloadAggregate,
+        ),
+    ];
+    let text = line_detailed(&ev, None, Some(secs(12)), WIDE).unwrap();
+    assert_eq!(text, "apply 0/1 package:nginx");
+}
+
+#[test]
+fn a_detail_after_the_stage_ended_is_ignored() {
+    let ev = [
+        started(Stage::Resources, Some(1)),
+        ProgressEvent::Progress {
+            stage: Stage::Resources,
+            done: 0,
+            total: Some(1),
+            current: item(ItemKind::Package, "postgresql"),
+        },
+        ended(Stage::Resources, StageOutcome::Completed, 1),
+        detail(
+            Some(72),
+            crate::progress::PackagePhase::Downloading,
+            crate::progress::PercentScope::DownloadAggregate,
+        ),
+    ];
+    let text = line_detailed(&ev, None, Some(secs(12)), WIDE).unwrap();
+    assert_eq!(text, "apply 1/1");
+}
+
+#[test]
+fn a_package_detail_ticks_its_own_elapsed_time_once_per_second() {
+    let mem = Mem::new(Some(80));
+    let t0 = Instant::now();
+    let mut core = core(&mem, RunKind::Apply, t0);
+    core.on_event(&started(Stage::Resources, Some(1)), t0);
+    core.on_event(
+        &ProgressEvent::Progress {
+            stage: Stage::Resources,
+            done: 0,
+            total: Some(1),
+            current: item(ItemKind::Package, "postgresql"),
+        },
+        t0,
+    );
+    core.on_event(
+        &detail(
+            Some(72),
+            crate::progress::PackagePhase::Downloading,
+            crate::progress::PercentScope::DownloadAggregate,
+        ),
+        t0,
+    );
+    // The three events arrive within the redraw interval, so the next tick
+    // draws the coalesced line.
+    core.tick(t0 + ms(200));
+    assert!(mem.text().contains("download 72% 0s"), "{}", mem.text());
+
+    // The worker is asked to wake within the second that the elapsed text
+    // changes, even though no event arrives.
+    let wake = core
+        .wake_after(t0 + ms(200))
+        .expect("a detail keeps ticking");
+    assert!(wake <= secs(1), "wake={wake:?}");
+    core.tick(t0 + secs(1));
+    assert!(mem.text().contains("download 72% 1s"), "{}", mem.text());
+    core.tick(t0 + secs(2));
+    assert!(mem.text().contains("download 72% 2s"), "{}", mem.text());
+}
+
+#[test]
+fn a_detail_does_not_print_its_elapsed_time_twice() {
+    let mem = Mem::new(Some(80));
+    let t0 = Instant::now();
+    let mut core = core(&mem, RunKind::Apply, t0);
+    core.on_event(&started(Stage::Resources, Some(1)), t0);
+    core.on_event(
+        &ProgressEvent::Progress {
+            stage: Stage::Resources,
+            done: 0,
+            total: Some(1),
+            current: item(ItemKind::Package, "postgresql"),
+        },
+        t0,
+    );
+    core.on_event(
+        &detail(
+            Some(72),
+            crate::progress::PackagePhase::Downloading,
+            crate::progress::PercentScope::DownloadAggregate,
+        ),
+        t0,
+    );
+    // Let the run go quiet past QUIET_AFTER: the detail's own elapsed text is
+    // the only time on the line.
+    core.tick(t0 + secs(5));
+    let text = mem.text();
+    assert!(text.contains("download 72% 5s"), "{text:?}");
+    assert_eq!(text.matches("5s").count(), 1, "{text:?}");
 }

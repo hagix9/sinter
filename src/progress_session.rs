@@ -241,6 +241,12 @@ impl ProgressSink for ChannelSink {
     fn emit(&self, event: &ProgressEvent) {
         let _ = self.tx.send(event.clone());
     }
+
+    /// An unbounded `mpsc::Sender::send` never blocks, so a package reporter
+    /// may join its thread and keep the exact detail/stage-end ordering.
+    fn is_non_blocking(&self) -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------

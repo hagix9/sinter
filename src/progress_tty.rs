@@ -122,7 +122,10 @@
 //!   has printed more. That is the whole residual, and only a terminal that has
 //!   not drained for longer than the teardown bound can cause it.
 
-use crate::progress::{ItemRef, ProgressEvent, RunKind, Stage, StageOutcome};
+use crate::progress::{
+    ItemRef, PackagePhase, PackageProgress, PercentScope, ProgressEvent, RunKind, Stage,
+    StageOutcome,
+};
 use crate::progress_session::{
     AbandonLatch, ConsumerFactory, NullConsumer, ProgressConsumer, SessionInfo, MIN_WAKE,
 };
@@ -285,6 +288,9 @@ struct View {
     command: Option<RunKind>,
     stage: Option<StageView>,
     finished: bool,
+    /// The latest package detail of the item in flight. Cleared at every item
+    /// boundary, stage end and run end: a detail never outlives its item.
+    detail: Option<PackageProgress>,
 }
 
 impl View {
@@ -293,6 +299,7 @@ impl View {
             command,
             stage: None,
             finished: false,
+            detail: None,
         }
     }
 
@@ -300,6 +307,7 @@ impl View {
         match event {
             ProgressEvent::RunStarted { command } => self.command = Some(*command),
             ProgressEvent::StageStarted { stage, total } => {
+                self.detail = None;
                 self.stage = Some(StageView {
                     stage: *stage,
                     phase: StagePhase::Active,
@@ -314,6 +322,7 @@ impl View {
                 total,
                 current,
             } => {
+                self.detail = None;
                 self.stage = Some(StageView {
                     stage: *stage,
                     phase: StagePhase::Active,
@@ -321,6 +330,18 @@ impl View {
                     total: *total,
                     current: current.clone(),
                 });
+            }
+            ProgressEvent::PackageDetail(detail) => {
+                // A detail for another stage or a finished item is ignored, not
+                // trusted: the renderer never invents an item to show it on.
+                let matches = self.stage.as_ref().is_some_and(|s| {
+                    s.phase == StagePhase::Active
+                        && s.stage == detail.stage
+                        && s.current.as_ref() == Some(&detail.resource)
+                });
+                if matches {
+                    self.detail = Some(detail.clone());
+                }
             }
             ProgressEvent::StageEnded {
                 stage,
@@ -332,6 +353,7 @@ impl View {
                     Some(s) if s.stage == *stage => s.total,
                     _ => None,
                 };
+                self.detail = None;
                 self.stage = Some(StageView {
                     stage: *stage,
                     phase: StagePhase::Ended(*outcome),
@@ -341,6 +363,7 @@ impl View {
                 });
             }
             ProgressEvent::RunEnded { .. } => {
+                self.detail = None;
                 self.finished = true;
             }
         }
@@ -405,40 +428,173 @@ fn cut(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-/// Lay out the pieces within `max` characters. Priority, highest first: label
-/// and counter, elapsed, item (shortened with `...`, then dropped).
-fn fit(head: &str, item: Option<&str>, tail: Option<&str>, max: usize) -> String {
+/// One field of the transient line. Lower `priority` survives a narrow
+/// terminal longer; `truncatable` fields may be shortened with `...` instead of
+/// being dropped, which is applied to the item id only.
+struct Field {
+    text: String,
+    priority: u8,
+}
+
+/// Lay out the head, the item and the package-detail fields within `max`
+/// characters.
+///
+/// Priority, highest first: the label and counter (always kept, cut only when
+/// it alone exceeds the budget), the measured percent, the elapsed time, the
+/// item id, the package/file counts, the measured bytes/rate. A field is
+/// never cut in the middle for the numeric ones: it is dropped whole. The item
+/// id is the one field that may be shortened (`kind:abc...`).
+fn assemble(head: &str, item: Option<&str>, detail: &[Field], max: usize) -> String {
     let head_len = head.chars().count();
-    let tail_len = tail.map_or(0, |t| t.chars().count() + 1);
-    if head_len + tail_len > max {
-        // Not even the label and the elapsed time: keep the label.
+    if head_len >= max {
         return cut(head, max);
     }
-    let mut out = String::from(head);
-    let room = max - head_len - tail_len;
-    if let Some(item) = item {
-        let avail = room.saturating_sub(1);
-        let item_len = item.chars().count();
-        if item_len <= avail {
-            out.push(' ');
-            out.push_str(item);
-        } else if avail >= MIN_ITEM_CHARS {
-            out.push(' ');
-            out.push_str(&cut(item, avail - 3));
-            out.push_str("...");
+    let mut used = head_len;
+    let mut keep_item: Option<usize> = None;
+    let mut keep = vec![false; detail.len()];
+    for priority in 0..=4u8 {
+        if priority == 2 {
+            if let Some(item) = item {
+                let item_len = item.chars().count();
+                let need = item_len + 1;
+                if used + need <= max {
+                    keep_item = Some(item_len);
+                    used += need;
+                } else if max.saturating_sub(used) > MIN_ITEM_CHARS {
+                    let avail = max - used - 1;
+                    keep_item = Some(avail);
+                    used = max;
+                }
+            }
+            continue;
+        }
+        for (i, field) in detail.iter().enumerate() {
+            if field.priority != priority || keep[i] {
+                continue;
+            }
+            let need = field.text.chars().count() + 1;
+            if used + need <= max {
+                keep[i] = true;
+                used += need;
+            }
         }
     }
-    if let Some(tail) = tail {
-        out.push(' ');
-        out.push_str(tail);
+    let mut out = String::from(head);
+    if let Some(avail) = keep_item {
+        if let Some(item) = item {
+            out.push(' ');
+            if item.chars().count() <= avail {
+                out.push_str(item);
+            } else {
+                out.push_str(&cut(item, avail.saturating_sub(3)));
+                out.push_str("...");
+            }
+        }
+    }
+    for (i, field) in detail.iter().enumerate() {
+        if keep[i] {
+            out.push(' ');
+            out.push_str(&field.text);
+        }
     }
     out
 }
 
+/// `11.4 MB`, `648 kB`, `512 B`: decimal units, one decimal above 1000.
+pub(crate) fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "kB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1000.0 && unit + 1 < UNITS.len() {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+/// The package-detail fields for the line, in display order.
+fn detail_fields(detail: &PackageProgress, elapsed: Option<Duration>) -> Vec<Field> {
+    let mut fields = Vec::new();
+    match (detail.percent, detail.percent_scope) {
+        (Some(percent), Some(PercentScope::DownloadAggregate)) => fields.push(Field {
+            text: format!("download {percent}%"),
+            priority: 0,
+        }),
+        (Some(percent), Some(PercentScope::TransactionOperation)) => fields.push(Field {
+            text: format!("install {percent}%"),
+            priority: 0,
+        }),
+        // A percent without a scope must never reach a renderer (the validator
+        // rejects it); showing the phase word is the honest fallback.
+        _ => fields.push(Field {
+            text: detail.phase.label().to_string(),
+            priority: 0,
+        }),
+    }
+    // A package name during download is a file name (DNF completion lines);
+    // it is not shown as an item name. Install/configure/remove/verify phases
+    // name the package currently being processed.
+    if matches!(
+        detail.phase,
+        PackagePhase::Installing
+            | PackagePhase::Configuring
+            | PackagePhase::Removing
+            | PackagePhase::Verifying
+            | PackagePhase::Waiting
+    ) {
+        if let Some(package) = detail.package.as_deref() {
+            fields.push(Field {
+                text: sanitize_display(package, crate::progress::PACKAGE_NAME_MAX),
+                priority: 3,
+            });
+        }
+    }
+    if let (Some(done), Some(total)) = (detail.files_done, detail.files_total) {
+        fields.push(Field {
+            text: format!("file {done}/{total}"),
+            priority: 3,
+        });
+    } else if let (Some(done), Some(total)) = (detail.packages_done, detail.packages_total) {
+        fields.push(Field {
+            text: format!("package {done}/{total}"),
+            priority: 3,
+        });
+    }
+    if let Some(elapsed) = elapsed {
+        fields.push(Field {
+            text: format_elapsed(elapsed),
+            priority: 1,
+        });
+    }
+    if let Some(bytes) = detail.bytes_downloaded {
+        fields.push(Field {
+            text: format_bytes(bytes),
+            priority: 4,
+        });
+    }
+    if let Some(rate) = detail.rate_bps {
+        fields.push(Field {
+            text: format!("{}/s", format_bytes(rate)),
+            priority: 4,
+        });
+    }
+    fields
+}
+
 /// The text of the line for `view`, at most `max` characters, or `None` when
 /// there is nothing to show. `quiet` is the elapsed time to display (already
-/// past the display threshold) or `None`. Pure: no clock, no terminal.
-fn format_line(view: &View, quiet: Option<Duration>, max: usize) -> Option<String> {
+/// past the display threshold) or `None`; `detail_elapsed` is the age of the
+/// current package detail. Pure: no clock, no terminal.
+fn format_line(
+    view: &View,
+    quiet: Option<Duration>,
+    detail_elapsed: Option<Duration>,
+    max: usize,
+) -> Option<String> {
     if !view.has_line() || max == 0 {
         return None;
     }
@@ -461,8 +617,18 @@ fn format_line(view: &View, quiet: Option<Duration>, max: usize) -> Option<Strin
             sanitize_display(&c.id, max.saturating_add(8))
         )
     });
-    let tail = quiet.map(format_elapsed);
-    Some(fit(&head, item.as_deref(), tail.as_deref(), max))
+    let mut fields = Vec::new();
+    if let Some(detail) = view.detail.as_ref() {
+        // The detail carries its own elapsed time; the quiet-elapsed text would
+        // duplicate the same datum on one line.
+        fields = detail_fields(detail, detail_elapsed);
+    } else if let Some(quiet) = quiet {
+        fields.push(Field {
+            text: format_elapsed(quiet),
+            priority: 1,
+        });
+    }
+    Some(assemble(&head, item.as_deref(), &fields, max))
 }
 
 // ---------------------------------------------------------------------------
@@ -506,6 +672,9 @@ struct Core {
     /// The last width left no room for any text, so there is nothing to refresh
     /// until the next event asks again.
     no_room: bool,
+    /// When the first package detail of the item in flight arrived. Cleared at
+    /// every item/stage boundary; drives the detail's own elapsed text.
+    detail_since: Option<Instant>,
 }
 
 impl Core {
@@ -521,6 +690,7 @@ impl Core {
             dead: false,
             latch: AbandonLatch::default(),
             no_room: false,
+            detail_since: None,
         }
     }
 
@@ -538,6 +708,18 @@ impl Core {
     fn on_event(&mut self, event: &ProgressEvent, now: Instant) {
         if self.silenced() || self.view.finished {
             return;
+        }
+        match event {
+            ProgressEvent::PackageDetail(_) => {
+                if self.detail_since.is_none() {
+                    self.detail_since = Some(now);
+                }
+            }
+            ProgressEvent::StageStarted { .. }
+            | ProgressEvent::Progress { .. }
+            | ProgressEvent::StageEnded { .. }
+            | ProgressEvent::RunEnded { .. } => self.detail_since = None,
+            ProgressEvent::RunStarted { .. } => {}
         }
         self.view.apply(event);
         self.last_event = now;
@@ -562,6 +744,17 @@ impl Core {
             return None;
         }
         let mut wake = self.next_elapsed_change(now);
+        if let Some(since) = self.detail_since {
+            // The detail shows its own elapsed time from the first detail of
+            // the item, so it changes on every whole second of that age even
+            // when events keep arriving.
+            let step = self.timing.step.as_nanos().max(1);
+            let elapsed = now.saturating_duration_since(since).as_nanos();
+            let remaining = step - (elapsed % step);
+            wake = wake.min(Duration::from_nanos(
+                u64::try_from(remaining).unwrap_or(u64::MAX),
+            ));
+        }
         if self.dirty {
             let due = match self.last_write {
                 Some(t) => self
@@ -591,10 +784,11 @@ impl Core {
     fn refresh(&mut self, now: Instant) {
         let quiet = now.saturating_duration_since(self.last_event);
         let shown = (quiet >= self.timing.quiet_after).then_some(quiet);
+        let detail_elapsed = self.detail_since.map(|t| now.saturating_duration_since(t));
         let columns = self.surface.columns();
         let budget = line_budget(columns);
         self.no_room = budget == 0;
-        let text = format_line(&self.view, shown, budget);
+        let text = format_line(&self.view, shown, detail_elapsed, budget);
         match text {
             None => {
                 self.dirty = false;

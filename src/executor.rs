@@ -8,6 +8,46 @@ use std::time::{Duration, Instant};
 
 pub const MAX_CAPTURE: usize = 1024 * 1024;
 
+/// Which stream a chunk came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamKind {
+    Stdout,
+    Stderr,
+}
+
+/// An observation-only consumer of a running command's raw output chunks.
+///
+/// `stdout`/`stderr` are called synchronously from the executor's reader
+/// thread (local pipes) or drain loop (SSH), *while the command runs*, and
+/// never on the engine thread. The observer must therefore be cheap and must
+/// not block: the executor reads the pipe as fast as it can, and a blocking
+/// observer applies backpressure to the child's stdout/stderr, which can slow
+/// a package manager and, in the worst case, make it hit its timeout. The
+/// in-tree production observer
+/// ([`crate::package_progress::PackageReporter`]) only copies the chunk into
+/// an unbounded channel; the parsing and the sink calls happen on its own
+/// thread.
+///
+/// A panic is caught here and ignored: a broken observer never unwinds into
+/// the executor, never changes [`Output`], an exit code, a timeout or a
+/// result. (The default panic hook may still print to the process's stderr;
+/// an in-tree observer does not panic.)
+pub trait ExecObserver: Send + Sync {
+    fn stdout(&self, chunk: &[u8]);
+    fn stderr(&self, chunk: &[u8]);
+}
+
+/// Deliver one chunk to the observer, isolating panics.
+fn observe(observer: Option<&dyn ExecObserver>, stream: StreamKind, chunk: &[u8]) {
+    let Some(observer) = observer else {
+        return;
+    };
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match stream {
+        StreamKind::Stdout => observer.stdout(chunk),
+        StreamKind::Stderr => observer.stderr(chunk),
+    }));
+}
+
 #[derive(Clone)]
 pub struct ExecRequest {
     pub program: String,
@@ -439,11 +479,44 @@ impl Executor {
     }
 
     pub fn run(&mut self, req: &ExecRequest) -> Result<Output> {
+        self.run_with_observer(req, None)
+    }
+
+    /// [`run`](Self::run) with an observation-only consumer of the raw output
+    /// chunks. The observer cannot change the request, the capture, the
+    /// timeout, the completion classification or the statistics.
+    ///
+    /// The fake executor has no byte stream: it replays its scripted stdout and
+    /// stderr to the observer in one chunk each, after the command "ran", so a
+    /// scripted target can exercise a parser end to end. Nothing is replayed
+    /// when the observer is `None`.
+    pub fn run_with_observer(
+        &mut self,
+        req: &ExecRequest,
+        observer: Option<Arc<dyn ExecObserver>>,
+    ) -> Result<Output> {
         self.record(req);
         match self {
-            Executor::Local(l) => l.run(req),
-            Executor::Ssh(s) => s.run(req),
-            Executor::Fake(f) => Ok(f.run(req)),
+            Executor::Local(l) => match observer {
+                // The no-observer fast path: unchanged local execution.
+                None => l.run(req),
+                Some(observer) => {
+                    let wrap = l.wraps_sudo();
+                    l.run_with_observer(req, wrap, Some(observer))
+                }
+            },
+            Executor::Ssh(s) => {
+                let wrap = s.wraps_sudo();
+                s.run_with_observer(req, wrap, observer)
+            }
+            Executor::Fake(f) => {
+                let out = f.run(req);
+                if let Some(observer) = observer.as_deref() {
+                    observe(Some(observer), StreamKind::Stdout, &out.stdout);
+                    observe(Some(observer), StreamKind::Stderr, &out.stderr);
+                }
+                Ok(out)
+            }
         }
     }
 
@@ -678,14 +751,28 @@ impl LocalExecutor {
     }
 
     fn run_with(&mut self, req: &ExecRequest, wrap: bool) -> Result<Output> {
+        self.run_with_observer(req, wrap, None)
+    }
+
+    fn run_with_observer(
+        &mut self,
+        req: &ExecRequest,
+        wrap: bool,
+        observer: Option<Arc<dyn ExecObserver>>,
+    ) -> Result<Output> {
         let started = Instant::now();
-        let result = self.exec_local(req, wrap);
+        let result = self.exec_local(req, wrap, observer);
         self.stats
             .note(req, wrap, started.elapsed(), result.as_ref().ok());
         result
     }
 
-    fn exec_local(&mut self, req: &ExecRequest, wrap: bool) -> Result<Output> {
+    fn exec_local(
+        &mut self,
+        req: &ExecRequest,
+        wrap: bool,
+        observer: Option<Arc<dyn ExecObserver>>,
+    ) -> Result<Output> {
         let deadline = Instant::now() + Duration::from_secs(req.timeout_secs.max(1));
         use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
@@ -747,8 +834,14 @@ impl LocalExecutor {
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
         let cap = MAX_CAPTURE;
-        let out_handle = std::thread::spawn(move || read_capped(stdout_pipe, cap));
-        let err_handle = std::thread::spawn(move || read_capped(stderr_pipe, cap));
+        let out_observer = observer.clone();
+        let err_observer = observer;
+        let out_handle = std::thread::spawn(move || {
+            read_capped(stdout_pipe, cap, out_observer, StreamKind::Stdout)
+        });
+        let err_handle = std::thread::spawn(move || {
+            read_capped(stderr_pipe, cap, err_observer, StreamKind::Stderr)
+        });
 
         // One bounded deadline covers spawn, execution, pipe drain, and wait.
         #[cfg(test)]
@@ -910,7 +1003,12 @@ impl LocalExecutor {
     }
 }
 
-fn read_capped<R: Read + Send + 'static>(pipe: Option<R>, cap: usize) -> (Vec<u8>, bool) {
+fn read_capped<R: Read + Send + 'static>(
+    pipe: Option<R>,
+    cap: usize,
+    observer: Option<Arc<dyn ExecObserver>>,
+    stream: StreamKind,
+) -> (Vec<u8>, bool) {
     let mut buf = Vec::new();
     let mut truncated = false;
     if let Some(mut r) = pipe {
@@ -919,6 +1017,10 @@ fn read_capped<R: Read + Send + 'static>(pipe: Option<R>, cap: usize) -> (Vec<u8
             match r.read(&mut tmp) {
                 Ok(0) => break,
                 Ok(n) => {
+                    // The observer sees every chunk, including bytes beyond the
+                    // capture cap: detail must not stop at 1 MiB just because
+                    // the capture did.
+                    observe(observer.as_deref(), stream, &tmp[..n]);
                     if buf.len() >= cap {
                         truncated = true;
                         continue;
@@ -1076,14 +1178,28 @@ impl SshExecutor {
     }
 
     fn run_with(&mut self, req: &ExecRequest, wrap: bool) -> Result<Output> {
+        self.run_with_observer(req, wrap, None)
+    }
+
+    fn run_with_observer(
+        &mut self,
+        req: &ExecRequest,
+        wrap: bool,
+        observer: Option<Arc<dyn ExecObserver>>,
+    ) -> Result<Output> {
         let started = Instant::now();
-        let result = self.exec_ssh(req, wrap);
+        let result = self.exec_ssh(req, wrap, observer);
         self.stats
             .note(req, wrap, started.elapsed(), result.as_ref().ok());
         result
     }
 
-    fn exec_ssh(&mut self, req: &ExecRequest, wrap: bool) -> Result<Output> {
+    fn exec_ssh(
+        &mut self,
+        req: &ExecRequest,
+        wrap: bool,
+        observer: Option<Arc<dyn ExecObserver>>,
+    ) -> Result<Output> {
         let deadline = Instant::now() + Duration::from_secs(req.timeout_secs.max(1));
         let line = build_remote_command_with(req, self.sudo, wrap, &self.home);
         self.session.set_blocking(false);
@@ -1149,6 +1265,8 @@ impl SshExecutor {
                         &mut out_trunc,
                         MAX_CAPTURE,
                         deadline,
+                        observer.as_deref(),
+                        StreamKind::Stdout,
                     ) {
                         Ok(0) => {
                             stdout_eof = true;
@@ -1166,7 +1284,15 @@ impl SshExecutor {
                 }
                 if !stderr_eof {
                     let mut st = channel.stderr();
-                    match drain_stream(&mut st, &mut err, &mut err_trunc, MAX_CAPTURE, deadline) {
+                    match drain_stream(
+                        &mut st,
+                        &mut err,
+                        &mut err_trunc,
+                        MAX_CAPTURE,
+                        deadline,
+                        observer.as_deref(),
+                        StreamKind::Stderr,
+                    ) {
                         Ok(0) => {
                             stderr_eof = true;
                             progressed = true;
@@ -1573,6 +1699,8 @@ fn drain_stream<R: Read>(
     truncated: &mut bool,
     cap: usize,
     deadline: Instant,
+    observer: Option<&dyn ExecObserver>,
+    stream: StreamKind,
 ) -> std::result::Result<usize, StreamErr> {
     let mut total = 0;
     let mut tmp = [0u8; 8192];
@@ -1586,6 +1714,9 @@ fn drain_stream<R: Read>(
             Ok(0) => return Ok(total),
             Ok(n) => {
                 total += n;
+                // Observed before the cap check: the observer must see the
+                // whole stream, not only the part kept for the capture.
+                observe(observer, stream, &tmp[..n]);
                 if sink.len() >= cap {
                     *truncated = true;
                 } else {
@@ -5310,5 +5441,305 @@ mod stats_tests {
             ),
             (1, 1, 1)
         );
+    }
+}
+
+#[cfg(test)]
+mod observer_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Recorder {
+        out: Mutex<Vec<u8>>,
+        err: Mutex<Vec<u8>>,
+    }
+
+    impl ExecObserver for Recorder {
+        fn stdout(&self, chunk: &[u8]) {
+            self.out
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(chunk);
+        }
+
+        fn stderr(&self, chunk: &[u8]) {
+            self.err
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(chunk);
+        }
+    }
+
+    impl Recorder {
+        fn out_bytes(&self) -> Vec<u8> {
+            self.out.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+
+        fn err_bytes(&self) -> Vec<u8> {
+            self.err.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+    }
+
+    struct Panicking;
+
+    impl ExecObserver for Panicking {
+        fn stdout(&self, _chunk: &[u8]) {
+            panic!("observer panic on stdout");
+        }
+
+        fn stderr(&self, _chunk: &[u8]) {
+            panic!("observer panic on stderr");
+        }
+    }
+
+    fn local() -> LocalExecutor {
+        LocalExecutor {
+            sudo: false,
+            root_direct: false,
+            home: "/".to_string(),
+            log: Vec::new(),
+            stats: ExecStatsHandle::default(),
+            wait_fault: None,
+        }
+    }
+
+    fn sh(script: &str) -> ExecRequest {
+        let mut req = ExecRequest::new("/bin/sh");
+        req.args = vec!["-c".to_string(), script.to_string()];
+        req.timeout_secs = 30;
+        req
+    }
+
+    #[test]
+    fn observer_sees_exactly_the_captured_streams() {
+        let mut ex = local();
+        let observer = Arc::new(Recorder::default());
+        let out = ex
+            .run_with_observer(
+                &sh("printf 'out-1'; printf 'err-1' >&2"),
+                false,
+                Some(observer.clone()),
+            )
+            .expect("command runs");
+        assert_eq!(out.completion, Completion::Exited(0));
+        assert_eq!(out.stdout, b"out-1");
+        assert_eq!(out.stderr, b"err-1");
+        assert_eq!(observer.out_bytes(), out.stdout);
+        assert_eq!(observer.err_bytes(), out.stderr);
+    }
+
+    #[test]
+    fn observer_bytes_are_in_command_order() {
+        let mut ex = local();
+        let observer = Arc::new(Recorder::default());
+        let out = ex
+            .run_with_observer(
+                &sh("i=1; while [ $i -le 200 ]; do printf 'line-%03d\\n' $i; i=$((i+1)); done"),
+                false,
+                Some(observer.clone()),
+            )
+            .expect("command runs");
+        assert_eq!(out.completion, Completion::Exited(0));
+        let seen = observer.out_bytes();
+        assert_eq!(seen, out.stdout);
+        let text = String::from_utf8(seen).expect("ascii");
+        let numbers: Vec<&str> = text
+            .lines()
+            .map(|l| l.trim_start_matches("line-"))
+            .collect();
+        assert_eq!(numbers.len(), 200);
+        let ordered: Vec<String> = (1..=200).map(|n| format!("{n:03}")).collect();
+        assert_eq!(numbers, ordered);
+    }
+
+    #[test]
+    fn observer_sees_bytes_beyond_the_capture_cap() {
+        let mut ex = local();
+        let observer = Arc::new(Recorder::default());
+        let out = ex
+            .run_with_observer(
+                &sh(&format!(
+                    "dd if=/dev/zero bs=1024 count={} 2>/dev/null",
+                    (MAX_CAPTURE * 2) / 1024
+                )),
+                false,
+                Some(observer.clone()),
+            )
+            .expect("command runs");
+        assert_eq!(out.completion, Completion::Exited(0));
+        // The capture is capped and marked truncated...
+        assert_eq!(out.stdout.len(), MAX_CAPTURE);
+        assert!(out.stdout_truncated);
+        // ...but the observer saw the whole stream, which is what progress needs.
+        assert_eq!(observer.out_bytes().len(), MAX_CAPTURE * 2);
+    }
+
+    #[test]
+    fn a_panicking_observer_changes_nothing() {
+        let script = "printf 'payload'; printf 'problem' >&2; exit 3";
+        let mut ex = local();
+        let baseline = ex.run(&sh(script)).expect("command runs");
+        let observed = ex
+            .run_with_observer(&sh(script), false, Some(Arc::new(Panicking)))
+            .expect("command runs");
+        assert_eq!(baseline.completion, Completion::Exited(3));
+        assert_eq!(observed.completion, baseline.completion);
+        assert_eq!(observed.stdout, baseline.stdout);
+        assert_eq!(observed.stderr, baseline.stderr);
+        assert_eq!(observed.stdout_truncated, baseline.stdout_truncated);
+        assert_eq!(observed.stderr_truncated, baseline.stderr_truncated);
+    }
+}
+
+#[cfg(test)]
+mod fake_observer_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Recorder {
+        out: Mutex<Vec<u8>>,
+        err: Mutex<Vec<u8>>,
+        called: AtomicBool,
+    }
+
+    impl ExecObserver for Recorder {
+        fn stdout(&self, chunk: &[u8]) {
+            self.called.store(true, AtomicOrdering::SeqCst);
+            self.out
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(chunk);
+        }
+
+        fn stderr(&self, chunk: &[u8]) {
+            self.called.store(true, AtomicOrdering::SeqCst);
+            self.err
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(chunk);
+        }
+    }
+
+    impl Recorder {
+        fn out_bytes(&self) -> Vec<u8> {
+            self.out.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+
+        fn err_bytes(&self) -> Vec<u8> {
+            self.err.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+    }
+
+    struct Panicking;
+
+    impl ExecObserver for Panicking {
+        fn stdout(&self, _chunk: &[u8]) {
+            panic!("observer panic on stdout");
+        }
+
+        fn stderr(&self, _chunk: &[u8]) {
+            panic!("observer panic on stderr");
+        }
+    }
+
+    fn fake() -> Executor {
+        Executor::Fake(Box::new(FakeExecutor::new(FakeTarget::ubuntu2404(), false)))
+    }
+
+    fn hostname() -> ExecRequest {
+        ExecRequest::new("hostname")
+    }
+
+    fn getent_error() -> ExecRequest {
+        let mut req = ExecRequest::new("getent");
+        req.args = vec!["-s".to_string(), "bogus".to_string(), "hosts".to_string()];
+        req
+    }
+
+    #[test]
+    fn fake_replay_delivers_the_scripted_stdout() {
+        let mut ex = fake();
+        let observer = Arc::new(Recorder::default());
+        let out = ex
+            .run_with_observer(&hostname(), Some(observer.clone()))
+            .expect("fake run");
+        assert_eq!(out.completion, Completion::Exited(0));
+        assert_eq!(observer.out_bytes(), out.stdout);
+        assert!(!out.stdout.is_empty());
+        assert!(observer.err_bytes().is_empty());
+    }
+
+    #[test]
+    fn fake_replay_delivers_the_scripted_stderr() {
+        let mut ex = fake();
+        let observer = Arc::new(Recorder::default());
+        let out = ex
+            .run_with_observer(&getent_error(), Some(observer.clone()))
+            .expect("fake run");
+        assert_eq!(out.completion, Completion::Exited(1));
+        assert!(out.stdout.is_empty());
+        assert_eq!(observer.err_bytes(), out.stderr);
+        assert!(!out.stderr.is_empty());
+    }
+
+    #[test]
+    fn fake_replay_does_not_change_the_result_or_the_streams() {
+        let req = hostname();
+        let mut plain = fake();
+        let baseline = plain.run(&req).expect("fake run");
+        let mut observed = fake();
+        let with_observer = observed
+            .run_with_observer(&req, Some(Arc::new(Recorder::default())))
+            .expect("fake run");
+        assert_eq!(with_observer.completion, baseline.completion);
+        assert_eq!(with_observer.stdout, baseline.stdout);
+        assert_eq!(with_observer.stderr, baseline.stderr);
+        assert_eq!(with_observer.stdout_truncated, baseline.stdout_truncated);
+        assert_eq!(with_observer.stderr_truncated, baseline.stderr_truncated);
+    }
+
+    #[test]
+    fn fake_replay_finishes_before_the_call_returns() {
+        let mut ex = fake();
+        let observer = Arc::new(Recorder::default());
+        let out = ex
+            .run_with_observer(&hostname(), Some(observer.clone()))
+            .expect("fake run");
+        assert!(
+            observer.called.load(AtomicOrdering::SeqCst),
+            "the replay must complete before run_with_observer returns"
+        );
+        assert!(!out.stdout.is_empty());
+    }
+
+    #[test]
+    fn a_panicking_observer_does_not_change_a_fake_run() {
+        let req = hostname();
+        let mut plain = fake();
+        let baseline = plain.run(&req).expect("fake run");
+        let mut observed = fake();
+        let with_observer = observed
+            .run_with_observer(&req, Some(Arc::new(Panicking)))
+            .expect("fake run");
+        assert_eq!(with_observer.completion, baseline.completion);
+        assert_eq!(with_observer.stdout, baseline.stdout);
+        assert_eq!(with_observer.stderr, baseline.stderr);
+    }
+
+    #[test]
+    fn fake_replay_adds_no_command_record() {
+        let req = hostname();
+        let mut plain = fake();
+        plain.run(&req).expect("fake run");
+        let mut observed = fake();
+        observed
+            .run_with_observer(&req, Some(Arc::new(Recorder::default())))
+            .expect("fake run");
+        assert_eq!(observed.log().len(), plain.log().len());
+        assert_eq!(observed.log().len(), 1);
+        assert_eq!(observed.log()[0].program, plain.log()[0].program);
     }
 }

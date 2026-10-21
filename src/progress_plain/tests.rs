@@ -1226,3 +1226,187 @@ fn no_sensitive_value_reaches_the_plain_log_of_a_real_engine_stream() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Package detail (WP-PKG-PROGRESS P1)
+// ---------------------------------------------------------------------------
+
+fn package_item_started(stage: Stage, done: u32, total: u32, id: &str) -> ProgressEvent {
+    ProgressEvent::Progress {
+        stage,
+        done,
+        total: Some(total),
+        current: item(ItemKind::Package, id),
+    }
+}
+
+fn package_detail(
+    id: &str,
+    percent: u8,
+    phase: crate::progress::PackagePhase,
+    percent_scope: crate::progress::PercentScope,
+    files: Option<(u32, u32)>,
+) -> ProgressEvent {
+    let mut p = crate::progress::PackageProgress::new(
+        ItemRef {
+            kind: ItemKind::Package,
+            id: id.to_string(),
+        },
+        crate::platform::PackageBackend::Apt,
+        phase,
+        crate::progress::PackageScope::Transaction,
+        crate::progress::ProgressSource::AptStatusFdDl,
+        crate::progress::ProgressConfidence::Measured,
+    );
+    p.percent = Some(percent);
+    p.percent_scope = Some(percent_scope);
+    if let Some((done, total)) = files {
+        p.files_done = Some(done);
+        p.files_total = Some(total);
+    }
+    ProgressEvent::PackageDetail(p)
+}
+
+#[test]
+fn package_detail_lines_read_as_documented() {
+    let mem = Mem::default();
+    let mut core = mem.core(RunKind::Apply);
+    let t0 = Instant::now();
+    core.on_event(&stage_started(Stage::Resources, Some(1)), t0);
+    core.on_event(&package_item_started(Stage::Resources, 0, 1, "pg"), t0);
+    core.on_event(
+        &package_detail(
+            "pg",
+            0,
+            crate::progress::PackagePhase::Downloading,
+            crate::progress::PercentScope::DownloadAggregate,
+            Some((0, 3)),
+        ),
+        t0 + secs(1),
+    );
+    core.on_event(
+        &package_detail(
+            "pg",
+            72,
+            crate::progress::PackagePhase::Downloading,
+            crate::progress::PercentScope::DownloadAggregate,
+            Some((2, 3)),
+        ),
+        t0 + secs(12),
+    );
+    core.on_event(
+        &package_detail(
+            "pg",
+            40,
+            crate::progress::PackagePhase::Installing,
+            crate::progress::PercentScope::TransactionOperation,
+            None,
+        ),
+        t0 + secs(18),
+    );
+    assert_eq!(
+        mem.lines(),
+        [
+            "progress: apply: start 0/1",
+            "progress: apply: package:pg: download 0% (file 0/3, 1s)",
+            "progress: apply: package:pg: download 72% (file 2/3, 12s)",
+            "progress: apply: package:pg: install 40% (18s)",
+        ]
+    );
+}
+
+#[test]
+fn detail_lines_are_limited_to_ten_percent_milestones_per_phase() {
+    let mem = Mem::default();
+    let mut core = mem.core(RunKind::Apply);
+    let t0 = Instant::now();
+    core.on_event(&stage_started(Stage::Resources, Some(1)), t0);
+    core.on_event(&package_item_started(Stage::Resources, 0, 1, "pg"), t0);
+    for percent in [0, 5, 9, 10, 11, 19, 20, 99, 100] {
+        core.on_event(
+            &package_detail(
+                "pg",
+                percent,
+                crate::progress::PackagePhase::Downloading,
+                crate::progress::PercentScope::DownloadAggregate,
+                None,
+            ),
+            t0 + secs(1),
+        );
+    }
+    let detail_lines: Vec<String> = mem
+        .lines()
+        .into_iter()
+        .filter(|l| l.contains("package:pg: download"))
+        .collect();
+    assert_eq!(
+        detail_lines,
+        [
+            "progress: apply: package:pg: download 0% (1s)",
+            "progress: apply: package:pg: download 10% (1s)",
+            "progress: apply: package:pg: download 20% (1s)",
+            "progress: apply: package:pg: download 99% (1s)",
+            "progress: apply: package:pg: download 100% (1s)",
+        ]
+    );
+}
+
+#[test]
+fn a_detail_for_an_item_that_is_not_in_flight_prints_nothing() {
+    let mem = Mem::default();
+    let mut core = mem.core(RunKind::Apply);
+    let t0 = Instant::now();
+    core.on_event(&stage_started(Stage::Resources, Some(1)), t0);
+    core.on_event(&package_item_started(Stage::Resources, 0, 1, "nginx"), t0);
+    core.on_event(
+        &package_detail(
+            "pg",
+            50,
+            crate::progress::PackagePhase::Downloading,
+            crate::progress::PercentScope::DownloadAggregate,
+            None,
+        ),
+        t0 + secs(1),
+    );
+    assert_eq!(mem.lines(), ["progress: apply: start 0/1"]);
+}
+
+#[test]
+fn detail_lines_are_bounded_per_stage() {
+    let mem = Mem::default();
+    let mut core = mem.core(RunKind::Apply);
+    let t0 = Instant::now();
+    let items = 20u32;
+    core.on_event(&stage_started(Stage::Resources, Some(items)), t0);
+    for done in 0..items {
+        let id = format!("pkg{done}");
+        core.on_event(
+            &package_item_started(Stage::Resources, done, items, &id),
+            t0,
+        );
+        // Two phases x eleven buckets = 22 lines for this item.
+        for (phase, scope) in [
+            (
+                crate::progress::PackagePhase::Downloading,
+                crate::progress::PercentScope::DownloadAggregate,
+            ),
+            (
+                crate::progress::PackagePhase::Installing,
+                crate::progress::PercentScope::TransactionOperation,
+            ),
+        ] {
+            for bucket in 0..=10u8 {
+                core.on_event(
+                    &package_detail(&id, bucket * 10, phase, scope, None),
+                    t0 + secs(1),
+                );
+            }
+        }
+    }
+    let detail_lines = mem
+        .lines()
+        .into_iter()
+        .filter(|l| l.contains(": download ") || l.contains(": install "))
+        .count();
+    assert_eq!(detail_lines, MAX_STAGE_DETAIL_LINES as usize, "stage cap");
+}
