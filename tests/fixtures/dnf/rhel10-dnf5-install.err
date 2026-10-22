@@ -1,0 +1,10 @@
+Updating and loading repositories:
+Repositories loaded.
+Running transaction
+[ 1/ 4] Prepare transaction  100% | 0.0 B/s | 0.0 B | 00:00
+[ 2/ 4] Installing python36-0:3.6.8-39.module+el8.10.0+1910+234ad790.x86_64  100% | 12.3 MiB/s | 18.0 KiB | 00:00
+[ 3/ 4] Verify package files  100% | 1.0 MiB/s | 2.0 MiB | 00:01
+[ 4/ 4] Running scriptlets  ???% | 0.0 B/s | 0.0 B | 00:01
+>>> Running post-install scriptlet: python36-0:3.6.8-39.module+el8.10.0+1910+234ad790.x86_64
+>>> Scriptlet output:
+Complete!

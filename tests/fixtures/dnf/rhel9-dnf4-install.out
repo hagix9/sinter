@@ -1,0 +1,36 @@
+Last metadata expiration check: 0:00:23 ago on Sat Oct 17 04:55:43 2026.
+Dependencies resolved.
+================================================================================
+ Package          Arch   Version                                Repo       Size
+================================================================================
+Installing:
+ python36         x86_64 3.6.8-39.module+el8.10.0+1910+234ad790 baseos     18 k
+Installing dependencies:
+ python3-pip      noarch 9.0.3-24.el8.rocky.0                   baseos     20 k
+ python3-setuptools
+                  noarch 39.2.0-9.el8_10                        baseos    162 k
+
+Transaction Summary
+================================================================================
+Install  3 Packages
+
+Total download size: 200 k
+Installed size: 466 k
+Downloading Packages:
+Running transaction check
+Running transaction test
+Running transaction
+  Preparing        : python36-3.6.8-39.module+el8.10.0+1910+234ad790.x86_64  1/1
+  Installing       : python36-3.6.8-39.module+el8.10.0+1910+234ad790.x86_64  1/3
+  Installing       : python3-pip-9.0.3-24.el8.rocky.0.noarch                 2/3
+  Installing       : python3-setuptools-39.2.0-9.el8_10.noarch               3/3
+  Verifying        : python36-3.6.8-39.module+el8.10.0+1910+234ad790.x86_64  3/3
+  Verifying        : python3-pip-9.0.3-24.el8.rocky.0.noarch                 3/3
+  Verifying        : python3-setuptools-39.2.0-9.el8_10.noarch               3/3
+
+Installed:
+  python36-3.6.8-39.module+el8.10.0+1910+234ad790.x86_64
+  python3-pip-9.0.3-24.el8.rocky.0.noarch
+  python3-setuptools-39.2.0-9.el8_10.noarch
+
+Complete!

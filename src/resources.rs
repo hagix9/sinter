@@ -5,6 +5,7 @@ use crate::expressions::{eval_boolean, eval_value_interpolated, parse_expr, Eval
 use crate::manager::ManagerInput;
 use crate::model::FrozenResource;
 use crate::package_progress::apt::AptProgressParser;
+use crate::package_progress::dnf::DnfProgressParser;
 use crate::package_progress::{PackageParser, PackageReporter};
 use crate::paths::{ancestor_dirs, mode_to_string, parent_and_name, parse_mode};
 use crate::platform::PackageBackend;
@@ -2910,10 +2911,13 @@ impl Engine {
     // -----------------------------------------------------------------------
     // package
     // -----------------------------------------------------------------------
-    /// The package-progress reporter for one mutation, or `None` when the
-    /// resource is sensitive, no consumer is attached, or the backend has no
-    /// progress grammar yet (DNF is Phase 3). One reporter per executed
-    /// command: the APT grammar's state never crosses a command boundary.
+    /// The package-progress reporter for one command, or `None` when the
+    /// resource is sensitive or no consumer is attached. One reporter per
+    /// executed command: neither grammar's state crosses a command boundary.
+    ///
+    /// DNF gets a reporter for the payload prefetch and for the mutation
+    /// itself; the prefetch is where DNF actually downloads (its mutations run
+    /// cache-only). APT's grammar is attached to its single mutation.
     fn start_package_reporter(
         &self,
         backend: PackageBackend,
@@ -2925,7 +2929,7 @@ impl Engine {
         }
         let parser: Box<dyn PackageParser> = match backend {
             PackageBackend::Apt => Box::new(AptProgressParser::new()),
-            PackageBackend::Dnf => return None,
+            PackageBackend::Dnf => Box::new(DnfProgressParser::new()),
         };
         PackageReporter::start(
             ItemRef::resource("package", &res.id),
@@ -3011,7 +3015,7 @@ impl Engine {
         // Failure to prove completeness fails closed before any mutation.
         let mut snapshot_dir: Option<String> = None;
         if backend == PackageBackend::Dnf && want_installed {
-            match self.dnf_metadata_snapshot(&name, sensitive, &package_env)? {
+            match self.dnf_metadata_snapshot(&name, sensitive, &package_env, res)? {
                 DnfSnapshot::Ready(p) => snapshot_dir = Some(p),
                 DnfSnapshot::Refused(refusal, cleanup, context) => {
                     // dnf refused the install for a cause it reported (DNF-01,
@@ -3553,8 +3557,9 @@ impl Engine {
         name: &str,
         sensitive: bool,
         package_env: &BTreeMap<String, String>,
+        res: &FrozenResource,
     ) -> Result<DnfSnapshot> {
-        self.dnf_metadata_snapshot_inner(name, sensitive, package_env, true)
+        self.dnf_metadata_snapshot_inner(name, sensitive, package_env, res, true)
     }
 
     /// The body of [`Self::dnf_metadata_snapshot`]. `allow_refresh` bounds the
@@ -3566,6 +3571,7 @@ impl Engine {
         name: &str,
         sensitive: bool,
         package_env: &BTreeMap<String, String>,
+        res: &FrozenResource,
         allow_refresh: bool,
     ) -> Result<DnfSnapshot> {
         let name_disp = if sensitive { "[redacted]" } else { name };
@@ -3694,7 +3700,13 @@ impl Engine {
             }
             return match self.dnf_acquire_host_metadata(sensitive, name_disp, package_env) {
                 Ok(()) => {
-                    match self.dnf_metadata_snapshot_inner(name, sensitive, package_env, false)? {
+                    match self.dnf_metadata_snapshot_inner(
+                        name,
+                        sensitive,
+                        package_env,
+                        res,
+                        false,
+                    )? {
                         DnfSnapshot::Blocked(detail2, indeterminate2) => Ok(DnfSnapshot::Blocked(
                             format!(
                                 "{} (after refreshing repository metadata: {})",
@@ -3934,6 +3946,7 @@ impl Engine {
                 sensitive,
                 name_disp,
                 package_env,
+                res,
             )? {
                 DnfSnapshot::Ready(_) => {}
                 blocked => return Ok(blocked),
@@ -4114,6 +4127,7 @@ impl Engine {
     /// landed is proven to be exactly one frozen transaction row —
     /// location, file name and rpm-verified identity — before any
     /// installation runs.
+    #[allow(clippy::too_many_arguments)]
     fn dnf_prefetch_payloads(
         &mut self,
         snap: &str,
@@ -4122,6 +4136,7 @@ impl Engine {
         sensitive: bool,
         name_disp: &str,
         package_env: &BTreeMap<String, String>,
+        res: &FrozenResource,
     ) -> Result<DnfSnapshot> {
         let blocked = |s: &mut Self, reason: String, indeterminate: bool| -> Result<DnfSnapshot> {
             let mut reason = reason;
@@ -4252,7 +4267,21 @@ impl Engine {
         req.env.extend(package_env.clone());
         req.sensitive = sensitive;
         req.timeout_secs = 600;
-        let dl_out = self.snap_exec(snap, &req, "payload download", "payload_download_fail")?;
+        // The payload prefetch is the only DNF step that downloads anything
+        // (the mutations themselves run cache-only), so it is observed as the
+        // resource's download phase. The reporter is additive: DNF's argv is
+        // unchanged and the exit status remains the contract.
+        let reporter = self.start_package_reporter(PackageBackend::Dnf, res, sensitive);
+        let dl_out = match &reporter {
+            Some(reporter) => self.snap_exec_progress(
+                snap,
+                &req,
+                "payload download",
+                "payload_download_fail",
+                reporter,
+            )?,
+            None => self.snap_exec(snap, &req, "payload download", "payload_download_fail")?,
+        };
         match dl_out.completion {
             Completion::Exited(0) => {}
             Completion::Indeterminate { reason, .. } => {
@@ -4544,6 +4573,37 @@ impl Engine {
         what: &str,
         fault: &str,
     ) -> Result<Output> {
+        self.snap_exec_inner(snap, req, what, fault, None)
+    }
+
+    /// The same command channel with a package-progress reporter attached to
+    /// the one command it observes.
+    ///
+    /// The reporter is finished the moment the command returns — before the
+    /// dispatch-failure cleanup below can send another command to the target —
+    /// so no detail can arrive after the snapshot work has moved on. Progress
+    /// observation is additive: the argv is unchanged (DNF has no
+    /// `APT::Status-Fd` equivalent) and the captured output is still what the
+    /// guards classify.
+    fn snap_exec_progress(
+        &mut self,
+        snap: &str,
+        req: &ExecRequest,
+        what: &str,
+        fault: &str,
+        reporter: &Arc<PackageReporter>,
+    ) -> Result<Output> {
+        self.snap_exec_inner(snap, req, what, fault, Some(reporter))
+    }
+
+    fn snap_exec_inner(
+        &mut self,
+        snap: &str,
+        req: &ExecRequest,
+        what: &str,
+        fault: &str,
+        reporter: Option<&Arc<PackageReporter>>,
+    ) -> Result<Output> {
         // DNF's bash-completion cache plugin hard-codes /var/cache/dnf/packages.db
         // in both sack and transaction hooks, even with a private cachedir.
         let private_dnf = (req.program == "/usr/bin/dnf").then(|| {
@@ -4554,15 +4614,33 @@ impl Engine {
             request
         });
         let req = private_dnf.as_ref().unwrap_or(req);
-        let permit = self.fs.mutation_permit()?;
+        let permit = match self.fs.mutation_permit() {
+            Ok(permit) => permit,
+            Err(e) => {
+                // The reporter was started for a command that will not run;
+                // finishing here keeps its thread from outliving this call.
+                if let Some(reporter) = reporter {
+                    reporter.finish();
+                }
+                return Err(e);
+            }
+        };
+        let observer: Option<Arc<dyn ExecObserver>> =
+            reporter.map(|r| Arc::clone(r) as Arc<dyn ExecObserver>);
         let out = if !fault.is_empty() && self.fs.fault() == Some(fault) {
             Err(SinterError::apply(format!(
                 "injected {} dispatch failure",
                 what
             )))
         } else {
-            self.fs.exec(&permit, req)
+            self.fs.exec_with_observer(&permit, req, observer)
         };
+        // The observed command is over on every path (success, non-zero
+        // exit, signal, indeterminate, dispatch error): stop the reporter
+        // before any cleanup command is dispatched.
+        if let Some(reporter) = reporter {
+            reporter.finish();
+        }
         match out {
             Ok(o) => Ok(o),
             Err(e) => {

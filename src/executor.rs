@@ -2613,6 +2613,15 @@ pub struct FakeTarget {
     /// as a whole, so tests can model a failed download — the payload set
     /// the run leaves behind is then whatever `snap_rpm_listing` reports.
     pub dnf_downloadonly_output: Option<Output>,
+    /// Extra `(stdout, stderr)` the fake `dnf install --downloadonly`
+    /// payload transport prints while still registering the payloads it
+    /// delivered. Models DNF's non-TTY download meter lines for progress
+    /// tests without changing the payload bookkeeping.
+    pub dnf_downloadonly_progress: Option<(String, String)>,
+    /// Extra `(stdout, stderr)` the fake `dnf -y install/remove` mutation
+    /// prints. Models DNF's non-TTY transaction display for progress tests;
+    /// the state transition and completion are unchanged.
+    pub dnf_mutation_progress: Option<(String, String)>,
     /// Overrides the `find <snap> -name '*.rpm'` payload listing, so tests
     /// can model a missing, unexpected or misplaced payload file. When
     /// unset, the listing is the payloads the fake's download-only
@@ -2861,6 +2870,8 @@ impl FakeTarget {
             dnf_makecache_output: None,
             dnf_dry_run_output: None,
             dnf_downloadonly_output: None,
+            dnf_downloadonly_progress: None,
+            dnf_mutation_progress: None,
             snap_rpm_listing: None,
             rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
@@ -2928,6 +2939,8 @@ impl FakeTarget {
             dnf_makecache_output: None,
             dnf_dry_run_output: None,
             dnf_downloadonly_output: None,
+            dnf_downloadonly_progress: None,
+            dnf_mutation_progress: None,
             snap_rpm_listing: None,
             rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
@@ -2981,6 +2994,8 @@ impl FakeTarget {
             dnf_makecache_output: None,
             dnf_dry_run_output: None,
             dnf_downloadonly_output: None,
+            dnf_downloadonly_progress: None,
+            dnf_mutation_progress: None,
             snap_rpm_listing: None,
             rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
@@ -3037,6 +3052,8 @@ impl FakeTarget {
             dnf_makecache_output: None,
             dnf_dry_run_output: None,
             dnf_downloadonly_output: None,
+            dnf_downloadonly_progress: None,
+            dnf_mutation_progress: None,
             snap_rpm_listing: None,
             rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
@@ -3087,6 +3104,8 @@ impl FakeTarget {
             dnf_makecache_output: None,
             dnf_dry_run_output: None,
             dnf_downloadonly_output: None,
+            dnf_downloadonly_progress: None,
+            dnf_mutation_progress: None,
             snap_rpm_listing: None,
             rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
@@ -4163,7 +4182,12 @@ impl FakeExecutor {
                     ));
                 }
             }
-            return Self::exited(0, String::new(), String::new());
+            let (progress_out, progress_err) = self
+                .target
+                .dnf_downloadonly_progress
+                .clone()
+                .unwrap_or_default();
+            return Self::exited(0, progress_out, progress_err);
         }
         if let Some(o) = &self.target.manager_output {
             return o.clone();
@@ -4211,7 +4235,14 @@ impl FakeExecutor {
         } else {
             self.target.packages.remove(&name);
         }
-        Self::exited(0, stdout, String::new())
+        let mut stderr = String::new();
+        if prog == "dnf" {
+            if let Some((progress_out, progress_err)) = &self.target.dnf_mutation_progress {
+                stdout.push_str(progress_out);
+                stderr.push_str(progress_err);
+            }
+        }
+        Self::exited(0, stdout, stderr)
     }
 
     /// Route a filesystem command to the scripted filesystem when one is

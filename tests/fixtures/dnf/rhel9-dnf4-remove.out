@@ -1,0 +1,28 @@
+Last metadata expiration check: 0:00:45 ago on Sat Oct 17 04:55:43 2026.
+Dependencies resolved.
+================================================================================
+ Package         Arch     Version                                    Repo     Size
+================================================================================
+Removing:
+ python36        x86_64   3.6.8-39.module+el8.10.0+1910+234ad790     @System   0  
+Removing dependent packages:
+ python3-pip     noarch   9.0.3-24.el8.rocky.0                       @System   0  
+
+Transaction Summary
+================================================================================
+Remove  2 Packages
+
+Freed space: 466 k
+Running transaction check
+Running transaction test
+Running transaction
+  Erasing          : python3-pip-9.0.3-24.el8.rocky.0.noarch                 1/2
+  Erasing          : python36-3.6.8-39.module+el8.10.0+1910+234ad790.x86_64  2/2
+  Verifying        : python3-pip-9.0.3-24.el8.rocky.0.noarch                 2/2
+  Verifying        : python36-3.6.8-39.module+el8.10.0+1910+234ad790.x86_64  2/2
+
+Removed:
+  python3-pip-9.0.3-24.el8.rocky.0.noarch
+  python36-3.6.8-39.module+el8.10.0+1910+234ad790.x86_64
+
+Complete!

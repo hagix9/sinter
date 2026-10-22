@@ -3,8 +3,9 @@
 //! This module is the seam between an execution's byte streams and the
 //! [`ProgressEvent::PackageDetail`] vocabulary. The generic machinery lives
 //! here; the backend grammars live beside it. APT's status-fd grammar is
-//! [`apt::AptProgressParser`] (Phase 2). DNF's stage lines are Phase 3 work and
-//! still use [`SkeletonParser`], which recognizes nothing.
+//! [`apt::AptProgressParser`] (Phase 2) and DNF's stage/completion grammar is
+//! [`dnf::DnfProgressParser`] (Phase 3). [`SkeletonParser`] remains for tests
+//! that need a parser which recognizes nothing.
 //!
 //! 1. **A parser never sees raw strings.** [`LineSplitter`] frames bytes into
 //!    complete lines, caps a line at [`MAX_LINE`] bytes, drops over-long lines
@@ -47,6 +48,7 @@
 //! writes to stdout or to the terminal.
 
 pub mod apt;
+pub mod dnf;
 
 use crate::executor::ExecObserver;
 use crate::platform::PackageBackend;
@@ -163,15 +165,16 @@ impl PackageObservation {
     }
 }
 
-/// A backend-specific line parser. P1 ships [`SkeletonParser`]; Phase 2 and
-/// Phase 3 replace it with the APT and DNF grammars.
+/// A backend-specific line parser: [`apt::AptProgressParser`] for APT,
+/// [`dnf::DnfProgressParser`] for DNF, and [`SkeletonParser`] for tests.
 pub trait PackageParser: Send {
     /// Observe one complete, bounded line. `None` means "not a record I know".
     fn observe(&mut self, line: &str) -> Option<PackageObservation>;
 }
 
 /// The Phase 1 parser: recognizes nothing. Every line is ignored, so a
-/// package execution with the skeleton produces no detail at all.
+/// package execution with the skeleton produces no detail at all. Kept for
+/// tests that need a parser with no grammar.
 #[derive(Debug, Default)]
 pub struct SkeletonParser;
 
