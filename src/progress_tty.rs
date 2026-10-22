@@ -542,12 +542,13 @@ fn detail_fields(detail: &PackageProgress, elapsed: Option<Duration>) -> Vec<Fie
         }),
     }
     // A package name during download is a file name (DNF completion lines);
-    // it is not shown as an item name. Install/configure/remove/verify phases
-    // name the package currently being processed.
+    // it is not shown as an item name. Install/configure/trigger/remove/verify
+    // phases name the package currently being processed.
     if matches!(
         detail.phase,
         PackagePhase::Installing
             | PackagePhase::Configuring
+            | PackagePhase::Triggering
             | PackagePhase::Removing
             | PackagePhase::Verifying
             | PackagePhase::Waiting
@@ -607,15 +608,30 @@ fn format_line(
         return None;
     }
     let sv = view.stage.as_ref()?;
-    let mut head = String::from(stage_label(sv.stage, view.command));
+    let label = stage_label(sv.stage, view.command);
+    let mut head = String::from(label);
     if let Some(total) = sv.total {
         head.push_str(&format!(" {}/{}", sv.done, total));
     }
-    match sv.phase {
-        StagePhase::Active => {}
-        StagePhase::Ended(StageOutcome::Completed) => {}
-        StagePhase::Ended(StageOutcome::Failed) => head.push_str(" failed"),
-        StagePhase::Ended(StageOutcome::Indeterminate) => head.push_str(" indeterminate"),
+    let outcome = match sv.phase {
+        StagePhase::Active => None,
+        StagePhase::Ended(StageOutcome::Completed) => None,
+        StagePhase::Ended(StageOutcome::Failed) => Some(" failed"),
+        StagePhase::Ended(StageOutcome::Indeterminate) => Some(" indeterminate"),
+    };
+    if let Some(outcome) = outcome {
+        head.push_str(outcome);
+    }
+    // The outcome is the part that must survive a narrow terminal. When the
+    // full head does not fit, drop the counter before cutting the outcome word
+    // in half: `apply failed` is more use than `apply 5/5 fai`.
+    if head.chars().count() > max {
+        if let Some(outcome) = outcome {
+            let short = format!("{label}{outcome}");
+            if short.chars().count() <= max {
+                return Some(short);
+            }
+        }
     }
     let item = sv.current.as_ref().map(|c| {
         // Bounded work for a huge id: 8 characters of slack over the budget.

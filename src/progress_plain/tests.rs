@@ -1460,3 +1460,23 @@ fn a_transaction_count_is_labelled_as_an_action_not_a_package_count() {
     assert!(body.contains("action 1/3"), "{body}");
     assert!(!body.contains("package 1/3"), "{body}");
 }
+
+#[test]
+fn a_triggering_detail_names_the_package_like_the_other_package_phases() {
+    let mut p = crate::progress::PackageProgress::new(
+        ItemRef {
+            kind: ItemKind::Package,
+            id: "pg".to_string(),
+        },
+        crate::platform::PackageBackend::Dnf,
+        crate::progress::PackagePhase::Triggering,
+        crate::progress::PackageScope::Package,
+        crate::progress::ProgressSource::DnfTransactionLine,
+        crate::progress::ProgressConfidence::Measured,
+    );
+    p.package = Some("acl-2.3.2-1.el9.x86_64".to_string());
+
+    let body = detail_body(&p, secs(2));
+    assert!(body.contains("triggering"), "{body}");
+    assert!(body.contains("acl-2.3.2-1.el9.x86_64"), "{body}");
+}

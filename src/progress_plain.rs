@@ -244,6 +244,7 @@ fn detail_body(detail: &PackageProgress, elapsed: Duration) -> String {
         detail.phase,
         PackagePhase::Installing
             | PackagePhase::Configuring
+            | PackagePhase::Triggering
             | PackagePhase::Removing
             | PackagePhase::Verifying
             | PackagePhase::Waiting

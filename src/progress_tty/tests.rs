@@ -1929,3 +1929,97 @@ fn a_transaction_count_is_labelled_as_an_action_not_a_package_count() {
         "{texts:?}"
     );
 }
+
+#[test]
+fn a_triggering_detail_names_the_package_like_the_other_package_phases() {
+    // DNF4 `Running scriptlet : pkg` and APT's trigger records name a package;
+    // the phase word alone would hide which package's scriptlet is running.
+    let mut d = detail(
+        None,
+        crate::progress::PackagePhase::Triggering,
+        crate::progress::PercentScope::TransactionOperation,
+    );
+    if let ProgressEvent::PackageDetail(p) = &mut d {
+        p.package = Some("acl-2.3.2-1.el9.x86_64".to_string());
+    }
+    let ev = [
+        started(Stage::Resources, Some(1)),
+        ProgressEvent::Progress {
+            stage: Stage::Resources,
+            done: 0,
+            total: Some(1),
+            current: item(ItemKind::Package, "postgresql"),
+        },
+        d,
+    ];
+    let text = line_detailed(&ev, None, Some(secs(2)), WIDE).unwrap();
+    assert!(text.contains("triggering"), "{text}");
+    assert!(text.contains("acl-2.3.2-1.el9.x86_64"), "{text}");
+}
+
+#[test]
+fn a_narrow_terminal_keeps_the_outcome_word_over_the_counter() {
+    // The counter is a number the user can lose; `failed` vs `indeterminate` is
+    // the state he must not. When the full head cannot fit, the counter is
+    // dropped before the outcome word is cut.
+    let failed = [
+        started(Stage::Resources, Some(5)),
+        progress(Stage::Resources, 5, Some(5), None),
+        ended(Stage::Resources, StageOutcome::Failed, 5),
+    ];
+    assert_eq!(
+        line(Some(RunKind::Apply), &failed, None, 12).as_deref(),
+        Some("apply failed")
+    );
+    assert_eq!(
+        line(Some(RunKind::Apply), &failed, None, 16).as_deref(),
+        Some("apply 5/5 failed")
+    );
+
+    let indeterminate = [
+        started(Stage::Resources, Some(5)),
+        progress(Stage::Resources, 5, Some(5), None),
+        ended(Stage::Resources, StageOutcome::Indeterminate, 5),
+    ];
+    assert_eq!(
+        line(Some(RunKind::Apply), &indeterminate, None, 19).as_deref(),
+        Some("apply indeterminate")
+    );
+}
+
+#[test]
+fn a_package_detail_line_reads_as_documented() {
+    // The example in `docs-site/.../reference/cli.md` ("Package progress").
+    let mut d = detail(
+        None,
+        crate::progress::PackagePhase::Downloading,
+        crate::progress::PercentScope::DownloadAggregate,
+    );
+    if let ProgressEvent::PackageDetail(p) = &mut d {
+        // `detail()` fixes the resource; the view matches a detail to the item
+        // in flight, so align it with the item below.
+        p.resource = ItemRef {
+            kind: ItemKind::Package,
+            id: "nginx".to_string(),
+        };
+        p.files_done = Some(2);
+        p.files_total = Some(3);
+        p.bytes_downloaded = Some(512);
+        p.bytes_total = Some(512);
+        p.rate_bps = Some(648);
+    }
+    let ev = [
+        started(Stage::Resources, Some(42)),
+        progress(
+            Stage::Resources,
+            17,
+            Some(42),
+            item(ItemKind::Package, "nginx"),
+        ),
+        d,
+    ];
+    assert_eq!(
+        line_detailed(&ev, None, Some(secs(9)), WIDE).as_deref(),
+        Some("apply 17/42 package:nginx downloading file 2/3 9s 512 B 648 B/s")
+    );
+}

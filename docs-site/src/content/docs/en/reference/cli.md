@@ -730,7 +730,9 @@ handlers 0/1 handler:reload-nginx
 - A stage that ends badly says so (`apply 5/5 failed`, `indeterminate`); the
   count alone never means success.
 - The line is cut to fit the terminal width, shortening the item first. When
-  the width cannot be determined, 60 columns are assumed.
+  the width cannot be determined, 60 columns are assumed. If even the stage
+  label and the counter do not fit, the counter is dropped before the `failed` or
+  `indeterminate` word is cut, so a narrow terminal still shows the outcome.
 
 The line only says how long Sinter has been waiting; it never claims that the
 target is alive.
@@ -815,6 +817,79 @@ not finish normally, not that it succeeded or failed. The exit status, as
 always, is the authority. Sinter installs no signal handler for these commands;
 on a terminal, an interrupted run can leave the last transient line on screen.
 
+### Package progress (APT and DNF)
+
+*Package detail is unreleased: it is not part of v1.7.0.*
+
+While `apply` runs a `package` resource, the progress line can also show what
+the package manager is doing: the phase, the package name and, when the manager
+printed one, a measured count or percentage. `plan` and `audit` never run a
+package manager and never show this detail. It is part of the same stderr line
+(or plain line) and follows the same rules: best effort, never on stdout, never
+in the report or the exit code.
+
+Sinter does not allocate a pseudo-terminal, so it sees exactly what the manager
+prints when stdout is not a terminal. That is what bounds the table below.
+
+| Backend | Can be shown | Never shown |
+|---|---|---|
+| APT with status records | aggregate download percent (`download 42%`), transaction-wide operation percent (`install 42%`, `remove 42%`), package name, payload-file counts | a per-package percentage; a percentage derived from a count |
+| APT without status records | the human stage words (`downloading`, `installing`, `configuring`, `triggering`) | any percentage or count; a removal phase |
+| DNF 4 | download-meter completion (`downloading`, `file n/m`, a `B`/`B/s` value), transaction actions (`installing`, `removing`, `verifying`, `triggering`), `action n/m` on install and remove lines | a transaction percentage (the non-terminal output has none); `kB`/`MiB` values converted to bytes |
+| DNF 5 | completed progress bars: stage lines, the package name of install/remove bars, `file n/m` on download bars | a percentage (a bar's `100%` is one item's, not the transaction's); a package count from `[n/m]` (it includes the prepare step) |
+
+```text
+apply 17/42 package:nginx download 42% file 2/3 12s
+apply 20/42 package:nginx install 64% nginx-1.24.0 15s
+apply 21/42 package:nginx installing nginx-1.24.0 action 1/3 8s
+apply 18/42 package:nginx downloading file 2/3 9s 512 B 648 B/s
+```
+
+The same detail in plain mode is one `progress:` line of its own:
+
+```text
+progress: apply: 20/42 on package:nginx, install 64% (nginx-1.24.0, 15s)
+```
+
+- **`install N%` / `remove N%`** is APT's transaction-wide operation percentage:
+  the share of dpkg work over every package of the transaction, not the
+  percentage of the package named beside it. It is shown while that transaction
+  unpacks, configures and runs triggers, so the word names the direction, not
+  the sub-step.
+- **`action n/m`** is the position of a DNF 4 transaction action, not a count of
+  distinct packages. An upgrade contributes an install action and a cleanup
+  action, so one upgraded package is two actions. DNF's `Verifying` is a banner
+  over the transaction's items (DNF does not verify payloads) and a `Running
+  scriptlet` line can belong to a `%pre` before its package is installed, so
+  neither carries a count.
+- **`file n/m`** counts package payload files, not packages.
+- **Bytes and rates** come only from values the manager printed. Sinter formats
+  them in decimal units (`B`, `kB`, `MB`, `GB`; one decimal above 999). A DNF
+  byte count or rate appears only for an exact `B` value; DNF's `kB`/`MiB` are
+  rounded displays and are not converted. APT prints decimal SI sizes and Sinter
+  converts the printed size to bytes, so an APT byte value is no more precise
+  than the size APT printed (`80.1 MB`).
+- A package name is shown only when the manager printed a plausible name; an
+  unknown or implausible name is omitted, never invented.
+- A `package` resource marked `sensitive`, or one whose `env` value is secret,
+  shows no package detail at all. Its stage line is unchanged.
+- DNF installs from the cache; Sinter's prefetch (`dnf install --downloadonly`)
+  is where DNF downloads, so DNF's `downloading` detail belongs to that step.
+- In plain mode a package detail is a line of its own only when the phase
+  changes, at each 10% download milestone, and when a download completes: at
+  most 24 lines per resource and 200 per stage, so a log stays bounded.
+
+Over SSH the same rules apply: Sinter allocates no PTY on the target, so the
+manager behaves as it does on a pipe, and only the mutation and prefetch
+commands are observed. Other remote commands never contribute detail. If the
+connection drops or the command is cancelled, progress stops; the result is the
+usual failed or indeterminate classification, and package detail never changes
+it.
+
+Package detail is not part of the stable text contract: its words and fields may
+change in a minor release. It never reaches stdout and never appears in
+`--format json`.
+
 ### No progress for JSON and for secrets
 
 - **`--format json`** never produces progress on any stream, whatever
@@ -832,9 +907,11 @@ on a terminal, an interrupted run can leave the last transient line on screen.
 ### What progress contains and what it does not
 
 Progress is built only from the stage, the counts, the resource type and recipe
-`id` of the item, the command name and a fixed set of outcome words. It never
-contains host names, addresses, user names, key paths, command lines or their
-output, file content, diffs, secret references, or error messages. Showing a
+`id` of the item, the command name, a fixed set of phase and outcome words, and
+— for a `package` resource — the package name and the numbers the package
+manager printed. It never contains host names, addresses, user names, key paths,
+command lines or their output, file content, diffs, secret references, or error
+messages. Showing a
 host or recipe label in progress is not part of the current behavior.
 
 Progress text is informational, like other stderr text: do not parse it. Its
