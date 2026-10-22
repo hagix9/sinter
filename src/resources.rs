@@ -7775,6 +7775,17 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
 /// never trimmed or normalized by this function, and an empty record is not a
 /// status at all (a real exit-0 answer always carries one). Callers validate
 /// the record framing before reaching this point (RA2-01).
+///
+/// dpkg 1.22 answers some names that have no status stanza — for example a
+/// source name of an installed package, or a name purged earlier — with the
+/// complete record `unknown ok not-installed` and exit 0. Its third field is
+/// dpkg's status field, and `not-installed` is the defined terminal state
+/// meaning no files and no registration; the second field is `ok` (no error).
+/// Only that exact record is accepted as absent: `unknown` is never accepted
+/// with another status, and broken states (`half-configured`, `unpacked`,
+/// `reinstreq`, `triggers-awaited`, …) keep a different status and stay
+/// errors. No trimming, prefix matching or whitespace folding is performed
+/// (RA2-01).
 pub fn classify_dpkg_status(status: &str) -> Result<PackageState> {
     match status {
         "install ok installed" => Ok(PackageState::Installed),
@@ -7782,6 +7793,10 @@ pub fn classify_dpkg_status(status: &str) -> Result<PackageState> {
         | "deinstall ok not-installed"
         | "purge ok not-installed"
         | "purge ok config-files" => Ok(PackageState::Absent),
+        // A defined, non-error "not installed" answer. The status field says
+        // not-installed, so no installed package can be misclassified; every
+        // broken state keeps a different status and is rejected below.
+        "unknown ok not-installed" => Ok(PackageState::Absent),
         "" => Err(SinterError::apply(
             "package observation produced an empty status record",
         )),
@@ -7818,10 +7833,57 @@ mod package_tests {
             classify_dpkg_status("install ok installed").unwrap(),
             PackageState::Installed
         );
+        for state in [
+            "deinstall ok config-files",
+            "deinstall ok not-installed",
+            "purge ok not-installed",
+            "purge ok config-files",
+            // P5-01: dpkg 1.22's defined "no files, no registration" answer
+            // for a name with no status stanza (source name of an installed
+            // package, or a purged name).
+            "unknown ok not-installed",
+        ] {
+            assert_eq!(
+                classify_dpkg_status(state).unwrap(),
+                PackageState::Absent,
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_not_installed_answer_is_only_absent_as_the_exact_record() {
+        // P5-01: the one accepted `unknown` record is the defined terminal
+        // not-installed state. It is matched whole; `unknown` grants nothing
+        // to any other status, and no whitespace or extra field is folded in.
         assert_eq!(
-            classify_dpkg_status("deinstall ok config-files").unwrap(),
+            classify_dpkg_status("unknown ok not-installed").unwrap(),
             PackageState::Absent
         );
+        for state in [
+            "unknown ok installed",
+            "unknown ok half-configured",
+            "unknown ok unpacked",
+            "unknown ok triggers-awaited",
+            "unknown ok half-installed",
+            "unknown reinstreq not-installed",
+            "install ok not-installed",
+            "deinstall ok installed",
+            "unknown  ok not-installed",
+            "unknown ok  not-installed",
+            "unknown ok not-installed ",
+            " unknown ok not-installed",
+            "unknown ok not-installed\n",
+            "Unknown ok not-installed",
+            "unknown ok notinstalled",
+            "unknown ok not-installed extra",
+            "unknown",
+        ] {
+            assert!(
+                classify_dpkg_status(state).is_err(),
+                "state {state:?} must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -7850,7 +7912,6 @@ mod package_tests {
             "install ok triggers-awaited",
             "install reinstreq half-installed",
             "install reinstreq half-configured",
-            "unknown ok not-installed",
         ] {
             assert!(
                 classify_dpkg_status(s).is_err(),
