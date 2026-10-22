@@ -1435,3 +1435,28 @@ fn a_removal_detail_says_remove_not_install() {
         "{lines:?}"
     );
 }
+
+#[test]
+fn a_transaction_count_is_labelled_as_an_action_not_a_package_count() {
+    // F-02: DNF's `ts_done/ts_total` counts rpm transaction actions. An
+    // upgrade is two actions for one package, so the renderer may not call it
+    // a package count.
+    let mut p = crate::progress::PackageProgress::new(
+        ItemRef {
+            kind: ItemKind::Package,
+            id: "pg".to_string(),
+        },
+        crate::platform::PackageBackend::Dnf,
+        crate::progress::PackagePhase::Installing,
+        crate::progress::PackageScope::Package,
+        crate::progress::ProgressSource::DnfTransactionLine,
+        crate::progress::ProgressConfidence::Measured,
+    );
+    p.package = Some("acl-2.3.2-1.el9.x86_64".to_string());
+    p.packages_done = Some(1);
+    p.packages_total = Some(3);
+
+    let body = detail_body(&p, secs(12));
+    assert!(body.contains("action 1/3"), "{body}");
+    assert!(!body.contains("package 1/3"), "{body}");
+}

@@ -565,8 +565,10 @@ fn detail_fields(detail: &PackageProgress, elapsed: Option<Duration>) -> Vec<Fie
             priority: 3,
         });
     } else if let (Some(done), Some(total)) = (detail.packages_done, detail.packages_total) {
+        // DNF's count is a transaction-action ordinal (an upgrade is two
+        // actions), so it is never labelled as a distinct-package count.
         fields.push(Field {
-            text: format!("package {done}/{total}"),
+            text: format!("action {done}/{total}"),
             priority: 3,
         });
     }

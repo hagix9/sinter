@@ -255,7 +255,9 @@ fn detail_body(detail: &PackageProgress, elapsed: Duration) -> String {
     if let (Some(done), Some(total)) = (detail.files_done, detail.files_total) {
         extras.push(format!("file {done}/{total}"));
     } else if let (Some(done), Some(total)) = (detail.packages_done, detail.packages_total) {
-        extras.push(format!("package {done}/{total}"));
+        // DNF's count is a transaction-action ordinal (an upgrade is two
+        // actions), so it is never labelled as a distinct-package count.
+        extras.push(format!("action {done}/{total}"));
     }
     if let Some(bytes) = detail.bytes_downloaded {
         extras.push(format_bytes(bytes));

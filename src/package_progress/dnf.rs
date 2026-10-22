@@ -118,7 +118,23 @@ fn marker(line: &str) -> Option<PackageObservation> {
 ///
 /// The line is indented by two spaces and the action is padded to the widest
 /// action name, so the separator is found by the first `": "`. The displayed
-/// count is the transaction-set index/total DNF prints for the action.
+/// count is the transaction-set index/total DNF prints for the action
+/// (`dnf/yum/rpmtrans.py`: `complete_actions`/`total_actions`), i.e. **rpm
+/// transaction actions**, not distinct packages: an upgrade contributes an
+/// install action and a cleanup action, so one upgraded package is two
+/// actions.
+///
+/// The count is attached only for `Installing`/`Erasing`/`Cleanup`, whose line
+/// DNF prints when that action's file work is complete (`ti_done ==
+/// ti_total`). It is not attached elsewhere:
+///
+/// * `Verifying` is a post-transaction banner that walks the same item list
+///   (`dnf/base.py::_verify_transaction`); DNF no longer verifies payloads, so
+///   its count is not a number of verified packages.
+/// * `Running scriptlet` is also emitted by a `%pre` scriptlet
+///   (`RPMCALLBACK_SCRIPT_START`), i.e. before that package is installed, so
+///   its count would claim a completed package operation that has not
+///   happened.
 fn action_line(line: &str) -> Option<PackageObservation> {
     let rest = line.strip_prefix("  ")?;
     let (label, tail) = rest.split_once(": ")?;
@@ -141,8 +157,12 @@ fn action_line(line: &str) -> Option<PackageObservation> {
         ProgressSource::DnfTransactionLine,
     );
     obs.package = package;
-    obs.packages_done = Some(done);
-    obs.packages_total = Some(total);
+    // See the doc comment: the printed count is a completed transaction action
+    // for install/remove lines only.
+    if matches!(phase, PackagePhase::Installing | PackagePhase::Removing) {
+        obs.packages_done = Some(done);
+        obs.packages_total = Some(total);
+    }
     Some(obs)
 }
 
@@ -326,15 +346,22 @@ fn size_tokens<'a>(words: &[&'a str]) -> Option<(&'a str, &'a str)> {
 }
 
 /// An exact byte count: only the `B` unit is printed without rounding.
+///
+/// DNF prints an exact byte count as a plain decimal integer, so the token is
+/// parsed as `u64` directly. A floating-point round trip cannot stand in for
+/// that: it would round integers above 2^53 and `u64::MAX as f64` is 2^64, so
+/// a value of 2^64 (or 2^64 + 1) would be accepted and then saturate to
+/// `u64::MAX`. Only digits are accepted here, so a fraction, an exponent, a
+/// sign, `NaN`/`inf`, a hex form or a value beyond `u64` is not a byte count
+/// DNF printed and yields no number.
 fn exact(number: &str, unit: &str) -> Option<u64> {
     if unit != "B" && unit != "B/s" {
         return None;
     }
-    let value: f64 = number.parse().ok()?;
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > u64::MAX as f64 {
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    Some(value as u64)
+    number.parse().ok()
 }
 
 /// `<done>/<total>`, with DNF5's padded `[ 1/ 2]` accepted. A total of zero

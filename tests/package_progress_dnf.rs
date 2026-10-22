@@ -171,6 +171,16 @@ fn a_dnf4_install_stream_reports_download_install_and_verify_without_a_percent()
     assert_eq!(first_install.packages_done, Some(1));
     assert_eq!(first_install.packages_total, Some(3));
 
+    // `Verifying` is a post-transaction banner over the item list, not a
+    // measured verification count (F-02).
+    assert!(
+        events
+            .iter()
+            .filter(|e| e.phase == PackagePhase::Verifying)
+            .all(|e| e.packages_done.is_none() && e.packages_total.is_none()),
+        "a verify line must not carry a package count"
+    );
+
     // `Preparing` is direction-neutral and must not create an install event
     // before the first `Installing` line.
     let first = events.first().expect("an event");
@@ -290,6 +300,13 @@ fn an_apply_reports_dnf_download_then_install_detail_before_the_stage_ends() {
     assert!(
         found.iter().any(|d| d.phase == PackagePhase::Verifying),
         "no verify detail: {found:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .filter(|d| d.phase == PackagePhase::Verifying)
+            .all(|d| d.packages_done.is_none() && d.packages_total.is_none()),
+        "a verify detail must not carry a package count: {found:?}"
     );
     assert_no_percent(&found);
     assert!(

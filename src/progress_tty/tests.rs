@@ -1901,3 +1901,31 @@ fn a_removal_detail_says_remove_not_install() {
     let text = line_detailed(&ev, None, Some(secs(2)), WIDE).unwrap();
     assert_eq!(text, "apply 0/1 package:hello remove 33% hello 2s");
 }
+
+#[test]
+fn a_transaction_count_is_labelled_as_an_action_not_a_package_count() {
+    // F-02: DNF's `ts_done/ts_total` counts rpm transaction actions. An
+    // upgrade is two actions for one package, so the renderer may not call it
+    // a package count.
+    let d = detail(
+        None,
+        crate::progress::PackagePhase::Installing,
+        crate::progress::PercentScope::TransactionOperation,
+    );
+    let ProgressEvent::PackageDetail(mut p) = d else {
+        unreachable!()
+    };
+    p.package = Some("acl-2.3.2-1.el9.x86_64".to_string());
+    p.packages_done = Some(1);
+    p.packages_total = Some(3);
+
+    let texts: Vec<String> = detail_fields(&p, None)
+        .into_iter()
+        .map(|field| field.text)
+        .collect();
+    assert!(texts.iter().any(|text| text == "action 1/3"), "{texts:?}");
+    assert!(
+        !texts.iter().any(|text| text.contains("package 1/3")),
+        "{texts:?}"
+    );
+}

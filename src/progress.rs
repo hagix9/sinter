@@ -371,6 +371,14 @@ pub struct PackageProgress {
     pub percent_scope: Option<PercentScope>,
     pub files_done: Option<u32>,
     pub files_total: Option<u32>,
+    /// The DNF transaction-action ordinal/total DNF printed on a completed
+    /// `Installing`/`Erasing`/`Cleanup` line (`ts_done`/`ts_total`). An action
+    /// is one rpm transaction element, so an upgrade contributes an install
+    /// action and a cleanup action and this is **not** a count of distinct
+    /// packages. It is absent for DNF4 `Verifying` (a banner over the item
+    /// list, not verification progress) and `Running scriptlet` (which may be
+    /// a `%pre` before the package is installed), and for every DNF5 bar
+    /// (whose `[n/m]` counts the prepare step too).
     pub packages_done: Option<u32>,
     pub packages_total: Option<u32>,
     pub bytes_downloaded: Option<u64>,

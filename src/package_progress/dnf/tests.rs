@@ -88,7 +88,58 @@ fn dnf4_action_without_a_package_keeps_the_phase_and_drops_the_name() {
     assert_eq!(obs.phase, PackagePhase::Verifying);
     assert_eq!(obs.scope, PackageScope::Transaction);
     assert_eq!(obs.package, None);
-    assert_eq!(obs.packages_done, Some(1));
+    // A verify line is a banner over the transaction items, not a measured
+    // count of verified packages, so it carries no count (F-02).
+    assert_eq!(obs.packages_done, None);
+    assert_eq!(obs.packages_total, None);
+}
+
+#[test]
+fn dnf4_verify_and_scriptlet_lines_report_no_package_count() {
+    // `_verify_transaction` walks every item after the transaction; DNF no
+    // longer verifies payloads. `_script_start` runs for `%pre` as well, i.e.
+    // before the package is installed, so neither count is "packages done".
+    let verify = parse("  Verifying        : acl-2.3.2-1.el9.x86_64  2/3").expect("verify line");
+    assert_eq!(verify.phase, PackagePhase::Verifying);
+    assert_eq!(verify.packages_done, None);
+    assert_eq!(verify.packages_total, None);
+
+    let scriptlet =
+        parse("  Running scriptlet: acl-2.3.2-1.el9.x86_64  1/3").expect("scriptlet line");
+    assert_eq!(scriptlet.phase, PackagePhase::Triggering);
+    assert_eq!(scriptlet.packages_done, None);
+    assert_eq!(scriptlet.packages_total, None);
+
+    // Install and remove lines are printed when that action is complete, so
+    // they keep the ordinal DNF printed.
+    let install = parse("  Installing       : acl-2.3.2-1.el9.x86_64  1/3").expect("install line");
+    assert_eq!(
+        (install.packages_done, install.packages_total),
+        (Some(1), Some(3))
+    );
+    let erase = parse("  Erasing          : acl-2.3.2-1.el9.x86_64  2/3").expect("erase line");
+    assert_eq!(
+        (erase.packages_done, erase.packages_total),
+        (Some(2), Some(3))
+    );
+}
+
+#[test]
+fn dnf4_upgrade_counts_actions_not_distinct_packages() {
+    // An upgrade is two rpm transaction actions for one package: the install
+    // and the cleanup of the old version. The parser reports the action
+    // ordinal DNF printed, never a distinct-package count.
+    let install = parse("  Upgrading        : acl-2.3.2-1.el9.x86_64  1/2").expect("install");
+    let cleanup = parse("  Cleanup          : acl-2.3.2-1.el8.x86_64  2/2").expect("cleanup");
+    assert_eq!(
+        (install.packages_done, install.packages_total),
+        (Some(1), Some(2))
+    );
+    assert_eq!(
+        (cleanup.packages_done, cleanup.packages_total),
+        (Some(2), Some(2))
+    );
+    assert_eq!(cleanup.phase, PackagePhase::Removing);
 }
 
 #[test]
@@ -215,6 +266,56 @@ fn a_long_download_time_is_still_a_meter_line() {
     let obs = parse("big-1.0-1.noarch.rpm  648 B/s | 512 B  123:45").expect("download line");
     assert_eq!(obs.bytes_downloaded, Some(512));
     assert_eq!(obs.rate_bps, Some(648));
+}
+
+#[test]
+fn exact_byte_counts_are_not_rounded_through_floating_point() {
+    // `u64::MAX` as text must stay `u64::MAX`. A float round trip turns it
+    // into 2^64 and the cast then saturates to a value one below the text.
+    let max =
+        parse("pkg-1.0-1.noarch.rpm  1 B/s | 18446744073709551615 B  00:00").expect("meter line");
+    assert_eq!(max.bytes_downloaded, Some(u64::MAX));
+    assert_eq!(max.bytes_total, Some(u64::MAX));
+    assert_eq!(max.rate_bps, Some(1));
+
+    // 2^53 + 1 is not representable as f64; the integer parser keeps it.
+    let odd = parse("pkg-1.0-1.noarch.rpm  1 B/s | 9007199254740993 B  00:00").expect("meter line");
+    assert_eq!(odd.bytes_downloaded, Some(9_007_199_254_740_993));
+    assert_eq!(odd.bytes_total, Some(9_007_199_254_740_993));
+}
+
+#[test]
+fn byte_values_that_are_not_plain_integers_are_not_numbers() {
+    for size in [
+        "18446744073709551616",
+        "18446744073709551617",
+        "99999999999999999999999999999999999999",
+        "1.0",
+        "1e3",
+        "+512",
+        "-512",
+        "NaN",
+        "inf",
+        "0x200",
+    ] {
+        let line = format!("pkg-1.0-1.noarch.rpm  1 B/s | {size} B  00:00");
+        let obs = parse(&line).unwrap_or_else(|| panic!("{line}"));
+        assert_eq!(obs.phase, PackagePhase::Downloading, "{line}");
+        assert_eq!(obs.bytes_downloaded, None, "{line}");
+        assert_eq!(obs.bytes_total, None, "{line}");
+        // The rate is a real `1 B/s`; only the size token is rejected.
+        assert_eq!(obs.rate_bps, Some(1), "{line}");
+    }
+}
+
+#[test]
+fn rate_values_that_are_not_plain_integers_are_not_numbers() {
+    for rate in ["1e3", "+648", "1.0", "NaN", "inf", "-1"] {
+        let line = format!("pkg-1.0-1.noarch.rpm  {rate} B/s | 512 B  00:00");
+        let obs = parse(&line).unwrap_or_else(|| panic!("{line}"));
+        assert_eq!(obs.rate_bps, None, "{line}");
+        assert_eq!(obs.bytes_downloaded, Some(512), "{line}");
+    }
 }
 
 #[test]
