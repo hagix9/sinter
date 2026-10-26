@@ -102,6 +102,7 @@ reload は restart ではありません。
 ### CA 信頼ストアのハンドラ
 
 ```yaml
+version: 1
 resources:
   - id: company_ca
     type: file
@@ -143,6 +144,7 @@ OS の判定は、検出された OS ファミリーで行い、「存在する�
 ### command ハンドラ
 
 ```yaml
+version: 1
 resources:
   - id: app_config
     type: file

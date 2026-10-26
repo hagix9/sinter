@@ -22,7 +22,13 @@
 #   of the recipe that includes it, not on its own. An included file that git
 #   ignores (local secrets) is supplied, in the copy only, from a committed
 #   synthetic sample beside its directory (`X/file.yaml` <- `X.example/file.yaml`).
-# --self-test also proves that an invalid recipe makes this script fail.
+# * A file this script itself creates as a `source:` placeholder is not a
+#   recipe: it is recorded and never validated on its own (it exists only so
+#   that the recipe naming it passes the source check).
+# --self-test also proves, against synthetic inputs, that an invalid example, a
+# docs recipe without `version`, and an example with a missing source each make
+# this script fail, and that a handler fragment, a `<placeholder>` sample and a
+# generated source placeholder do not.
 set -euo pipefail
 SINTER=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 ROOT=$(git rev-parse --show-toplevel)
@@ -32,8 +38,9 @@ trap 'rm -rf "$WORK"' EXIT
 cp -R "$ROOT/examples" "$WORK/examples"
 mkdir -p "$WORK/docs"
 
-# Complete recipes from the docs.
-python3 - "$ROOT/docs-site/src/content/docs" "$WORK/docs" <<'PY'
+# Complete recipes from the docs (and, in --self-test, from synthetic pages).
+extract_docs() {
+python3 - "$1" "$WORK/docs" <<'PY'
 import os, re, sys
 src, dst = sys.argv[1], sys.argv[2]
 n = 0
@@ -56,6 +63,8 @@ for d, _, files in os.walk(src):
             n += 1
 print(f"docs: {n} complete recipe block(s) extracted")
 PY
+}
+extract_docs "$ROOT/docs-site/src/content/docs"
 # Guard against a silent no-op (docs moved, fence syntax changed, ...).
 MIN_DOCS=36
 MIN_EXAMPLES=15
@@ -65,14 +74,72 @@ if [ "$docs_n" -lt "$MIN_DOCS" ] || [ "$ex_n" -lt "$MIN_EXAMPLES" ]; then
   echo "::error::too few recipes found (docs $docs_n < $MIN_DOCS or examples $ex_n < $MIN_EXAMPLES)"; exit 1
 fi
 
+# --self-test inputs. Synthetic only; they are added after the floors above, so
+# the floors apply to the real docs and examples. The docs page holds, in this
+# order: [0] a valid complete recipe whose `source:` names a .yaml file (a
+# generated placeholder must not be validated as a recipe), [1] a complete
+# recipe without `version` (must fail), [2] a handlers-only fragment and [3] a
+# sample with a <placeholder> token (neither is a complete recipe: not
+# extracted).
+if [ "${2:-}" = --self-test ]; then
+  mkdir -p "$WORK/selftest-docs"
+  cat > "$WORK/selftest-docs/zz-self-test.md" <<'MD'
+```yaml
+version: 1
+resources:
+  - id: st_ok
+    type: file
+    with:
+      path: /etc/zz-self-test.conf
+      source: files/zz-self-test-source.yaml
+```
+
+```yaml
+resources:
+  - id: st_no_version
+    type: file
+    with:
+      path: /etc/zz-self-test.conf
+      content: x
+```
+
+```yaml
+handlers:
+  - id: st_fragment
+    type: ca_trust
+```
+
+```yaml
+version: 1
+resources:
+  - id: st_placeholder
+    type: file
+    with:
+      path: /etc/<name>.conf
+      content: x
+```
+MD
+  extract_docs "$WORK/selftest-docs"
+  [ "$(find "$WORK/docs" -name 'zz-self-test__*.yaml' | wc -l | tr -d ' ')" = 2 ] \
+    || { echo "::error::self-test: expected exactly 2 synthetic docs recipes to be extracted"; exit 1; }
+  printf 'version: 1\nresources:\n  - id: bad\n    type: file\n    with:\n      path: relative/path\n      no_such_field: 1\n' > "$WORK/examples/zz-self-test-invalid.yaml"
+  printf 'version: 1\nresources:\n  - id: bad_source\n    type: file\n    with:\n      path: /etc/zz-self-test.conf\n      source: ""\n' > "$WORK/examples/zz-self-test-empty-source.yaml"
+fi
+
 # Template sources named by docs samples (relative to the recipe) get a
-# placeholder; the examples ship their own.
+# placeholder; the examples ship their own. A placeholder this loop creates is
+# recorded: it is a stand-in file, not a recipe, and is never validated.
+PLACEHOLDERS="$WORK/placeholders.txt"
+: > "$PLACEHOLDERS"
 while IFS= read -r f; do
   dir=$(dirname "$f")
   { grep -oE '^ *source: *[^ #]+' "$f" || true; } | sed -E 's/^ *source: *//' | while IFS= read -r ref; do
     case "$ref" in /*|*..*|*'{{'*) continue ;; esac
     mkdir -p "$dir/$(dirname "$ref")"
-    [ -e "$dir/$ref" ] || printf 'placeholder\n' > "$dir/$ref"
+    if [ ! -e "$dir/$ref" ]; then
+      printf 'placeholder\n' > "$dir/$ref"
+      echo "${dir#"$WORK"/}/$ref" >> "$PLACEHOLDERS"
+    fi
   done
 done < <(find "$WORK/docs" -name '*.yaml' -type f)
 
@@ -130,13 +197,12 @@ for d, _, files in os.walk(os.path.join(work, "examples")):
 open(out, "w").write("".join(f + "\n" for f in sorted(frags)))
 PY
 
-if [ "${2:-}" = --self-test ]; then
-  printf 'version: 1\nresources:\n  - id: bad\n    type: file\n    with:\n      path: relative/path\n      no_such_field: 1\n' > "$WORK/examples/zz-self-test-invalid.yaml"
-fi
-
-checked=0; failed=0
+checked=0; failed=0; skipped_ph=0; failed_list=""
 while IFS= read -r f; do
   rel=${f#"$WORK"/}
+  if grep -qxF "$rel" "$PLACEHOLDERS"; then
+    skipped_ph=$((skipped_ph + 1)); echo "skip (generated source placeholder): $rel"; continue
+  fi
   if grep -qE '^hosts:' "$f" && ! grep -qE '^(resources|recipes):' "$f"; then
     echo "skip (inventory): $rel"; continue
   fi
@@ -146,13 +212,24 @@ while IFS= read -r f; do
   if out=$("$SINTER" validate "$f" 2>&1); then
     checked=$((checked + 1))
   else
-    failed=$((failed + 1)); echo "::error::$rel: $out"
+    failed=$((failed + 1)); failed_list="$failed_list$rel"$'\n'; echo "::error::$rel: $out"
   fi
 done < <(find "$WORK/examples" "$WORK/docs" -name '*.yaml' -type f | sort)
 
-echo "validated $checked recipe(s); $failed failed"
+echo "validated $checked recipe(s); $failed failed; $skipped_ph generated placeholder(s) not validated"
 if [ "${2:-}" = --self-test ]; then
-  if [ "$failed" -eq 1 ]; then echo "self-test: the invalid recipe was rejected"; exit 0; fi
-  echo "::error::self-test: expected exactly one failure, got $failed"; exit 1
+  # Exactly these, no more and no less: a broken extraction or a missing
+  # rejection must not hide behind a matching count.
+  expected=$'docs/zz-self-test__1.yaml\nexamples/zz-self-test-empty-source.yaml\nexamples/zz-self-test-invalid.yaml'
+  if [ "$(printf '%s' "$failed_list" | sort)" = "$expected" ]; then
+    echo "self-test: the 3 invalid synthetic recipes were rejected; the valid, fragment and placeholder inputs were not"; exit 0
+  fi
+  echo "::error::self-test: expected exactly the failures [$(echo "$expected" | tr '\n' ' ')], got [$(printf '%s' "$failed_list" | tr '\n' ' ')]"; exit 1
+fi
+# The floor counts what was validated, not what was found: a script that
+# silently skips (or fails to reach) most of the recipes must not pass.
+MIN_VALIDATED=55
+if [ "$checked" -lt "$MIN_VALIDATED" ]; then
+  echo "::error::too few recipes validated ($checked < $MIN_VALIDATED)"; exit 1
 fi
 [ "$failed" -eq 0 ]

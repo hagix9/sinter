@@ -102,6 +102,7 @@ restart. See
 ### CA trust handler
 
 ```yaml
+version: 1
 resources:
   - id: company_ca
     type: file
@@ -143,6 +144,7 @@ Verified on real hosts: none yet (tested against a scripted target only).
 ### Command handler
 
 ```yaml
+version: 1
 resources:
   - id: app_config
     type: file
