@@ -5614,7 +5614,7 @@ impl Engine {
                 "refreshing the CA trust store needs root: connect as root or pass --sudo".into(),
             );
         }
-        match self.fs.executable_present(tool.program()) {
+        match self.fs.executable_present(tool.program(), false) {
             Ok(true) => {}
             Ok(false) => {
                 return failed(format!(
@@ -5691,7 +5691,7 @@ impl Engine {
         } else {
             spec.program.clone()
         };
-        match self.fs.executable_present(&spec.program) {
+        match self.fs.executable_present(&spec.program, h.sensitive) {
             Ok(true) => {}
             Ok(false) => return failed(format!("{name} is not an executable file on the target")),
             Err(e) => {

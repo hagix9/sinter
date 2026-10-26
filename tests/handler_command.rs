@@ -714,6 +714,36 @@ fn a_sensitive_handler_leaks_nothing() {
 }
 
 #[test]
+fn a_sensitive_handler_never_records_its_program_path() {
+    // The availability check names the program too: for a sensitive handler it
+    // must be recorded as redacted like the run itself, in every path
+    // (success, not executable) and in every channel.
+    let prog = format!("/usr/local/bin/{CANARY}-app");
+    let handlers = format!(
+        "  - id: h\n    type: command\n    sensitive: true\n    with:\n      program: {prog}\n"
+    );
+    let r = notified("hc-secret-prog", &handlers);
+    for (what, t) in [
+        ("runs", target().with_executable(&prog)),
+        ("not executable", target()),
+    ] {
+        let rep = apply(&r, t);
+        for c in &rep.commands {
+            assert!(!format!("{c:?}").contains(CANARY), "{what}: {c:?}");
+        }
+        assert!(
+            !format!("{:?}", rep.handlers_run).contains(CANARY),
+            "{what}"
+        );
+        assert!(!text(&rep).contains(CANARY), "{what}");
+        assert!(
+            !serde_json::to_string(&json(&rep)).unwrap().contains(CANARY),
+            "{what}"
+        );
+    }
+}
+
+#[test]
 fn a_handler_notified_by_a_sensitive_resource_is_sensitive() {
     let r = recipe(
         "hc-secret-res",
