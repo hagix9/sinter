@@ -8,14 +8,25 @@ All notable changes to Sinter are documented in this file.
 
 - **Handlers have a type.** A handler may carry `type: service`; without a type
   it is a service handler exactly as before, so existing recipes are unchanged.
-  `service` is the only type implemented. `ca_trust` and `command` are reserved
-  for later versions: a recipe that declares them, or any unknown or
-  non-string type, is rejected at validation and is never ignored or reported as
-  run. Notification, deduplication, declaration order, fail-fast and the
-  pending report are unchanged. In JSON output each handler object gains a
-  `type` field (`"service"`); its other keys are unchanged. A failed apply still
-  loses the notifications of the handlers that did not run; the documentation
-  now describes how to run them by hand.
+  The types are `service` (the original handler) and `ca_trust` (below);
+  `command` is reserved for a later version. A recipe that declares `command`,
+  or any unknown or non-string type, is rejected at validation and is never
+  ignored or reported as run. Notification, deduplication, declaration order,
+  fail-fast and the pending report are unchanged. In JSON output each handler
+  object gains a `type` field; its other keys are unchanged. A failed apply
+  still loses the notifications of the handlers that did not run; the
+  documentation now describes how to run them by hand.
+- **`ca_trust` handler.** `type: ca_trust` refreshes the system CA trust store
+  after a file that notified it changed: `/usr/sbin/update-ca-certificates` (no
+  `--fresh`) on Debian/Ubuntu, `/usr/bin/update-ca-trust extract` on
+  RHEL/Rocky/Alma. The command is fixed and runs without a shell; the OS is the
+  detected OS family. The handler needs root (a root login, or `--sudo`) and
+  never escalates by itself. On any other OS family a recipe whose resources
+  notify it is rejected when the target is connected; a missing tool or a run
+  without root fails the handler without running anything. Success means the
+  tool exited 0, not that a given certificate is trusted. `plan` and `audit`
+  never run it. In JSON output the handler has `type: "ca_trust"`, `action:
+  "refresh"` and an empty `service`. Not yet verified on real hosts.
 
 ### Changed
 

@@ -152,9 +152,9 @@ vars:
 | フィールド | 必須 | 補足 |
 |-----------|------|------|
 | `id` | はい | リソースとハンドラをまたいで一意。 |
-| `type` | いいえ | ハンドラの種別。既定は `service`。実装されているのは `service` のみです。`ca_trust` と `command` は将来のバージョン用に予約されており、他の値と同様に検証で拒否されます。 |
-| `service` | はい（種別 `service`） | 対象サービス。 |
-| `action` | はい（種別 `service`） | `restart` または `reload`。 |
+| `type` | いいえ | ハンドラの種別。既定は `service`。`service` と `ca_trust` が実装されています。`command` は将来のバージョン用に予約されており、他の値と同様に検証で拒否されます。 |
+| `service` | はい（種別 `service`） | 対象サービス。`ca_trust` では指定できません。 |
+| `action` | はい（種別 `service`） | `restart` または `reload`。`ca_trust` では指定できません。 |
 | `sensitive` | いいえ | ハンドラの詳細をマスクする。 |
 
 ハンドラは apply の最後に 1 回だけ実行されます。変更されたリソースが

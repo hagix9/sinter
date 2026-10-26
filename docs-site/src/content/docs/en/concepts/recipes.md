@@ -86,10 +86,10 @@ handlers:
 ```
 
 A handler may carry `type: service`; without it the handler is a service
-handler, so existing recipes are unchanged. `service` is the only handler type
-this version implements: `type: ca_trust` and `type: command` are reserved for
-later versions, and a recipe that uses them (or any unknown type) is rejected
-at validation instead of being ignored.
+handler, so existing recipes are unchanged. This version implements two
+handler types, `service` and `ca_trust` (below). `type: command` is reserved
+for a later version, and a recipe that uses it (or any unknown type) is
+rejected at validation instead of being ignored.
 
 `service` is the **systemd unit name on the target** — it is not resolved from
 a Sinter resource id. Handlers run once at the end of an apply, only when
@@ -99,6 +99,47 @@ reports `NeedDaemonReload=yes`, Sinter reloads the system manager
 (`systemctl daemon-reload`) before the handler runs; a reload is not a
 restart. See
 [service](/en/reference/resources/service/#automatic-manager-synchronization).
+
+### CA trust handler
+
+```yaml
+resources:
+  - id: company_ca
+    type: file
+    with:
+      path: /usr/local/share/ca-certificates/company.crt   # Debian/Ubuntu
+      source: files/company.crt
+    notify: [refresh_ca]
+handlers:
+  - id: refresh_ca
+    type: ca_trust
+```
+
+A `ca_trust` handler refreshes the system CA trust store after a file that
+notified it changed. It has no other fields (not `service`, not `action`). The
+`file` resource places the certificate; the handler places nothing.
+
+| Target | Command run (fixed, no shell) |
+|--------|-------------------------------|
+| Debian, Ubuntu | `/usr/sbin/update-ca-certificates` (no `--fresh`: the store is not rebuilt) |
+| RHEL, Rocky Linux, AlmaLinux | `/usr/bin/update-ca-trust extract` |
+
+The operating system is the detected OS family, not "whichever tool exists". If
+a resource notifies a `ca_trust` handler on any other OS, the run is rejected
+when the target is connected (plan, apply and audit), before any resource
+runs. The handler needs root: connect as root, or pass `--sudo`; without root it
+fails and runs nothing. If the tool is not executable on the target it fails
+and runs nothing. Put the Debian anchor under `/usr/local/share/ca-certificates/`
+with a `.crt` name, and the RHEL anchor under
+`/etc/pki/ca-trust/source/anchors/`, as each tool expects.
+
+Success means the tool exited 0; it does not prove that a particular
+certificate is trusted. `plan` and `audit` never run the tool: `plan` lists the
+handler under pending handlers. A handler is declared in order, so declare a
+`ca_trust` handler before a `service` handler that has to see the new store.
+It is unrelated to the automatic `systemctl daemon-reload`.
+
+Verified on real hosts: none yet (tested against a scripted target only).
 
 ## Expressions
 

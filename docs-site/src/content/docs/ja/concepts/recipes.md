@@ -86,8 +86,8 @@ handlers:
 
 ハンドラには `type: service` を付けられます。付けなければサービスハンドラなので、
 既存のレシピは変わりません。このバージョンで実装されているハンドラ種別は
-`service` だけです。`type: ca_trust` と `type: command` は将来のバージョン用に
-予約されており、これらや未知の種別を使うレシピは、無視されずに検証で拒否されます。
+`service` と `ca_trust`（下記）の 2 つです。`type: command` は将来のバージョン用に
+予約されており、これや未知の種別を使うレシピは、無視されずに検証で拒否されます。
 
 `service` は**ターゲット上の systemd ユニット名**です。Sinter のリソース id
 から解決されることはありません。ハンドラは apply の最後に 1 回だけ実行され
@@ -98,6 +98,47 @@ handlers:
 reload は restart ではありません。
 [service](/ja/reference/resources/service/#マネージャの自動同期)を参照して
 ください。
+
+### CA 信頼ストアのハンドラ
+
+```yaml
+resources:
+  - id: company_ca
+    type: file
+    with:
+      path: /usr/local/share/ca-certificates/company.crt   # Debian/Ubuntu
+      source: files/company.crt
+    notify: [refresh_ca]
+handlers:
+  - id: refresh_ca
+    type: ca_trust
+```
+
+`ca_trust` ハンドラは、通知元のファイルが変更されたときに、システムの CA 信頼ストアを
+更新します。他のフィールド（`service`、`action`）は持ちません。証明書の配置は
+`file` リソースの役割で、ハンドラは何も配置しません。
+
+| 対象 | 実行されるコマンド（固定。シェルなし） |
+|------|-----------------------------------------|
+| Debian、Ubuntu | `/usr/sbin/update-ca-certificates`（`--fresh` なし。ストアを再構築しません） |
+| RHEL、Rocky Linux、AlmaLinux | `/usr/bin/update-ca-trust extract` |
+
+OS の判定は、検出された OS ファミリーで行い、「存在するツール」では決めません。
+それ以外の OS で、リソースが `ca_trust` ハンドラに通知する場合は、ターゲットに接続した
+時点（plan、apply、audit とも）で、どのリソースも実行される前にレシピが拒否されます。
+ハンドラには root が必要です。root で接続するか `--sudo` を付けてください。root が
+なければハンドラは失敗し、何も実行しません。ツールがターゲット上で実行可能でなければ
+失敗し、何も実行しません。Debian の証明書は `/usr/local/share/ca-certificates/` の下に
+`.crt` の名前で、RHEL の証明書は `/etc/pki/ca-trust/source/anchors/` の下に置いてください
+（各ツールの期待どおりです）。
+
+成功は、ツールが終了コード 0 で終わったことを意味します。特定の証明書が信頼されることまでは
+確認しません。`plan` と `audit` はツールを実行しません。`plan` はハンドラを保留中のハンドラ
+として表示します。ハンドラは宣言順に実行されるので、新しいストアを参照する `service`
+ハンドラより前に `ca_trust` ハンドラを宣言してください。自動の `systemctl daemon-reload` とは
+無関係です。
+
+実機での検証済み: まだありません（スクリプト化したターゲットでのみテスト済み）。
 
 ## 式
 

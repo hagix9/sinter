@@ -37,9 +37,12 @@ pub struct HandlerDecl {
     /// The handler's type (`type:`; absent means `service`).
     pub kind: HandlerKind,
     /// The systemd unit of a `service` handler. Meaningful only when `kind`
-    /// is [`HandlerKind::Service`]; no other kind has a service name.
+    /// is [`HandlerKind::Service`]; no other kind has a service name (it is
+    /// empty, and output never invents one).
     pub service: String,
-    /// The action of a `service` handler (same rule as `service`).
+    /// The action of a `service` handler (same rule as `service`). Any other
+    /// kind carries a placeholder that nothing reads; its action word comes
+    /// from `FrozenHandler::action_label`.
     pub action: HandlerAction,
     pub sensitive: bool,
     pub origin: String,
@@ -48,15 +51,15 @@ pub struct HandlerDecl {
 /// The type of a handler (DESIGN §4.3).
 ///
 /// The foundation knows three types so that the engine, the model and the
-/// output dispatch on one value. Only [`HandlerKind::Service`] is implemented:
-/// the recipe parser refuses a recipe that declares any other type (see
-/// [`HandlerKind::is_implemented`]), so no unimplemented handler can be
-/// frozen, queued, or reported as run.
+/// output dispatch on one value. [`HandlerKind::Service`] and
+/// [`HandlerKind::CaTrust`] are implemented: the recipe parser refuses a recipe
+/// that declares any other type (see [`HandlerKind::is_implemented`]), so no
+/// unimplemented handler can be frozen, queued, or reported as run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandlerKind {
     /// Restart or reload a systemd unit (the original handler).
     Service,
-    /// Refresh the system CA trust store. Not implemented yet.
+    /// Refresh the system CA trust store with the operating system's own tool.
     CaTrust,
     /// Run a program after a change. Not implemented yet.
     Command,
@@ -83,7 +86,7 @@ impl HandlerKind {
 
     /// Whether this version of Sinter can execute handlers of this type.
     pub fn is_implemented(self) -> bool {
-        matches!(self, HandlerKind::Service)
+        matches!(self, HandlerKind::Service | HandlerKind::CaTrust)
     }
 }
 

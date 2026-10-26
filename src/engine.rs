@@ -304,6 +304,29 @@ impl Engine {
                 None
             }
         };
+        // A notified `ca_trust` handler needs a target OS family with a known
+        // trust-store tool. Like a package resource on an unsupported OS, that
+        // is a capability error before any resource runs, not a handler that
+        // fails after the change it was notified for. The tool itself is
+        // checked when the handler runs: an earlier resource may install it.
+        let ca_handlers: BTreeSet<&str> = model
+            .handlers
+            .iter()
+            .filter(|h| h.kind == crate::ir::HandlerKind::CaTrust)
+            .map(|h| h.id.as_str())
+            .collect();
+        if !ca_handlers.is_empty()
+            && model
+                .resources
+                .iter()
+                .any(|r| r.notify.iter().any(|n| ca_handlers.contains(n.as_str())))
+            && crate::platform::CaTrustTool::for_os_family(&facts.os_family).is_none()
+        {
+            return Err(SinterError::connect(format!(
+                "target operating system '{}' (family '{}') has no supported CA trust store tool for a ca_trust handler",
+                facts.os_name, facts.os_family
+            )));
+        }
         let mut vars = BTreeMap::new();
         for (name, v) in &model.vars {
             vars.insert(
@@ -914,14 +937,40 @@ impl Engine {
     fn run_handler(&mut self, h: &crate::model::FrozenHandler) -> Result<HandlerResult> {
         match h.kind {
             crate::ir::HandlerKind::Service => self.run_service_handler(h),
-            crate::ir::HandlerKind::CaTrust | crate::ir::HandlerKind::Command => {
-                Err(SinterError::apply(format!(
-                    "handler {} has type {}, which is not implemented in this version of Sinter",
-                    h.id,
-                    h.kind.label()
-                )))
-            }
+            crate::ir::HandlerKind::CaTrust => self.run_ca_trust_handler(h),
+            crate::ir::HandlerKind::Command => Err(SinterError::apply(format!(
+                "handler {} has type {}, which is not implemented in this version of Sinter",
+                h.id,
+                h.kind.label()
+            ))),
         }
+    }
+
+    /// The `ca_trust` handler. Its result is the exit status of the OS tool:
+    /// success means the tool finished normally, not that any particular
+    /// certificate is now trusted.
+    fn run_ca_trust_handler(&mut self, h: &crate::model::FrozenHandler) -> Result<HandlerResult> {
+        let (state, why) = self.handler_ca_trust(h)?;
+        let why = why.unwrap_or_default();
+        let reason = match state {
+            HandlerOutcomeState::Failed => {
+                Some(format!("handler {} (ca_trust) failed: {}", h.id, why))
+            }
+            HandlerOutcomeState::Indeterminate => Some(format!(
+                "handler {} (ca_trust) became indeterminate: {}",
+                h.id, why
+            )),
+            _ => None,
+        };
+        Ok(HandlerResult {
+            id: h.id.clone(),
+            kind: h.kind,
+            service: h.service.clone(),
+            action: h.action_label().to_string(),
+            state,
+            reason,
+            sensitive: h.sensitive,
+        })
     }
 
     fn run_service_handler(&mut self, h: &crate::model::FrozenHandler) -> Result<HandlerResult> {

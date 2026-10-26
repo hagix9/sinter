@@ -65,11 +65,17 @@ pub struct FrozenHandler {
 }
 
 impl FrozenHandler {
-    /// The action as written in a recipe and reported in output.
+    /// The action word reported in output: the service handler's action as
+    /// written in the recipe, or the one verb of another type.
     pub fn action_label(&self) -> &'static str {
-        match self.action {
-            HandlerAction::Restart => "restart",
-            HandlerAction::Reload => "reload",
+        match self.kind {
+            HandlerKind::Service => match self.action {
+                HandlerAction::Restart => "restart",
+                HandlerAction::Reload => "reload",
+            },
+            HandlerKind::CaTrust => "refresh",
+            // Not implemented: the parser never freezes this type.
+            HandlerKind::Command => "run",
         }
     }
 }

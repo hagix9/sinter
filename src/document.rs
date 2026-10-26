@@ -516,30 +516,50 @@ fn parse_handler(item: &Value, origin: &str, idx: usize) -> Result<HandlerDecl> 
             )))
         }
     };
-    let service = match map.get("service") {
-        Some(Value::Str(s)) if s.is_empty() => {
-            return Err(SinterError::schema(format!(
-                "{}: service must not be empty",
-                ctx
-            )))
+    // The unit and the action belong to the `service` type. A `ca_trust`
+    // handler refreshes the trust store with a fixed, OS-chosen tool: it has
+    // no unit and no action, so a recipe that gives it either is mistaken and
+    // is refused, not ignored.
+    let (service, action) = if kind == HandlerKind::Service {
+        let service = match map.get("service") {
+            Some(Value::Str(s)) if s.is_empty() => {
+                return Err(SinterError::schema(format!(
+                    "{}: service must not be empty",
+                    ctx
+                )))
+            }
+            Some(Value::Str(s)) => s.clone(),
+            _ => {
+                return Err(SinterError::schema(format!(
+                    "{}: service is required and must be a string",
+                    ctx
+                )))
+            }
+        };
+        let action = match map.get("action") {
+            Some(Value::Str(s)) if s == "restart" => HandlerAction::Restart,
+            Some(Value::Str(s)) if s == "reload" => HandlerAction::Reload,
+            _ => {
+                return Err(SinterError::schema(format!(
+                    "{}: action is required and must be restart or reload",
+                    ctx
+                )))
+            }
+        };
+        (service, action)
+    } else {
+        for f in ["service", "action"] {
+            if map.contains_key(f) {
+                return Err(SinterError::schema(format!(
+                    "{}: {} is not a field of a {} handler",
+                    ctx,
+                    f,
+                    kind.label()
+                )));
+            }
         }
-        Some(Value::Str(s)) => s.clone(),
-        _ => {
-            return Err(SinterError::schema(format!(
-                "{}: service is required and must be a string",
-                ctx
-            )))
-        }
-    };
-    let action = match map.get("action") {
-        Some(Value::Str(s)) if s == "restart" => HandlerAction::Restart,
-        Some(Value::Str(s)) if s == "reload" => HandlerAction::Reload,
-        _ => {
-            return Err(SinterError::schema(format!(
-                "{}: action is required and must be restart or reload",
-                ctx
-            )))
-        }
+        // No unit, and a placeholder action that nothing reads.
+        (String::new(), HandlerAction::Restart)
     };
     let sensitive = match map.get("sensitive") {
         None => false,

@@ -154,9 +154,9 @@ vars:
 | Field | Required | Notes |
 |-------|----------|-------|
 | `id` | yes | Unique across resources and handlers. |
-| `type` | no | Handler type; default `service`. Only `service` is implemented. `ca_trust` and `command` are reserved for later versions and are rejected at validation, as is any other value. |
-| `service` | yes (type `service`) | Target service. |
-| `action` | yes (type `service`) | `restart` or `reload`. |
+| `type` | no | Handler type; default `service`. `service` and `ca_trust` are implemented. `command` is reserved for a later version and is rejected at validation, as is any other value. |
+| `service` | yes (type `service`) | Target service. Not allowed on `ca_trust`. |
+| `action` | yes (type `service`) | `restart` or `reload`. Not allowed on `ca_trust`. |
 | `sensitive` | no | Redact handler details. |
 
 Handlers run once at apply end, only when a changed resource notified them.

@@ -673,6 +673,22 @@ impl TargetFs {
         self.target_uid
     }
 
+    /// Whether `path` is an executable on the target: `test -x` with a fixed
+    /// argv, an observation (it needs no mutation permit). Used to refuse,
+    /// with a plain reason, before a fixed tool is run; the answer is
+    /// "not executable" for anything but a clean exit 0.
+    pub(crate) fn executable_present(&mut self, path: &str) -> Result<bool> {
+        let out = self.run_argv("/usr/bin/test", &["-x".to_string(), path.to_string()])?;
+        match out.completion {
+            Completion::Exited(0) => Ok(true),
+            Completion::Exited(_) => Ok(false),
+            _ => Err(SinterError::apply(format!(
+                "could not determine whether {} is executable on the target",
+                path
+            ))),
+        }
+    }
+
     pub fn target_gid(&self) -> u32 {
         self.target_gid
     }

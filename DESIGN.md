@@ -178,21 +178,23 @@ IMPLEMENTED: a handler has
 
 id: required string
 
-type: optional string, default service. The values are service, ca_trust and command; this version implements service only (see below)
+type: optional string, default service. The values are service, ca_trust and command; this version implements service and ca_trust (see below)
 
 sensitive: optional boolean, default false
 
-and, for the type service,
+for the type service,
 
 service: required static string
 
 action: required enum restart | reload
 
+and for the type ca_trust, nothing more: a ca_trust handler has only id, type and sensitive.
+
 A handler that has no type is a service handler. type: service is the same handler as no type. A recipe written before handler types existed means exactly what it meant.
 
-IMPLEMENTED: a recipe that declares a type this version does not implement (ca_trust, command) is rejected at validation with a plain error. A type that is not one of the three values, or a type that is not a string, is rejected. Such a handler is never frozen, never queued by a notification and never reported as run. No type is skipped or treated as a success.
+IMPLEMENTED: a recipe that declares a type this version does not implement (command) is rejected at validation with a plain error. A type that is not one of the three values, or a type that is not a string, is rejected. Such a handler is never frozen, never queued by a notification and never reported as run. No type is skipped or treated as a success.
 
-IMPLEMENTED: the fields a type does not define are rejected. In particular a service handler has no with block and no privilege field.
+IMPLEMENTED: the fields a type does not define are rejected. In particular neither implemented type has a with block or a privilege field, and a ca_trust handler has no service and no action.
 
 UNCHANGED LIMIT: handlers do not support
 
@@ -208,15 +210,29 @@ notify
 
 Handler IDs must be unique and must not collide with resource IDs. A notify that names an unknown handler is an error. Handlers never notify and never depend on each other, so handlers cannot form a cycle.
 
-UNCHANGED LIMIT: a handler is never a general resource, and a handler never runs a shell. The only way a handler may run a program is the planned type command below.
+UNCHANGED LIMIT: a handler is never a general resource, and a handler never runs a shell. The programs a handler may run are the fixed tool of the type ca_trust below and, when it exists, the planned type command.
 
-PLANNED, not implemented (H2): type ca_trust refreshes the system CA trust store with the operating system's own tool, chosen by the target's OS family: update-ca-certificates on debian, update-ca-trust extract on redhat. It has no parameters. It needs root. On any other OS family it is refused rather than replaced by another command.
+IMPLEMENTED: type ca_trust refreshes the system CA trust store with the operating system's own tool. The tool is chosen from the target's detected OS family (facts.os.family, the same identity that selects the package manager), never by checking which binary exists:
+
+debian: /usr/sbin/update-ca-certificates, with no arguments. --fresh is not used; the existing store is not rebuilt.
+
+redhat: /usr/bin/update-ca-trust extract.
+
+The program and its arguments are fixed; nothing in the command line comes from the recipe, no shell is involved, and the run's executor, mutation permit and baseline environment are used. The timeout is 300 seconds and is not configurable. Output capture is bounded like every other command.
+
+IMPLEMENTED: the placement, owner, mode and backup of the certificate files remain the duty of the file resources that notify the handler. The handler places nothing.
+
+IMPLEMENTED: ca_trust is refused, never replaced by another command, in these cases. If a resource notifies a ca_trust handler and the target's OS family has no known tool (neither debian nor redhat), the run is rejected when the target is connected, before any resource runs (plan, apply and audit alike). If the run has no root (neither a root login nor --sudo) the handler fails without running anything. If the tool is not executable on the target the handler fails without running anything; the tool is checked when the handler runs, because an earlier resource may install it.
+
+IMPLEMENTED: the result is the exit status of the tool. Exit status 0 is succeeded. It does not mean that any particular certificate is trusted; nothing is verified beyond the exit status. A non-zero status or a signal is failed, and an outcome that cannot be established (a timeout or a lost connection) is indeterminate and is not retried. A program that may have started is never reported as not run; nothing is rolled back. In output the handler has the type ca_trust, the action refresh, and no service: the service field is the empty string and no unit name is invented.
 
 PLANNED, not implemented (H3): type command runs one program after a change. It reuses the validation of the command resource (§10): a static absolute program path, an exact argument list with no shell, a fixed baseline environment plus a restricted env map, an absolute cwd, success_codes, and timeout_seconds. Differences fixed in advance: every value is a static string (no expression), the argument list has at most 64 entries of at most 4096 bytes each, timeout_seconds is 1 to 3600 with default 300, and an optional privilege: root states that root is required. The command resource itself keeps its existing limits.
 
-PLANNED: neither ca_trust nor command introduces implicit privilege escalation. Every handler runs with the privilege of the run (§21); privilege: root only requires it and fails the handler when the run does not have it. A handler never escalates by itself.
+IMPLEMENTED: ca_trust introduces no privilege escalation. Every handler runs with the privilege of the run (§21). A ca_trust handler requires root and fails when the run does not have it; it never escalates by itself, and a root login needs no --sudo.
 
-PLANNED: plan and audit never run any handler type. Output keeps the documented handler keys; the type is reported additively.
+PLANNED: the type command follows the same rule: privilege: root only requires root and fails the handler when the run does not have it.
+
+IMPLEMENTED: plan and audit never run any handler type. Output keeps the documented handler keys; the type is reported additively.
 
 4.4 Variables
 
@@ -1091,7 +1107,7 @@ When fail-fast is triggered by a failed/indeterminate resource, all resources no
 
 18. Handler contract
 
-IMPLEMENTED: the only handler type this version runs is service, a delayed service action. The rules below apply to every handler type, present and planned.
+IMPLEMENTED: the handler types this version runs are service, a delayed service action, and ca_trust, a delayed refresh of the system CA trust store. The rules below apply to every handler type, present and planned.
 
 They execute only if notified by a resource that:
 
@@ -1133,11 +1149,13 @@ The manager synchronization that may precede a handler (systemctl daemon-reload)
 
 A failed or indeterminate manager synchronization before a handler makes that handler failed or indeterminate without running its action; later handlers do not run.
 
-systemctl daemon-reload is not a handler type and none is planned: the manager synchronization of §28 already performs it.
+systemctl daemon-reload is not a handler type and none is planned: the manager synchronization of §28 already performs it. A ca_trust handler is unrelated to it: it neither causes nor needs a manager reload.
 
-UNCHANGED LIMIT: a handler is not retried and is not recorded across runs. If a run stops before the handler phase, or a handler fails, the notification is lost: the next apply finds the resource already correct and notifies nobody. The run reports the handlers that did not run (handlers_pending); the operator must perform their action by hand. This holds for every handler type, and for a planned type such as ca_trust it means a stale trust store until someone runs the refresh.
+The type ca_trust (IMPLEMENTED): see §4.3. It runs once after the changed files that notified it, in handler declaration order, so a service handler that must see the refreshed store is declared after the ca_trust handler.
 
-PLANNED (types ca_trust and command): their result is the exit status of the program, not a state observation; a failed or indeterminate result stops the phase like any other handler, a program that may have started is never reported as unchanged, and nothing is rolled back.
+UNCHANGED LIMIT: a handler is not retried and is not recorded across runs. If a run stops before the handler phase, or a handler fails, the notification is lost: the next apply finds the resource already correct and notifies nobody. The run reports the handlers that did not run (handlers_pending); the operator must perform their action by hand. This holds for every handler type. For ca_trust it means a stale trust store until someone runs the refresh by hand (update-ca-certificates on debian, update-ca-trust extract on redhat).
+
+IMPLEMENTED (ca_trust) and PLANNED (command): the result is the exit status of the program, not a state observation; a failed or indeterminate result stops the phase like any other handler, a program that may have started is never reported as unchanged, and nothing is rolled back.
 
 Handlers cannot notify anything else.
 

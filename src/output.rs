@@ -224,10 +224,14 @@ fn render_text(
             } else {
                 h.reason.clone()
             };
+            // A handler that is not a service handler has no unit to show: its
+            // type stands in the same place.
             let service = if h.sensitive {
                 "<redacted>".to_string()
-            } else {
+            } else if h.kind == crate::ir::HandlerKind::Service {
                 sanitize_line(&h.service)
+            } else {
+                h.kind.label().to_string()
             };
             writeln!(
                 out,

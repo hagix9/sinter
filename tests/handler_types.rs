@@ -225,22 +225,17 @@ fn plan_and_audit_never_run_a_handler() {
 fn types_this_version_cannot_run_are_refused_before_anything_runs() {
     // The refusal does not depend on the other fields: a recipe written for a
     // later version (a `with` block) gets the same plain answer.
-    for (label, handler) in [
-        ("ca_trust", "  - id: h\n    type: ca_trust\n"),
-        (
-            "command",
-            "  - id: h\n    type: command\n    with:\n      program: /usr/bin/true\n",
-        ),
-    ] {
-        let e = load_error(&format!("ht-unimpl-{label}"), handler);
-        assert_eq!(e.kind, ErrorKind::Schema, "{label}");
-        assert!(
-            e.message
-                .contains(&format!("handler type {label} is not implemented")),
-            "{label}: {}",
-            e.message
-        );
-    }
+    let e = load_error(
+        "ht-unimpl-command",
+        "  - id: h\n    type: command\n    with:\n      program: /usr/bin/true\n",
+    );
+    assert_eq!(e.kind, ErrorKind::Schema);
+    assert!(
+        e.message
+            .contains("handler type command is not implemented"),
+        "{}",
+        e.message
+    );
 }
 
 #[test]
@@ -330,7 +325,7 @@ fn handler_ids_and_notify_references_are_validated() {
 }
 
 #[test]
-fn only_the_service_type_is_implemented_and_every_type_has_a_label() {
+fn service_and_ca_trust_are_implemented_and_every_type_has_a_label() {
     for k in [
         HandlerKind::Service,
         HandlerKind::CaTrust,
@@ -339,7 +334,7 @@ fn only_the_service_type_is_implemented_and_every_type_has_a_label() {
         assert_eq!(HandlerKind::from_label(k.label()), Some(k));
         assert_eq!(
             k.is_implemented(),
-            k == HandlerKind::Service,
+            k != HandlerKind::Command,
             "{}",
             k.label()
         );

@@ -67,7 +67,9 @@ IDs in `handlers_pending` (a handler that ran and failed is in `handlers` with
 `state` `Failed` or `Indeterminate`). For each one, find the handler in the
 recipe and perform its action yourself, for example
 `systemctl restart app.service` or `systemctl reload app.service` for the
-handler's `service` and `action`. Sinter will not run it on the next apply:
+handler's `service` and `action`; for a `ca_trust` handler run
+`update-ca-certificates` (Debian, Ubuntu) or `update-ca-trust extract` (RHEL,
+Rocky Linux, AlmaLinux) as root. Sinter will not run it on the next apply:
 the resource that notified it is already correct. This holds for every handler
 type.
 :::

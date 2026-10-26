@@ -5587,6 +5587,83 @@ impl Engine {
     // -----------------------------------------------------------------------
     // handlers
     // -----------------------------------------------------------------------
+
+    /// The `ca_trust` handler: refresh the system CA trust store with the
+    /// operating system's own tool (`platform::CaTrustTool`, chosen from the
+    /// detected OS family). It uses the same executor and mutation permit as
+    /// every other change; the program and its arguments are fixed, there is no
+    /// shell, and nothing in the command line comes from the recipe.
+    ///
+    /// Returns the outcome and, when it is not a success, the plain reason.
+    /// Fail-closed: an unsupported OS family, a run without root, and a missing
+    /// tool are `Failed` before anything is executed. A `Succeeded` means the
+    /// tool exited 0; it does not verify any certificate.
+    pub(crate) fn handler_ca_trust(
+        &mut self,
+        h: &crate::model::FrozenHandler,
+    ) -> Result<(HandlerOutcomeState, Option<String>)> {
+        let failed = |why: String| Ok((HandlerOutcomeState::Failed, Some(why)));
+        let Some(tool) = crate::platform::CaTrustTool::for_os_family(&self.facts.os_family) else {
+            return failed(format!(
+                "no supported CA trust store tool for OS family '{}'",
+                self.facts.os_family
+            ));
+        };
+        if !self.fs.runs_as_root() {
+            return failed(
+                "refreshing the CA trust store needs root: connect as root or pass --sudo".into(),
+            );
+        }
+        match self.fs.executable_present(tool.program()) {
+            Ok(true) => {}
+            Ok(false) => {
+                return failed(format!(
+                    "{} is not installed or not executable on the target (the ca-certificates package provides it)",
+                    tool.program()
+                ))
+            }
+            Err(e) => {
+                let state = if e.kind == crate::error::ErrorKind::Indeterminate {
+                    HandlerOutcomeState::Indeterminate
+                } else {
+                    HandlerOutcomeState::Failed
+                };
+                return Ok((state, Some(e.message)));
+            }
+        }
+        let permit = self.fs.mutation_permit()?;
+        let mut req = ExecRequest::new(tool.program());
+        req.args = tool.args().iter().map(|a| a.to_string()).collect();
+        req.env = baseline_env(self.fs.home_env());
+        req.timeout_secs = CA_TRUST_TIMEOUT_SECS;
+        req.sensitive = h.sensitive;
+        let out = self.fs.exec(&permit, &req)?;
+        match out.completion {
+            Completion::Indeterminate { .. } => Ok((
+                HandlerOutcomeState::Indeterminate,
+                Some(format!(
+                    "{} did not report completion (timeout or lost connection); the trust store may or may not have been refreshed",
+                    tool.label()
+                )),
+            )),
+            Completion::Signaled(n) => {
+                failed(format!("{} was ended by signal {}", tool.label(), n))
+            }
+            Completion::Exited(0) => Ok((HandlerOutcomeState::Succeeded, None)),
+            Completion::Exited(code) => {
+                let mut why = format!("{} exited with status {}", tool.label(), code);
+                if !h.sensitive {
+                    let line = ca_tool_excerpt(&out.stderr);
+                    if !line.is_empty() {
+                        why.push_str(": ");
+                        why.push_str(&line);
+                    }
+                }
+                failed(why)
+            }
+        }
+    }
+
     pub(crate) fn handler_service(
         &mut self,
         h: &crate::model::FrozenHandler,
@@ -5675,6 +5752,30 @@ impl Engine {
             }
         }
     }
+}
+
+/// How long the CA trust store tool may run (fixed; not a recipe setting).
+const CA_TRUST_TIMEOUT_SECS: u64 = 300;
+
+/// The first non-empty line of a tool's standard error, printable ASCII and
+/// capped, for a failure reason. The capture itself is already bounded.
+fn ca_tool_excerpt(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    line.chars()
+        .map(|c| {
+            if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                '?'
+            }
+        })
+        .take(160)
+        .collect()
 }
 
 /// Outcome of preparing the private dnf metadata snapshot for an install.

@@ -1091,9 +1091,9 @@ v1.0.0 以降、この節に記載した内容は 1.x 系全体を通じて安�
 
 handler オブジェクトのフィールド:
 - `id`（string）
-- `service`（string）
-- `action`（string）
-- `type`（string。追加フィールド。`"service"` — このバージョンで実装されている唯一のハンドラ種別）
+- `service`（string。`service` ハンドラのユニット。ユニットを持たない `ca_trust` では `""`）
+- `action`（string。`restart`/`reload`。`ca_trust` では `refresh`）
+- `type`（string。追加フィールド。`"service"` または `"ca_trust"`）
 - `state`（string: `NotRun`、`Succeeded`、`Failed`、`Indeterminate`。大文字・小文字も表記どおり）
 - `reason`（string または null）
 

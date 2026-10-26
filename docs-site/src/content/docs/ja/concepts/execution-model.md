@@ -67,7 +67,8 @@ reload は何も再起動しません。
 `Indeterminate` で載ります）。それぞれについて、レシピでそのハンドラを探し、
 自分で同じ操作を実行してください。たとえばハンドラの `service` と `action` に
 従って `systemctl restart app.service` または `systemctl reload app.service` を
-実行します。Sinter は次の apply でもそれを実行しません。通知元のリソースは既に
+実行します。`ca_trust` ハンドラなら、root で `update-ca-certificates`（Debian、
+Ubuntu）または `update-ca-trust extract`（RHEL、Rocky Linux、AlmaLinux）を実行します。Sinter は次の apply でもそれを実行しません。通知元のリソースは既に
 正しい状態だからです。これはすべてのハンドラ種別に当てはまります。
 :::
 

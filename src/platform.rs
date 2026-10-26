@@ -16,6 +16,55 @@ pub enum PackageBackend {
     Dnf,
 }
 
+/// The system CA trust-store refresh tool for a detected OS family (the
+/// `ca_trust` handler).
+///
+/// Like [`PackageBackend`], the tool is chosen from the target's detected OS
+/// identity (`facts.os.family`), never by probing which binary exists. A
+/// family without a known tool yields `None` and callers must fail rather than
+/// try another family's command. The program is a fixed absolute path and the
+/// argument list is fixed: nothing here comes from the recipe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaTrustTool {
+    /// Debian/Ubuntu: `update-ca-certificates` (no `--fresh`: the existing
+    /// store is not rebuilt).
+    UpdateCaCertificates,
+    /// RHEL family: `update-ca-trust extract`.
+    UpdateCaTrust,
+}
+
+impl CaTrustTool {
+    pub fn for_os_family(family: &str) -> Option<Self> {
+        match family {
+            "debian" => Some(Self::UpdateCaCertificates),
+            "redhat" => Some(Self::UpdateCaTrust),
+            _ => None,
+        }
+    }
+
+    /// The tool's name, for diagnostics.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::UpdateCaCertificates => "update-ca-certificates",
+            Self::UpdateCaTrust => "update-ca-trust",
+        }
+    }
+
+    pub fn program(&self) -> &'static str {
+        match self {
+            Self::UpdateCaCertificates => "/usr/sbin/update-ca-certificates",
+            Self::UpdateCaTrust => "/usr/bin/update-ca-trust",
+        }
+    }
+
+    pub fn args(&self) -> &'static [&'static str] {
+        match self {
+            Self::UpdateCaCertificates => &[],
+            Self::UpdateCaTrust => &["extract"],
+        }
+    }
+}
+
 impl PackageBackend {
     /// Select the backend for a detected OS family string.
     /// `None` means the platform has no supported package manager.
@@ -617,6 +666,26 @@ fn observation_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The CA trust-store tool is a fixed table keyed by OS family: two
+    /// families, an absolute program each, no recipe-controlled text, and never
+    /// `--fresh`. Every other family has no tool (callers must fail, not guess).
+    #[test]
+    fn ca_trust_tool_is_a_fixed_table_by_os_family() {
+        let deb = CaTrustTool::for_os_family("debian").unwrap();
+        assert_eq!(deb.program(), "/usr/sbin/update-ca-certificates");
+        assert!(deb.args().is_empty());
+        let rpm = CaTrustTool::for_os_family("redhat").unwrap();
+        assert_eq!(rpm.program(), "/usr/bin/update-ca-trust");
+        assert_eq!(rpm.args(), &["extract"]);
+        for tool in [deb, rpm] {
+            assert!(tool.program().starts_with('/'));
+            assert!(!tool.args().iter().any(|a| a.contains("fresh")));
+        }
+        for family in ["", "arch", "suse", "Debian", "RedHat", "alpine", "debian "] {
+            assert!(CaTrustTool::for_os_family(family).is_none(), "{family:?}");
+        }
+    }
 
     fn exited(code: i32, stdout: &str, stderr: &str) -> Output {
         Output {
