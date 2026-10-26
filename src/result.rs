@@ -177,6 +177,8 @@ pub enum HandlerOutcomeState {
 #[derive(Debug, Clone)]
 pub struct HandlerResult {
     pub id: String,
+    /// The handler's type (reported as `type` in JSON output).
+    pub kind: crate::ir::HandlerKind,
     pub service: String,
     pub action: String,
     pub state: HandlerOutcomeState,

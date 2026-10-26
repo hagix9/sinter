@@ -3,7 +3,7 @@ use crate::error::{Result, SinterError};
 use crate::expressions::{
     collect_register_refs, eval_value_interpolated, parse_expr, EvalVal, Expr, Scope,
 };
-use crate::ir::{HandlerAction, ResourceDecl};
+use crate::ir::{HandlerAction, HandlerKind, ResourceDecl};
 use crate::paths::{parse_mode, validate_path};
 use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -54,10 +54,24 @@ pub struct FrozenResource {
 #[derive(Debug, Clone)]
 pub struct FrozenHandler {
     pub id: String,
+    /// The handler type. Only `service` can be frozen in this version.
+    pub kind: HandlerKind,
+    /// The unit of a `service` handler (unused by every other type).
     pub service: String,
+    /// The action of a `service` handler (unused by every other type).
     pub action: HandlerAction,
     pub sensitive: bool,
     pub origin: String,
+}
+
+impl FrozenHandler {
+    /// The action as written in a recipe and reported in output.
+    pub fn action_label(&self) -> &'static str {
+        match self.action {
+            HandlerAction::Restart => "restart",
+            HandlerAction::Reload => "reload",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -680,6 +694,7 @@ fn expand_document(canon: &Path, doc: Document, state: &mut LoadState) -> Result
     for h in &doc.handlers {
         state.handlers.push(FrozenHandler {
             id: h.id.clone(),
+            kind: h.kind,
             service: h.service.clone(),
             action: h.action,
             sensitive: h.sensitive,

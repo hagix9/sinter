@@ -1128,7 +1128,8 @@ Resource object (`plan` and `apply`):
 
 A resource is identified by `id` together with `loop_index`.
 
-Handler object: `id` (string), `service` (string), `action` (string),
+Handler object: `id` (string), `type` (string, additive; `"service"` — the
+only handler type this version implements), `service` (string), `action` (string),
 `state` (string: `NotRun`, `Succeeded`, `Failed`, or `Indeterminate`,
 capitalized exactly as shown), and `reason` (string or null).
 

@@ -60,6 +60,15 @@ reload は何も再起動しません。
 リソースが無いとき）にだけ実行されます。ハンドラに通知するファイルをあるリソースが変更した後で apply が失敗すると、ハンドラは実行されず、
 次の apply はファイルが正しいので誰にも通知しません。失敗した apply の後は、
 関係するサービスを手で restart または reload してください。
+
+**手動での復旧。** 実行されなかったハンドラはすべてレポートに載ります。テキスト出力では
+`pending handlers` の下に、JSON 出力では `handlers_pending` に ID が並びます
+（実行して失敗したハンドラは `handlers` に `state` が `Failed` または
+`Indeterminate` で載ります）。それぞれについて、レシピでそのハンドラを探し、
+自分で同じ操作を実行してください。たとえばハンドラの `service` と `action` に
+従って `systemctl restart app.service` または `systemctl reload app.service` を
+実行します。Sinter は次の apply でもそれを実行しません。通知元のリソースは既に
+正しい状態だからです。これはすべてのハンドラ種別に当てはまります。
 :::
 
 ## audit — 読み取り専用の検証

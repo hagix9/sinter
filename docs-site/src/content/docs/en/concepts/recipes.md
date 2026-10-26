@@ -85,6 +85,12 @@ handlers:
     action: restart        # restart or reload
 ```
 
+A handler may carry `type: service`; without it the handler is a service
+handler, so existing recipes are unchanged. `service` is the only handler type
+this version implements: `type: ca_trust` and `type: command` are reserved for
+later versions, and a recipe that uses them (or any unknown type) is rejected
+at validation instead of being ignored.
+
 `service` is the **systemd unit name on the target** — it is not resolved from
 a Sinter resource id. Handlers run once at the end of an apply, only when
 notified by a resource that actually changed. Multiple notifications of the

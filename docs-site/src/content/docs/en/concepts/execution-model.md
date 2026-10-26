@@ -60,6 +60,16 @@ failed or ended indeterminate. If an apply fails after
 a resource already changed a file that notifies a handler, the handler does
 not run, and the next apply — finding the file correct — notifies nobody.
 After a failed apply, restart or reload the affected services by hand.
+
+**Recovering by hand.** The report names every handler that did not run: the
+text output lists them under `pending handlers`, and the JSON output lists the
+IDs in `handlers_pending` (a handler that ran and failed is in `handlers` with
+`state` `Failed` or `Indeterminate`). For each one, find the handler in the
+recipe and perform its action yourself, for example
+`systemctl restart app.service` or `systemctl reload app.service` for the
+handler's `service` and `action`. Sinter will not run it on the next apply:
+the resource that notified it is already correct. This holds for every handler
+type.
 :::
 
 ## audit — read-only verification

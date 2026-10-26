@@ -1,7 +1,7 @@
 use crate::error::{Result, SinterError};
 use crate::ir::{
-    HandlerAction, HandlerDecl, ResourceDecl, VarDecl, BACKUP_FIELDS, COMMON_RESOURCE_FIELDS,
-    HANDLER_FIELDS, TARGET_FIELDS, TOP_LEVEL_FIELDS, VAR_FIELDS,
+    HandlerAction, HandlerDecl, HandlerKind, ResourceDecl, VarDecl, BACKUP_FIELDS,
+    COMMON_RESOURCE_FIELDS, HANDLER_FIELDS, TARGET_FIELDS, TOP_LEVEL_FIELDS, VAR_FIELDS,
 };
 use crate::toml_front::parse_toml;
 use crate::value::Value;
@@ -476,6 +476,36 @@ fn parse_handler(item: &Value, origin: &str, idx: usize) -> Result<HandlerDecl> 
     let map = item
         .as_map()
         .ok_or_else(|| SinterError::schema(format!("{}: handler must be a map", ctx)))?;
+    // `type` is optional and defaults to `service`, so every recipe written
+    // before handler types existed keeps its meaning. A type that this
+    // version cannot execute is refused here, at validation: it is never
+    // frozen, never queued by a notification, and never reported as run.
+    let kind = match map.get("type") {
+        None => HandlerKind::Service,
+        Some(Value::Str(s)) => match HandlerKind::from_label(s) {
+            Some(k) if k.is_implemented() => k,
+            Some(k) => {
+                return Err(SinterError::schema(format!(
+                    "{}: handler type {} is not implemented in this version of Sinter (supported: service)",
+                    ctx,
+                    k.label()
+                )))
+            }
+            None => {
+                return Err(SinterError::schema(format!(
+                    "{}: unknown handler type {} (supported: service)",
+                    ctx,
+                    printable_token(s)
+                )))
+            }
+        },
+        Some(_) => {
+            return Err(SinterError::schema(format!(
+                "{}: type must be a string",
+                ctx
+            )))
+        }
+    };
     only_fields(map, HANDLER_FIELDS, &ctx)?;
     let id = match map.get("id") {
         Some(Value::Str(s)) => s.clone(),
@@ -523,11 +553,22 @@ fn parse_handler(item: &Value, origin: &str, idx: usize) -> Result<HandlerDecl> 
     };
     Ok(HandlerDecl {
         id,
+        kind,
         service,
         action,
         sensitive,
         origin: origin.to_string(),
     })
+}
+
+/// A recipe-supplied token for an error message: short and printable, or a
+/// fixed placeholder, so an odd value cannot inject text into diagnostics.
+fn printable_token(s: &str) -> String {
+    if !s.is_empty() && s.chars().count() <= 64 && s.chars().all(|c| c.is_ascii_graphic()) {
+        s.to_string()
+    } else {
+        "<invalid>".to_string()
+    }
 }
 
 fn string_list(v: Option<&Value>, ctx: &str) -> Result<Vec<String>> {

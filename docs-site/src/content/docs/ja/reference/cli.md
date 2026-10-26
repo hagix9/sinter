@@ -1093,6 +1093,7 @@ handler オブジェクトのフィールド:
 - `id`（string）
 - `service`（string）
 - `action`（string）
+- `type`（string。追加フィールド。`"service"` — このバージョンで実装されている唯一のハンドラ種別）
 - `state`（string: `NotRun`、`Succeeded`、`Failed`、`Indeterminate`。大文字・小文字も表記どおり）
 - `reason`（string または null）
 

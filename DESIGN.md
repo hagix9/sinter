@@ -40,6 +40,20 @@ deterministic command environment construction
 
 It also synchronizes stale examples/handler wording with already-normative v4.1 semantics.
 
+1.2 Handler types note (after v4.2)
+
+Handlers now have a type (§4.3, §18). The original handler is the type service and keeps every v4.2 semantic unchanged; a handler without a type is a service handler.
+
+This revision separates three things, and a statement in §4.3 or §18 belongs to exactly one of them:
+
+IMPLEMENTED: what this version of Sinter does today.
+
+PLANNED: designed and accepted, not implemented. A planned feature is not available: a recipe that uses it is rejected at validation, never run and never ignored.
+
+UNCHANGED LIMIT: a restriction that this revision keeps.
+
+Planned features are listed so that their boundaries are fixed before they are built. They must not be read as available.
+
 2. Six v0.1 contracts
 
 Sinter v0.1 is defined by:
@@ -158,19 +172,29 @@ Unknown fields are errors.
 
 4.3 Handlers
 
-v0.1 handlers are not generic resources.
+A handler is a delayed action that runs once, after normal traversal, when a resource that definitely changed notified it (§18).
 
-A handler has exactly:
+IMPLEMENTED: a handler has
 
 id: required string
+
+type: optional string, default service. The values are service, ca_trust and command; this version implements service only (see below)
+
+sensitive: optional boolean, default false
+
+and, for the type service,
 
 service: required static string
 
 action: required enum restart | reload
 
-sensitive: optional boolean, default false
+A handler that has no type is a service handler. type: service is the same handler as no type. A recipe written before handler types existed means exactly what it meant.
 
-Handlers do not support:
+IMPLEMENTED: a recipe that declares a type this version does not implement (ca_trust, command) is rejected at validation with a plain error. A type that is not one of the three values, or a type that is not a string, is rejected. Such a handler is never frozen, never queued by a notification and never reported as run. No type is skipped or treated as a success.
+
+IMPLEMENTED: the fields a type does not define are rejected. In particular a service handler has no with block and no privilege field.
+
+UNCHANGED LIMIT: handlers do not support
 
 when
 
@@ -182,9 +206,17 @@ depends_on
 
 notify
 
-arbitrary command execution
+Handler IDs must be unique and must not collide with resource IDs. A notify that names an unknown handler is an error. Handlers never notify and never depend on each other, so handlers cannot form a cycle.
 
-Handler IDs must be unique and must not collide with resource IDs.
+UNCHANGED LIMIT: a handler is never a general resource, and a handler never runs a shell. The only way a handler may run a program is the planned type command below.
+
+PLANNED, not implemented (H2): type ca_trust refreshes the system CA trust store with the operating system's own tool, chosen by the target's OS family: update-ca-certificates on debian, update-ca-trust extract on redhat. It has no parameters. It needs root. On any other OS family it is refused rather than replaced by another command.
+
+PLANNED, not implemented (H3): type command runs one program after a change. It reuses the validation of the command resource (§10): a static absolute program path, an exact argument list with no shell, a fixed baseline environment plus a restricted env map, an absolute cwd, success_codes, and timeout_seconds. Differences fixed in advance: every value is a static string (no expression), the argument list has at most 64 entries of at most 4096 bytes each, timeout_seconds is 1 to 3600 with default 300, and an optional privilege: root states that root is required. The command resource itself keeps its existing limits.
+
+PLANNED: neither ca_trust nor command introduces implicit privilege escalation. Every handler runs with the privilege of the run (§21); privilege: root only requires it and fails the handler when the run does not have it. A handler never escalates by itself.
+
+PLANNED: plan and audit never run any handler type. Output keeps the documented handler keys; the type is reported additively.
 
 4.4 Variables
 
@@ -1059,7 +1091,7 @@ When fail-fast is triggered by a failed/indeterminate resource, all resources no
 
 18. Handler contract
 
-Handlers are delayed service actions only.
+IMPLEMENTED: the only handler type this version runs is service, a delayed service action. The rules below apply to every handler type, present and planned.
 
 They execute only if notified by a resource that:
 
@@ -1070,6 +1102,10 @@ succeeded
 passed required verification
 
 Multiple notifications to the same handler are deduplicated.
+
+Handlers run in handler declaration order, never in notification order, and the first failed or indeterminate handler stops the phase (§17).
+
+The type service (IMPLEMENTED):
 
 Allowed actions:
 
@@ -1096,6 +1132,12 @@ reload: command/action must report success and service must still be active afte
 The manager synchronization that may precede a handler (systemctl daemon-reload) is a separate operation from the handler's restart or reload action. It reloads unit definitions only and never restarts or reloads the service. To apply a changed unit definition to a running process, a restart handler (or a reload handler when the unit supports ExecReload) must be notified.
 
 A failed or indeterminate manager synchronization before a handler makes that handler failed or indeterminate without running its action; later handlers do not run.
+
+systemctl daemon-reload is not a handler type and none is planned: the manager synchronization of §28 already performs it.
+
+UNCHANGED LIMIT: a handler is not retried and is not recorded across runs. If a run stops before the handler phase, or a handler fails, the notification is lost: the next apply finds the resource already correct and notifies nobody. The run reports the handlers that did not run (handlers_pending); the operator must perform their action by hand. This holds for every handler type, and for a planned type such as ca_trust it means a stale trust store until someone runs the refresh.
+
+PLANNED (types ca_trust and command): their result is the exit status of the program, not a state observation; a failed or indeterminate result stops the phase like any other handler, a program that may have started is never reported as unchanged, and nothing is rolled back.
 
 Handlers cannot notify anything else.
 

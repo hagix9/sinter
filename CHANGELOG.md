@@ -4,6 +4,19 @@ All notable changes to Sinter are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Handlers have a type.** A handler may carry `type: service`; without a type
+  it is a service handler exactly as before, so existing recipes are unchanged.
+  `service` is the only type implemented. `ca_trust` and `command` are reserved
+  for later versions: a recipe that declares them, or any unknown or
+  non-string type, is rejected at validation and is never ignored or reported as
+  run. Notification, deduplication, declaration order, fail-fast and the
+  pending report are unchanged. In JSON output each handler object gains a
+  `type` field (`"service"`); its other keys are unchanged. A failed apply still
+  loses the notifications of the handlers that did not run; the documentation
+  now describes how to run them by hand.
+
 ### Changed
 
 - **`package` `state: absent` removes exactly the named package on apt and dnf

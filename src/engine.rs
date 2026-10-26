@@ -632,10 +632,7 @@ impl Engine {
                 if let Some(s) = hstage.as_mut() {
                     s.item_started(Some(ItemRef::handler(&h.id)));
                 }
-                let action = match h.action {
-                    crate::ir::HandlerAction::Restart => "restart",
-                    crate::ir::HandlerAction::Reload => "reload",
-                };
+                let action = h.action_label();
                 // Outer errors must not discard already-processed resources or
                 // pending handler information. Convert them into a handler
                 // outcome and continue building the report.
@@ -649,6 +646,7 @@ impl Engine {
                         };
                         HandlerResult {
                             id: h.id.clone(),
+                            kind: h.kind,
                             service: h.service.clone(),
                             action: action.to_string(),
                             state,
@@ -908,11 +906,26 @@ impl Engine {
         Ok(out)
     }
 
+    /// Run one notified handler. The type decides how: the dispatch has no
+    /// default arm that could run something else. A type that is not
+    /// implemented never reaches here (the parser refuses it); if one ever did,
+    /// it fails closed and is reported as a failed handler instead of being
+    /// skipped or counted as run.
     fn run_handler(&mut self, h: &crate::model::FrozenHandler) -> Result<HandlerResult> {
-        let action = match h.action {
-            crate::ir::HandlerAction::Restart => "restart",
-            crate::ir::HandlerAction::Reload => "reload",
-        };
+        match h.kind {
+            crate::ir::HandlerKind::Service => self.run_service_handler(h),
+            crate::ir::HandlerKind::CaTrust | crate::ir::HandlerKind::Command => {
+                Err(SinterError::apply(format!(
+                    "handler {} has type {}, which is not implemented in this version of Sinter",
+                    h.id,
+                    h.kind.label()
+                )))
+            }
+        }
+    }
+
+    fn run_service_handler(&mut self, h: &crate::model::FrozenHandler) -> Result<HandlerResult> {
+        let action = h.action_label();
         self.manager.last_handler_failure = None;
         let outcome = self.handler_service(h, action)?;
         let detail = self
@@ -934,6 +947,7 @@ impl Engine {
         };
         Ok(HandlerResult {
             id: h.id.clone(),
+            kind: h.kind,
             service: h.service.clone(),
             action: action.to_string(),
             state: outcome,
