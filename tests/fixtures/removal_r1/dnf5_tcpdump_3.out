@@ -1,0 +1,10 @@
+Package     Arch    Version          Repository      Size
+Removing:
+ tcpdump    aarch64 14:4.99.6-2.fc43 updates      1.4 MiB
+Removing unused dependencies:
+ libibverbs aarch64 58.0-4.fc43      fedora       1.6 MiB
+ libpcap    aarch64 14:1.10.7-1.fc43 updates    442.4 KiB
+
+Transaction Summary:
+ Removing:           3 packages
+

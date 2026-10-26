@@ -1,0 +1,15 @@
+Package             Arch    Version         Repository      Size
+Removing:
+ unzip              aarch64 6.0-67.fc43     fedora     470.2 KiB
+Removing dependent packages:
+ fonts-srpm-macros  noarch  1:2.0.5-23.fc43 fedora      55.8 KiB
+ forge-srpm-macros  noarch  0.4.0-3.fc43    fedora      38.9 KiB
+ go-srpm-macros     noarch  3.8.0-1.fc43    fedora      61.9 KiB
+ python-srpm-macros noarch  3.14-5.fc43     fedora      51.5 KiB
+ redhat-rpm-config  noarch  343-14.fc43     updates    182.9 KiB
+ rpm-build          aarch64 6.0.2-1.fc43    updates    598.1 KiB
+ zip                aarch64 3.0-44.fc43     fedora     762.5 KiB
+
+Transaction Summary:
+ Removing:           8 packages
+

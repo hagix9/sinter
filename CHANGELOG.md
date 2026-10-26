@@ -2,6 +2,52 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **`package` `state: absent` removes exactly the named package on apt and dnf
+  targets.** Until now Sinter ran `apt-get -y remove NAME` / `dnf -y remove NAME`,
+  and the package manager's resolver could remove reverse dependencies as well.
+  Removal now uses `dpkg --remove` (after `dpkg --dry-run --remove`) on apt
+  targets and `rpm -e NEVRA` (after `rpm -e --test`, under dnf's own process
+  lock) on dnf targets, never `--force-*` / `--nodeps` / autoremove / purge.
+  If other installed packages depend on the package, nothing is removed and the
+  resource fails naming them; unneeded dependencies stay installed. Before
+  removing, Sinter also refuses essential/protected packages (dpkg), DNF
+  protected packages and the package that owns the running kernel, packages
+  installed more than once, unreadable DNF configuration, a custom dnf
+  `persistdir`, a held package-database lock and a running dnf transaction.
+  After removing, it reads the package database back and fails if any other
+  package is gone or a new dependency problem appeared. A recipe's `with.env`
+  now only passes `DEBIAN_FRONTEND`, `DEBIAN_PRIORITY`, `NEEDRESTART_MODE` and
+  `NEEDRESTART_SUSPEND` to the removal commands.
+  - Not recorded in `dnf history` / `/var/log/apt/history.log`; apt/dnf hooks do
+    not run.
+  - dpkg records the removal request before it checks dependencies: a refusal or
+    a failing maintainer script leaves `deinstall ok installed` /
+    `half-installed`, which Sinter reports as a possible change with unknown
+    verification.
+  - dnf targets take seconds to minutes per removal on small hosts
+    (`rpm -qa` and `rpm -Va --nofiles` before and after).
+  - Not excluded: PackageKit, `microdnf`, a hand-run `rpm`, and a short window
+    inside rpm itself; a dependent installed in that window is reported as a
+    failure afterwards only if its commit came before Sinter read the package
+    database, and is never repaired.
+  - A `dpkg.cfg` `ignore-depends=` line cannot be cancelled from the command
+    line; a removal that package manager scripts turn into a `dnf`/`yum` call
+    waits for Sinter's lock and is killed after 300 seconds.
+  - On apt, a failed `dpkg --remove` is reported as "nothing was changed" only
+    when dpkg printed no `Removing` line and its own refusal is on stderr as a
+    whole line; words in a maintainer script's output are not evidence. A
+    started or unexplained failure is a (possible) change.
+  - On apt, another architecture's instance that only keeps configuration
+    files (or is not installed) no longer makes the package unobservable;
+    two installed architectures are still refused.
+  - Verified on real hosts: Ubuntu 24.04, Rocky Linux 9.8 and 10.2. Not verified
+    for removal: Ubuntu 26.04, RHEL, AlmaLinux, Oracle Linux, Rocky Linux 8.
+    Fedora is not supported.
+
 ## [1.7.0] - 2026-10-21
 
 ### Added

@@ -130,6 +130,39 @@ impl PackageBackend {
         }
     }
 
+    /// Exact argv for a DNF5 removal preview. The preview and the mutation
+    /// share `--disablerepo=*` and `--no-autoremove`; only the confirmation
+    /// flag differs (`--assumeno` vs `-y`). R2 only uses this for a detected
+    /// DNF5 target; DNF4 argv is unchanged.
+    pub fn dnf5_remove_preview_args(name: &str) -> Vec<String> {
+        Self::dnf5_remove_preview_args_for(name, true)
+    }
+
+    /// Preview argv with the exact auto-remove setting. R2 runs both the
+    /// default policy probe (`false`) and the execution-matched preview
+    /// (`true`); a caller must keep the execution on `true`.
+    pub fn dnf5_remove_preview_args_for(name: &str, no_autoremove: bool) -> Vec<String> {
+        let mut args = vec!["--disablerepo=*".to_string(), "remove".to_string()];
+        if no_autoremove {
+            args.push("--no-autoremove".to_string());
+        }
+        args.push("--assumeno".to_string());
+        args.push(name.to_string());
+        args
+    }
+
+    /// Exact argv for the DNF5 removal that follows a passing preview. It is
+    /// the execution counterpart of [`Self::dnf5_remove_preview_args`].
+    pub fn dnf5_remove_args(name: &str) -> Vec<String> {
+        vec![
+            "--disablerepo=*".to_string(),
+            "-y".to_string(),
+            "remove".to_string(),
+            "--no-autoremove".to_string(),
+            name.to_string(),
+        ]
+    }
+
     /// argv that loads every enabled repository's metadata strictly from a
     /// private snapshot cachedir. Exits non-zero when any enabled
     /// repository's repodata is missing or unusable offline — proving the
@@ -373,6 +406,105 @@ impl PackageBackend {
         }
     }
 }
+
+impl PackageBackend {
+    /// Whether an APT status answer that could not be read as one record looks
+    /// like several instances of the package run together.
+    ///
+    /// `dpkg-query -W -f=${Status} -- NAME` prints one status per instance
+    /// (one per architecture) without a separator, so a second architecture
+    /// that is only left as `config-files` turns a clean answer into
+    /// `install ok installeddeinstall ok config-files`. A complete, valid
+    /// exit-0 capture with a single line that holds two or more `<want> ok
+    /// <state>` statuses is that symptom; anything else is not, and keeps
+    /// its original error.
+    pub(crate) fn looks_like_several_apt_instances(out: &Output) -> bool {
+        if !matches!(out.completion, Completion::Exited(0))
+            || out.stdout_truncated
+            || out.stderr_truncated
+            || !out.stderr.is_empty()
+        {
+            return false;
+        }
+        let Ok(text) = std::str::from_utf8(&out.stdout) else {
+            return false;
+        };
+        !text.contains(['\n', '\r']) && text.matches(" ok ").count() >= 2
+    }
+
+    /// Classify `dpkg-query -W -f=${Status}\t${Package}\t${Architecture}\n --
+    /// NAME`: one record per instance. Instances that are only configuration
+    /// files or not installed (another architecture's leftover) do not count;
+    /// exactly one clean installed instance is `Installed`, none is `Absent`.
+    /// More than one installed instance, an instance in any other state, or
+    /// any record that is not exactly what was asked for fails closed.
+    pub(crate) fn classify_apt_instances(
+        out: &Output,
+        name: &str,
+        name_disp: &str,
+        sensitive: bool,
+    ) -> Result<PackageState> {
+        match &out.completion {
+            Completion::Exited(0) => {}
+            Completion::Exited(c) => {
+                return Err(observation_error(Self::Apt, name_disp, *c, out, sensitive))
+            }
+            Completion::Signaled(s) => {
+                return Err(SinterError::apply(format!(
+                    "package observation for {} terminated by signal {}",
+                    name_disp, s
+                )))
+            }
+            Completion::Indeterminate { reason, .. } => {
+                return Err(SinterError::indeterminate(format!(
+                    "package observation for {} did not complete: {}",
+                    name_disp, reason
+                )))
+            }
+        }
+        require_package_record(out, name_disp)?;
+        let text = utf8_package_stream(out, name_disp, sensitive)?;
+        let malformed = || {
+            SinterError::apply(format!(
+                "package observation for {} produced instance records that cannot be read",
+                name_disp
+            ))
+        };
+        if text.is_empty() || !text.ends_with('\n') || text.contains('\r') {
+            return Err(malformed());
+        }
+        let mut installed = 0usize;
+        for record in text.split_terminator('\n') {
+            let fields: Vec<&str> = record.split('\t').collect();
+            let [status, package, arch] = fields.as_slice() else {
+                return Err(malformed());
+            };
+            let arch_ok = !arch.is_empty()
+                && arch
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+            // A name dpkg only knows by reference has no architecture.
+            if *package != name || !(arch_ok || (arch.is_empty() && *status == NO_STANZA_STATUS)) {
+                return Err(malformed());
+            }
+            if crate::resources::classify_dpkg_status(status)? == PackageState::Installed {
+                installed += 1;
+            }
+        }
+        match installed {
+            0 => Ok(PackageState::Absent),
+            1 => Ok(PackageState::Installed),
+            _ => Err(SinterError::apply(format!(
+                "package observation for {} found more than one installed instance \
+                 (another architecture is installed too)",
+                name_disp
+            ))),
+        }
+    }
+}
+
+/// The record dpkg 1.22 prints for a name that has no status stanza.
+const NO_STANZA_STATUS: &str = "unknown ok not-installed";
 
 /// A package answer must come from a complete capture: a truncated stream
 /// cannot prove the record is the whole answer (IA-01). A diagnostic on stderr
@@ -1079,5 +1211,254 @@ mod tests {
             .unwrap_err();
         assert!(!e.message.contains("secret value in stderr"));
         assert!(e.message.contains("[redacted]"));
+    }
+
+    // ----------------------------------------------- several architectures
+
+    const INST: &str = "install ok installed";
+    const CONF: &str = "deinstall ok config-files";
+
+    fn instances(text: &str) -> Result<PackageState> {
+        let o = exited(0, text, "");
+        PackageBackend::classify_apt_instances(&o, "nano", "nano", false)
+    }
+
+    #[test]
+    fn run_together_statuses_are_recognised_but_never_trusted() {
+        // What dpkg-query prints for amd64 installed + i386 config-files.
+        let both = format!("{INST}{CONF}");
+        let o = exited(0, &both, "");
+        assert!(PackageBackend::Apt
+            .classify_observation(&o, "nano", "nano", false)
+            .is_err());
+        assert!(PackageBackend::looks_like_several_apt_instances(&o));
+        // One status is not the symptom, whatever it says.
+        for single in [
+            INST,
+            CONF,
+            "deinstall ok installed",
+            "install ok half-configured",
+        ] {
+            assert!(
+                !PackageBackend::looks_like_several_apt_instances(&exited(0, single, "")),
+                "{single}"
+            );
+        }
+        // Neither is a failed, noisy, truncated, multi-line or empty answer.
+        assert!(!PackageBackend::looks_like_several_apt_instances(&exited(
+            1, &both, ""
+        )));
+        assert!(!PackageBackend::looks_like_several_apt_instances(&exited(
+            0,
+            &both,
+            "warning\n"
+        )));
+        assert!(!PackageBackend::looks_like_several_apt_instances(&exited(
+            0,
+            &format!("{both}\n"),
+            ""
+        )));
+        assert!(!PackageBackend::looks_like_several_apt_instances(&exited(
+            0, "", ""
+        )));
+        let mut cut = exited(0, &both, "");
+        cut.stdout_truncated = true;
+        assert!(!PackageBackend::looks_like_several_apt_instances(&cut));
+        let mut cut = exited(0, &both, "");
+        cut.stderr_truncated = true;
+        assert!(!PackageBackend::looks_like_several_apt_instances(&cut));
+        let bad = Output {
+            completion: Completion::Exited(0),
+            stdout: [both.as_bytes(), &[0xff]].concat(),
+            stderr: Vec::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        };
+        assert!(!PackageBackend::looks_like_several_apt_instances(&bad));
+        let sig = Output {
+            completion: Completion::Signaled(9),
+            ..exited(0, &both, "")
+        };
+        assert!(!PackageBackend::looks_like_several_apt_instances(&sig));
+    }
+
+    #[test]
+    fn one_installed_instance_with_other_architectures_left_as_config_files_is_installed() {
+        assert_eq!(
+            instances(&format!("{INST}\tnano\tamd64\n")).unwrap(),
+            PackageState::Installed
+        );
+        assert_eq!(
+            instances(&format!("{INST}\tnano\tamd64\n{CONF}\tnano\ti386\n")).unwrap(),
+            PackageState::Installed
+        );
+        // Whatever order dpkg lists them in.
+        assert_eq!(
+            instances(&format!("{CONF}\tnano\ti386\n{INST}\tnano\tamd64\n")).unwrap(),
+            PackageState::Installed
+        );
+        assert_eq!(
+            instances(&format!(
+                "{CONF}\tnano\ti386\n{INST}\tnano\tamd64\nunknown ok not-installed\tnano\tarm64\n"
+            ))
+            .unwrap(),
+            PackageState::Installed
+        );
+        assert_eq!(
+            instances(&format!(
+                "{INST}\tnano\tamd64\npurge ok not-installed\tnano\ti386\n"
+            ))
+            .unwrap(),
+            PackageState::Installed
+        );
+    }
+
+    #[test]
+    fn instances_that_are_all_left_over_make_the_package_absent() {
+        assert_eq!(
+            instances(&format!("{CONF}\tnano\ti386\n")).unwrap(),
+            PackageState::Absent
+        );
+        assert_eq!(
+            instances(&format!("{CONF}\tnano\ti386\n{CONF}\tnano\tamd64\n")).unwrap(),
+            PackageState::Absent
+        );
+        assert_eq!(
+            instances("purge ok not-installed\tnano\tamd64\n").unwrap(),
+            PackageState::Absent
+        );
+        // A name dpkg only knows by reference has no architecture.
+        assert_eq!(
+            instances("unknown ok not-installed\tnano\t\n").unwrap(),
+            PackageState::Absent
+        );
+    }
+
+    #[test]
+    fn two_installed_instances_stay_ambiguous() {
+        let e = instances(&format!("{INST}\tnano\tamd64\n{INST}\tnano\ti386\n")).unwrap_err();
+        assert!(
+            e.message.contains("more than one installed instance"),
+            "{}",
+            e.message
+        );
+        let e = instances(&format!(
+            "{INST}\tnano\tamd64\n{CONF}\tnano\tarm64\n{INST}\tnano\ti386\n"
+        ))
+        .unwrap_err();
+        assert!(e.message.contains("more than one installed instance"));
+        // The name is redacted for a sensitive resource.
+        let o = exited(0, &format!("{INST}\tnano\tamd64\n{INST}\tnano\ti386\n"), "");
+        let e = PackageBackend::classify_apt_instances(&o, "nano", "[redacted]", true).unwrap_err();
+        assert!(!e.message.contains("nano"), "{}", e.message);
+    }
+
+    #[test]
+    fn an_instance_in_any_other_state_fails_closed() {
+        for bad in [
+            "deinstall ok installed",
+            "install ok half-configured",
+            "install ok unpacked",
+            "install reinstreq installed",
+            "install ok triggers-awaited",
+            "deinstall ok half-installed",
+            "hold ok installed",
+            "install ok  installed",
+            " install ok installed",
+            "",
+        ] {
+            assert!(
+                instances(&format!("{bad}\tnano\tamd64\n")).is_err(),
+                "alone: {bad:?}"
+            );
+            // Also next to a clean installed instance of another architecture.
+            assert!(
+                instances(&format!("{INST}\tnano\tamd64\n{bad}\tnano\ti386\n")).is_err(),
+                "next to a clean one: {bad:?}"
+            );
+        }
+        // `unknown` is only the defined record for a name without a stanza.
+        assert!(instances("unknown ok installed\tnano\tamd64\n").is_err());
+        assert!(instances("unknown ok not-installed\tnano\tamd64\n").is_ok());
+    }
+
+    #[test]
+    fn malformed_unrelated_or_incomplete_instance_records_fail_closed() {
+        let one = format!("{INST}\tnano\tamd64\n");
+        for bad in [
+            // no terminator, CR, blank, empty
+            format!("{INST}\tnano\tamd64"),
+            format!("{INST}\tnano\tamd64\r\n"),
+            format!("{one}\n"),
+            String::new(),
+            "\n".to_string(),
+            // field counts
+            format!("{INST}\tnano\n"),
+            format!("{INST}\tnano\tamd64\t1.0\n"),
+            format!("{INST}\tnano\tamd64\t\n"),
+            format!("{INST}\n"),
+            // records concatenated without the separator
+            format!("{INST}\tnano\tamd64{CONF}\tnano\ti386\n"),
+            format!("{INST}{CONF}\n"),
+            // another package, a prefix of the name, a different case
+            format!("{INST}\tnano2\tamd64\n"),
+            format!("{INST}\tnan\tamd64\n"),
+            format!("{INST}\tNANO\tamd64\n"),
+            format!("{INST}\tnano:amd64\tamd64\n"),
+            format!("{one}{INST}\tother\ti386\n"),
+            // the architecture
+            format!("{INST}\tnano\t\n"),
+            format!("{INST}\tnano\tamd 64\n"),
+            format!("{INST}\tnano\tamd64;rm\n"),
+            format!("{INST}\tnano\tamd64:i386\n"),
+            // a record that is only partly valid next to a valid one
+            format!("{one}{CONF}\tnano\n"),
+            format!("{one}garbage\n"),
+        ] {
+            assert!(instances(&bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_failed_noisy_truncated_or_invalid_instance_query_never_gives_a_state() {
+        let good = format!("{INST}\tnano\tamd64\n");
+        let call = |o: &Output| PackageBackend::classify_apt_instances(o, "nano", "nano", false);
+        assert!(call(&exited(0, &good, "dpkg-query: warning: x\n")).is_err());
+        assert!(call(&exited(1, &good, "")).is_err());
+        assert!(call(&exited(
+            1,
+            "",
+            "dpkg-query: no packages found matching nano\n"
+        ))
+        .is_err());
+        assert!(call(&exited(2, &good, "")).is_err());
+        let mut cut = exited(0, &good, "");
+        cut.stdout_truncated = true;
+        assert!(call(&cut).is_err());
+        let mut cut = exited(0, &good, "");
+        cut.stderr_truncated = true;
+        assert!(call(&cut).is_err());
+        let bad = Output {
+            completion: Completion::Exited(0),
+            stdout: [good.as_bytes(), &[0xff, 0xfe]].concat(),
+            stderr: Vec::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        };
+        assert!(call(&bad).is_err());
+        let sig = Output {
+            completion: Completion::Signaled(11),
+            ..exited(0, &good, "")
+        };
+        assert!(call(&sig).is_err());
+        let ind = Output {
+            completion: Completion::Indeterminate {
+                started: true,
+                reason: "timed out".to_string(),
+            },
+            ..exited(0, &good, "")
+        };
+        let e = call(&ind).unwrap_err();
+        assert_eq!(e.kind, crate::error::ErrorKind::Indeterminate);
     }
 }

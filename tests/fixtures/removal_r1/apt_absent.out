@@ -1,0 +1,12 @@
+NOTE: This is only a simulation!
+      apt-get needs root privileges for real execution.
+      Keep also in mind that locking is deactivated,
+      so don't depend on the relevance to the real current situation!
+Reading package lists...
+Building dependency tree...
+Reading state information...
+Package '7zip' is not installed, so not removed
+The following packages were automatically installed and are no longer required:
+  fortunes-min libcaca0 librecode0 toilet-fonts
+Use 'apt autoremove' to remove them.
+0 upgraded, 0 newly installed, 0 to remove and 179 not upgraded.

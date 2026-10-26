@@ -287,11 +287,27 @@ fn dnf_removes_installed_package() {
     let p = find(&r, "p");
     assert_eq!(p.change, Change::Changed);
     assert_eq!(p.verification, Verification::Verified);
-    // Removal consults no repository at all: a single mutation with every
-    // repo disabled makes a metadata fetch impossible by construction.
-    let dnf = commands_with(&r, "/usr/bin/dnf");
-    assert_eq!(dnf.len(), 1);
-    assert_eq!(dnf[0].args, vec!["--disablerepo=*", "-y", "remove", "nano"]);
+    // Removal never asks dnf for a removal set: rpm removes exactly the
+    // installed package's own NEVRA, after a dry-run of the same operand, and
+    // runs under dnf's lock so a dnf transaction cannot overlap it.
+    assert!(commands_with(&r, "/usr/bin/dnf").is_empty());
+    let rpm = commands_with(&r, "/usr/bin/rpm");
+    let test: Vec<_> = rpm
+        .iter()
+        .filter(|c| c.args.iter().any(|a| a == "--test"))
+        .collect();
+    assert_eq!(test.len(), 1);
+    assert_eq!(
+        test[0].args,
+        vec!["-e", "--test", "--", "nano-1.0-1.el9.x86_64"]
+    );
+    let erase = commands_with(&r, "/usr/bin/sh");
+    assert_eq!(erase.len(), 1);
+    assert_eq!(
+        erase[0].args.last().map(String::as_str),
+        Some("nano-1.0-1.el9.x86_64")
+    );
+    assert!(erase[0].args[1].contains("/usr/bin/rpm' -e -- \"$1\""));
 }
 
 #[test]

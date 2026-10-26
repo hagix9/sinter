@@ -1,0 +1,15 @@
+Dependencies resolved.
+================================================================================
+ Package         Architecture Version                     Repository       Size
+================================================================================
+Removing:
+ tcpdump         aarch64      14:4.99.0-9.el9             @appstream      1.5 M
+Removing unused dependencies:
+ libibverbs      aarch64      61.0-2.el9                  @baseos         1.7 M
+ libpcap         aarch64      14:1.10.0-4.el9_8.1         @baseos         408 k
+
+Transaction Summary
+================================================================================
+Remove  3 Packages
+
+Freed space: 3.6 M

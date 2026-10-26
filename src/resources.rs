@@ -7,6 +7,11 @@ use crate::model::FrozenResource;
 use crate::package_progress::apt::AptProgressParser;
 use crate::package_progress::dnf::DnfProgressParser;
 use crate::package_progress::{PackageParser, PackageReporter};
+use crate::package_removal::{
+    evaluate as evaluate_removal, parse_preview as parse_removal_preview, InventoryFingerprint,
+    PreviewInput, RemovalAllowList, RemovalBackend, RemovalExecutionDelta, RemovalPreview,
+    RemovalSafetyDecision, RemovalSafetyError,
+};
 use crate::paths::{ancestor_dirs, mode_to_string, parent_and_name, parse_mode};
 use crate::platform::PackageBackend;
 use crate::progress::ItemRef;
@@ -19,6 +24,8 @@ use crate::value::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use zeroize::Zeroizing;
+
+mod exact_removal;
 
 /// Metadata desired for a filesystem object.
 #[derive(Debug, Clone)]
@@ -3004,6 +3011,38 @@ impl Engine {
             return Ok(r);
         }
 
+        // R2: a DNF5 removal is the only path connected to the removal
+        // safety seam. The permit is obtained once and reused for the
+        // preview/inventory commands and the mutation; nothing in this block
+        // mutates the host on a refusal.
+        let permit = self.fs.mutation_permit()?;
+        let mut dnf5_plan: Option<Dnf5RemovalPlan> = None;
+        if backend == PackageBackend::Dnf
+            && !want_installed
+            && self.dnf_is_v5(&permit, &package_env)?
+        {
+            match self.dnf5_removal_gate(&name, sensitive, &package_env, res, &permit)? {
+                Dnf5RemovalGate::Proceed(plan) => dnf5_plan = Some(plan),
+                Dnf5RemovalGate::Refused(result) => return Ok(result),
+            }
+        }
+
+        // WP-PKG-CORE-REPAIR: APT and DNF4 removal never lets the package
+        // manager's resolver choose the removal set (`apt-get remove`,
+        // `dnf remove` can remove reverse dependencies). The low-level tool
+        // removes exactly the installed package and refuses when anything
+        // depends on it; see `exact_removal`.
+        if !want_installed && dnf5_plan.is_none() {
+            return self.run_exact_package_removal(
+                res,
+                &name,
+                sensitive,
+                backend,
+                &package_env,
+                &permit,
+            );
+        }
+
         // DESIGN §27: a dnf install mutation runs cache-only (`-C`) against
         // a private snapshot of the metadata cache whose completeness —
         // repodata, mirror lists, and every required package payload — is
@@ -3058,9 +3097,13 @@ impl Engine {
 
         let mut req = ExecRequest::new(backend.manager_program());
         req.env = baseline_env(self.fs.home_env());
-        req.env.extend(package_env);
+        req.env.extend(package_env.clone());
         req.sensitive = sensitive;
-        req.args = backend.mutate_args(want_installed, &name, snapshot_dir.as_deref());
+        req.args = if dnf5_plan.is_some() {
+            PackageBackend::dnf5_remove_args(&name)
+        } else {
+            backend.mutate_args(want_installed, &name, snapshot_dir.as_deref())
+        };
         if snapshot_dir.is_some() {
             // This completion-only plugin writes a fixed live-cache path,
             // ignoring cachedir. Keep repository/authentication plugins enabled.
@@ -3079,7 +3122,6 @@ impl Engine {
         // attached to the propagated error so it is never discarded by a
         // bare `?` — but the mutation itself never ran, so there is no
         // mutation truth to preserve.
-        let permit = self.fs.mutation_permit()?;
         // Progress observation is additive: a reporter exists only when a
         // consumer is attached and the resource is not sensitive, and the
         // backend argv gains the machine-readable option only then. A run
@@ -3228,6 +3270,63 @@ impl Engine {
             Self::note_snapshot_cleanup_failure(&mut r, &cleanup_failure);
             return Ok(r);
         }
+        if let Some(plan) = &dnf5_plan {
+            let after_inventory = match self.dnf_inventory(&permit, &package_env) {
+                Ok(inventory) => inventory,
+                Err(e) => {
+                    let mut r = changed_result_sensitive(res, sensitive);
+                    r.execution = if e.is_indeterminate() {
+                        Execution::Indeterminate
+                    } else {
+                        Execution::Failed
+                    };
+                    // The remove command exited 0. Never report "unchanged"
+                    // merely because the post-removal inventory is unreadable.
+                    r.change = Change::Changed;
+                    r.verification = Verification::Unknown;
+                    r.reason = Some(format!(
+                        "package removal completed but the post-removal inventory could not be read: {}",
+                        e.render(sensitive)
+                    ));
+                    return Ok(r);
+                }
+            };
+            let delta = match RemovalExecutionDelta::compute(
+                plan.preview.planned_removals(),
+                RemovalBackend::Dnf5,
+                &plan.before,
+                &after_inventory,
+            ) {
+                Ok(delta) => delta,
+                Err(e) => {
+                    let mut r = changed_result_sensitive(res, sensitive);
+                    r.execution = Execution::Failed;
+                    r.change = Change::Possible;
+                    r.verification = Verification::Failed;
+                    r.reason = Some(format!(
+                        "package removal result could not be compared with the previewed set: {}",
+                        e.render(sensitive)
+                    ));
+                    return Ok(r);
+                }
+            };
+            if let Err(e) = delta.require_clean() {
+                let mut r = changed_result_sensitive(res, sensitive);
+                r.execution = Execution::Failed;
+                r.change = if delta.actual_removals().is_empty() {
+                    Change::Possible
+                } else {
+                    Change::Changed
+                };
+                r.verification = Verification::Failed;
+                r.reason = Some(format!(
+                    "package removal result did not match the previewed removal set: {}",
+                    e.render(sensitive)
+                ));
+                return Ok(r);
+            }
+        }
+
         let after = match self.observe_package_sensitive(backend, &name, sensitive) {
             Ok(after) => after,
             Err(e) => {
@@ -4785,7 +4884,18 @@ impl Engine {
             )));
         }
         let out = self.fs.package_query_sensitive(name, sensitive)?;
-        backend.classify_observation(&out, name, name_disp, sensitive)
+        let first = backend.classify_observation(&out, name, name_disp, sensitive);
+        // Several architectures of one package run together in that answer;
+        // read them one by one before refusing (the instance-level answer
+        // replaces the first one, whatever it is).
+        if first.is_err()
+            && backend == PackageBackend::Apt
+            && PackageBackend::looks_like_several_apt_instances(&out)
+        {
+            let instances = self.fs.dpkg_query_instances_sensitive(name, sensitive)?;
+            return PackageBackend::classify_apt_instances(&instances, name, name_disp, sensitive);
+        }
+        first
     }
 
     // -----------------------------------------------------------------------
@@ -5568,6 +5678,18 @@ impl Engine {
 }
 
 /// Outcome of preparing the private dnf metadata snapshot for an install.
+/// A DNF5 removal that passed the preview gate. `before` is inventory C.
+struct Dnf5RemovalPlan {
+    before: InventoryFingerprint,
+    preview: RemovalPreview,
+}
+
+/// The result of the DNF5 pre-mutation gate.
+enum Dnf5RemovalGate {
+    Proceed(Dnf5RemovalPlan),
+    Refused(ResourceResult),
+}
+
 enum DnfSnapshot {
     /// Verified snapshot cachedir path; the install may run against it.
     Ready(String),
@@ -7804,6 +7926,311 @@ pub fn classify_dpkg_status(status: &str) -> Result<PackageState> {
             "package is in an unsupported or non-clean state: {}",
             other
         ))),
+    }
+}
+
+impl Engine {
+    /// Detect the target's DNF generation from the binary the target's
+    /// `/usr/bin/dnf` actually resolves to. DNF4 on Rocky/DNF4 systems
+    /// resolves to `dnf-3`/`dnf-4` and is left on its existing path; DNF5
+    /// (Fedora 43) resolves to `/usr/bin/dnf5`. A regular `/usr/bin/dnf` is
+    /// resolved with the version fallback; any unknown answer fails closed.
+    fn dnf_is_v5(
+        &mut self,
+        permit: &crate::targetfs::MutationPermit,
+        package_env: &BTreeMap<String, String>,
+    ) -> Result<bool> {
+        let mut req = ExecRequest::new("/usr/bin/readlink");
+        req.args = vec!["-f".to_string(), "/usr/bin/dnf".to_string()];
+        req.env = baseline_env(self.fs.home_env());
+        req.env.extend(package_env.clone());
+        req.timeout_secs = 30;
+        let out = self.fs.exec(permit, &req)?;
+        if out.stdout_truncated
+            || out.stderr_truncated
+            || !out.stderr.is_empty()
+            || out.completion != Completion::Exited(0)
+        {
+            return Err(SinterError::apply(
+                "dnf binary identity could not be established; refusing the package removal",
+            ));
+        }
+        let text = std::str::from_utf8(&out.stdout).map_err(|_| {
+            SinterError::apply(
+                "dnf binary identity is not valid UTF-8; refusing the package removal",
+            )
+        })?;
+        let target = text.trim();
+        let basename = std::path::Path::new(target)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        if basename == "dnf5" {
+            return Ok(true);
+        }
+        if basename.starts_with("dnf-") || basename.starts_with("dnf4") {
+            return Ok(false);
+        }
+        if basename == "dnf" {
+            return self.dnf_version_is_v5(permit, package_env);
+        }
+        Err(SinterError::apply(
+            "dnf binary identity is not recognized; refusing the package removal",
+        ))
+    }
+
+    /// Fallback for a regular `/usr/bin/dnf` (not a symlink): ask the binary
+    /// itself. This is only reached on unusual layouts, so the common DNF4
+    /// path keeps its one-command behavior.
+    fn dnf_version_is_v5(
+        &mut self,
+        permit: &crate::targetfs::MutationPermit,
+        package_env: &BTreeMap<String, String>,
+    ) -> Result<bool> {
+        let mut req = ExecRequest::new("/usr/bin/dnf");
+        req.args = vec!["--version".to_string()];
+        req.env = baseline_env(self.fs.home_env());
+        req.env.extend(package_env.clone());
+        req.timeout_secs = 30;
+        let out = self.fs.exec(permit, &req)?;
+        if out.stdout_truncated
+            || out.stderr_truncated
+            || !out.stderr.is_empty()
+            || out.completion != Completion::Exited(0)
+        {
+            return Err(SinterError::apply(
+                "dnf version could not be established; refusing the package removal",
+            ));
+        }
+        let text = std::str::from_utf8(&out.stdout).map_err(|_| {
+            SinterError::apply("dnf version is not valid UTF-8; refusing the package removal")
+        })?;
+        let first = text.lines().next().unwrap_or("").trim();
+        if first.starts_with("dnf5 version ") {
+            Ok(true)
+        } else if first.starts_with("4.") || first.starts_with("dnf 4") {
+            Ok(false)
+        } else {
+            Err(SinterError::apply(
+                "dnf version is not recognized; refusing the package removal",
+            ))
+        }
+    }
+
+    /// Read the complete RPM package inventory through the same target
+    /// identity and environment as the mutation. Empty/malformed/truncated
+    /// answers fail closed; no inventory means no removal.
+    fn dnf_inventory(
+        &mut self,
+        permit: &crate::targetfs::MutationPermit,
+        package_env: &BTreeMap<String, String>,
+    ) -> std::result::Result<InventoryFingerprint, RemovalSafetyError> {
+        let mut req = ExecRequest::new("/usr/bin/rpm");
+        req.args = vec![
+            "-qa".to_string(),
+            "--qf".to_string(),
+            "%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n".to_string(),
+        ];
+        req.env = baseline_env(self.fs.home_env());
+        req.env.extend(package_env.clone());
+        req.timeout_secs = 120;
+        req.sensitive = true;
+        let out = match self.fs.exec(permit, &req) {
+            Ok(out) => out,
+            Err(_) => return Err(RemovalSafetyError::command_failed()),
+        };
+        if out.completion != Completion::Exited(0)
+            || out.stdout_truncated
+            || out.stderr_truncated
+            || !out.stderr.is_empty()
+        {
+            return Err(RemovalSafetyError::command_failed());
+        }
+        InventoryFingerprint::from_records(RemovalBackend::Dnf5, &out.stdout)
+    }
+
+    /// Run one DNF5 `remove --assumeno` preview. `no_autoremove=false` is the
+    /// policy probe that would expose DNF's default unused-dependency cascade;
+    /// `true` is the exact setting the mutation uses.
+    fn dnf5_preview(
+        &mut self,
+        name: &str,
+        sensitive: bool,
+        package_env: &BTreeMap<String, String>,
+        permit: &crate::targetfs::MutationPermit,
+        no_autoremove: bool,
+    ) -> std::result::Result<RemovalPreview, RemovalSafetyError> {
+        let mut req = ExecRequest::new("/usr/bin/dnf");
+        req.args = PackageBackend::dnf5_remove_preview_args_for(name, no_autoremove);
+        req.env = baseline_env(self.fs.home_env());
+        req.env.extend(package_env.clone());
+        req.sensitive = sensitive;
+        req.timeout_secs = 120;
+        let out = match self.fs.exec(permit, &req) {
+            Ok(out) => out,
+            Err(_) => return Err(RemovalSafetyError::command_failed()),
+        };
+        let exit_code = match out.completion {
+            Completion::Exited(code) => code,
+            _ => return Err(RemovalSafetyError::command_failed()),
+        };
+        parse_removal_preview(
+            RemovalBackend::Dnf5,
+            name,
+            PreviewInput {
+                exit_code,
+                stdout: &out.stdout,
+                stderr: &out.stderr,
+                stdout_truncated: out.stdout_truncated,
+                stderr_truncated: out.stderr_truncated,
+                backend_version: None,
+            },
+            no_autoremove,
+        )
+    }
+
+    fn dnf5_error_result(
+        res: &FrozenResource,
+        sensitive: bool,
+        error: RemovalSafetyError,
+    ) -> ResourceResult {
+        let mut r = changed_result_sensitive(res, sensitive);
+        r.change = Change::None;
+        r.execution = if error.is_indeterminate() {
+            Execution::Indeterminate
+        } else {
+            Execution::Failed
+        };
+        r.verification = if error.is_indeterminate() {
+            Verification::Unknown
+        } else {
+            Verification::NotPerformed
+        };
+        r.reason = Some(error.render(sensitive));
+        r
+    }
+
+    fn dnf5_decision_result(
+        res: &FrozenResource,
+        sensitive: bool,
+        decision: RemovalSafetyDecision,
+    ) -> ResourceResult {
+        match decision {
+            RemovalSafetyDecision::Allowed { .. } => {
+                // The gate only calls this for a non-allowed decision.
+                Self::dnf5_error_result(res, sensitive, RemovalSafetyError::identity())
+            }
+            RemovalSafetyDecision::Denied { .. } => {
+                let mut r = changed_result_sensitive(res, sensitive);
+                r.change = Change::None;
+                r.execution = Execution::Failed;
+                r.verification = Verification::NotPerformed;
+                r.reason = Some(decision.render(sensitive));
+                r
+            }
+            RemovalSafetyDecision::Indeterminate { error } => {
+                Self::dnf5_error_result(res, sensitive, error)
+            }
+        }
+    }
+
+    /// DNF5-only pre-mutation gate: inventory A, default preview, inventory B,
+    /// exact-no-autoremove preview, inventory C, exact-set evaluation. Both
+    /// previews must be allowed; the second is the execution-matched one.
+    fn dnf5_removal_gate(
+        &mut self,
+        name: &str,
+        sensitive: bool,
+        package_env: &BTreeMap<String, String>,
+        res: &FrozenResource,
+        permit: &crate::targetfs::MutationPermit,
+    ) -> Result<Dnf5RemovalGate> {
+        if !self.fs.runs_as_root() {
+            // The preview, inventory and mutation all need the package
+            // manager's privileged view. Refuse before dispatching any of
+            // them so a non-root run cannot report a possible mutation.
+            return Ok(Dnf5RemovalGate::Refused(Self::dnf5_error_result(
+                res,
+                sensitive,
+                RemovalSafetyError::privilege_required(),
+            )));
+        }
+        let a = match self.dnf_inventory(permit, package_env) {
+            Ok(fingerprint) => fingerprint,
+            Err(e) => {
+                return Ok(Dnf5RemovalGate::Refused(Self::dnf5_error_result(
+                    res, sensitive, e,
+                )))
+            }
+        };
+        let default_preview = match self.dnf5_preview(name, sensitive, package_env, permit, false) {
+            Ok(preview) => preview,
+            Err(e) => {
+                return Ok(Dnf5RemovalGate::Refused(Self::dnf5_error_result(
+                    res, sensitive, e,
+                )))
+            }
+        };
+        let b = match self.dnf_inventory(permit, package_env) {
+            Ok(fingerprint) => fingerprint,
+            Err(e) => {
+                return Ok(Dnf5RemovalGate::Refused(Self::dnf5_error_result(
+                    res, sensitive, e,
+                )))
+            }
+        };
+        if a != b {
+            return Ok(Dnf5RemovalGate::Refused(Self::dnf5_error_result(
+                res,
+                sensitive,
+                RemovalSafetyError::inventory_changed(),
+            )));
+        }
+        let noauto_preview = match self.dnf5_preview(name, sensitive, package_env, permit, true) {
+            Ok(preview) => preview,
+            Err(e) => {
+                return Ok(Dnf5RemovalGate::Refused(Self::dnf5_error_result(
+                    res, sensitive, e,
+                )))
+            }
+        };
+        let c = match self.dnf_inventory(permit, package_env) {
+            Ok(fingerprint) => fingerprint,
+            Err(e) => {
+                return Ok(Dnf5RemovalGate::Refused(Self::dnf5_error_result(
+                    res, sensitive, e,
+                )))
+            }
+        };
+        if b != c {
+            return Ok(Dnf5RemovalGate::Refused(Self::dnf5_error_result(
+                res,
+                sensitive,
+                RemovalSafetyError::inventory_changed(),
+            )));
+        }
+
+        let allow = RemovalAllowList::empty();
+        let default_decision = evaluate_removal(&default_preview, &allow);
+        if !default_decision.is_allowed() {
+            return Ok(Dnf5RemovalGate::Refused(Self::dnf5_decision_result(
+                res,
+                sensitive,
+                default_decision,
+            )));
+        }
+        let noauto_decision = evaluate_removal(&noauto_preview, &allow);
+        if !noauto_decision.is_allowed() {
+            return Ok(Dnf5RemovalGate::Refused(Self::dnf5_decision_result(
+                res,
+                sensitive,
+                noauto_decision,
+            )));
+        }
+        Ok(Dnf5RemovalGate::Proceed(Dnf5RemovalPlan {
+            before: c,
+            preview: noauto_preview,
+        }))
     }
 }
 

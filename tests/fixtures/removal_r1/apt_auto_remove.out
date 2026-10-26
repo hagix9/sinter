@@ -1,0 +1,16 @@
+NOTE: This is only a simulation!
+      apt-get needs root privileges for real execution.
+      Keep also in mind that locking is deactivated,
+      so don't depend on the relevance to the real current situation!
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following packages will be REMOVED:
+  7zip fortunes-min libcaca0 librecode0 p7zip-full toilet-fonts
+0 upgraded, 0 newly installed, 6 to remove and 179 not upgraded.
+Remv p7zip-full [16.02+transitional.1]
+Remv 7zip [23.01+dfsg-11]
+Remv fortunes-min [1:1.99.1-7.3build1]
+Remv libcaca0 [0.99.beta20-4ubuntu0.2]
+Remv librecode0 [3.6-26]
+Remv toilet-fonts [0.3-1.4build1]

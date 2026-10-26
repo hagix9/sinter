@@ -1,0 +1,11 @@
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following packages were automatically installed and are no longer required:
+  fortunes-min libcaca0 librecode0 toilet-fonts
+Use 'sudo apt autoremove' to remove them.
+The following packages will be REMOVED:
+  7zip p7zip-full
+0 upgraded, 0 newly installed, 2 to remove and 179 not upgraded.
+Remv p7zip-full [16.02+transitional.1]
+Remv 7zip [23.01+dfsg-11]

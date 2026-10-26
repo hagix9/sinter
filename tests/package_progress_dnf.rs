@@ -337,31 +337,29 @@ fn an_apply_reports_dnf_download_then_install_detail_before_the_stage_ends() {
 }
 
 #[test]
-fn a_remove_reports_a_removal_and_never_an_install() {
+fn a_remove_has_no_package_stream_and_never_reports_an_install() {
+    // Removal runs `rpm -e`, which has no machine-readable progress stream:
+    // no package detail is invented for it, and in particular none that
+    // looks like an install. The result is unaffected by the missing detail.
     let mut fake = auditor_target();
     fake.packages.insert("python36".to_string());
+    // A DNF transaction display would be ignored: dnf is not run at all.
     fake.dnf_mutation_progress = Some((
-        "Running transaction check\n\
-         Running transaction\n\
-         \x20 Erasing          : python36-1.0-1.el9.x86_64  1/1\n\
-         \x20 Verifying        : python36-1.0-1.el9.x86_64  1/1\n\
-         Complete!\n"
+        "Running transaction\n  Erasing          : python36-1.0-1.el9.x86_64  1/1\nComplete!\n"
             .to_string(),
         String::new(),
     ));
     let sink = RecordingSink::new();
     let report = run("phase3-dnf-remove", REMOVE, fake, sink.clone());
     let found = details(&sink.events());
-    assert!(!found.is_empty(), "no package detail was emitted");
     assert!(
-        found.iter().any(|d| d.phase == PackagePhase::Removing),
-        "no removal detail: {found:?}"
+        found.is_empty(),
+        "removal invented package detail: {found:?}"
     );
     assert!(
-        !found.iter().any(|d| d.phase == PackagePhase::Installing),
-        "a remove reported an install: {found:?}"
+        report.commands.iter().all(|c| c.program != "/usr/bin/dnf"),
+        "dnf was run for a removal"
     );
-    assert_no_percent(&found);
 
     let r = find(&report, "p");
     assert_eq!(r.execution, Execution::Succeeded, "{:?}", r.reason);

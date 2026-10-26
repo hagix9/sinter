@@ -203,7 +203,18 @@ pub fn is_mutation_command(program: &str, args: &[String]) -> bool {
                     || a.contains("/bin/rmdir ")
                     || a.contains("/bin/ln ")
                     || a.contains("base64 -d")
+                    // exact-target rpm removal: the lock wrapper that becomes `rpm -e`
+                    || a == "sinter-erase"
             })
+        }
+        // The low-level removers used by exact-target package removal: only the
+        // dry-run forms (`dpkg --dry-run`, `rpm --test`) leave the database alone.
+        "dpkg" => {
+            args.iter().any(|a| a == "--remove" || a == "--purge")
+                && !args.iter().any(|a| a == "--dry-run")
+        }
+        "rpm" => {
+            args.iter().any(|a| a == "-e" || a == "--erase") && !args.iter().any(|a| a == "--test")
         }
         "apt-get" | "dnf" | "yum" => {
             // `dnf install --downloadonly` transports payload files without

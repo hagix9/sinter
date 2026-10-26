@@ -1,0 +1,14 @@
+Dependencies resolved.
+================================================================================
+ Package        Architecture     Version                 Repository        Size
+================================================================================
+Removing:
+ unzip          aarch64          6.0-60.el9_8            @baseos          469 k
+Removing dependent packages:
+ zip            aarch64          3.0-35.el9              @baseos          759 k
+
+Transaction Summary
+================================================================================
+Remove  2 Packages
+
+Freed space: 1.2 M

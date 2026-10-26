@@ -1,0 +1,7 @@
+Package  Arch    Version          Repository      Size
+Removing:
+ tcpdump aarch64 14:4.99.6-2.fc43 updates      1.4 MiB
+
+Transaction Summary:
+ Removing:           1 package
+

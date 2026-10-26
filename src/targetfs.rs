@@ -1109,6 +1109,25 @@ impl TargetFs {
         )
     }
 
+    /// Query dpkg for every instance (architecture) of a package, one
+    /// tab-separated record per line: status, package, architecture.
+    pub fn dpkg_query_instances_sensitive(
+        &mut self,
+        name: &str,
+        sensitive: bool,
+    ) -> Result<Output> {
+        self.run_argv_sensitivity(
+            "/usr/bin/dpkg-query",
+            &[
+                "-W".to_string(),
+                "-f=${Status}\\t${Package}\\t${Architecture}\\n".to_string(),
+                "--".to_string(),
+                name.to_string(),
+            ],
+            sensitive,
+        )
+    }
+
     /// Query the detected platform's package database for a package using
     /// exact argv. The backend was selected from /etc/os-release metadata at
     /// capability-detection time; `None` (unsupported platform) is an explicit

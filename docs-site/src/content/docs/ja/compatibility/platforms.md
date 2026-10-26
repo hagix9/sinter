@@ -22,6 +22,11 @@ Oracle LinuxはRHEL系platformとして認識され、SinterのDNF backendを
 使用します。対応するRHEL系実装と互換性があると見込まれますが、現在
 Sinterの実ホスト受入マトリクスには含まれていません。
 
+**パッケージ削除（`state: absent`、未リリース）**の検証範囲はこれより狭く、実機で試したのは
+Ubuntu 24.04、Rocky Linux 9.8、Rocky Linux 10.2 だけです。Ubuntu 26.04、RHEL、AlmaLinux、
+Oracle Linux、Rocky Linux 8 は同じツールを使いますが、削除は未検証です。
+[package リファレンス](/ja/reference/resources/package/)を参照してください。
+
 RHEL系ターゲットでは、標準的に構成されたDNFリポジトリが機能している
 必要があります。リポジトリの転送と認証はネイティブのdnf/librepo
 スタックに委任されます — プロバイダがエンタイトルメントを供給する

@@ -1,0 +1,12 @@
+Dependencies resolved.
+================================================================================
+ Package        Architecture   Version                  Repository         Size
+================================================================================
+Removing:
+ tcpdump        aarch64        14:4.99.0-9.el9          @appstream        1.5 M
+
+Transaction Summary
+================================================================================
+Remove  1 Package
+
+Freed space: 1.5 M

@@ -147,7 +147,7 @@ fn ubuntu2604_apt_install_keeps_the_v021_argv() {
 }
 
 #[test]
-fn ubuntu2604_apt_remove_keeps_the_v021_argv() {
+fn ubuntu2604_apt_remove_uses_exact_target_dpkg() {
     let dir = trusted_root("next-ubuntu2604-remove");
     let recipe = pkg_recipe(&dir, "hello", "absent");
     let r = run_recipe_fake(
@@ -160,9 +160,39 @@ fn ubuntu2604_apt_remove_keeps_the_v021_argv() {
     let p = find(&r, "p");
     assert_eq!(p.change, Change::Changed);
     assert_eq!(p.verification, Verification::Verified);
-    let apt = commands_with(&r, "/usr/bin/apt-get");
-    assert_eq!(apt.len(), 1);
-    assert_eq!(apt[0].args, vec!["-y", "remove", "hello"]);
+    // The resolver is never asked for a removal set: dpkg removes the one
+    // named package after a dry-run of the same command.
+    assert!(commands_with(&r, "/usr/bin/apt-get")
+        .iter()
+        .all(|c| c.args == ["-s", "check"]));
+    let dpkg = commands_with(&r, "/usr/bin/dpkg");
+    let removals: Vec<_> = dpkg
+        .iter()
+        .filter(|c| c.args.iter().any(|a| a == "--remove"))
+        .collect();
+    assert_eq!(removals.len(), 2);
+    // The command line cancels force-depends configured on the host.
+    assert_eq!(
+        removals[0].args,
+        vec![
+            "--refuse-depends",
+            "--refuse-remove-essential",
+            "--refuse-remove-protected",
+            "--dry-run",
+            "--remove",
+            "hello"
+        ]
+    );
+    assert_eq!(
+        removals[1].args,
+        vec![
+            "--refuse-depends",
+            "--refuse-remove-essential",
+            "--refuse-remove-protected",
+            "--remove",
+            "hello"
+        ]
+    );
 }
 
 #[test]

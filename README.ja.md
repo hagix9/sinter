@@ -328,6 +328,23 @@ Oracle LinuxはRHEL系platformとして認識され、SinterのDNF backendを
 使用します。対応するRHEL系実装と互換性があると見込まれますが、現在
 Sinterの実ホスト受入マトリクスには含まれていません。
 
+### パッケージ削除（`state: absent`）— 未リリース
+
+v1.7.0 より後の作業（まだどのリリースにも含まれません）から、apt / dnf ターゲットの
+`state: absent` は `apt-get remove` / `dnf remove` を使わず、`dpkg --remove` または
+`rpm -e` で**指定したパッケージだけ**を削除します。ほかの導入済みパッケージが依存して
+いれば何も削除せず、依存元を示して失敗します。引き込まれた依存パッケージは残ります。
+削除後にパッケージ DB を読み戻し、ほかのパッケージが消えた場合や新しい依存問題が出た場合は
+失敗とします（dnf のロックを使わない writer との競合は、その commit がこの読取りより前の
+場合に限り検出されます）。削除は `dnf history` / `/var/log/apt/history.log` に記録されません。ロックは
+apt では厳密（dpkg のロック）、dnf ターゲットでは dnf・dnf-automatic・yum を排他しますが、
+PackageKit・`microdnf`・手で実行した `rpm` は**排他しません**。実機で検証済み: Ubuntu 24.04、
+Rocky Linux 9.8 / 10.2。削除は**未検証**: Ubuntu 26.04、RHEL、AlmaLinux、Oracle Linux、
+Rocky Linux 8。dnf ターゲットでは、小さな VM で 1 回の削除に数秒から数分かかります。
+詳細・失敗の種類・dpkg の `deinstall ok installed` の注意は
+[package リファレンス](docs-site/src/content/docs/ja/reference/resources/package.md)
+を参照してください。
+
 v1.0.0 以降の各リリースは、公開前にリリース成果物そのものを8つの対応
 ターゲットで受入検証し、その受入証跡（manifest、raw log、チェックサム）を
 リリースと一緒に公開します。Sinter v1.7.0 のリリースは、Linux x86_64

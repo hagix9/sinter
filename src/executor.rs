@@ -2622,6 +2622,19 @@ pub struct FakeTarget {
     /// prints. Models DNF's non-TTY transaction display for progress tests;
     /// the state transition and completion are unchanged.
     pub dnf_mutation_progress: Option<(String, String)>,
+    /// Overrides the `dnf --version` answer. `None` models DNF4 (`4.14.0`)
+    /// so existing DNF4 tests keep their behavior; R2 tests set a DNF5
+    /// `dnf5 version ...` answer.
+    pub dnf_version_output: Option<Output>,
+    /// Overrides the `dnf remove --assumeno` preview answer. `None` leaves
+    /// preview unsupported (existing tests do not run it).
+    pub dnf_remove_preview_results: std::collections::VecDeque<Output>,
+    /// Ordered `rpm -qa` answers used by the R2 removal gate (A/B/C/D).
+    pub rpm_qa_results: std::collections::VecDeque<Output>,
+    /// Scripted `dpkg` / `rpm` answers for the exact-target removal path:
+    /// versions, requirements between installed packages, package-script
+    /// failures and a concurrent installer. Defaults model a healthy host.
+    pub pkgdb: crate::fakepkg::FakePkgDb,
     /// Overrides the `find <snap> -name '*.rpm'` payload listing, so tests
     /// can model a missing, unexpected or misplaced payload file. When
     /// unset, the listing is the payloads the fake's download-only
@@ -2872,6 +2885,10 @@ impl FakeTarget {
             dnf_downloadonly_output: None,
             dnf_downloadonly_progress: None,
             dnf_mutation_progress: None,
+            dnf_version_output: None,
+            dnf_remove_preview_results: std::collections::VecDeque::new(),
+            rpm_qa_results: std::collections::VecDeque::new(),
+            pkgdb: crate::fakepkg::FakePkgDb::default(),
             snap_rpm_listing: None,
             rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
@@ -2941,6 +2958,10 @@ impl FakeTarget {
             dnf_downloadonly_output: None,
             dnf_downloadonly_progress: None,
             dnf_mutation_progress: None,
+            dnf_version_output: None,
+            dnf_remove_preview_results: std::collections::VecDeque::new(),
+            rpm_qa_results: std::collections::VecDeque::new(),
+            pkgdb: crate::fakepkg::FakePkgDb::default(),
             snap_rpm_listing: None,
             rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
@@ -2996,6 +3017,10 @@ impl FakeTarget {
             dnf_downloadonly_output: None,
             dnf_downloadonly_progress: None,
             dnf_mutation_progress: None,
+            dnf_version_output: None,
+            dnf_remove_preview_results: std::collections::VecDeque::new(),
+            rpm_qa_results: std::collections::VecDeque::new(),
+            pkgdb: crate::fakepkg::FakePkgDb::default(),
             snap_rpm_listing: None,
             rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
@@ -3054,6 +3079,10 @@ impl FakeTarget {
             dnf_downloadonly_output: None,
             dnf_downloadonly_progress: None,
             dnf_mutation_progress: None,
+            dnf_version_output: None,
+            dnf_remove_preview_results: std::collections::VecDeque::new(),
+            rpm_qa_results: std::collections::VecDeque::new(),
+            pkgdb: crate::fakepkg::FakePkgDb::default(),
             snap_rpm_listing: None,
             rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
@@ -3106,6 +3135,10 @@ impl FakeTarget {
             dnf_downloadonly_output: None,
             dnf_downloadonly_progress: None,
             dnf_mutation_progress: None,
+            dnf_version_output: None,
+            dnf_remove_preview_results: std::collections::VecDeque::new(),
+            rpm_qa_results: std::collections::VecDeque::new(),
+            pkgdb: crate::fakepkg::FakePkgDb::default(),
             snap_rpm_listing: None,
             rpm_qp_results: std::collections::VecDeque::new(),
             snapshot_listing: None,
@@ -3490,6 +3523,14 @@ impl FakeExecutor {
         if let Some(o) = self.run_fake_fs(&prog, req) {
             return o;
         }
+        if let Some(o) = self.target.pkgdb.serve(
+            &mut self.target.packages,
+            self.sudo || self.target.uid == 0,
+            &prog,
+            &req.args,
+        ) {
+            return o;
+        }
         match prog.as_str() {
             "test" => self.run_test(&req.args),
             "hostname" => Self::exited(0, format!("{}\n", self.target.hostname), String::new()),
@@ -3508,6 +3549,13 @@ impl FakeExecutor {
                 {
                     Some(o) => o,
                     None => Self::exited(127, String::new(), "fake target: unmodeled".into()),
+                }
+            }
+            "readlink" => {
+                if let Some(o) = self.target.program_outputs.get("/usr/bin/readlink") {
+                    o.clone()
+                } else {
+                    Self::exited(0, "/usr/bin/dnf-3\n".to_string(), String::new())
                 }
             }
             "rpm" => self.run_rpm(&req.args),
@@ -3789,6 +3837,12 @@ impl FakeExecutor {
     }
 
     fn run_rpm(&mut self, args: &[String]) -> Output {
+        if args.iter().any(|a| a == "-qa" || a == "--all") {
+            if let Some(o) = self.target.rpm_qa_results.pop_front() {
+                return o;
+            }
+            return Self::exited(1, String::new(), "fake rpm: -qa not configured".to_string());
+        }
         // `rpm -qp --queryformat <fmt> <file>` — a payload identity query,
         // not an installed-package observation: queued answers are popped
         // from `rpm_qp_results`, and otherwise the identity is derived
@@ -4001,6 +4055,25 @@ impl FakeExecutor {
     }
 
     fn run_manager(&mut self, prog: &str, args: &[String]) -> Output {
+        if prog == "dnf" && args.len() == 1 && args[0] == "--version" {
+            if let Some(o) = self.target.dnf_version_output.clone() {
+                return o;
+            }
+            return Self::exited(0, "4.14.0\n".to_string(), String::new());
+        }
+        if prog == "dnf"
+            && args.iter().any(|a| a == "remove")
+            && args.iter().any(|a| a == "--assumeno")
+        {
+            if let Some(o) = self.target.dnf_remove_preview_results.pop_front() {
+                return o;
+            }
+            return Self::exited(
+                1,
+                String::new(),
+                "fake dnf: remove preview not configured".to_string(),
+            );
+        }
         let name = args.last().cloned().unwrap_or_default();
         if prog == "dnf" && args.iter().any(|a| a == "repolist") {
             // repolist -v: the real dnf 4.14 stream layout (R5-F04). stdout

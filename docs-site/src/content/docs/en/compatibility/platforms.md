@@ -23,6 +23,12 @@ DNF backend. It is expected to be compatible with the corresponding Red
 Hat-family implementation, but it is not currently part of Sinter's
 real-host acceptance matrix.
 
+**Package removal (`state: absent`, not yet released)** has its own, narrower
+verification: it was exercised on real hosts only on Ubuntu 24.04, Rocky Linux
+9.8 and Rocky Linux 10.2. Ubuntu 26.04, RHEL, AlmaLinux, Oracle Linux and Rocky
+Linux 8 use the same tools but are not verified for removal. See the
+[package reference](/en/reference/resources/package/#removal-state-absent-on-apt-and-dnf-targets).
+
 On RHEL-family targets, standard configured DNF repositories must be
 functional. Repository transport and authentication are delegated to the
 native `dnf`/librepo stack — including cloud images whose repositories are

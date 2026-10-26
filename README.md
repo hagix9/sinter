@@ -328,6 +328,24 @@ DNF backend. It is expected to be compatible with the corresponding Red
 Hat-family implementation, but it is not currently part of Sinter's
 real-host acceptance matrix.
 
+### Package removal (`state: absent`) — unreleased
+
+Since the work after v1.7.0 (not part of any release yet), `state: absent` on
+apt and dnf targets removes **exactly the named package** with `dpkg --remove`
+or `rpm -e`, never through `apt-get remove` / `dnf remove`. If other installed
+packages depend on it, nothing is removed and the resource fails naming them;
+dependencies it pulled in stay installed; afterwards Sinter reads the package
+database back and fails if any other package disappeared or a new dependency
+problem appeared (a race with a writer that does not use dnf's lock is
+reported only if its commit came before that read). Removals are not recorded in `dnf history` /
+`/var/log/apt/history.log`. Locking is exact for apt (dpkg's locks) and covers dnf,
+dnf-automatic and yum on dnf targets, but **not** PackageKit, `microdnf` or a
+hand-run `rpm`. Verified on real hosts: Ubuntu 24.04, Rocky Linux 9.8 and 10.2;
+**not** verified for removal: Ubuntu 26.04, RHEL, AlmaLinux, Oracle Linux, Rocky
+Linux 8. On dnf targets a removal takes seconds to a couple of minutes on small
+VMs. Details, failure modes and the dpkg `deinstall ok installed` caveat:
+[package reference](docs-site/src/content/docs/en/reference/resources/package.md).
+
 Each release from v1.0.0 on is acceptance-tested as its exact release
 artifact on the eight supported targets before it is published, and its
 acceptance evidence (manifest, raw logs, checksums) is published with the
