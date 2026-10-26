@@ -1,0 +1,4 @@
+#!/bin/sh
+echo "TRIPWIRE: yum $*" >> "${MOCK_TRIPWIRE_LOG:-/dev/null}"
+echo "tripwire: a real package manager was called" >&2
+exit 99
