@@ -1,7 +1,9 @@
 use crate::error::{Result, SinterError};
 use crate::ir::{
-    HandlerAction, HandlerDecl, HandlerKind, ResourceDecl, VarDecl, BACKUP_FIELDS,
-    COMMON_RESOURCE_FIELDS, HANDLER_FIELDS, TARGET_FIELDS, TOP_LEVEL_FIELDS, VAR_FIELDS,
+    CommandHandlerSpec, HandlerAction, HandlerDecl, HandlerKind, ResourceDecl, VarDecl,
+    BACKUP_FIELDS, COMMON_RESOURCE_FIELDS, HANDLER_COMMAND_FIELDS, HANDLER_DEFAULT_TIMEOUT_SECS,
+    HANDLER_FIELDS, HANDLER_MAX_ARGS, HANDLER_MAX_ARG_BYTES, HANDLER_MAX_TIMEOUT_SECS,
+    TARGET_FIELDS, TOP_LEVEL_FIELDS, VAR_FIELDS,
 };
 use crate::toml_front::parse_toml;
 use crate::value::Value;
@@ -477,28 +479,18 @@ fn parse_handler(item: &Value, origin: &str, idx: usize) -> Result<HandlerDecl> 
         .as_map()
         .ok_or_else(|| SinterError::schema(format!("{}: handler must be a map", ctx)))?;
     // `type` is optional and defaults to `service`, so every recipe written
-    // before handler types existed keeps its meaning. A type that this
-    // version cannot execute is refused here, at validation: it is never
-    // frozen, never queued by a notification, and never reported as run.
+    // before handler types existed keeps its meaning. Any other value must be
+    // one of the known types: an unknown or malformed type is refused here, at
+    // validation, and is never frozen, queued by a notification or run.
     let kind = match map.get("type") {
         None => HandlerKind::Service,
-        Some(Value::Str(s)) => match HandlerKind::from_label(s) {
-            Some(k) if k.is_implemented() => k,
-            Some(k) => {
-                return Err(SinterError::schema(format!(
-                    "{}: handler type {} is not implemented in this version of Sinter (supported: service)",
-                    ctx,
-                    k.label()
-                )))
-            }
-            None => {
-                return Err(SinterError::schema(format!(
-                    "{}: unknown handler type {} (supported: service)",
-                    ctx,
-                    printable_token(s)
-                )))
-            }
-        },
+        Some(Value::Str(s)) => HandlerKind::from_label(s).ok_or_else(|| {
+            SinterError::schema(format!(
+                "{}: unknown handler type {} (supported: service, ca_trust, command)",
+                ctx,
+                printable_token(s)
+            ))
+        })?,
         Some(_) => {
             return Err(SinterError::schema(format!(
                 "{}: type must be a string",
@@ -516,10 +508,35 @@ fn parse_handler(item: &Value, origin: &str, idx: usize) -> Result<HandlerDecl> 
             )))
         }
     };
-    // The unit and the action belong to the `service` type. A `ca_trust`
-    // handler refreshes the trust store with a fixed, OS-chosen tool: it has
-    // no unit and no action, so a recipe that gives it either is mistaken and
-    // is refused, not ignored.
+    let sensitive = match map.get("sensitive") {
+        None => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => {
+            return Err(SinterError::schema(format!(
+                "{}: sensitive must be a boolean",
+                ctx
+            )))
+        }
+    };
+    // Each field belongs to a type, and a field on the wrong type is mistaken
+    // and refused rather than ignored: `service` and `action` are the service
+    // handler's, `with` is the command handler's. A `ca_trust` handler has none
+    // of them (it refreshes the trust store with a fixed, OS-chosen tool).
+    let foreign: &[&str] = match kind {
+        HandlerKind::Service => &["with"],
+        HandlerKind::CaTrust => &["service", "action", "with"],
+        HandlerKind::Command => &["service", "action"],
+    };
+    for f in foreign {
+        if map.contains_key(*f) {
+            return Err(SinterError::schema(format!(
+                "{}: {} is not a field of a {} handler",
+                ctx,
+                f,
+                kind.label()
+            )));
+        }
+    }
     let (service, action) = if kind == HandlerKind::Service {
         let service = match map.get("service") {
             Some(Value::Str(s)) if s.is_empty() => {
@@ -548,37 +565,135 @@ fn parse_handler(item: &Value, origin: &str, idx: usize) -> Result<HandlerDecl> 
         };
         (service, action)
     } else {
-        for f in ["service", "action"] {
-            if map.contains_key(f) {
-                return Err(SinterError::schema(format!(
-                    "{}: {} is not a field of a {} handler",
-                    ctx,
-                    f,
-                    kind.label()
-                )));
-            }
-        }
         // No unit, and a placeholder action that nothing reads.
         (String::new(), HandlerAction::Restart)
     };
-    let sensitive = match map.get("sensitive") {
-        None => false,
-        Some(Value::Bool(b)) => *b,
-        Some(_) => {
-            return Err(SinterError::schema(format!(
-                "{}: sensitive must be a boolean",
-                ctx
-            )))
-        }
+    let command = if kind == HandlerKind::Command {
+        Some(parse_command_handler(map.get("with"), &ctx, sensitive)?)
+    } else {
+        None
     };
     Ok(HandlerDecl {
         id,
         kind,
         service,
         action,
+        command,
         sensitive,
         origin: origin.to_string(),
     })
+}
+
+/// The `with` block of a `command` handler: `program` (an absolute path),
+/// `args` and `timeout_seconds`, nothing else. Every value is static text. The
+/// limits are the handler's own (DESIGN §4.3); the `command` resource keeps its
+/// existing ones. A sensitive handler never has a value of its own echoed in an
+/// error message.
+fn parse_command_handler(
+    with: Option<&Value>,
+    ctx: &str,
+    sensitive: bool,
+) -> Result<CommandHandlerSpec> {
+    let ctx = format!("{ctx}: with");
+    let map = match with {
+        Some(Value::Map(m)) => m,
+        Some(_) => {
+            return Err(SinterError::schema(format!(
+                "{ctx} must be a map (program, args, timeout_seconds)"
+            )))
+        }
+        None => {
+            return Err(SinterError::schema(format!(
+                "{}: a command handler needs a with block (program, args, timeout_seconds)",
+                ctx.trim_end_matches(": with")
+            )))
+        }
+    };
+    only_fields(map, HANDLER_COMMAND_FIELDS, &ctx)?;
+    let program = match map.get("program") {
+        Some(Value::Str(p)) => p.clone(),
+        _ => {
+            return Err(SinterError::schema(format!(
+                "{ctx}: program is required and must be a string"
+            )))
+        }
+    };
+    if let Err(e) = crate::paths::validate_path(&program) {
+        return Err(SinterError::schema(if sensitive {
+            format!("{ctx}: program must be a valid absolute path")
+        } else {
+            format!("{ctx}: program: {}", e.message)
+        }));
+    }
+    if program == "/" {
+        return Err(SinterError::schema(format!(
+            "{ctx}: program must name a file, not the root directory"
+        )));
+    }
+    reject_expression(&program, &ctx, "program")?;
+    let args = match map.get("args") {
+        None => Vec::new(),
+        Some(Value::List(items)) => {
+            if items.len() > HANDLER_MAX_ARGS {
+                return Err(SinterError::schema(format!(
+                    "{ctx}: args has {} entries; at most {HANDLER_MAX_ARGS} are allowed",
+                    items.len()
+                )));
+            }
+            let mut out = Vec::with_capacity(items.len());
+            for (i, item) in items.iter().enumerate() {
+                let Value::Str(a) = item else {
+                    return Err(SinterError::schema(format!(
+                        "{ctx}: args[{i}] must be a string"
+                    )));
+                };
+                if a.contains('\0') {
+                    return Err(SinterError::schema(format!(
+                        "{ctx}: args[{i}] may not contain NUL"
+                    )));
+                }
+                if a.len() > HANDLER_MAX_ARG_BYTES {
+                    return Err(SinterError::schema(format!(
+                        "{ctx}: args[{i}] is {} bytes; at most {HANDLER_MAX_ARG_BYTES} are allowed",
+                        a.len()
+                    )));
+                }
+                reject_expression(a, &ctx, "args")?;
+                out.push(a.clone());
+            }
+            out
+        }
+        Some(_) => {
+            return Err(SinterError::schema(format!(
+                "{ctx}: args must be a list of strings"
+            )))
+        }
+    };
+    let timeout_secs = match map.get("timeout_seconds") {
+        None => HANDLER_DEFAULT_TIMEOUT_SECS,
+        Some(Value::Int(n)) if (1..=HANDLER_MAX_TIMEOUT_SECS as i64).contains(n) => *n as u64,
+        Some(_) => {
+            return Err(SinterError::schema(format!(
+                "{ctx}: timeout_seconds must be an integer in 1..{HANDLER_MAX_TIMEOUT_SECS}"
+            )))
+        }
+    };
+    Ok(CommandHandlerSpec {
+        program,
+        args,
+        timeout_secs,
+    })
+}
+
+/// Handler values are static: a `{{ ... }}` would be run literally, which is
+/// never what the author meant, so it is refused instead.
+fn reject_expression(value: &str, ctx: &str, field: &str) -> Result<()> {
+    if value.contains("{{") {
+        return Err(SinterError::schema(format!(
+            "{ctx}: {field} is static text in a handler; expressions ({{{{ ... }}}}) are not supported"
+        )));
+    }
+    Ok(())
 }
 
 /// A recipe-supplied token for an error message: short and printable, or a

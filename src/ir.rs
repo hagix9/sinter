@@ -44,24 +44,47 @@ pub struct HandlerDecl {
     /// kind carries a placeholder that nothing reads; its action word comes
     /// from `FrozenHandler::action_label`.
     pub action: HandlerAction,
+    /// The program of a `command` handler (present exactly when `kind` is
+    /// [`HandlerKind::Command`]).
+    pub command: Option<CommandHandlerSpec>,
     pub sensitive: bool,
     pub origin: String,
 }
 
+/// What a `command` handler runs (DESIGN §4.3). Every value is static text
+/// taken from the recipe at validation: nothing is evaluated later, so what is
+/// validated is what runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandHandlerSpec {
+    /// Absolute path of the program (never searched for in PATH).
+    pub program: String,
+    /// Exact arguments; no shell is involved.
+    pub args: Vec<String>,
+    pub timeout_secs: u64,
+}
+
+/// The most arguments a `command` handler may have.
+pub const HANDLER_MAX_ARGS: usize = 64;
+/// The longest single argument of a `command` handler, in bytes.
+pub const HANDLER_MAX_ARG_BYTES: usize = 4096;
+/// A `command` handler's timeout when the recipe gives none, and its ceiling.
+pub const HANDLER_DEFAULT_TIMEOUT_SECS: u64 = 300;
+pub const HANDLER_MAX_TIMEOUT_SECS: u64 = 3600;
+/// The fields of a `command` handler's `with` block.
+pub const HANDLER_COMMAND_FIELDS: &[&str] = &["program", "args", "timeout_seconds"];
+
 /// The type of a handler (DESIGN §4.3).
 ///
-/// The foundation knows three types so that the engine, the model and the
-/// output dispatch on one value. [`HandlerKind::Service`] and
-/// [`HandlerKind::CaTrust`] are implemented: the recipe parser refuses a recipe
-/// that declares any other type (see [`HandlerKind::is_implemented`]), so no
-/// unimplemented handler can be frozen, queued, or reported as run.
+/// The engine, the model and the output dispatch on one value. The recipe
+/// parser refuses every other `type:` value, so a handler of an unknown type
+/// can never be frozen, queued, or reported as run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandlerKind {
     /// Restart or reload a systemd unit (the original handler).
     Service,
     /// Refresh the system CA trust store with the operating system's own tool.
     CaTrust,
-    /// Run a program after a change. Not implemented yet.
+    /// Run one program after a change (an absolute path and exact arguments).
     Command,
 }
 
@@ -82,11 +105,6 @@ impl HandlerKind {
             "command" => Some(HandlerKind::Command),
             _ => None,
         }
-    }
-
-    /// Whether this version of Sinter can execute handlers of this type.
-    pub fn is_implemented(self) -> bool {
-        matches!(self, HandlerKind::Service | HandlerKind::CaTrust)
     }
 }
 
@@ -122,6 +140,7 @@ pub const COMMON_RESOURCE_FIELDS: &[&str] = &[
     "sensitive",
 ];
 /// Fields accepted on a handler. `type` selects the handler type; `service`
-/// and `action` belong to the `service` type, the only implemented one.
-pub const HANDLER_FIELDS: &[&str] = &["id", "type", "service", "action", "sensitive"];
+/// and `action` belong to the `service` type, `with` to the `command` type. The
+/// parser rejects a field that does not belong to the handler's type.
+pub const HANDLER_FIELDS: &[&str] = &["id", "type", "service", "action", "with", "sensitive"];
 pub const VAR_FIELDS: &[&str] = &["value", "sensitive"];

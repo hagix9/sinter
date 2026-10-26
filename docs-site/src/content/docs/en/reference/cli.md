@@ -1128,10 +1128,10 @@ Resource object (`plan` and `apply`):
 
 A resource is identified by `id` together with `loop_index`.
 
-Handler object: `id` (string), `type` (string, additive; `"service"` or
-`"ca_trust"`), `service` (string; the unit of a `service` handler, `""` for
-`ca_trust`, which has no unit), `action` (string; `restart`/`reload`, or
-`refresh` for `ca_trust`),
+Handler object: `id` (string), `type` (string, additive; `"service"`,
+`"ca_trust"` or `"command"`), `service` (string; the unit of a `service`
+handler, `""` for the other types, which have no unit), `action` (string;
+`restart`/`reload`, `refresh` for `ca_trust`, `run` for `command`),
 `state` (string: `NotRun`, `Succeeded`, `Failed`, or `Indeterminate`,
 capitalized exactly as shown), and `reason` (string or null).
 

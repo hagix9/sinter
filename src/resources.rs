@@ -5653,7 +5653,76 @@ impl Engine {
             Completion::Exited(code) => {
                 let mut why = format!("{} exited with status {}", tool.label(), code);
                 if !h.sensitive {
-                    let line = ca_tool_excerpt(&out.stderr);
+                    let line = tool_stderr_excerpt(&out.stderr);
+                    if !line.is_empty() {
+                        why.push_str(": ");
+                        why.push_str(&line);
+                    }
+                }
+                failed(why)
+            }
+        }
+    }
+
+    /// The `command` handler: run one program after a change. It uses the same
+    /// executor and mutation permit as every other change, with the program and
+    /// arguments exactly as the recipe gave them (validated as static text when
+    /// the recipe was read): no shell, no PATH search, the baseline environment
+    /// and the handler's own timeout. It runs with the privilege of the run,
+    /// like the `command` resource; it never escalates by itself.
+    ///
+    /// The outcome is the program's exit status: 0 is succeeded; anything else
+    /// is failed, even if the program had begun to change something; an
+    /// unconfirmed completion is indeterminate and is not retried. A program
+    /// that is not executable fails before anything is run.
+    pub(crate) fn handler_command(
+        &mut self,
+        h: &crate::model::FrozenHandler,
+    ) -> Result<(HandlerOutcomeState, Option<String>)> {
+        let failed = |why: String| Ok((HandlerOutcomeState::Failed, Some(why)));
+        let Some(spec) = h.command.as_ref() else {
+            // Cannot happen (the parser gives every command handler a spec);
+            // refusing is the safe answer if it ever did.
+            return failed("the command handler has no command".into());
+        };
+        // A sensitive handler's program is not named in its own reasons.
+        let name = if h.sensitive {
+            "the program".to_string()
+        } else {
+            spec.program.clone()
+        };
+        match self.fs.executable_present(&spec.program) {
+            Ok(true) => {}
+            Ok(false) => return failed(format!("{name} is not an executable file on the target")),
+            Err(e) => {
+                let state = if e.kind == crate::error::ErrorKind::Indeterminate {
+                    HandlerOutcomeState::Indeterminate
+                } else {
+                    HandlerOutcomeState::Failed
+                };
+                return Ok((state, Some(e.message)));
+            }
+        }
+        let permit = self.fs.mutation_permit()?;
+        let mut req = ExecRequest::new(&spec.program);
+        req.args = spec.args.clone();
+        req.env = baseline_env(self.fs.home_env());
+        req.timeout_secs = spec.timeout_secs;
+        req.sensitive = h.sensitive;
+        let out = self.fs.exec(&permit, &req)?;
+        match out.completion {
+            Completion::Indeterminate { .. } => Ok((
+                HandlerOutcomeState::Indeterminate,
+                Some(format!(
+                    "{name} did not report completion (timeout or lost connection); it may or may not have run to the end"
+                )),
+            )),
+            Completion::Signaled(n) => failed(format!("{name} was ended by signal {n}")),
+            Completion::Exited(0) => Ok((HandlerOutcomeState::Succeeded, None)),
+            Completion::Exited(code) => {
+                let mut why = format!("{name} exited with status {code}");
+                if !h.sensitive {
+                    let line = tool_stderr_excerpt(&out.stderr);
                     if !line.is_empty() {
                         why.push_str(": ");
                         why.push_str(&line);
@@ -5759,7 +5828,7 @@ const CA_TRUST_TIMEOUT_SECS: u64 = 300;
 
 /// The first non-empty line of a tool's standard error, printable ASCII and
 /// capped, for a failure reason. The capture itself is already bounded.
-fn ca_tool_excerpt(stderr: &[u8]) -> String {
+fn tool_stderr_excerpt(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
     let line = text
         .lines()

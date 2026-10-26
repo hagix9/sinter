@@ -929,48 +929,22 @@ impl Engine {
         Ok(out)
     }
 
-    /// Run one notified handler. The type decides how: the dispatch has no
-    /// default arm that could run something else. A type that is not
-    /// implemented never reaches here (the parser refuses it); if one ever did,
-    /// it fails closed and is reported as a failed handler instead of being
-    /// skipped or counted as run.
+    /// Run one notified handler. The type decides how, and the match has no
+    /// default arm: a new handler type does not compile until it says how it
+    /// runs. The three types share one executor, one mutation permit and one
+    /// result shape; none of them runs through a shell.
     fn run_handler(&mut self, h: &crate::model::FrozenHandler) -> Result<HandlerResult> {
         match h.kind {
             crate::ir::HandlerKind::Service => self.run_service_handler(h),
-            crate::ir::HandlerKind::CaTrust => self.run_ca_trust_handler(h),
-            crate::ir::HandlerKind::Command => Err(SinterError::apply(format!(
-                "handler {} has type {}, which is not implemented in this version of Sinter",
-                h.id,
-                h.kind.label()
-            ))),
-        }
-    }
-
-    /// The `ca_trust` handler. Its result is the exit status of the OS tool:
-    /// success means the tool finished normally, not that any particular
-    /// certificate is now trusted.
-    fn run_ca_trust_handler(&mut self, h: &crate::model::FrozenHandler) -> Result<HandlerResult> {
-        let (state, why) = self.handler_ca_trust(h)?;
-        let why = why.unwrap_or_default();
-        let reason = match state {
-            HandlerOutcomeState::Failed => {
-                Some(format!("handler {} (ca_trust) failed: {}", h.id, why))
+            crate::ir::HandlerKind::CaTrust => {
+                let (state, why) = self.handler_ca_trust(h)?;
+                Ok(program_handler_result(h, state, why))
             }
-            HandlerOutcomeState::Indeterminate => Some(format!(
-                "handler {} (ca_trust) became indeterminate: {}",
-                h.id, why
-            )),
-            _ => None,
-        };
-        Ok(HandlerResult {
-            id: h.id.clone(),
-            kind: h.kind,
-            service: h.service.clone(),
-            action: h.action_label().to_string(),
-            state,
-            reason,
-            sensitive: h.sensitive,
-        })
+            crate::ir::HandlerKind::Command => {
+                let (state, why) = self.handler_command(h)?;
+                Ok(program_handler_result(h, state, why))
+            }
+        }
     }
 
     fn run_service_handler(&mut self, h: &crate::model::FrozenHandler) -> Result<HandlerResult> {
@@ -1003,6 +977,41 @@ impl Engine {
             reason,
             sensitive: h.sensitive,
         })
+    }
+}
+
+/// The result of a handler that runs a program (`ca_trust`, `command`): its
+/// outcome is the program's exit status, so the report says only that, with
+/// the plain reason when it was not a success. There is no service to name.
+fn program_handler_result(
+    h: &crate::model::FrozenHandler,
+    state: HandlerOutcomeState,
+    why: Option<String>,
+) -> HandlerResult {
+    let why = why.unwrap_or_default();
+    let reason = match state {
+        HandlerOutcomeState::Failed => Some(format!(
+            "handler {} ({}) failed: {}",
+            h.id,
+            h.kind.label(),
+            why
+        )),
+        HandlerOutcomeState::Indeterminate => Some(format!(
+            "handler {} ({}) became indeterminate: {}",
+            h.id,
+            h.kind.label(),
+            why
+        )),
+        _ => None,
+    };
+    HandlerResult {
+        id: h.id.clone(),
+        kind: h.kind,
+        service: h.service.clone(),
+        action: h.action_label().to_string(),
+        state,
+        reason,
+        sensitive: h.sensitive,
     }
 }
 

@@ -69,7 +69,8 @@ recipe and perform its action yourself, for example
 `systemctl restart app.service` or `systemctl reload app.service` for the
 handler's `service` and `action`; for a `ca_trust` handler run
 `update-ca-certificates` (Debian, Ubuntu) or `update-ca-trust extract` (RHEL,
-Rocky Linux, AlmaLinux) as root. Sinter will not run it on the next apply:
+Rocky Linux, AlmaLinux) as root; for a `command` handler run its `program`
+with its `args` yourself. Sinter will not run it on the next apply:
 the resource that notified it is already correct. This holds for every handler
 type.
 :::

@@ -7,8 +7,8 @@
 //!
 //! * a recipe written before handler types existed means the same thing, and
 //!   `type: service` is the same handler;
-//! * a type this version cannot execute (`ca_trust`, `command`) and an unknown
-//!   type are refused at validation, before anything can run;
+//! * an unknown or malformed type is refused at validation, before anything
+//!   can run;
 //! * notification aggregation, declaration order, fail-fast and pending
 //!   reporting are unchanged;
 //! * plan and audit never run a handler;
@@ -222,23 +222,6 @@ fn plan_and_audit_never_run_a_handler() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn types_this_version_cannot_run_are_refused_before_anything_runs() {
-    // The refusal does not depend on the other fields: a recipe written for a
-    // later version (a `with` block) gets the same plain answer.
-    let e = load_error(
-        "ht-unimpl-command",
-        "  - id: h\n    type: command\n    with:\n      program: /usr/bin/true\n",
-    );
-    assert_eq!(e.kind, ErrorKind::Schema);
-    assert!(
-        e.message
-            .contains("handler type command is not implemented"),
-        "{}",
-        e.message
-    );
-}
-
-#[test]
 fn unknown_and_malformed_types_are_refused() {
     for (what, handler, needle) in [
         (
@@ -325,19 +308,13 @@ fn handler_ids_and_notify_references_are_validated() {
 }
 
 #[test]
-fn service_and_ca_trust_are_implemented_and_every_type_has_a_label() {
+fn every_handler_type_has_a_label_and_nothing_else_is_a_type() {
     for k in [
         HandlerKind::Service,
         HandlerKind::CaTrust,
         HandlerKind::Command,
     ] {
         assert_eq!(HandlerKind::from_label(k.label()), Some(k));
-        assert_eq!(
-            k.is_implemented(),
-            k != HandlerKind::Command,
-            "{}",
-            k.label()
-        );
     }
     assert_eq!(HandlerKind::from_label("shell"), None);
 }

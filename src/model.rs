@@ -60,6 +60,8 @@ pub struct FrozenHandler {
     pub service: String,
     /// The action of a `service` handler (unused by every other type).
     pub action: HandlerAction,
+    /// The program of a `command` handler (present exactly for that type).
+    pub command: Option<crate::ir::CommandHandlerSpec>,
     pub sensitive: bool,
     pub origin: String,
 }
@@ -74,7 +76,6 @@ impl FrozenHandler {
                 HandlerAction::Reload => "reload",
             },
             HandlerKind::CaTrust => "refresh",
-            // Not implemented: the parser never freezes this type.
             HandlerKind::Command => "run",
         }
     }
@@ -703,6 +704,7 @@ fn expand_document(canon: &Path, doc: Document, state: &mut LoadState) -> Result
             kind: h.kind,
             service: h.service.clone(),
             action: h.action,
+            command: h.command.clone(),
             sensitive: h.sensitive,
             origin: h.origin.clone(),
         });

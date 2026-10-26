@@ -178,7 +178,7 @@ IMPLEMENTED: a handler has
 
 id: required string
 
-type: optional string, default service. The values are service, ca_trust and command; this version implements service and ca_trust (see below)
+type: optional string, default service. The values are service, ca_trust and command; this version implements all three (see below)
 
 sensitive: optional boolean, default false
 
@@ -188,13 +188,17 @@ service: required static string
 
 action: required enum restart | reload
 
-and for the type ca_trust, nothing more: a ca_trust handler has only id, type and sensitive.
+for the type ca_trust, nothing more: a ca_trust handler has only id, type and sensitive,
+
+and for the type command,
+
+with: required map with program (required static absolute path), args (optional static list of strings, default empty) and timeout_seconds (optional integer, default 300)
 
 A handler that has no type is a service handler. type: service is the same handler as no type. A recipe written before handler types existed means exactly what it meant.
 
-IMPLEMENTED: a recipe that declares a type this version does not implement (command) is rejected at validation with a plain error. A type that is not one of the three values, or a type that is not a string, is rejected. Such a handler is never frozen, never queued by a notification and never reported as run. No type is skipped or treated as a success.
+IMPLEMENTED: a type that is not one of the three values, or a type that is not a string, is rejected at validation with a plain error. Such a handler is never frozen, never queued by a notification and never reported as run. No type is skipped or treated as a success.
 
-IMPLEMENTED: the fields a type does not define are rejected. In particular neither implemented type has a with block or a privilege field, and a ca_trust handler has no service and no action.
+IMPLEMENTED: the fields a type does not define are rejected. In particular only a command handler has a with block, a command handler has no service and no action, a ca_trust handler has none of the three, and no handler has a privilege field.
 
 UNCHANGED LIMIT: handlers do not support
 
@@ -210,7 +214,7 @@ notify
 
 Handler IDs must be unique and must not collide with resource IDs. A notify that names an unknown handler is an error. Handlers never notify and never depend on each other, so handlers cannot form a cycle.
 
-UNCHANGED LIMIT: a handler is never a general resource, and a handler never runs a shell. The programs a handler may run are the fixed tool of the type ca_trust below and, when it exists, the planned type command.
+UNCHANGED LIMIT: a handler is never a general resource, and a handler never runs a shell. The programs a handler may run are the fixed tool of the type ca_trust and the one program of a command handler, both below, each run directly.
 
 IMPLEMENTED: type ca_trust refreshes the system CA trust store with the operating system's own tool. The tool is chosen from the target's detected OS family (facts.os.family, the same identity that selects the package manager), never by checking which binary exists:
 
@@ -226,11 +230,15 @@ IMPLEMENTED: ca_trust is refused, never replaced by another command, in these ca
 
 IMPLEMENTED: the result is the exit status of the tool. Exit status 0 is succeeded. It does not mean that any particular certificate is trusted; nothing is verified beyond the exit status. A non-zero status or a signal is failed, and an outcome that cannot be established (a timeout or a lost connection) is indeterminate and is not retried. A program that may have started is never reported as not run; nothing is rolled back. In output the handler has the type ca_trust, the action refresh, and no service: the service field is the empty string and no unit name is invented.
 
-PLANNED, not implemented (H3): type command runs one program after a change. It reuses the validation of the command resource (§10): a static absolute program path, an exact argument list with no shell, a fixed baseline environment plus a restricted env map, an absolute cwd, success_codes, and timeout_seconds. Differences fixed in advance: every value is a static string (no expression), the argument list has at most 64 entries of at most 4096 bytes each, timeout_seconds is 1 to 3600 with default 300, and an optional privilege: root states that root is required. The command resource itself keeps its existing limits.
+IMPLEMENTED: type command runs one program after a change. The program is an absolute path (the managed-path rule of §4.10: no . or .. component, no repeated or trailing separator, no NUL), never searched for in PATH. The arguments are an exact list: at most 64 entries of at most 4096 bytes each, no NUL. Every value is static text; a value that contains {{ is rejected, because the handler would run it literally. timeout_seconds is an integer from 1 to 3600, default 300; anything else (zero, a negative number, a non-integer, a string, more than 3600) is rejected. The program is run directly with those arguments, never through a shell, with the baseline environment of §10 and the run's executor and mutation permit. These limits belong to the command handler only: the command resource (§10) keeps its own and rejects no recipe it accepted before.
+
+IMPLEMENTED: a command handler has no cwd, env or success_codes (they are rejected as unknown fields, so they can be added later without changing what a recipe means). It runs in the default working directory of a command, and exit status 0 is the only success.
+
+IMPLEMENTED: the result of a command handler is the exit status of the program. Exit status 0 is succeeded. Any other status or a signal is failed, even if the program had begun to change something, and an outcome that cannot be established (a timeout or a lost connection) is indeterminate and is not retried. If the program is not an executable file on the target the handler fails and runs nothing; this is checked when the handler runs, because an earlier resource may install it. Nothing is rolled back. In output the handler has the type command, the action run, and no service (the service field is the empty string). The report never lists the arguments, and a failure reason names the program (not for a sensitive handler) and carries the first line of the program's standard error, which is withheld for a sensitive handler. A sensitive handler, or one notified by a sensitive resource, is redacted like every other.
 
 IMPLEMENTED: ca_trust introduces no privilege escalation. Every handler runs with the privilege of the run (§21). A ca_trust handler requires root and fails when the run does not have it; it never escalates by itself, and a root login needs no --sudo.
 
-PLANNED: the type command follows the same rule: privilege: root only requires root and fails the handler when the run does not have it.
+IMPLEMENTED: a command handler follows the same rule as the command resource: it runs with the privilege of the run (a root login, or --sudo) and never escalates by itself. It does not require root in advance: a program that needs root and does not have it fails with its own exit status. There is no privilege field.
 
 IMPLEMENTED: plan and audit never run any handler type. Output keeps the documented handler keys; the type is reported additively.
 
@@ -1107,7 +1115,7 @@ When fail-fast is triggered by a failed/indeterminate resource, all resources no
 
 18. Handler contract
 
-IMPLEMENTED: the handler types this version runs are service, a delayed service action, and ca_trust, a delayed refresh of the system CA trust store. The rules below apply to every handler type, present and planned.
+IMPLEMENTED: the handler types this version runs are service, a delayed service action; ca_trust, a delayed refresh of the system CA trust store; and command, a delayed run of one program. The rules below apply to every handler type.
 
 They execute only if notified by a resource that:
 
@@ -1151,11 +1159,11 @@ A failed or indeterminate manager synchronization before a handler makes that ha
 
 systemctl daemon-reload is not a handler type and none is planned: the manager synchronization of §28 already performs it. A ca_trust handler is unrelated to it: it neither causes nor needs a manager reload.
 
-The type ca_trust (IMPLEMENTED): see §4.3. It runs once after the changed files that notified it, in handler declaration order, so a service handler that must see the refreshed store is declared after the ca_trust handler.
+The types ca_trust and command (IMPLEMENTED): see §4.3. Each runs once, in handler declaration order, after the resources that notified it; a service handler that must see the refreshed trust store is declared after the ca_trust handler.
 
-UNCHANGED LIMIT: a handler is not retried and is not recorded across runs. If a run stops before the handler phase, or a handler fails, the notification is lost: the next apply finds the resource already correct and notifies nobody. The run reports the handlers that did not run (handlers_pending); the operator must perform their action by hand. This holds for every handler type. For ca_trust it means a stale trust store until someone runs the refresh by hand (update-ca-certificates on debian, update-ca-trust extract on redhat).
+UNCHANGED LIMIT: a handler is not retried and is not recorded across runs. If a run stops before the handler phase, or a handler fails, the notification is lost: the next apply finds the resource already correct and notifies nobody. The run reports the handlers that did not run (handlers_pending); the operator must perform their action by hand. This holds for every handler type. For ca_trust it means a stale trust store until someone runs the refresh by hand (update-ca-certificates on debian, update-ca-trust extract on redhat). For a command handler it means running the program by hand with the arguments of the recipe.
 
-IMPLEMENTED (ca_trust) and PLANNED (command): the result is the exit status of the program, not a state observation; a failed or indeterminate result stops the phase like any other handler, a program that may have started is never reported as unchanged, and nothing is rolled back.
+IMPLEMENTED (ca_trust and command): the result is the exit status of the program, not a state observation; a failed or indeterminate result stops the phase like any other handler, a program that may have started is never reported as unchanged, and nothing is rolled back.
 
 Handlers cannot notify anything else.
 

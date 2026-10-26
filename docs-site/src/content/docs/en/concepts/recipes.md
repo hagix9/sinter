@@ -86,10 +86,9 @@ handlers:
 ```
 
 A handler may carry `type: service`; without it the handler is a service
-handler, so existing recipes are unchanged. This version implements two
-handler types, `service` and `ca_trust` (below). `type: command` is reserved
-for a later version, and a recipe that uses it (or any unknown type) is
-rejected at validation instead of being ignored.
+handler, so existing recipes are unchanged. This version implements three
+handler types: `service`, `ca_trust` and `command` (below). A recipe that uses
+any other type is rejected at validation instead of being ignored.
 
 `service` is the **systemd unit name on the target** — it is not resolved from
 a Sinter resource id. Handlers run once at the end of an apply, only when
@@ -138,6 +137,65 @@ certificate is trusted. `plan` and `audit` never run the tool: `plan` lists the
 handler under pending handlers. A handler is declared in order, so declare a
 `ca_trust` handler before a `service` handler that has to see the new store.
 It is unrelated to the automatic `systemctl daemon-reload`.
+
+Verified on real hosts: none yet (tested against a scripted target only).
+
+### Command handler
+
+```yaml
+resources:
+  - id: app_config
+    type: file
+    with:
+      path: /etc/myapp/config.yaml
+      source: files/config.yaml
+    notify: [rebuild_cache]
+handlers:
+  - id: rebuild_cache
+    type: command
+    with:
+      program: /usr/bin/myapp
+      args: [cache, rebuild]
+      timeout_seconds: 300
+```
+
+A `command` handler runs one program after a resource that notified it
+changed. It is for an app-specific step that belongs to a change: rebuilding a
+cache, re-reading a configuration. It is not a place to run something on every
+apply (use a `command` resource for that).
+
+| Field (in `with`) | Required | Notes |
+|-------------------|----------|-------|
+| `program` | yes | Absolute path. Never searched for in `PATH`; no `.` or `..`; static text. |
+| `args` | no | List of strings, at most 64 entries of at most 4096 bytes each; no NUL. |
+| `timeout_seconds` | no | Integer 1–3600, default 300. |
+
+The values are static text, so a value containing `{{` is rejected rather than
+run literally. The program runs directly with exactly these arguments — there
+is no shell, so quoting and expansion never apply — with the same fixed
+environment as the `command` resource. `cwd`, `env` and `success_codes` are not
+available (they are rejected). These limits belong to the handler only: the
+`command` resource keeps its own.
+
+It runs with the privilege of the run, like the `command` resource: as root, or
+through `--sudo`. It never escalates by itself, and it does not check for root
+in advance: a program that needs root and does not have it fails with its own
+exit status. If the program is not an executable file on the target the handler
+fails and runs nothing.
+
+The result is the exit status. Exit 0 is success; any other status or a signal
+is a failure even if the program had begun to change something; a timeout or a
+lost connection is indeterminate and is never retried. A failed or
+indeterminate handler stops the handler phase, and the handlers after it are
+reported as pending. The report names the handler (`type: command`, action
+`run`) and, on a failure, the program and the first line of its standard error;
+it never lists the arguments. A `sensitive: true` handler (and one notified by a
+sensitive resource) is redacted completely.
+
+`plan` and `audit` never run the program; `plan` lists the handler under
+pending handlers. Handlers run in declaration order, so declare a command
+handler after the `ca_trust` or `service` handler it depends on, and the other
+way round.
 
 Verified on real hosts: none yet (tested against a scripted target only).
 

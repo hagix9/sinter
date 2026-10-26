@@ -8,10 +8,9 @@ All notable changes to Sinter are documented in this file.
 
 - **Handlers have a type.** A handler may carry `type: service`; without a type
   it is a service handler exactly as before, so existing recipes are unchanged.
-  The types are `service` (the original handler) and `ca_trust` (below);
-  `command` is reserved for a later version. A recipe that declares `command`,
-  or any unknown or non-string type, is rejected at validation and is never
-  ignored or reported as run. Notification, deduplication, declaration order,
+  The types are `service` (the original handler), `ca_trust` and `command`
+  (below). A recipe that declares any unknown or non-string type is rejected
+  at validation and is never ignored or reported as run. Notification, deduplication, declaration order,
   fail-fast and the pending report are unchanged. In JSON output each handler
   object gains a `type` field; its other keys are unchanged. A failed apply
   still loses the notifications of the handlers that did not run; the
@@ -27,6 +26,19 @@ All notable changes to Sinter are documented in this file.
   tool exited 0, not that a given certificate is trusted. `plan` and `audit`
   never run it. In JSON output the handler has `type: "ca_trust"`, `action:
   "refresh"` and an empty `service`. Not yet verified on real hosts.
+- **`command` handler.** `type: command` runs one program after a resource that
+  notified it changed: `with: { program, args, timeout_seconds }`. `program` is
+  an absolute path (never searched in `PATH`); `args` is an exact list of at most
+  64 strings of at most 4096 bytes; `timeout_seconds` is 1–3600 (default 300).
+  Values are static: `{{` is rejected. The program runs directly, without a
+  shell, with the `command` resource's baseline environment, through the same
+  executor and mutation permit, with the privilege of the run (it never
+  escalates by itself). Exit status 0 is success, any other status or a signal
+  is a failure, an unconfirmed completion is indeterminate and not retried, and
+  a program that is not executable fails without running. The report shows
+  `type: "command"`, action `run`, an empty `service`, and never the arguments;
+  a sensitive handler is fully redacted. `plan` and `audit` never run it. The
+  `command` resource keeps its existing limits. Not yet verified on real hosts.
 
 ### Changed
 
