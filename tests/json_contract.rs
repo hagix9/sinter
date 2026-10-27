@@ -324,9 +324,11 @@ fn failure_before_report_writes_no_json_to_stdout() {
 
 #[test]
 fn connection_failure_before_report_writes_no_json_to_stdout() {
-    // Exit 3 (connection/capability/security) before any report: the
-    // selected known_hosts file does not exist, so no connection is made.
-    let dir = trusted_root("json-contract-connect");
+    // Exit 3 (connection/capability/security) before any report, raised by the
+    // SSH transport itself (TCP connect, or the known_hosts read once
+    // something listens): `--no-ssh-config` skips the local `ssh -G` query, so
+    // no OpenSSH client is run and the failure is never a configuration error.
+    let dir = trusted_root("json-contract-connect-transport");
     let recipe = write_recipe(&dir, "r.yaml", PACKAGE_ONLY);
     let missing = dir.join("no-such-known-hosts");
     for cmd in ["plan", "apply", "audit"] {
@@ -342,13 +344,107 @@ fn connection_failure_before_report_writes_no_json_to_stdout() {
                 "nobody",
                 "--known-hosts",
                 missing.to_str().unwrap(),
+                "--no-ssh-config",
                 "--format",
                 "json",
             ])
             .output()
             .unwrap();
         assert_no_report(&out, 3, cmd);
+        assert_transport_failure(&out, cmd);
     }
+}
+
+#[test]
+fn strict_audit_connection_failure_is_exit_3_and_writes_no_json_to_stdout() {
+    // Phase A: `--audit-policy strict` must not turn a connection failure into
+    // a policy result; the exit stays 3 and no report is written.
+    let dir = trusted_root("json-contract-connect-strict");
+    let recipe = write_recipe(&dir, "r.yaml", PACKAGE_ONLY);
+    let missing = dir.join("no-such-known-hosts");
+    for format in ["json", "text"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_sinter"))
+            .args([
+                "audit",
+                recipe.to_str().unwrap(),
+                "--audit-policy",
+                "strict",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "1",
+                "--user",
+                "nobody",
+                "--known-hosts",
+                missing.to_str().unwrap(),
+                "--no-ssh-config",
+                "--format",
+                format,
+            ])
+            .output()
+            .unwrap();
+        assert_no_report(&out, 3, format);
+        assert_transport_failure(&out, format);
+    }
+}
+
+fn assert_transport_failure(out: &std::process::Output, cmd: &str) {
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("cannot connect to 127.0.0.1:1")
+            || err.contains("cannot read known_hosts file"),
+        "{cmd}: not a transport-stage failure: {err}"
+    );
+}
+
+#[test]
+fn ssh_config_rejection_before_report_writes_no_json_to_stdout() {
+    // The SSH configuration is rejected before the network/handshake path.
+    // The isolated executable accepts only the exact ssh -G request and emits
+    // an unsupported ProxyCommand; it never executes a real SSH client.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = trusted_root("json-contract-connect");
+    let recipe = write_recipe(&dir, "r.yaml", PACKAGE_ONLY);
+    let bin_dir = dir.join("bin");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::create_dir_all(home.join(".ssh")).unwrap();
+    std::fs::write(home.join(".ssh/config"), "Host *\n  ProxyCommand none\n").unwrap();
+    let known = home.join(".ssh/known_hosts");
+    std::fs::write(&known, "").unwrap();
+    let calls = dir.join("ssh-calls");
+    let ssh = bin_dir.join("ssh");
+    std::fs::write(&ssh, "#!/bin/sh\ncase \"$*\" in '-G -l nobody -p 1 -- 127.0.0.1') ;; *) exit 97 ;; esac\nprintf 'called\\n' >> \"$SINTER_FAKE_SSH_CALLS\"\nprintf 'proxycommand /bin/false\\n'\n").unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for cmd in ["plan", "apply", "audit"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_sinter"))
+            .args([
+                cmd,
+                recipe.to_str().unwrap(),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "1",
+                "--user",
+                "nobody",
+                "--known-hosts",
+                known.to_str().unwrap(),
+                "--format",
+                "json",
+            ])
+            .env("PATH", &bin_dir)
+            .env("HOME", &home)
+            .env("SINTER_FAKE_SSH_CALLS", &calls)
+            .env_remove("SSH_AUTH_SOCK")
+            .output()
+            .unwrap();
+        assert_no_report(&out, 3, cmd);
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("ProxyCommand"),
+            "{cmd}: unexpected failure cause"
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 3);
 }
 
 fn assert_no_report(out: &std::process::Output, code: i32, cmd: &str) {

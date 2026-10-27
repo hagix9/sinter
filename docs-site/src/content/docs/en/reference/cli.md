@@ -99,7 +99,7 @@ handler that needs it, and at the end of a successful apply; see
 ## audit
 
 ```sh
-sinter audit <RECIPE> [target options] [--format text|json]
+sinter audit <RECIPE> [target options] [--format text|json] [--audit-policy default|strict]
 ```
 
 Verifies whether the target already satisfies the recipe. Audit is strictly
@@ -424,7 +424,7 @@ inventory, each recipe runs in order on the one `--host` (or localhost).
   is never contacted, and runs neither backups nor resources. Earlier
   executions keep their results; nothing is rolled back.
 - The exit code is the most severe code among executions that ran, in the
-  order 6, 5, 4, 3, 2, 7, 0 (`not_run` contributes none). A partial failure
+  order 6, 5, 4, 3, 2, 7, 8, 0 (8 applies only to strict audit; `not_run` contributes none). A partial failure
   never exits 0. The summary line counts `exit 0`, `non-zero` and `not run`.
 - Text output prints `== <recipe> @ <host> (<user>@<address>:<port>) ==`
   before each execution's normal report and an `== executions ==` summary at
@@ -1059,6 +1059,7 @@ Sensitive resources never print raw values: drift details render as
 | 5 | Apply failed |
 | 6 | Indeterminate — apply became indeterminate, or audit recorded one or more `ERROR` results (errors dominate drift) |
 | 7 | Audit detected drift with no observation errors |
+| 8 | Strict audit policy found at least one not-auditable resource, with no drift or error |
 
 ## JSON output contract
 
@@ -1160,7 +1161,7 @@ In `plan`, entries have `phase` `planned`, `execution` `not_run` and
 | Field | Type | Values |
 |-------|------|--------|
 | `mode` | string | `"audit"` |
-| `status` | string | `no_drift` (exit 0), `drift` (exit 7), `indeterminate` (exit 6) |
+| `status` | string | `no_drift` (exit 0 by default; exit 8 is possible with strict policy), `drift` (exit 7), `indeterminate` (exit 6) |
 | `summary` | object | Integers `total`, `compliant`, `drifted`, `not_auditable`, `not_applicable`, `errors`. |
 | `resources` | array | One object per resource, in dependency/execution order. |
 
@@ -1263,3 +1264,15 @@ exits as described in [Framing and errors](#framing-and-errors).
   a host enrolled with only its Ed25519 (or only its RSA) key is accepted.
 - With an OpenSSH `HostKeyAlias`, the alias replaces the host name in the
   identity.
+
+### Strict audit policy for CI
+
+Audit keeps its default behavior unless `--audit-policy strict` is specified. In strict mode, an audit with one or more `not_auditable` resources exits 8 when there is no drift or observation error. Error still takes precedence (exit 6), followed by drift (exit 7). `not_applicable` alone does not fail the policy. A `not_auditable` resource remains unobserved; this option never runs command resources or handlers and does not turn them into compliant results. Scoped waivers are not supported.
+
+For example, in a CI job with an already configured target:
+
+```sh
+sinter audit recipe.yaml --audit-policy strict --format json > audit.json
+```
+
+In strict mode the audit JSON includes an `audit_policy` object with `mode`, `not_auditable_total`, and `effective_exit_code`; the resource statuses and summary remain the underlying audit result. For bundles and inventories the object is per execution, and the outer `exit_code` is the aggregate. Default JSON and MCP audit are unchanged. A `no_drift` result with exit 8 is not a fully audited pass.

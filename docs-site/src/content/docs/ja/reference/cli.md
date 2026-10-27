@@ -98,7 +98,7 @@ alias リンク、`system.conf`）に触れた場合、またはユニットが
 ## audit
 
 ```sh
-sinter audit <RECIPE> [target options] [--format text|json]
+sinter audit <RECIPE> [target options] [--format text|json] [--audit-policy default|strict]
 ```
 
 ターゲットがすでにレシピを満たしているかを検証します。audit は
@@ -413,7 +413,7 @@ sinter apply web-stack.yaml --inventory hosts.yaml
   実行（同じレシピの後続ホスト、後続レシピのすべて）は `not_run`（理由に
   失敗した実行名）となり、接続もバックアップもリソース実行も行いません。
   それまでに完了した実行の結果はそのまま残り、ロールバックはしません。
-- 終了コードは実行された実行のうち最も重いもの（6、5、4、3、2、7、0 の順。
+- 終了コードは実行された実行のうち最も重いもの（6、5、4、3、2、7、8、0 の順。8はstrict auditのみ。
   `not_run` は含めない）。一部が失敗して終了コード 0 になることはありません。
   要約行は `exit 0`、`non-zero`、`not run` の件数を示します。
 - テキスト出力では各実行の通常のレポートの前に
@@ -1021,6 +1021,7 @@ sensitive リソースは生の値を一切出力しません：drift の詳細�
 | 5 | apply が失敗 |
 | 6 | indeterminate — apply が indeterminate、または audit で 1 件以上の `ERROR` が記録された（エラーは drift より優先） |
 | 7 | audit が drift を検出（観測エラーなし） |
+| 8 | strict auditで監査不能があり、drift・観測エラーはない |
 
 ## JSON 出力の契約
 
@@ -1122,7 +1123,7 @@ handler オブジェクトのフィールド:
 | フィールド | 型 | 値 |
 |------------|----|----|
 | `mode` | string | `"audit"` |
-| `status` | string | `no_drift`（終了コード 0）、`drift`（7）、`indeterminate`（6） |
+| `status` | string | `no_drift`（既定は0、strictでは8もあり得る）、`drift`（7）、`indeterminate`（6） |
 | `summary` | object | 整数の `total`、`compliant`、`drifted`、`not_auditable`、`not_applicable`、`errors` |
 | `resources` | array | リソースごとに 1 つのオブジェクト（依存関係/実行順） |
 
@@ -1234,3 +1235,15 @@ targets、解決、重複ホスト）ではドキュメントを出力せず、
   ホストも受け入れます。
 - OpenSSH の `HostKeyAlias` がある場合は、ホスト名の代わりにその別名を
   アイデンティティに使います。
+
+### CI向けstrict audit policy
+
+`--audit-policy strict` を指定しない場合、auditの既存動作は変わりません。strictでは、DRIFTや観測ERRORがなくても `not_auditable` が1件以上あれば終了コード8になります。ERRORの6、DRIFTの7が優先され、`not_applicable` だけでは失敗しません。監査不能の結果はそのまま残り、command resourceやhandlerを実行したりcompliantに変換したりしません。対象を限定したwaiverは未対応です。
+
+接続先を設定済みのCIでの例:
+
+```sh
+sinter audit recipe.yaml --audit-policy strict --format json > audit.json
+```
+
+strict時のaudit JSONには `audit_policy`（`mode`、`not_auditable_total`、`effective_exit_code`）が追加され、元のresource statusとsummaryは変わりません。bundle・inventoryでは実行ごとの結果に付き、外側の `exit_code` は全体の集計です。既定JSONとMCP auditは変更しません。`no_drift` でも終了コード8なら、完全に監査された合格ではありません。

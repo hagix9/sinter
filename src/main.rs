@@ -57,7 +57,7 @@ enum Command {
     /// Apply a recipe to a target.
     Apply(TargetArgs),
     /// Audit whether a target already satisfies a recipe. Read-only.
-    Audit(TargetArgs),
+    Audit(AuditArgs),
     /// Serve a read-only MCP (Model Context Protocol) endpoint on stdio.
     Mcp(McpArgs),
     /// Encrypt, decrypt and list secret files (standard age format).
@@ -212,6 +212,8 @@ struct ValidateArgs {
 
 #[derive(Args, Debug)]
 struct TargetArgs {
+    #[arg(skip)]
+    audit_strict: bool,
     /// Recipe or bundle file.
     recipe: PathBuf,
     #[command(flatten)]
@@ -222,6 +224,15 @@ struct TargetArgs {
     /// Output format: text or json.
     #[arg(long, default_value = "text")]
     format: String,
+}
+
+#[derive(Args, Debug)]
+struct AuditArgs {
+    #[command(flatten)]
+    target: TargetArgs,
+    /// Fail with exit 8 when the audit contains non-auditable resources.
+    #[arg(long, value_parser = ["default", "strict"], default_value = "default")]
+    audit_policy: String,
 }
 
 fn main() -> ExitCode {
@@ -244,7 +255,10 @@ fn run(cli: Cli) -> Result<u8, SinterError> {
         Command::Validate(a) => validate(&a),
         Command::Plan(a) => run_phase(Phase::Plan, &a),
         Command::Apply(a) => run_phase(Phase::Apply, &a),
-        Command::Audit(a) => run_phase(Phase::Audit, &a),
+        Command::Audit(mut a) => {
+            a.target.audit_strict = a.audit_policy == "strict";
+            run_phase(Phase::Audit, &a.target)
+        }
         Command::Secrets(a) => secrets_command(a),
         Command::Mcp(a) => {
             // Load once, fail closed: a missing/unreadable/malformed targets
@@ -683,6 +697,14 @@ impl Outcome {
         }
     }
 
+    fn policy_exit_code(&self, strict: bool) -> u8 {
+        let code = self.exit_code();
+        match self {
+            Outcome::Audit(report) if strict && code == 0 && report.summary.not_auditable > 0 => 8,
+            _ => code,
+        }
+    }
+
     /// Closed run outcome for progress; never carries report content.
     fn run_outcome(&self) -> RunOutcome {
         match self {
@@ -698,21 +720,50 @@ impl Outcome {
         }
     }
 
-    fn render(&self, phase: Phase, ro: &RenderOptions) -> Result<(), SinterError> {
+    fn render(&self, phase: Phase, ro: &RenderOptions, strict: bool) -> Result<(), SinterError> {
         let stdout = std::io::stdout();
         let mut lock = stdout.lock();
+        if strict && matches!(self, Outcome::Audit(_)) && ro.format == OutputFormat::Json {
+            use std::io::Write;
+            let json = self.json(phase, strict);
+            serde_json::to_writer_pretty(&mut lock, &json)
+                .map_err(|e| io_error(std::io::Error::other(e)))?;
+            return writeln!(lock).map_err(io_error);
+        }
         match (self, phase) {
             (Outcome::Audit(r), _) => render_audit(r, ro, &mut lock),
             (Outcome::Run(r), Phase::Apply) => render_apply(r, ro, &mut lock),
             (Outcome::Run(r), _) => render_plan(r, ro, &mut lock),
         }
-        .map_err(io_error)
+        .map_err(io_error)?;
+        if strict {
+            if let Outcome::Audit(report) = self {
+                use std::io::Write;
+                writeln!(
+                    lock,
+                    "audit policy: strict; {} not_auditable; exit {}",
+                    report.summary.not_auditable,
+                    self.policy_exit_code(true)
+                )
+                .map_err(io_error)?;
+            }
+        }
+        Ok(())
     }
 
-    fn json(&self, phase: Phase) -> serde_json::Value {
+    fn json(&self, phase: Phase, strict: bool) -> serde_json::Value {
         match self {
             Outcome::Run(r) => run_report_json(r, phase.name()),
-            Outcome::Audit(r) => audit_report_json(r),
+            Outcome::Audit(r) => {
+                let mut json = audit_report_json(r);
+                if strict {
+                    json["audit_policy"] = serde_json::json!({
+                        "mode": "strict", "not_auditable_total": r.summary.not_auditable,
+                        "effective_exit_code": self.policy_exit_code(true)
+                    });
+                }
+                json
+            }
         }
     }
 }
@@ -835,8 +886,8 @@ fn run_one_target(
                 .and_then(|target| execute(phase, model, target.spec, a, None, session.sink()));
             session.end(run_outcome_of(&executed));
             let outcome = executed?;
-            outcome.render(phase, ro)?;
-            Ok(outcome.exit_code())
+            outcome.render(phase, ro, a.audit_strict)?;
+            Ok(outcome.policy_exit_code(a.audit_strict))
         }
         Source::Bundle(b) => {
             // One explicit target (--host or localhost): every recipe of the
@@ -1644,7 +1695,7 @@ fn backup_record(
 ///   backup, apply failure or indeterminate result); every later execution
 ///   is reported as `not_run`.
 /// * The exit code is the most severe execution exit code
-///   (6 > 5 > 4 > 3 > 2 > 7 > 0); a partial failure is never exit 0.
+///   (6 > 5 > 4 > 3 > 2 > 7 > 8 > 0); a partial failure is never exit 0.
 fn run_executions(
     phase: Phase,
     source: &Source,
@@ -1707,12 +1758,12 @@ fn run_executions(
         let (code, label, json) = match executed {
             Ok(outcome) => {
                 if text {
-                    outcome.render(phase, ro)?;
+                    outcome.render(phase, ro, a.audit_strict)?;
                 }
                 (
-                    outcome.exit_code(),
+                    outcome.policy_exit_code(a.audit_strict),
                     outcome.label(),
-                    serde_json::json!({ "result": outcome.json(phase) }),
+                    serde_json::json!({ "result": outcome.json(phase, a.audit_strict) }),
                 )
             }
             Err(e) => {
@@ -1927,6 +1978,7 @@ fn severity(code: u8) -> u8 {
         3 => 4,
         2 => 3,
         7 => 2,
+        8 => 1,
         0 => 0,
         _ => 1,
     }
@@ -1981,6 +2033,84 @@ fn report_status_code(status: &sinter::engine::AggregateStatus) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_audit_policy_preserves_status_and_prioritizes_errors_and_drift() {
+        use sinter::audit::{AuditResourceResult, AuditResourceStatus as S, AuditSummary};
+        for (statuses, default, strict) in [
+            (vec![S::Compliant], 0, 0),
+            (vec![S::NotAuditable], 0, 8),
+            (vec![S::NotAuditable, S::NotAuditable], 0, 8),
+            (vec![S::NotApplicable], 0, 0),
+            (vec![S::Drift, S::NotAuditable], 7, 7),
+            (vec![S::Error, S::NotAuditable], 6, 6),
+            (vec![S::Error, S::Drift, S::NotAuditable], 6, 6),
+        ] {
+            let resources: Vec<_> = statuses
+                .iter()
+                .enumerate()
+                .map(|(i, status)| AuditResourceResult {
+                    id: format!("r{i}"),
+                    type_: "command".into(),
+                    origin: "test".into(),
+                    status: *status,
+                    sensitive: false,
+                    details: vec![],
+                    loop_index: None,
+                    reason: None,
+                })
+                .collect();
+            let summary = AuditSummary::from_results(&resources);
+            let outcome = Outcome::Audit(AuditReport {
+                resources,
+                summary,
+                commands: vec![],
+            });
+            assert_eq!(outcome.policy_exit_code(false), default);
+            assert_eq!(outcome.policy_exit_code(true), strict);
+            let json = outcome.json(Phase::Audit, false);
+            assert_eq!(json["summary"]["not_auditable"], summary.not_auditable);
+            if let Outcome::Audit(ref report) = outcome {
+                assert_eq!(json, audit_report_json(report));
+            }
+            let strict_json = outcome.json(Phase::Audit, true);
+            assert_eq!(strict_json["audit_policy"]["mode"], "strict");
+            assert_eq!(strict_json["audit_policy"]["effective_exit_code"], strict);
+        }
+        assert!(
+            severity(6) > severity(7) && severity(7) > severity(8) && severity(8) > severity(0)
+        );
+    }
+
+    #[test]
+    fn audit_policy_is_audit_only_and_rejects_invalid_modes() {
+        assert!(Cli::try_parse_from([
+            "sinter",
+            "audit",
+            "recipe.yaml",
+            "--audit-policy",
+            "strict"
+        ])
+        .is_ok());
+        for command in ["plan", "apply", "validate"] {
+            assert!(Cli::try_parse_from([
+                "sinter",
+                command,
+                "recipe.yaml",
+                "--audit-policy",
+                "strict"
+            ])
+            .is_err());
+        }
+        assert!(Cli::try_parse_from([
+            "sinter",
+            "audit",
+            "recipe.yaml",
+            "--audit-policy",
+            "scoped"
+        ])
+        .is_err());
+    }
 
     thread_local! {
         /// Scripted targets for [`execute`], one per execution, in order
@@ -2119,7 +2249,11 @@ mod tests {
         let mut full = vec!["sinter", phase.name()];
         full.extend_from_slice(argv);
         match Cli::try_parse_from(full).unwrap().command {
-            Command::Plan(a) | Command::Apply(a) | Command::Audit(a) => a,
+            Command::Plan(a) | Command::Apply(a) => a,
+            Command::Audit(mut a) => {
+                a.target.audit_strict = a.audit_policy == "strict";
+                a.target
+            }
             _ => unreachable!(),
         }
     }
@@ -2143,6 +2277,268 @@ mod tests {
         let r = run_phase_with(phase, &a, format, &w.opts);
         FAKE_TARGETS.with(|f| f.borrow_mut().clear());
         r
+    }
+
+    #[test]
+    fn strict_audit_wiring_keeps_default_and_never_dispatches_command() {
+        let dir = fixture();
+        let recipe = write(&dir, "command.yaml", "version: 1\nresources:\n  - id: c\n    type: command\n    with:\n      program: /usr/bin/synthetic-audit-sentinel\n");
+        let w = wiring(ProgressMode::Disabled);
+        assert_eq!(
+            drive(
+                Phase::Audit,
+                &[&recipe, "--format", "json"],
+                &w,
+                vec![base()]
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            drive(
+                Phase::Audit,
+                &[&recipe, "--format", "json", "--audit-policy", "strict"],
+                &w,
+                vec![base()]
+            )
+            .unwrap(),
+            8
+        );
+    }
+
+    #[test]
+    fn strict_audit_multi_host_aggregates_policy_failure() {
+        let dir = fixture();
+        let inv = inventory(&dir);
+        let recipe = write(&dir, "multi.yaml", "version: 1\ntargets:\n  groups: [web]\nresources:\n  - id: c\n    type: command\n    with:\n      program: /usr/bin/synthetic-audit-sentinel\n");
+        let w = wiring(ProgressMode::Disabled);
+        assert_eq!(
+            drive(
+                Phase::Audit,
+                &[
+                    &recipe,
+                    "--inventory",
+                    &inv,
+                    "--no-ssh-config",
+                    "--format",
+                    "json",
+                    "--audit-policy",
+                    "strict"
+                ],
+                &w,
+                vec![base(), base()]
+            )
+            .unwrap(),
+            8
+        );
+    }
+
+    #[test]
+    fn strict_audit_never_dispatches_command_or_handler() {
+        let dir = fixture();
+        let recipe = write(&dir, "boundary.yaml", "version: 1\nresources:\n  - id: c\n    type: command\n    with:\n      program: /usr/bin/synthetic-command-sentinel\n  - id: f\n    type: file\n    with:\n      path: /etc/perf/a\n      content: x\n    notify: [h]\nhandlers:\n  - id: h\n    type: command\n    with:\n      program: /usr/bin/synthetic-handler-sentinel\n");
+        let source = load_source(std::path::Path::new(&recipe)).unwrap();
+        let a = target_args(Phase::Audit, &[&recipe, "--audit-policy", "strict"]);
+        FAKE_TARGETS.with(|f| {
+            f.borrow_mut()
+                .push_back(base().with_fs_file("/etc/perf/a", "x"))
+        });
+        let outcome = execute(
+            Phase::Audit,
+            source.units()[0].model.clone(),
+            TargetSpec { ssh: None },
+            &a,
+            None,
+            Arc::new(sinter::progress::NoopSink),
+        )
+        .unwrap();
+        FAKE_TARGETS.with(|f| f.borrow_mut().clear());
+        assert_eq!(outcome.policy_exit_code(true), 8);
+        if let Outcome::Audit(report) = outcome {
+            assert!(!report
+                .commands
+                .iter()
+                .any(|c| c.program.contains("synthetic-command-sentinel")
+                    || c.program.contains("synthetic-handler-sentinel")));
+        } else {
+            panic!("expected audit report");
+        }
+    }
+
+    // This child uses only the in-process FakeTarget; the parent compares the
+    // actual CLI wiring's stdout, stderr and exit status in a fresh process.
+    #[test]
+    fn audit_policy_capture_child() {
+        let Ok(recipe) = std::env::var("SINTER_POLICY_TEST_RECIPE") else {
+            return;
+        };
+        let mode = std::env::var("SINTER_POLICY_TEST_MODE").unwrap();
+        let format = std::env::var("SINTER_POLICY_TEST_FORMAT").unwrap();
+        let mut args = vec![recipe.as_str(), "--format", format.as_str()];
+        if mode != "implicit" {
+            args.extend(["--audit-policy", mode.as_str()]);
+        }
+        let w = wiring(ProgressMode::Disabled);
+        let inventory_path = std::env::var("SINTER_POLICY_TEST_INVENTORY").ok();
+        let targets = if let Some(ref inv) = inventory_path {
+            args.extend(["--inventory", inv.as_str(), "--no-ssh-config"]);
+            vec![base(), base()]
+        } else {
+            vec![base()]
+        };
+        let result = drive(Phase::Audit, &args, &w, targets).unwrap();
+        std::process::exit(i32::from(result));
+    }
+
+    #[test]
+    fn audit_policy_default_and_strict_output_contract() {
+        let dir = fixture();
+        let recipe = write(&dir, "policy.yaml", "version: 1\nresources:\n  - id: c\n    type: command\n    with:\n      program: /usr/bin/synthetic-audit-sentinel\n");
+        let run = |mode: &str, format: &str| {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::audit_policy_capture_child",
+                    "--nocapture",
+                ])
+                .env("SINTER_POLICY_TEST_RECIPE", &recipe)
+                .env("SINTER_POLICY_TEST_MODE", mode)
+                .env("SINTER_POLICY_TEST_FORMAT", format)
+                .env_remove("SINTER_POLICY_TEST_INVENTORY")
+                .output()
+                .unwrap()
+        };
+        for format in ["text", "json"] {
+            let implicit = run("implicit", format);
+            let explicit = run("default", format);
+            let strict = run("strict", format);
+            assert_eq!(implicit.status.code(), Some(0));
+            assert_eq!(explicit.status.code(), Some(0));
+            assert_eq!(strict.status.code(), Some(8));
+            assert_eq!(implicit.stdout, explicit.stdout);
+            assert_eq!(implicit.stderr, explicit.stderr);
+            assert_eq!(implicit.stderr, strict.stderr);
+            let output = String::from_utf8(strict.stdout).unwrap();
+            if format == "json" {
+                let value: serde_json::Value =
+                    serde_json::from_str(&output[output.find('{').unwrap()..]).unwrap();
+                assert_eq!(value["status"], "no_drift");
+                assert_eq!(value["resources"][0]["status"], "not_auditable");
+                assert_eq!(value["summary"]["not_auditable"], 1);
+                assert_eq!(value["audit_policy"]["effective_exit_code"], 8);
+            } else {
+                assert!(output.contains("NOT_AUDITABLE c [command]"));
+                assert!(output.contains("audit policy: strict; 1 not_auditable; exit 8"));
+            }
+        }
+    }
+
+    #[test]
+    fn strict_audit_bundle_and_multi_host_keep_priority() {
+        let dir = fixture();
+        let one = "version: 1\nresources:\n  - id: c\n    type: command\n    with:\n      program: /usr/bin/synthetic-audit-sentinel\n";
+        write(&dir, "one.yaml", one);
+        write(&dir, "two.yaml", one);
+        let bundle = write(
+            &dir,
+            "bundle.yaml",
+            "version: 1\nrecipes: [one.yaml, two.yaml]\n",
+        );
+        let w = wiring(ProgressMode::Disabled);
+        assert_eq!(
+            drive(
+                Phase::Audit,
+                &[&bundle, "--format", "json", "--audit-policy", "strict"],
+                &w,
+                vec![base(), base()]
+            )
+            .unwrap(),
+            8
+        );
+        let inv = inventory(&dir);
+        let recipe = write(&dir, "multi-status.yaml", "version: 1\ntargets:\n  groups: [web]\nresources:\n  - id: c\n    type: command\n    with:\n      program: /usr/bin/synthetic-audit-sentinel\n  - id: p\n    type: package\n    with:\n      name: jq\n      state: present\n");
+        let args = [
+            &recipe[..],
+            "--inventory",
+            &inv,
+            "--no-ssh-config",
+            "--format",
+            "json",
+            "--audit-policy",
+            "strict",
+        ];
+        assert_eq!(
+            drive(
+                Phase::Audit,
+                &args,
+                &w,
+                vec![base().with_package("jq"), base()]
+            )
+            .unwrap(),
+            7
+        );
+        let mut bad = base();
+        bad.query_completion = Some(sinter::executor::Completion::Exited(2));
+        assert_eq!(
+            drive(
+                Phase::Audit,
+                &args,
+                &w,
+                vec![base().with_package("jq"), bad]
+            )
+            .unwrap(),
+            6
+        );
+    }
+
+    #[test]
+    fn strict_audit_multi_host_text_reports_policy_failures() {
+        let dir = fixture();
+        let recipe = write(&dir, "multi-text.yaml", "version: 1\ntargets:\n  groups: [web]\nresources:\n  - id: c\n    type: command\n    with:\n      program: /usr/bin/synthetic-audit-sentinel\n");
+        let inv = inventory(&dir);
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::audit_policy_capture_child",
+                "--nocapture",
+            ])
+            .env("SINTER_POLICY_TEST_RECIPE", &recipe)
+            .env("SINTER_POLICY_TEST_MODE", "strict")
+            .env("SINTER_POLICY_TEST_FORMAT", "text")
+            .env("SINTER_POLICY_TEST_INVENTORY", &inv)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(8));
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(
+            stdout
+                .matches("audit policy: strict; 1 not_auditable; exit 8")
+                .count(),
+            2
+        );
+        assert!(stdout.contains("executions: 2 total, 0 exit 0, 2 non-zero, 0 not run"));
+        assert!(out.stderr.is_empty());
+    }
+
+    #[test]
+    fn audit_policy_plan_apply_are_unaffected_on_fake_target() {
+        let dir = fixture();
+        let recipe = write(&dir, "unchanged.yaml", "version: 1\nresources:\n  - id: f\n    type: file\n    with:\n      path: /etc/perf/a\n      content: x\n");
+        let w = wiring(ProgressMode::Disabled);
+        for phase in [Phase::Plan, Phase::Apply] {
+            let args = target_args(phase, &[&recipe, "--format", "json"]);
+            assert!(!args.audit_strict);
+            assert_eq!(
+                drive(
+                    phase,
+                    &[&recipe, "--format", "json"],
+                    &w,
+                    vec![base().with_fs_file("/etc/perf/a", "x")]
+                )
+                .unwrap(),
+                0
+            );
+        }
     }
 
     const RECIPE: &str = "version: 1\nresources:\n  - id: a\n    type: file\n    with:\n      path: /etc/perf/a\n      content: x\n";

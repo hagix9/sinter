@@ -215,6 +215,7 @@ sinter apply nginx.yaml --inventory hosts.yaml
 | 5 | apply failed |
 | 6 | apply became indeterminate。auditでは1件以上のERRORが記録された（ERRORはDRIFTより優先） |
 | 7 | auditがDRIFTを検出（ERRORなし） |
+| 8 | strict auditでNOT_AUDITABLEあり（DRIFT・ERRORなし） |
 
 ## Recipeモデル
 

@@ -1283,7 +1283,7 @@ plan and audit are read-only and attempt every execution.
 
 apply fail-fast: during apply, an execution whose exit code is not 0 — for any reason: validation (2), connection or capability (3), plan (4), backup or apply failure (5), indeterminate outcome (6) — stops the sequence. The failed execution keeps its own result or error. Every later execution, whether a later host of the same recipe or any execution of a later recipe, is reported as not run with the name of the failed execution as its reason: it is never contacted, and neither its backups nor its resources run. Executions completed before the failure keep their results; nothing is rolled back.
 
-The invocation exit code is the most severe exit code among executions that ran, in the order 6, 5, 4, 3, 2, 7, 0; not-run executions contribute none. A partial failure never exits 0. The summary counts executions that exited 0, exited non-zero, and were not run.
+The invocation exit code is the most severe exit code among executions that ran, in the order 6, 5, 4, 3, 2, 7, 8, 0 (8 only from a strict audit, §33); not-run executions contribute none. A partial failure never exits 0. The summary counts executions that exited 0, exited non-zero, and were not run.
 
 Text output shows the target resolution (MATCH with reasons / SKIP per host and recipe) before running and an execution summary after. JSON output is one document for the invocation with the resolution and, per execution, the recipe, the target identity (inventory name, address, port, user), status, exit code, the single-target document or error, and an execution-level backup record (§4.12): null when the recipe declares no backup or in audit; otherwise its status (planned, completed, failed, not_started, not_run) with run id, run directory and per-path entries — never content.
 
@@ -2096,9 +2096,15 @@ Stable v0.1 meanings:
 
 6: apply became indeterminate
 
+7: audit detected drift, with no observation error
+
+8: strict audit (`sinter audit --audit-policy strict`) found not-auditable resources, with no drift and no error
+
 Plan finding desired-state differences still exits 0.
 
-With an inventory or a bundle (§19.4) the exit code is the most severe execution exit code (6 > 5 > 4 > 3 > 2 > 7 > 0).
+Exit 8 exists only for `audit --audit-policy strict`. The observed audit statuses are unchanged (a not-auditable resource stays not auditable), command resources and handlers are still never run, and without the option, or with `--audit-policy default`, the exit codes are as before. Error (6) and drift (7) take precedence over 8.
+
+With an inventory or a bundle (§19.4) the exit code is the most severe execution exit code (6 > 5 > 4 > 3 > 2 > 7 > 8 > 0).
 
 34. Acceptance tests
 

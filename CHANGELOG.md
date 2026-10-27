@@ -39,6 +39,17 @@ All notable changes to Sinter are documented in this file.
   `type: "command"`, action `run`, an empty `service`, and never the arguments;
   a sensitive handler is fully redacted. `plan` and `audit` never run it. The
   `command` resource keeps its existing limits. Not yet verified on real hosts.
+- **Strict audit policy for CI.** `sinter audit --audit-policy strict` exits 8
+  when the audit has at least one `not_auditable` resource and no error or
+  drift. Error (exit 6) and drift (exit 7) keep their precedence, and
+  `not_applicable` alone does not fail the policy. The audit itself is
+  unchanged: it never runs `command` resources or handlers, and the observed
+  statuses are not rewritten. Without the option, or with `--audit-policy
+  default`, the output and exit codes are as before. In JSON a strict audit
+  gains an `audit_policy` object (`mode`, `not_auditable_total`,
+  `effective_exit_code`); with several executions the invocation exit code
+  orders as 6, 5, 4, 3, 2, 7, 8, 0. The option exists for `audit` only; `plan`,
+  `apply` and `validate` reject it. There is no waiver mechanism.
 
 ### Changed
 

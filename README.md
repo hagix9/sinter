@@ -216,6 +216,7 @@ Details: [CLI reference](https://sinter.fulltrust.co.jp/en/reference/cli/).
 | 5 | apply failed |
 | 6 | apply became indeterminate; audit recorded one or more ERROR results (errors dominate DRIFT) |
 | 7 | audit detected DRIFT with no ERROR results |
+| 8 | strict audit policy found NOT_AUDITABLE, with no DRIFT or ERROR |
 
 ## Recipe model
 
