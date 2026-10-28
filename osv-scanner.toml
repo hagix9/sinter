@@ -9,7 +9,25 @@
 # Sinter does not parse TOML with it (recipes use toml 0.8). ignoreUntil is
 # exclusive: the scan fails from that date on, and the exception must then be
 # reviewed and renewed or removed.
+#
+# GHSA-qwgh-2vcv-g2f7 (block-buffer < 0.12.1) and RUSTSEC-2026-0387
+# (crypto-bigint < 0.7.6) are excepted for the root lockfile only, until
+# 2026-12-21 (re-evaluated by 2026-12-14). They are accepted risks, not fixes:
+# age 0.12.1 (the latest age release) requires the digest 0.10 / elliptic-curve
+# 0.13 crates that pull in block-buffer 0.10.4 and crypto-bigint 0.5.5, and no
+# patched release of either exists on those lines. Each exception names one id
+# exactly; any other advisory still fails the scan.
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0374"
 ignoreUntil = 2027-01-31
 reason = "basic-toml 0.1.10 is unmaintained (RustSec INFO, no patched version). It is reachable only at build time: age 0.12.1 -> i18n-embed-fl/i18n-embed-impl (proc-macro) -> i18n-config 0.4.8 -> basic-toml; it is not linked into the sinter binary and Sinter does not parse TOML with it (recipes use toml 0.8). age is pinned at =0.12.1 (latest) and i18n-config 0.4.8 (latest) still requires basic-toml; cargo-i18n master has switched to toml but has not published i18n-config > 0.4.8. Re-evaluate when i18n-config > 0.4.8 is published, when age updates, a new advisory appears, or this exception expires."
+
+[[IgnoredVulns]]
+id = "GHSA-qwgh-2vcv-g2f7"
+ignoreUntil = 2026-12-21
+reason = "block-buffer 0.10.4 (fixed only in 0.12.1, the digest 0.11 line; no patched 0.10.x) is pulled in through digest 0.10 by sha2 0.10, hmac 0.12, hkdf 0.12, pbkdf2/scrypt, sha3 0.10 and elliptic-curve 0.13, which age 0.12.1 (the latest age release) requires. The advisory needs a panic inside a block-buffer call that is caught (catch_unwind) and the same buffer used again; Sinter computes one-shot digests and none of its catch_unwind calls (progress observers and tests) wraps a hashing call, so the condition is not expected to hold. This is a static review, not a proof of safety. Re-evaluate when a new stable age is released, rage PR #648/#649 is merged, a new advisory appears, at the 2026-12-14 review, or when this exception expires."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0387"
+ignoreUntil = 2026-12-21
+reason = "crypto-bigint 0.5.5 (fixed only in 0.7.6+; no patched 0.5.x) is pulled in through p256 0.13 / elliptic-curve 0.13 by age 0.12.1 (the latest age release) and its hpke dependency. In age it is used only by the P-256 tag / tagpq recipients (encryption only) and the disabled ssh feature. Sinter uses age only for x25519 recipients and identities, scrypt and armor, and never references age::tag, age::tagpq or plugins, so the timing issues are not expected to be reachable. This is a static review, not a proof of safety. Re-evaluate when a new stable age is released, rage PR #648/#649 is merged, Sinter starts using tag/tagpq/plugins, a new advisory appears, at the 2026-12-14 review, or when this exception expires."
