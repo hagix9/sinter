@@ -836,7 +836,11 @@ prints when stdout is not a terminal. That is what bounds the table below.
 | APT with status records | aggregate download percent (`download 42%`), transaction-wide operation percent (`install 42%`, `remove 42%`), package name, payload-file counts | a per-package percentage; a percentage derived from a count |
 | APT without status records | the human stage words (`downloading`, `installing`, `configuring`, `triggering`) | any percentage or count; a removal phase |
 | DNF 4 | download-meter completion (`downloading`, `file n/m`, a `B`/`B/s` value), transaction actions (`installing`, `removing`, `verifying`, `triggering`), `action n/m` on install and remove lines | a transaction percentage (the non-terminal output has none); `kB`/`MiB` values converted to bytes |
-| DNF 5 | completed progress bars: stage lines, the package name of install/remove bars, `file n/m` on download bars | a percentage (a bar's `100%` is one item's, not the transaction's); a package count from `[n/m]` (it includes the prepare step) |
+
+DNF 5 (a `/usr/bin/dnf` that is dnf5, as on Fedora) is not a supported package
+backend, and no package detail is promised for it. On a real dnf5 host its
+download bars were not recognized and package names could appear shortened as
+dnf5 printed them.
 
 ```text
 apply 17/42 package:nginx download 42% file 2/3 12s
@@ -875,16 +879,30 @@ progress: apply: 20/42 on package:nginx, install 64% (nginx-1.24.0, 15s)
   shows no package detail at all. Its stage line is unchanged.
 - DNF installs from the cache; Sinter's prefetch (`dnf install --downloadonly`)
   is where DNF downloads, so DNF's `downloading` detail belongs to that step.
+  DNF 4 prints its `Downloading Packages:` heading even when the payloads are
+  already cached (it then lists them as `[SKIPPED] … Already downloaded`), so
+  `downloading` can appear although nothing is downloaded: it names the step,
+  not a transfer. `file n/m` and byte values come only from DNF's completion
+  lines for downloaded files.
+- **Removal shows no package detail.** A `state: absent` resource on apt and
+  DNF 4 targets removes the package with `dpkg --remove` / `rpm -e` (see
+  [package](/en/reference/resources/package/)), and Sinter does not observe
+  those commands: while the removal runs, only the stage line is shown, with no
+  phase, package name, count or percentage from the package manager. `remove N%`
+  and `removing` appear only when an install transaction itself removes a
+  package (for example the old version DNF 4 cleans up when the install
+  upgrades a dependency). The result, the JSON document and the exit code are
+  the same either way.
 - In plain mode a package detail is a line of its own only when the phase
   changes, at each 10% download milestone, and when a download completes: at
   most 24 lines per resource and 200 per stage, so a log stays bounded.
 
 Over SSH the same rules apply: Sinter allocates no PTY on the target, so the
-manager behaves as it does on a pipe, and only the mutation and prefetch
-commands are observed. Other remote commands never contribute detail. If the
-connection drops or the command is cancelled, progress stops; the result is the
-usual failed or indeterminate classification, and package detail never changes
-it.
+manager behaves as it does on a pipe, and only the install mutation and the
+prefetch are observed. Other remote commands, including apt and DNF 4
+removals, never contribute detail. If the connection drops or the command is
+cancelled, progress stops; the result is the usual failed or indeterminate
+classification, and package detail never changes it.
 
 Package detail is not part of the stable text contract: its words and fields may
 change in a minor release. It never reaches stdout and never appears in

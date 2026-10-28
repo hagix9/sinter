@@ -805,7 +805,10 @@ Sinter は疑似端末（PTY）を割り当てないため、パッケージマ�
 | APT（status レコードあり） | ダウンロード全体のパーセント（`download 42%`）、トランザクション全体の操作パーセント（`install 42%` / `remove 42%`）、パッケージ名、ペイロードファイル数 | パッケージ単位のパーセント、件数から算出したパーセント |
 | APT（status レコードなし） | 通常の出力の局面語（`downloading`、`installing`、`configuring`、`triggering`） | パーセントと件数、remove の局面 |
 | DNF 4 | ダウンロードメーターの完了行（`downloading`、`file n/m`、`B`/`B/s` の値）、トランザクションのアクション（`installing`、`removing`、`verifying`、`triggering`）、install/remove 行の `action n/m` | トランザクションのパーセント（非端末出力には存在しません）、`kB`/`MiB` をバイト数へ換算した値 |
-| DNF 5 | 完了したプログレスバー（ステージ行、install/remove バーのパッケージ名、download バーの `file n/m`） | パーセント（バーの `100%` は1項目のもので、トランザクションのものではありません）、`[n/m]` からのパッケージ件数（prepare を含むため） |
+
+DNF 5（`/usr/bin/dnf` が dnf5 の構成。Fedora など）は対応するパッケージバックエンドではなく、
+パッケージの詳細表示は保証しません。実際の dnf5 ホストでは download バーを認識できず、
+パッケージ名が dnf5 の印字どおり短縮されて表示されることがありました。
 
 ```text
 apply 17/42 package:nginx download 42% file 2/3 12s
@@ -842,16 +845,28 @@ progress: apply: 20/42 on package:nginx, install 64% (nginx-1.24.0, 15s)
   リソースは、パッケージの詳細を一切表示しません。ステージ行は変わりません。
 - DNF はキャッシュからインストールします。Sinter のプリフェッチ
   （`dnf install --downloadonly`）が DNF のダウンロードを行う場所なので、DNF の
-  `downloading` 詳細はその段階のものです。
+  `downloading` 詳細はその段階のものです。DNF 4 はペイロードがキャッシュ済みでも
+  `Downloading Packages:` の見出しを印字し（その場合は `[SKIPPED] … Already downloaded`
+  と列挙します）、何もダウンロードしないときにも `downloading` が出ることがあります。
+  これは段階の名前であり、転送が行われていることを示すものではありません。`file n/m` と
+  バイト値は、ダウンロードされたファイルについて DNF が印字した完了行からだけ表示します。
+- **削除ではパッケージの詳細を表示しません。** apt と DNF 4 のターゲットで `state: absent`
+  のリソースは `dpkg --remove` / `rpm -e` でパッケージを削除し
+  （[package](/ja/reference/resources/package/) を参照）、Sinter はこれらのコマンドを観測
+  しません。削除の実行中はステージ行だけが表示され、パッケージマネージャ由来の局面、
+  パッケージ名、件数、パーセントは表示されません。`remove N%` と `removing` は、install の
+  トランザクション自体がパッケージを削除する場合（例: install が依存パッケージを upgrade
+  するときに DNF 4 が旧版を cleanup する場合）にだけ現れます。結果、JSON ドキュメント、
+  終了コードはどちらの場合も同じです。
 - プレーン行では、詳細は局面が変わったとき、ダウンロードの 10% ごと、ダウンロード完了時に
   だけ独立した行になります。1 リソースあたり最大 24 行、1 ステージあたり最大 200 行なので、
   ログの量は抑えられます。
 
 SSH 接続でも同じ規則です。Sinter はターゲットに PTY を割り当てないため、マネージャは
-パイプの場合と同じ動作をし、観測するのは mutation と prefetch のコマンドだけです。ほかの
-リモートコマンドは詳細を出しません。接続が切れたりコマンドがキャンセルされたりすると進捗は
-止まり、結果は通常どおり failed または indeterminate に分類されます。パッケージの詳細が
-結果を変えることはありません。
+パイプの場合と同じ動作をし、観測するのは install の mutation と prefetch だけです。apt と
+DNF 4 の削除を含むほかのリモートコマンドは詳細を出しません。接続が切れたりコマンドが
+キャンセルされたりすると進捗は止まり、結果は通常どおり failed または indeterminate に
+分類されます。パッケージの詳細が結果を変えることはありません。
 
 パッケージの詳細は安定したテキスト契約ではありません。語や項目はマイナーリリースで
 変わることがあります。stdout には出力されず、`--format json` にも現れません。
