@@ -2,7 +2,7 @@
 
 All notable changes to Sinter are documented in this file.
 
-## [Unreleased]
+## [1.8.0] - 2026-10-30
 
 ### Added
 
@@ -50,6 +50,18 @@ All notable changes to Sinter are documented in this file.
   `effective_exit_code`); with several executions the invocation exit code
   orders as 6, 5, 4, 3, 2, 7, 8, 0. The option exists for `audit` only; `plan`,
   `apply` and `validate` reject it. There is no waiver mechanism.
+- **Package progress on apt and DNF 4 targets.** While `apply` installs a
+  package, the progress line (and `SINTER_PROGRESS=plain` lines) can also show
+  what apt or dnf is doing: the phase, the package name and the counts or
+  percentages the package manager printed (`download N%` / `install N%` on
+  apt; `downloading`, `file n/m` and `action n/m` on DNF 4). It is written to
+  stderr only, never to stdout, the report, `--format json` or the exit code,
+  and a `sensitive` resource or a secret `env` value shows none. Removal
+  (`state: absent`) shows no package detail, only the stage line. DNF 4 can
+  show `downloading` for payloads that are already cached; it names the step,
+  not a transfer. DNF 5 (a `/usr/bin/dnf` that is dnf5, as on Fedora) is not
+  supported and gets no package detail. Package detail is not a stable text
+  contract: its words and fields may change in a minor release.
 
 ### Changed
 
@@ -94,6 +106,28 @@ All notable changes to Sinter are documented in this file.
   - Verified on real hosts: Ubuntu 24.04, Rocky Linux 9.8 and 10.2. Not verified
     for removal: Ubuntu 26.04, RHEL, AlmaLinux, Oracle Linux, Rocky Linux 8.
     Fedora is not supported.
+
+### Security
+
+- **Gateway: tokio 1.53.3** (from 1.53.1) for RUSTSEC-2026-0386
+  (`AsyncFd::new` and related constructors violate I/O safety), in
+  `gateway/Cargo.lock` only. The `sinter` binary is unaffected.
+- **Gateway: sha2 0.11** (block-buffer 0.12.1) for GHSA-qwgh-2vcv-g2f7, in
+  `gateway/Cargo.lock` only. The gateway computes the same SHA-256 values with
+  the same API; its credential verification is unchanged.
+- **block-buffer 0.10.4 (GHSA-qwgh-2vcv-g2f7) and crypto-bigint 0.5.5
+  (RUSTSEC-2026-0387) remain in the `sinter` dependency graph and are
+  accepted until 2026-12-21, not fixed.** Both come from `age` 0.12.1, the
+  latest `age` release, which requires the crate lines that carry them; no
+  patched release exists on those lines. Sinter uses `age` only for x25519
+  recipients and identities, scrypt and armor: the crypto-bigint code is used
+  by `age`'s P-256 tag recipients, which Sinter never references, and the
+  block-buffer issue needs a caught panic inside a hash computation, which
+  Sinter does not do. This is a static review of the call paths, not a
+  dynamic proof that the code is unreachable. The dependency check excepts
+  these two IDs for the root lockfile only, until 2026-12-21; they are
+  re-evaluated by 2026-12-14, when a new `age` release appears, or when a new
+  advisory appears.
 
 ## [1.7.0] - 2026-10-21
 

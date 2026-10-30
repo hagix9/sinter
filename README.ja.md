@@ -83,9 +83,9 @@ embedded scriptingは依然として実装対象に含めません。複数ホ�
 
 ## インストール
 
-Sinter **v1.7.0** は、対応するすべての Linux x86_64 プラットフォーム
+Sinter **v1.8.0** は、対応するすべての Linux x86_64 プラットフォーム
 ライン（Ubuntu、Rocky Linux、RHEL 9 / 10、AlmaLinux 9 / 10）向けに、
-1つの `sinter-v1.7.0-linux-x86_64.tar.gz` アーティファクトで配布します。
+1つの `sinter-v1.8.0-linux-x86_64.tar.gz` アーティファクトとしてリリースを準備しています。
 
 ```sh
 curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
