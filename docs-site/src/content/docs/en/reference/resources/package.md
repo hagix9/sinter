@@ -61,8 +61,8 @@ not configure a persistent host-wide environment.
 
 ## Removal (`state: absent`) on apt and dnf targets
 
-> **Not yet released.** This section describes the removal implemented after
-> v1.7.0 (WP-PKG-CORE-REPAIR). v1.7.0 and earlier asked the package manager to
+> **Since v1.8.0.** This section describes the removal released in v1.8.0
+> (WP-PKG-CORE-REPAIR). v1.7.0 and earlier asked the package manager to
 > remove the package (`apt-get remove`, `dnf remove`), which can remove reverse
 > dependencies too.
 

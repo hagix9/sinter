@@ -19,7 +19,7 @@ See [Core MCP](/en/reference/mcp/) for the `mcp` subcommand and `--targets-file`
 and [sinter secrets](/en/reference/secrets/) for the `secrets`
 subcommand.
 
-`sinter --version` prints the version (e.g. `sinter 1.7.0`).
+`sinter --version` prints the version (e.g. `sinter 1.8.0`).
 
 ## validate
 
@@ -819,7 +819,7 @@ on a terminal, an interrupted run can leave the last transient line on screen.
 
 ### Package progress (APT and DNF)
 
-*Package detail is unreleased: it is not part of v1.7.0.*
+*Available from v1.8.0.*
 
 While `apply` runs a `package` resource, the progress line can also show what
 the package manager is doing: the phase, the package name and, when the manager

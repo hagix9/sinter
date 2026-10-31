@@ -19,7 +19,7 @@ Commands:
 `secrets`サブコマンドについては[sinter secrets](/ja/reference/secrets/)を
 参照してください。
 
-`sinter --version` はバージョンを表示します（例: `sinter 1.7.0`）。
+`sinter --version` はバージョンを表示します（例: `sinter 1.8.0`）。
 
 ## validate
 
@@ -789,7 +789,7 @@ Sinter が中断された（Ctrl-C、`SIGTERM`）か、内部エラーで停止�
 
 ### パッケージの進捗（APT / DNF）
 
-*パッケージの詳細表示は未リリースです（v1.7.0 には含まれません）。*
+*v1.8.0 から利用できます。*
 
 `apply` が `package` リソースを実行している間、進捗行はパッケージマネージャの動作も表示できます。
 局面、パッケージ名、そしてマネージャが印字した場合は実測の件数またはパーセントです。

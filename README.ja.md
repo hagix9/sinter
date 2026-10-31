@@ -85,14 +85,14 @@ embedded scriptingは依然として実装対象に含めません。複数ホ�
 
 Sinter **v1.8.0** は、対応するすべての Linux x86_64 プラットフォーム
 ライン（Ubuntu、Rocky Linux、RHEL 9 / 10、AlmaLinux 9 / 10）向けに、
-1つの `sinter-v1.8.0-linux-x86_64.tar.gz` アーティファクトとしてリリースを準備しています。
+1つの `sinter-v1.8.0-linux-x86_64.tar.gz` アーティファクトとしてリリースしています。
 
 ```sh
 curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
 $HOME/.local/bin/sinter --version
 ```
 
-受入検証したpoint release（v1.7.0 リリース成果物）は Ubuntu 24.04、
+受入検証したpoint release（v1.8.0 リリース成果物）は Ubuntu 24.04、
 Ubuntu 26.04、Rocky Linux 9.8、Rocky Linux 10.2、RHEL 9.8、
 RHEL 10.2、AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64）です。
 他の各point releaseを個別に受入検証したという意味ではありません。
@@ -329,9 +329,9 @@ Oracle LinuxはRHEL系platformとして認識され、SinterのDNF backendを
 使用します。対応するRHEL系実装と互換性があると見込まれますが、現在
 Sinterの実ホスト受入マトリクスには含まれていません。
 
-### パッケージ削除（`state: absent`）— 未リリース
+### パッケージ削除（`state: absent`）
 
-v1.7.0 より後の作業（まだどのリリースにも含まれません）から、apt / dnf ターゲットの
+v1.8.0 から、apt / dnf ターゲットの
 `state: absent` は `apt-get remove` / `dnf remove` を使わず、`dpkg --remove` または
 `rpm -e` で**指定したパッケージだけ**を削除します。ほかの導入済みパッケージが依存して
 いれば何も削除せず、依存元を示して失敗します。引き込まれた依存パッケージは残ります。
@@ -348,15 +348,16 @@ Rocky Linux 8。dnf ターゲットでは、小さな VM で 1 回の削除に�
 
 v1.0.0 以降の各リリースは、公開前にリリース成果物そのものを8つの対応
 ターゲットで受入検証し、その受入証跡（manifest、raw log、チェックサム）を
-リリースと一緒に公開します。Sinter v1.7.0 のリリースは、Linux x86_64
+リリースと一緒に公開します。Sinter v1.8.0 のリリースは、Linux x86_64
 検証ゲートを通過した後、リリース成果物そのもの
-（`sinter-v1.7.0-linux-x86_64.tar.gz`）を8台の実x86_64 Linuxホストで
+（`sinter-v1.8.0-linux-x86_64.tar.gz`）を8台の実x86_64 Linuxホストで
 受入検証しました — [インストール](#インストール)に記載のpoint releaseです。
 各ホストでtarballと展開したバイナリがバイト単位で同一（SHA-256）であることを
 確認し、リリースの受入シナリオ（成果物同一性、プラットフォーム検出、SSHコマンド実行、
 `package` のinstall/removeとネイティブ検証・冪等性、`file`、`service`、`command` の
 guard、変更前失敗、機密の秘匿、`audit`、残留物なしの確認）を実行して、
-**264チェックが通過、失敗0（ターゲットあたり33）** でした（[v1.7.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.7.0)参照）。
+**264チェックが通過、失敗0（ターゲットあたり33）** でした（[v1.8.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.8.0)参照）。
+Sinter v1.7.0 も以前の同じ8台での受入検証（264チェック、失敗0。[v1.7.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.7.0)）を通過しています。
 Sinter v1.5.2 も以前の同じ8台での受入検証（264チェック、失敗0。[v1.5.2 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.5.2)）を通過しています。
 Sinter v1.5.1 も以前の同じ8台での受入検証（264チェック、失敗0。[v1.5.1 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.5.1)）を通過しています。
 Sinter v1.5.0 も以前の同じ8台での受入検証（264チェック、失敗0。[v1.5.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.5.0)）を通過しています。
