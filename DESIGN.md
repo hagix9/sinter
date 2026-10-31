@@ -54,6 +54,10 @@ UNCHANGED LIMIT: a restriction that this revision keeps.
 
 Planned features are listed so that their boundaries are fixed before they are built. They must not be read as available.
 
+1.3 Resource Plugin note (v1.9.0, Owner decision 2026-11-01)
+
+§38 adds restricted, data-only Resource Plugins (design E3-H). It uses the same three labels as §1.2. IMPLEMENTED today is only foundation step 1: reading the plugin root, the trust file, capability catalogs and plugin definitions, and verifying them. Running plugin operations, recipe activation, output and MCP handling are PLANNED. No existing resource type, JSON field or exit code changes. The §36 prohibition on plugins is narrowed only as §36 states, and GOALS §16 records why.
+
 2. Six v0.1 contracts
 
 Sinter v0.1 is defined by:
@@ -2496,7 +2500,15 @@ make recursive directory deletion implicit
 
 add shell as a separate v0.1 resource
 
-add generic handlers, roles, plugins, orchestration, or scripting
+add generic handlers, roles, plugins, orchestration, or scripting (amended 2026-11-01: the restricted, data-only Resource Plugins of §38 are the one exception to "plugins"; everything else in this line is unchanged)
+
+let a plugin definition name a program, argv, environment, working directory or standard input (§38.3)
+
+run a plugin operation through any channel other than the two of §38.8, or a mutate operation without the mutation permit
+
+accept a capability catalog that is not a reviewed first-party catalog of the release (§38.4)
+
+present an attested observe operation as technically proven read-only (§38.13)
 
 add inventory features beyond §19.2–19.5 (no variables in the inventory file, nested groups, patterns, implicit all-hosts selection, dynamic inventory, or parallel execution; host and group variables exist only as the variables file of §19.5)
 
@@ -2533,3 +2545,113 @@ second-apply mutation absence is tested for stateful resources
 sensitive output behavior is tested where applicable
 
 The v0.1 release is complete only when the mandatory acceptance matrix passes on the documented reference environment.
+
+38. Resource Plugins (E3-H)
+
+38.1 Status
+
+Adopted by the Owner on 2026-11-01 for v1.9.0 (GOALS §16).
+
+IMPLEMENTED (foundation step 1): §38.3–§38.6 and the value check of §38.9. This is a library only: no CLI option, recipe key or MCP tool reaches it, and the release registry of first-party catalogs (§38.4) is empty, so no catalog is usable yet.
+
+PLANNED: activation (§38.7), the execution channels (§38.8), result classification (§38.10), plan/apply/audit integration with JSON and exit codes (§38.11), and the first first-party catalog (firewalld; `firewalld.service`, present only, runtime and permanent, no reload, no removal, no zone or interface change).
+
+UNCHANGED LIMIT: no code runs from a plugin; third-party catalogs are not supported; plugin types are not offered through MCP (§38.12); Command Audit expectations cannot use plugin types in v1.9.0.
+
+38.2 Layers
+
+Core: the engine, the Core-fixed rules of §38.6, the two execution channels, the mutation permit, result classification, sensitivity, provenance and exit codes. Code, reviewed and released with Sinter.
+
+Capability catalog (data): the operations a plugin may use. Each has a program, an argv template with typed operand slots, a timeout, a closed exit-code map and, for observations, an optional closed standard-output map, and a class: observe or mutate.
+
+Resource plugin (data): resource types made of fields, prechecks and facets that name catalog operations. A plugin is never the basis of safety.
+
+Trust file (data, Owner): the root of trust, on the controller.
+
+Recipe: enables plugins and uses their types.
+
+38.3 File formats
+
+All three files are TOML with `format = 1`; any other format number is refused before anything else is read, and unknown keys are refused.
+
+trust.toml: `[[catalog]]` entries with `id`, `version`, `sha256`, `attested_observe` (observe operations the Owner attests are read-only) and `allowed_mutate` (mutate operations apply may run); `[[plugin]]` entries with `id`, `version`, `sha256`.
+
+catalogs/<id>-<version>.catalog.toml: `id`, `version`, and `[[op]]` entries with `id`, `class` (`observe` or `mutate`), `program`, `argv`, `timeout_secs`, `slots` (`{ name = { class = "ident", max_len = N } }`), `exit` (exit code -> state) and, for observe only, `stdout_map` (trimmed output template -> state).
+
+plugins/<id>-<version>.plugin.toml: `id`, `version`, `catalog = { id, version }`, and `[[type]]` entries with `name` (`<plugin id>.<name>`), `fields` (`ident`, or `enum` with `values`), `precheck` (`{ op, expect }`) and `[[type.facet]]` with `name`, `observe`, `want` (a state, or `field:<enum field>`) and `ensure` (state -> mutate operation).
+
+A plugin file has no key for a program, argv, environment, working directory or standard input. Files must not contain secrets.
+
+38.4 Versions, digests and first-party catalogs
+
+Identifiers are `[a-z][a-z0-9_]*` (at most 32 bytes); versions are `MAJOR.MINOR.PATCH` without leading zeros. A plugin is used only when the trust file has an entry with its exact id and version and the SHA-256 of the exact bytes read equals that entry. A catalog is used only when, in addition, the same id, version and SHA-256 appear in the release's registry of reviewed first-party catalogs, which is compiled into Sinter. A catalog that the trust file pins but the registry does not list is refused: third-party catalogs need a separate safety review and Owner approval and are not supported in v1.9.0. The digest of a catalog is checked against the trust file and the registry before the catalog is parsed.
+
+An operation is usable only when the trust file lists it under the list of its own class (`attested_observe` for observe, `allowed_mutate` for mutate). An operation listed under the other class, listed twice, or not defined by the catalog is an error; an operation the catalog defines but the trust file does not list loads and stays disabled.
+
+38.5 Plugin root and file protection
+
+The plugin root is a controller directory holding trust.toml, catalogs/ and plugins/. Its location comes only from the operator's configuration (§38.7), never from a recipe, a plugin file or MCP input.
+
+The configured path is resolved once (it may contain symbolic links) and then walked again from / one component at a time without following symbolic links, so a link introduced after resolution is refused. Each check is made on the opened descriptor:
+
+every ancestor of the root: owned by root or the invoking user, and not writable by group or others unless sticky
+
+the root, catalogs/ and plugins/: directories owned by root or the invoking user, not writable by group or others
+
+each file: a regular file opened without following a final symbolic link (and without blocking on a FIFO), owned by root or the invoking user, not writable by group or others, at most 64 KiB
+
+A file is read from the checked descriptor. Its device, inode, size, modification time and change time must be identical before and after the read, otherwise the file is refused as changed while it was being read; a replacement by rename is therefore either invisible (the original bytes are used) or refused, and the replacement's bytes are never used. The digest is computed over exactly the bytes that are parsed. Every failure is a refusal (exit 2 once wired); nothing falls back. ACLs are not inspected. On a non-Unix controller plugins are refused.
+
+Root ownership is not required: a root owned by the user (for example under the user's configuration directory) is accepted.
+
+38.6 Verification rules (Core-fixed)
+
+A data file can tighten these rules (shorter limits, fewer operations) but not loosen them.
+
+programs: directly under /usr/bin or /usr/sbin; shells, interpreters, privilege tools (sudo, su, setpriv, pkexec, ...), remote and transfer tools (ssh, scp, curl, ...), and general file tools (cp, mv, rm, tee, dd, ...) are refused
+
+argv: at most 16 tokens; a literal is 1–128 printable ASCII characters without spaces or braces; a whole-token slot `{name}` only after a literal `--` (which may appear once); otherwise a slot only as `--option={name}`; every slot used exactly once and declared
+
+slots: at most 4, class `ident`, `max_len` 1–64
+
+timeout: 1–120 seconds
+
+exit map: 1–16 entries, codes 0–255 in canonical decimal, states `[a-z][a-z0-9_]*`; a mutate operation maps only to `ok` and has no output map; an observation with an output map maps its exit codes only to `ok`
+
+observe lint: an observe operation whose literal tokens look like a change (`--add…`, `--remove…`, `--set…`, `reload`, `start`, ...) is refused. The lint is a denylist and supplementary; it is not the safety argument
+
+types: `<plugin id>.<name>`, never a built-in type name; 1–16 types, 1–8 fields, at most 8 prechecks, 1–8 facets; a precheck uses an enabled observe operation and expects a state it can report; a facet observes through an enabled observe operation, wants a state that operation can report (or an enum field whose every value it can report), and has an enabled mutate `ensure` operation for every wanted state; every slot of every operation a type uses is filled by the field of the same name; enum values must fit the shortest slot they fill
+
+enabling: each plugin at most once per run
+
+38.7 Activation (PLANNED)
+
+A recipe enables plugins explicitly with `plugins: [{ id, version }]`; without it nothing in §38 applies and every behavior is exactly as before. The plugin root is the operator's `--plugin-root <dir>` or, when absent, the user's configuration directory (`$XDG_CONFIG_HOME/sinter/plugins`, else `~/.config/sinter/plugins`). Neither can be set from a recipe, a variables file, a plugin file or MCP. Until activation is implemented, a recipe that uses a plugin type is refused as an unknown resource type, as today.
+
+38.8 Execution channels and the mutation permit (PLANNED)
+
+Two channels will run plugin operations: an observe channel, used by plan, audit and apply, and a mutate channel that requires the existing `&MutationPermit`. Neither accepts a program or argv: each takes a call value only the engine can construct, from a usable verified operation of the matching class and validated operands. There is no generic execution channel for plugins, audit never obtains a permit (unchanged), and audit and plan refuse a mutation-capable target. Requests use the baseline environment only.
+
+38.9 Operands and sensitivity
+
+An operand (implemented check) is 1 to the slot's `max_len` bytes (at most 64), starts with an ASCII letter or digit and continues with letters, digits, `_`, `.` or `-`; it is checked when a resource is validated and again before dispatch. It can never be an option, a list, a path, an assignment or shell syntax. A resource's values must be exactly the type's fields. Error messages name the field and never show the value. A plugin resource marked sensitive follows §31 (redacted command records, no values in output). Parser messages about data files drop quoted values.
+
+38.10 Result classification (PLANNED)
+
+An observation maps an exit code listed in the operation's exit map to its state, and, with an output map, maps the trimmed output to a state only when it equals one template exactly. Anything else (an unlisted exit code, unrecognized or truncated output, a signal, an unknown completion) is an error for observations. For a mutate operation, an unlisted exit code is a failure; a signal, a timeout or a lost connection after dispatch is Indeterminate: the resource reports `changed` as unknown, the run stops, nothing is retried, and the next run observes first. After a successful mutation the facet is observed again and must have the wanted state. Standard error is never shown, and standard output only through the closed map.
+
+38.11 plan, apply, audit, JSON and exit codes (PLANNED)
+
+plan and audit run prechecks and observe operations only; apply runs a facet's mutate operation only when its observed state differs from the wanted state. The existing statuses and exit codes are used (§33): validation and plugin verification errors 2, plan errors 4, apply failures 5, Indeterminate 6, audit drift 7, audit errors 6. Plan, apply and audit results add the plugin and catalog ids, versions and SHA-256 digests (provenance). No existing JSON field changes.
+
+38.12 MCP boundary
+
+Resource Plugins and connection providers (Tunnel, Gateway, MCP) are separate layers. In v1.9.0 MCP refuses plugin types. MCP can never select the plugin root or the trust file. Exposing plugin types through MCP is decided with v2.0 (caller identity, target authorization, approval-based apply that includes plugin provenance in the approved digest).
+
+38.13 Limits of the non-mutation guarantee
+
+Sinter enforces which operations can run: only operations of reviewed first-party catalogs, pinned and attested by the Owner, and in plan and audit only observe operations. It cannot prove that an attested observe operation is read-only on the host: a misclassified operation would change the host during audit. For daemon-based tools (firewalld, NetworkManager) the change is made by the daemon, so isolating the client process would not prevent it. Digests, signatures and argv rules do not prove non-mutation. This is a documented residual risk; it must not be described as a technical guarantee.
+
+38.14 Change history
+
+2026-11-01: section added (Owner decision adopting E3-H; GOALS §16). §1.3 added; §36 prohibition on plugins narrowed to the data-only Resource Plugins of this section and four related prohibitions added.

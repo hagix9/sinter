@@ -24,6 +24,7 @@ pub mod passwd_hash;
 pub mod paths;
 pub mod pgrole;
 pub mod platform;
+pub mod plugin;
 pub mod progress;
 pub mod progress_plain;
 pub mod progress_session;
