@@ -58,6 +58,10 @@ Planned features are listed so that their boundaries are fixed before they are b
 
 §38 adds restricted, data-only Resource Plugins (design E3-H). It uses the same three labels as §1.2. IMPLEMENTED: reading and verifying the plugin root (step 1) and, in step 2, recipe activation, the two execution channels, plan/apply/audit, results and the MCP refusal; in step 5 the release's registry of first-party catalogs lists its first catalog, firewalld 0.1.0, after it was confirmed on real hosts (§38.1, §38.4). No existing resource type, JSON key or exit code changes. The §36 prohibition on plugins is narrowed only as §36 states, and GOALS §16 records why.
 
+1.4 Future directions note (non-normative)
+
+Two possible future features are recorded outside this specification, in the project's future feature register: a common read-only Collector for configuration, diagnostics and forensic collection from selected inventory hosts (FR-025), and generating candidate Sinter recipes from what a Collector collected on existing hosts (FR-067). Neither is designed, accepted or implemented, and this note specifies nothing: no recipe, CLI, output or exit-code contract is changed by it, and validate, plan, apply and audit are unchanged. If either is taken up it needs its own design and Owner approval, and it must not change the observe and mutate contract of §38 or let audit run arbitrary commands.
+
 2. Six v0.1 contracts
 
 Sinter v0.1 is defined by:
@@ -1221,6 +1225,8 @@ A ProxyJump or ProxyCommand for the host is a connection error; Sinter never sil
 Precedence per field: explicit CLI option > inventory host field (§19.2) > OpenSSH configuration > built-in default ($USER, 22, ~/.ssh/known_hosts, ~/.ssh/id_ed25519, id_ecdsa, id_rsa).
 
 Private keys are never decrypted by Sinter; an encrypted key is usable only through ssh-agent.
+
+Key selection and authentication, as implemented. The list of key files is taken whole from the first source that names any: `--identity` (repeatable, also with `--host`) replaces the inventory host's `identity_files` (§19.2), which replace the OpenSSH `IdentityFile` list; lists are never merged. Each inventory host can therefore have its own keys. For a host without `IdentityFile` the OpenSSH client reports its own default key list, so the built-in list above applies only with `--no-ssh-config` or when no `ssh` client is installed. Authentication tries ssh-agent first: agent keys whose public key matches a selected key file's `.pub` are offered first, only those with IdentitiesOnly, and `IdentityAgent none` disables the agent. Then each selected key file that exists is tried without a passphrase. An unencrypted key file therefore works directly, and a passphrase-protected key only when it is loaded in ssh-agent; Sinter never asks for or accepts a passphrase. SSH password and keyboard-interactive authentication are not supported. With `--sudo`, sudo runs non-interactively and never asks for a password (§21).
 
 MCP target profiles never consult the OpenSSH configuration.
 

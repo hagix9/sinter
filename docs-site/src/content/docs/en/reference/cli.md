@@ -185,6 +185,9 @@ is still made by Sinter's built-in transport.
   them first); Sinter never prompts. Agent keys are tried first, keys that
   match configured identity files before others; `IdentitiesOnly yes` offers
   only those.
+- Each inventory host can name its own keys (`identity_files`); `--identity`
+  replaces them for every host. SSH password and keyboard-interactive
+  authentication are not supported.
 - `--no-ssh-config` skips all of this. Without an installed `ssh` client,
   the built-in defaults apply.
 

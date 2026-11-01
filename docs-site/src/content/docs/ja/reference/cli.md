@@ -185,6 +185,9 @@ sinter secrets list    [--format text|json] [--recipe <FILE>...] [<PATH>...]
   してください）。Sinter はパスフレーズを尋ねません。agent の鍵が先に試され、
   設定された鍵ファイルに一致するものが優先されます。`IdentitiesOnly yes`
   ではそれらだけを使います。
+- Inventory ではホストごとに鍵を指定できます（`identity_files`）。`--identity`
+  を指定すると、すべてのホストでそれに置き換わります。SSH のパスワード認証と
+  keyboard-interactive 認証には対応していません。
 - `--no-ssh-config` でこれらをすべて無効にできます。`ssh` クライアントが
   ない環境では組み込みのデフォルトを使います。
 
