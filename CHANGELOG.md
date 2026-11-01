@@ -2,6 +2,98 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [1.9.0] - 2026-11-01
+
+### Added
+
+- **Resource Plugins (data only, first-party catalogs).** A recipe can enable
+  plugins with a top-level `plugins: [{ id, version }]` list (in the top-level
+  recipe only; an included file that declares `plugins` is rejected). A
+  plugin adds resource types named `<plugin>.<name>` as data: no code from a
+  plugin runs in Sinter, and every program a plugin can run comes from a
+  capability catalog that lists fixed programs, argument templates with
+  checked operands and the meaning of each exit status.
+  - The plugin root is a directory on the controller with `trust.toml`,
+    `catalogs/` and `plugins/`, given with `--plugin-root DIR` (default
+    `$XDG_CONFIG_HOME/sinter/plugins`, else `~/.config/sinter/plugins`). It is
+    read only when a recipe enables plugins; a recipe without `plugins:`
+    behaves exactly as before.
+  - `trust.toml` pins every plugin and catalog by the SHA-256 of its exact
+    bytes and lists which observe and mutate operations may be used. A catalog
+    is used only when it is also one of the reviewed first-party catalogs
+    compiled into this Sinter; any other catalog is refused, even when pinned.
+  - The plugin root and every file in it must be owned by root or by the
+    invoking user and not writable by group or others (directories above it
+    may be sticky); symbolic links are refused. Any problem refuses the recipe
+    (exit 2) before anything runs. On Linux a POSIX ACL entry that grants write
+    to someone else is refused through the ACL mask; on macOS ACLs are not
+    detected. Plugins are refused on non-Unix controllers.
+  - `plan` and `audit` run only the observe operations; `apply` runs a mutate
+    operation only for a part whose observed state differs, and observes it
+    again afterwards. Results use the existing statuses and exit codes and no
+    JSON key is added: each plugin resource carries one provenance line
+    (plugin, catalog and their SHA-256) in its existing `notes` or `reason`.
+  - `sinter mcp` refuses every manifest that declares `plugins`.
+  - Sinter cannot prove that an operation a catalog classes as observe is
+    read-only on the host; that classification rests on the catalog review.
+- **First-party plugin `firewalld` 0.1.0: `firewalld.service`.** Makes a
+  service present in a firewalld zone, separately in the runtime and the
+  permanent configuration (`with: { zone, service, state: present }`). It
+  never reloads, removes a service, or changes a zone or an interface, and it
+  checks that the daemon runs and that the zone and the service exist before
+  it queries the service. It needs root on the target (a root login or
+  `--sudo`).
+  - Its exit codes were measured, and the plugin was run through Sinter, on
+    Rocky Linux 9.8 (firewalld 1.3.4), Rocky Linux 10.2 (2.4.3) and Ubuntu
+    24.04 (2.1.1). Other OS and firewalld versions are not verified; Sinter
+    does not check the version.
+  - The catalog (`27741bcc6b72dfbf69d918282fb454c324e7229b764873334a5c6c0af04707ff`)
+    and the plugin definition
+    (`47f33f171d239103cbb97450d17b57c857ce22436620ddf809fdd2be94948544`) are
+    kept in the source repository under `plugins/first-party/`, with a README
+    and an example `trust.toml`. They are not part of the release archive.
+
+### Changed
+
+- **A failed package query no longer shows the query's output.** When
+  `dpkg-query` or `rpm -q` exits with a status that no observation contract
+  accepts, the error names the backend, the package and the exit status, and
+  says how many bytes of output were withheld; the output itself is never
+  copied into the message (it could carry anything). This matches failed dnf
+  mutations since v1.5.1. A sensitive resource's message is unchanged.
+
+### Security
+
+- **libz-sys 1.1.31** (from 1.1.29) for RUSTSEC-2026-0418: its build script
+  can write the whole build environment to the build output when it is built
+  with `cc` 1.6.0 or later. Sinter's lockfile keeps `cc` 1.4.5, and the issue
+  never affects a built binary at run time. Only the lockfile entry changes.
+
+### Documentation
+
+- SSH key selection and authentication are described as implemented: each
+  inventory host can name its own keys (`identity_files`), `--identity`
+  replaces them for every host, encrypted keys are used only through
+  ssh-agent, and SSH password and keyboard-interactive authentication are not
+  supported.
+
+### Release validation
+
+- The release acceptance on every target gains six checks (39 in all, from
+  33): `audit --audit-policy strict` exits 8 for a not-auditable command and
+  never runs it, the default policy is unchanged, and a package apply with
+  `SINTER_PROGRESS=plain` writes only `progress:` lines to stderr, while
+  `--format json` and a non-terminal stderr get no progress. Package progress
+  detail words are recorded but not judged.
+- The `ca_trust` and `command` handlers added in v1.8.0 were verified in
+  pre-release testing on real hosts — Rocky Linux 9.8, Rocky Linux 10.2 and
+  Ubuntu 24.04.5 — with a build of the v1.9.0 source before this release
+  commit: normal runs, idempotence, notification merging, failures, a missing
+  program, timeouts (indeterminate, never retried), plan and audit never
+  running a handler, redaction, the order of service, `ca_trust` and
+  `command` handlers, the root and `--sudo` boundaries, and cleanup. This is
+  not release evidence; the release acceptance runs on the frozen artifact.
+
 ## [1.8.0] - 2026-10-30
 
 ### Added
