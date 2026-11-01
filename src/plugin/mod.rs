@@ -1,18 +1,26 @@
-//! Resource Plugins (E3-H), foundation step 1 (DESIGN §38).
+//! Resource Plugins (E3-H) (DESIGN §38).
 //!
-//! What this step does: read the Owner's trust file, the capability catalogs
-//! and the plugin definitions from a protected plugin root on the controller,
-//! verify them against the Core-fixed rules, and produce a sealed model.
+//! Step 1 (`format`, `protect`, `verify`, this file): read the Owner's trust
+//! file, the capability catalogs and the plugin definitions from a protected
+//! plugin root on the controller, verify them against the Core-fixed rules,
+//! and produce a sealed model. Loading never runs a program or touches a
+//! target.
 //!
-//! What it does not do: nothing here runs a program, opens a connection or
-//! touches a target, and nothing is wired into recipes, the CLI or MCP yet.
-//! There is no execution channel ([`EXECUTION_AVAILABLE`] is `false`), so a
-//! loaded plugin is never presented as runnable.
+//! Step 2 (`exec`, `run`): recipes enable plugins explicitly (`plugins:`),
+//! the engine runs plugin resource types through the two channels of
+//! `TargetFs` (observe, and mutate with the mutation permit), and audit
+//! observes only. A catalog is usable only when this release's first-party
+//! registry lists it; that registry is empty ([`production_enabled`] is
+//! `false`), so no plugin can run in a production build yet.
 
+pub mod exec;
 pub mod format;
 mod protect;
+pub(crate) mod run;
 pub mod verify;
 
+#[cfg(all(test, unix))]
+mod run_tests;
 #[cfg(all(test, unix))]
 mod tests;
 
@@ -23,13 +31,22 @@ pub use verify::{
 };
 
 use crate::error::{Result, SinterError};
+use crate::value::Value;
 use protect::{Ancestors, TrustedDir};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// Whether plugin operations can be run by this Sinter. Step 1 has no
-/// execution channel: loading and verification only.
-pub const EXECUTION_AVAILABLE: bool = false;
+/// Whether this Sinter has the plugin execution channels (step 2: yes). It
+/// does not mean a plugin can run: that also needs a catalog listed in the
+/// release's first-party registry (see [`production_enabled`]).
+pub const EXECUTION_AVAILABLE: bool = true;
+
+/// Whether any plugin can run in this build: only when the release lists at
+/// least one reviewed first-party catalog. `false` in v1.9.0 so far: the
+/// firewalld catalog is not yet attested on real hosts.
+pub fn production_enabled() -> bool {
+    !FIRST_PARTY_CATALOGS.is_empty()
+}
 
 /// A capability catalog reviewed by the Sinter project and shipped as part
 /// of this release (DESIGN §38.4). A catalog whose exact bytes are not listed
@@ -99,10 +116,153 @@ impl PluginSet {
             .iter()
             .find_map(|p| p.resource_type(name).map(|t| (p, t)))
     }
-    /// Always `false` in step 1 (see [`EXECUTION_AVAILABLE`]).
+    /// Whether the execution channels exist (see [`EXECUTION_AVAILABLE`]).
     pub fn execution_available(&self) -> bool {
         EXECUTION_AVAILABLE
     }
+    /// Provenance of every enabled plugin, for results (DESIGN §38.11).
+    pub fn provenance(&self) -> Vec<Provenance> {
+        self.plugins
+            .iter()
+            .map(|p| {
+                let c = self.catalog(p.catalog());
+                Provenance {
+                    plugin_id: p.id().to_string(),
+                    plugin_version: p.version().to_string(),
+                    plugin_sha256: p.sha256().to_string(),
+                    catalog_id: p.catalog().id.clone(),
+                    catalog_version: p.catalog().version.clone(),
+                    catalog_sha256: c.map(|c| c.sha256().to_string()).unwrap_or_default(),
+                    catalog_registry: "first-party",
+                    types: p.resource_types().map(|t| t.name().to_string()).collect(),
+                }
+            })
+            .collect()
+    }
+}
+
+/// Where a plugin came from, as results report it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Provenance {
+    pub plugin_id: String,
+    pub plugin_version: String,
+    pub plugin_sha256: String,
+    pub catalog_id: String,
+    pub catalog_version: String,
+    pub catalog_sha256: String,
+    /// Which registry admitted the catalog. Always `first-party` in v1.9.0.
+    pub catalog_registry: &'static str,
+    pub types: Vec<String>,
+}
+
+/// Where plugins may come from for one load (DESIGN §38.7). Only the CLI
+/// builds [`PluginContext::Root`], from `--plugin-root` or the user's
+/// configuration directory; every other caller (MCP, `secrets list`, library
+/// users) gets [`PluginContext::Disabled`], and a recipe that enables plugins
+/// is then refused. Nothing in a recipe, a variables file, a plugin file or
+/// MCP input can choose the root.
+#[derive(Debug, Clone)]
+pub enum PluginContext {
+    Disabled(&'static str),
+    Root(PathBuf),
+    /// Tests: a root checked only below `boundary`, and a test registry of
+    /// first-party catalogs in place of the release's.
+    #[cfg(all(test, unix))]
+    Test {
+        root: PathBuf,
+        boundary: PathBuf,
+        registry: Vec<FirstPartyCatalog>,
+    },
+}
+
+impl Default for PluginContext {
+    fn default() -> Self {
+        PluginContext::Disabled("Resource Plugins are not available here")
+    }
+}
+
+impl PluginContext {
+    /// The CLI's plugin root: `explicit` (`--plugin-root`) when given, else
+    /// `$XDG_CONFIG_HOME/sinter/plugins` when that variable is an absolute
+    /// path, else `$HOME/.config/sinter/plugins`. Nothing is opened here; the
+    /// root is opened only when a recipe enables a plugin.
+    pub fn controller(explicit: Option<&Path>) -> PluginContext {
+        if let Some(p) = explicit {
+            return PluginContext::Root(p.to_path_buf());
+        }
+        let abs = |v: Option<std::ffi::OsString>| {
+            v.map(PathBuf::from)
+                .filter(|p| p.is_absolute() && p != Path::new("/"))
+        };
+        if let Some(x) = abs(std::env::var_os("XDG_CONFIG_HOME")) {
+            return PluginContext::Root(x.join("sinter/plugins"));
+        }
+        if let Some(h) = abs(std::env::var_os("HOME")) {
+            return PluginContext::Root(h.join(".config/sinter/plugins"));
+        }
+        PluginContext::Disabled("no plugin root: pass --plugin-root (HOME is not set)")
+    }
+
+    /// Load the plugins a recipe enables (never called when it enables none).
+    pub(crate) fn load(&self, enabled: &[PluginRef]) -> Result<PluginSet> {
+        match self {
+            PluginContext::Disabled(why) => Err(refuse(format!(
+                "this recipe enables plugins, which are not available: {}",
+                why
+            ))),
+            PluginContext::Root(p) => load(&PluginRoot::open(p)?, enabled),
+            #[cfg(all(test, unix))]
+            PluginContext::Test {
+                root,
+                boundary,
+                registry,
+            } => load_with(
+                &PluginRoot::open_below(root, boundary)?,
+                enabled,
+                registry,
+                &mut |_| {},
+            ),
+        }
+    }
+}
+
+/// Static check of one plugin resource declaration while a recipe is loaded
+/// (DESIGN §38.9): the type must come from an enabled plugin, the fields must
+/// be exactly the type's, and every literal value must be a valid operand.
+/// A value with `{{ }}` is checked when it is evaluated. Without enabled
+/// plugins the error is the one every unknown type gets.
+pub(crate) fn check_declaration(
+    set: Option<&PluginSet>,
+    type_: &str,
+    with: &BTreeMap<String, Value>,
+    ctx: &str,
+) -> Result<()> {
+    let Some(set) = set else {
+        return Err(SinterError::schema(format!(
+            "{}: unknown resource type {}",
+            ctx, type_
+        )));
+    };
+    let Some((_, t)) = set.resource_type(type_) else {
+        return Err(SinterError::schema(format!(
+            "{}: unknown resource type {} (no enabled plugin provides it)",
+            ctx, type_
+        )));
+    };
+    t.check_field_names(with.keys().map(String::as_str), ctx)?;
+    for (k, v) in with {
+        match v {
+            Value::Str(s) if crate::expressions::has_interpolation(s) => {}
+            Value::Str(s) => t.check_field(k, s, ctx)?,
+            _ => {
+                return Err(SinterError::schema(format!(
+                    "{}: with.{} must be a string",
+                    ctx, k
+                )))
+            }
+        }
+    }
+    Ok(())
 }
 
 fn refuse(msg: impl Into<String>) -> SinterError {

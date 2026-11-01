@@ -17,7 +17,8 @@
 
 use crate::document::{only_fields, parse_file_value, valid_name};
 use crate::error::{Result, SinterError};
-use crate::model::{load_model_with, prepare_with, Model, Prepared};
+use crate::model::{prepare_with_plugins, Model, Prepared};
+use crate::plugin::PluginContext;
 use crate::secret_source::ReferenceCheck;
 use crate::value::Value;
 use std::path::{Path, PathBuf};
@@ -47,6 +48,10 @@ pub struct Bundle {
 
 /// What the positional argument named: one recipe, or a bundle.
 #[derive(Debug, Clone)]
+// One value per loaded recipe or bundle, never stored in bulk: the size of
+// the `Recipe` variant (a whole `Model`, which gained the plugin set in
+// v1.9.0) does not matter, and boxing it would change every caller.
+#[allow(clippy::large_enum_variant)]
 pub enum Source {
     Recipe(RecipeUnit),
     Bundle(Bundle),
@@ -79,7 +84,18 @@ pub fn load_source(path: &Path) -> Result<Source> {
 /// [`load_source`] with an explicit secret-reference mode (strict for every
 /// caller except `secrets list --recipe`).
 pub(crate) fn load_source_with(path: &Path, refs: ReferenceCheck) -> Result<Source> {
-    Ok(match walk_source(path, |p| load_model_with(p, refs))? {
+    load_source_inner(path, refs, &PluginContext::default())
+}
+
+/// [`load_source`] with the controller's plugin context (the CLI; DESIGN
+/// §38.7). Without it a recipe that enables plugins is refused.
+pub fn load_source_with_plugins(path: &Path, plugins: &PluginContext) -> Result<Source> {
+    load_source_inner(path, ReferenceCheck::Strict, plugins)
+}
+
+fn load_source_inner(path: &Path, refs: ReferenceCheck, plugins: &PluginContext) -> Result<Source> {
+    let load = |p: &Path| prepare_with_plugins(p, refs, plugins)?.freeze_default();
+    Ok(match walk_source(path, load)? {
         Walked::Recipe(u) => Source::Recipe(u.into_unit()),
         Walked::Bundle { name, path, units } => Source::Bundle(Bundle {
             name,
@@ -168,8 +184,15 @@ impl PreparedSource {
 /// files are read in the same order and fail with the same errors, except the
 /// errors that belong to freezing.
 pub fn prepare_source(path: &Path) -> Result<PreparedSource> {
+    prepare_source_with_plugins(path, &PluginContext::default())
+}
+
+/// [`prepare_source`] with the controller's plugin context (the CLI).
+pub fn prepare_source_with_plugins(path: &Path, plugins: &PluginContext) -> Result<PreparedSource> {
     Ok(
-        match walk_source(path, |p| prepare_with(p, ReferenceCheck::Strict))? {
+        match walk_source(path, |p| {
+            prepare_with_plugins(p, ReferenceCheck::Strict, plugins)
+        })? {
             Walked::Recipe(u) => PreparedSource {
                 bundle: None,
                 units: vec![u],

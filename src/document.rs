@@ -27,6 +27,9 @@ pub struct Document {
     /// Recipe-wide default environment for `package`/`command` resources
     /// (`env`), from the entry recipe only.
     pub env: Option<Value>,
+    /// Resource Plugins this recipe enables (`plugins`, DESIGN §38.7), from
+    /// the entry recipe only. Empty when the key is absent.
+    pub plugins: Vec<crate::plugin::PluginRef>,
 }
 
 /// A recipe's explicit execution targets, by inventory host and group
@@ -225,6 +228,11 @@ pub fn document_from_value(root: Value, path: &Path, origin: &str) -> Result<Doc
         }
     };
 
+    let plugins = match map.get("plugins") {
+        None => Vec::new(),
+        Some(v) => parse_plugins(v, origin)?,
+    };
+
     Ok(Document {
         path: path.to_path_buf(),
         version,
@@ -235,7 +243,46 @@ pub fn document_from_value(root: Value, path: &Path, origin: &str) -> Result<Doc
         backup_paths,
         targets,
         env,
+        plugins,
     })
+}
+
+/// `plugins: [{ id, version }, ...]`: a non-empty list of distinct plugin
+/// ids, each with an exact `MAJOR.MINOR.PATCH` version. Where the plugins
+/// come from is never part of a recipe (DESIGN §38.7).
+fn parse_plugins(v: &Value, origin: &str) -> Result<Vec<crate::plugin::PluginRef>> {
+    let bad = |why: &str| SinterError::schema(format!("{}: plugins: {}", origin, why));
+    let list = match v {
+        Value::List(l) if !l.is_empty() => l,
+        _ => return Err(bad("must be a non-empty list of { id, version } maps")),
+    };
+    let mut out: Vec<crate::plugin::PluginRef> = Vec::new();
+    for item in list {
+        let m = item
+            .as_map()
+            .ok_or_else(|| bad("each entry must be a map with id and version"))?;
+        only_fields(
+            m,
+            crate::ir::PLUGIN_REF_FIELDS,
+            &format!("{} plugins entry", origin),
+        )?;
+        let field = |k: &str| match m.get(k) {
+            Some(Value::Str(s)) => Ok(s.clone()),
+            _ => Err(bad(&format!("{} must be a string", k))),
+        };
+        let (id, version) = (field("id")?, field("version")?);
+        if !crate::plugin::verify::id_ok(&id) {
+            return Err(bad("id must be [a-z][a-z0-9_]* (at most 32 bytes)"));
+        }
+        if !crate::plugin::verify::version_ok(&version) {
+            return Err(bad("version must be MAJOR.MINOR.PATCH"));
+        }
+        if out.iter().any(|p| p.id == id) {
+            return Err(bad(&format!("plugin {} is listed more than once", id)));
+        }
+        out.push(crate::plugin::PluginRef { id, version });
+    }
+    Ok(out)
 }
 
 /// Validate a recipe-level `env` map: string keys that are valid environment

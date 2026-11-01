@@ -96,6 +96,9 @@ pub struct Model {
     /// Load-time warnings: likely mistakes that are still valid recipes
     /// (shown by `validate`; they never change what a run does).
     pub warnings: Vec<String>,
+    /// The Resource Plugins the entry recipe enables, verified (DESIGN §38).
+    /// `None` when it enables none: then no plugin type exists.
+    pub plugins: Option<std::sync::Arc<crate::plugin::PluginSet>>,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +136,7 @@ impl Model {
             backups: Vec::new(),
             targets,
             warnings: Vec::new(),
+            plugins: None,
         }
     }
 
@@ -170,6 +174,25 @@ pub(crate) fn prepare_with(
     entry: &Path,
     refs: crate::secret_source::ReferenceCheck,
 ) -> Result<Prepared> {
+    prepare_with_plugins(entry, refs, &crate::plugin::PluginContext::default())
+}
+
+/// [`load_model`] with the controller's plugin context (the CLI). Every other
+/// loader uses a disabled context, so a recipe that enables plugins is
+/// refused there (DESIGN §38.7).
+pub fn load_model_with_plugins(
+    entry: &Path,
+    plugins: &crate::plugin::PluginContext,
+) -> Result<Model> {
+    prepare_with_plugins(entry, crate::secret_source::ReferenceCheck::Strict, plugins)?
+        .freeze_default()
+}
+
+pub(crate) fn prepare_with_plugins(
+    entry: &Path,
+    refs: crate::secret_source::ReferenceCheck,
+    plugin_ctx: &crate::plugin::PluginContext,
+) -> Result<Prepared> {
     // Pre-pass: collect every sensitive variable name across the whole
     // include graph before any resource is expanded. Sensitivity of an
     // expression must not depend on include ordering — a resource in an
@@ -193,6 +216,8 @@ pub(crate) fn prepare_with(
         targets: None,
         recipe_env: None,
         refs,
+        plugin_ctx: plugin_ctx.clone(),
+        plugins: None,
     };
     state.load(entry)?;
     Ok(Prepared {
@@ -602,6 +627,11 @@ struct LoadState {
     recipe_env: Option<Value>,
     /// How strictly secret references are checked (strict unless listing).
     refs: crate::secret_source::ReferenceCheck,
+    /// Where plugins may come from for this load (DESIGN §38.7).
+    plugin_ctx: crate::plugin::PluginContext,
+    /// The plugins the entry recipe enables, loaded once before any of its
+    /// resources is expanded.
+    plugins: Option<std::sync::Arc<crate::plugin::PluginSet>>,
 }
 
 /// A resource declaration as written, retained for declaration-level
@@ -633,6 +663,16 @@ impl LoadState {
             self.entry = Some(canon.clone());
             self.targets = doc.targets.clone();
             self.recipe_env = doc.env.clone();
+            // Only a recipe that enables plugins reads the plugin root.
+            if !doc.plugins.is_empty() {
+                self.plugins = Some(std::sync::Arc::new(self.plugin_ctx.load(&doc.plugins)?));
+            }
+        } else if !doc.plugins.is_empty() {
+            // Which plugins a run may use belongs to the recipe that is run.
+            return Err(SinterError::schema(format!(
+                "{}: plugins may only be declared in the top-level recipe, not in an included file",
+                canon.display()
+            )));
         } else if doc.targets.is_some() {
             // Execution targets belong to the recipe that is run, never to a
             // fragment pulled in by `include` (no implicit merging).
@@ -924,6 +964,7 @@ fn validate_declarations(
     declarations: &[Declaration],
     _handlers: &[FrozenHandler],
     sensitive_var_names: &BTreeSet<String>,
+    plugins: Option<&crate::plugin::PluginSet>,
 ) -> Result<()> {
     // Register producers: declared by non-loop command resources.
     let mut register_producers: BTreeSet<String> = BTreeSet::new();
@@ -1012,7 +1053,7 @@ fn validate_declarations(
     // Shape validation per declaration type. This uses the literal IR values
     // only; facts/registers are rejected as static identifiers by construction.
     for d in declarations {
-        validate_declaration_shape(d, sensitive_var_names)?;
+        validate_declaration_shape(d, sensitive_var_names, plugins)?;
     }
 
     // Register reference validation must not be skipped for empty loops.
@@ -1049,6 +1090,7 @@ fn validate_declarations(
 fn validate_declaration_shape(
     d: &Declaration,
     sensitive_var_names: &BTreeSet<String>,
+    plugins: Option<&crate::plugin::PluginSet>,
 ) -> Result<()> {
     let ctx = &d.id;
     // Whether diagnostics about a `with` field must be redacted: sensitive
@@ -1331,6 +1373,9 @@ fn validate_declaration_shape(
                 ctx,
                 d.sensitive || field_sensitive("name"),
             )?;
+        }
+        t if crate::plugin::run::is_plugin_type(t) => {
+            crate::plugin::check_declaration(plugins, t, &d.with, ctx)?;
         }
         other => {
             return Err(SinterError::schema(format!(
@@ -1721,7 +1766,12 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
             },
         );
     }
-    validate_declarations(&state.declarations, &state.handlers, &sensitive_var_names)?;
+    validate_declarations(
+        &state.declarations,
+        &state.handlers,
+        &sensitive_var_names,
+        state.plugins.as_deref(),
+    )?;
     // The scope of a structure-only probe (see [`Tolerance`]); built for no
     // other freeze.
     let probe_vars: BTreeMap<String, EvalVal> = if overrides.structure_only {
@@ -2409,6 +2459,16 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         }
                     }
                 }
+                t if crate::plugin::run::is_plugin_type(t) => {
+                    staged(&mut stage, Stage::ValueFree, || {
+                        crate::plugin::check_declaration(
+                            state.plugins.as_deref(),
+                            t,
+                            &r.with,
+                            &resource_ctx,
+                        )
+                    })?;
+                }
                 other => {
                     stage = Stage::ValueFree;
                     return Err(SinterError::schema(format!(
@@ -2646,6 +2706,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
         backups: state.backups.into_iter().map(|(p, _)| p).collect(),
         targets: state.targets,
         warnings,
+        plugins: state.plugins,
     })
 }
 

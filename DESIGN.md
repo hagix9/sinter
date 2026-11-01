@@ -56,7 +56,7 @@ Planned features are listed so that their boundaries are fixed before they are b
 
 1.3 Resource Plugin note (v1.9.0, Owner decision 2026-11-01)
 
-§38 adds restricted, data-only Resource Plugins (design E3-H). It uses the same three labels as §1.2. IMPLEMENTED today is only foundation step 1: reading the plugin root, the trust file, capability catalogs and plugin definitions, and verifying them. Running plugin operations, recipe activation, output and MCP handling are PLANNED. No existing resource type, JSON field or exit code changes. The §36 prohibition on plugins is narrowed only as §36 states, and GOALS §16 records why.
+§38 adds restricted, data-only Resource Plugins (design E3-H). It uses the same three labels as §1.2. IMPLEMENTED: reading and verifying the plugin root (step 1) and, in step 2, recipe activation, the two execution channels, plan/apply/audit, results and the MCP refusal. No catalog is usable in a release build yet, because the release's registry of first-party catalogs is empty (§38.4); the first entry is PLANNED after the firewalld catalog is confirmed on real hosts. No existing resource type, JSON key or exit code changes. The §36 prohibition on plugins is narrowed only as §36 states, and GOALS §16 records why.
 
 2. Six v0.1 contracts
 
@@ -2552,9 +2552,11 @@ The v0.1 release is complete only when the mandatory acceptance matrix passes on
 
 Adopted by the Owner on 2026-11-01 for v1.9.0 (GOALS §16).
 
-IMPLEMENTED (foundation step 1): §38.3–§38.6 and the value check of §38.9. This is a library only: no CLI option, recipe key or MCP tool reaches it, and the release registry of first-party catalogs (§38.4) is empty, so no catalog is usable yet.
+IMPLEMENTED (step 1): §38.3–§38.6 and the value check of §38.9.
 
-PLANNED: activation (§38.7), the execution channels (§38.8), result classification (§38.10), plan/apply/audit integration with JSON and exit codes (§38.11), and the first first-party catalog (firewalld; `firewalld.service`, present only, runtime and permanent, no reload, no removal, no zone or interface change).
+IMPLEMENTED (step 2): activation (§38.7), the execution channels (§38.8), result classification (§38.10), plan/apply/audit with the existing results and exit codes (§38.11) and the MCP refusal (§38.12). Verified against a scripted target only.
+
+PLANNED: the first first-party catalog in the release registry (firewalld; `firewalld.service`, present only, runtime and permanent, no reload, no removal, no zone or interface change), after its exit codes are confirmed on real hosts and the trust-file checks of §38.5 are confirmed on a Linux controller. Until then the registry is empty and no plugin can run in a release build.
 
 UNCHANGED LIMIT: no code runs from a plugin; third-party catalogs are not supported; plugin types are not offered through MCP (§38.12); Command Audit expectations cannot use plugin types in v1.9.0.
 
@@ -2624,29 +2626,33 @@ types: `<plugin id>.<name>`, never a built-in type name; 1–16 types, 1–8 fie
 
 enabling: each plugin at most once per run
 
-38.7 Activation (PLANNED)
+38.7 Activation
 
-A recipe enables plugins explicitly with `plugins: [{ id, version }]`; without it nothing in §38 applies and every behavior is exactly as before. The plugin root is the operator's `--plugin-root <dir>` or, when absent, the user's configuration directory (`$XDG_CONFIG_HOME/sinter/plugins`, else `~/.config/sinter/plugins`). Neither can be set from a recipe, a variables file, a plugin file or MCP. Until activation is implemented, a recipe that uses a plugin type is refused as an unknown resource type, as today.
+A recipe enables plugins explicitly with `plugins: [{ id, version }]` (a non-empty list, each id once, an exact `MAJOR.MINOR.PATCH` version), in the top-level recipe only: an included file that declares `plugins` is refused. Without it nothing in §38 applies, no plugin file is opened, and every behavior is exactly as before; a type named like a plugin type is an unknown resource type. With it, the plugins are loaded and verified once, before any resource is expanded, and a resource type `<plugin>.<name>` is accepted only when an enabled plugin provides it; its fields must be exactly the type's and each literal value a valid value (a value with `{{ }}` is checked when it is evaluated, before any command for that resource runs).
 
-38.8 Execution channels and the mutation permit (PLANNED)
+The plugin root is `--plugin-root <dir>` (validate, plan, apply, audit) or, when absent, `$XDG_CONFIG_HOME/sinter/plugins` when that variable is an absolute path, else `$HOME/.config/sinter/plugins`. It is opened only when the recipe enables a plugin. Nothing in a recipe, a variables file, a plugin file or MCP input can choose it. Only the CLI provides a plugin root; every other loader (MCP, `secrets list --recipe`, library callers) refuses a recipe that enables plugins.
 
-Two channels will run plugin operations: an observe channel, used by plan, audit and apply, and a mutate channel that requires the existing `&MutationPermit`. Neither accepts a program or argv: each takes a call value only the engine can construct, from a usable verified operation of the matching class and validated operands. There is no generic execution channel for plugins, audit never obtains a permit (unchanged), and audit and plan refuse a mutation-capable target. Requests use the baseline environment only.
+Controller identity: the files and directories must be owned by root or by the invoking user (§38.5). When the controller runs as root (for example through sudo), only root-owned plugin files are accepted, whatever HOME points to.
+
+38.8 Execution channels and the mutation permit
+
+Two channels run plugin operations: an observe channel, used by plan, audit and apply, and a mutate channel that requires the existing `&MutationPermit`. Neither accepts a program or argv: each takes a call value only the plugin module builds, from a verified operation of the matching class that the trust file enabled, with every operand checked again. There is no generic execution channel for plugins, audit never obtains a permit (unchanged), and audit refuses a mutation-capable target. Requests use the baseline environment, never a tree identity, and the run's executor (so `--sudo` applies as for every other command). The mutation permit's construction is unchanged.
 
 38.9 Operands and sensitivity
 
 An operand (implemented check) is 1 to the slot's `max_len` bytes (at most 64), starts with an ASCII letter or digit and continues with letters, digits, `_`, `.` or `-`; it is checked when a resource is validated and again before dispatch. It can never be an option, a list, a path, an assignment or shell syntax. A resource's values must be exactly the type's fields. Error messages name the field and never show the value. A plugin resource marked sensitive follows §31 (redacted command records, no values in output). Parser messages about data files drop quoted values.
 
-38.10 Result classification (PLANNED)
+38.10 Result classification
 
-An observation maps an exit code listed in the operation's exit map to its state, and, with an output map, maps the trimmed output to a state only when it equals one template exactly. Anything else (an unlisted exit code, unrecognized or truncated output, a signal, an unknown completion) is an error for observations. For a mutate operation, an unlisted exit code is a failure; a signal, a timeout or a lost connection after dispatch is Indeterminate: the resource reports `changed` as unknown, the run stops, nothing is retried, and the next run observes first. After a successful mutation the facet is observed again and must have the wanted state. Standard error is never shown, and standard output only through the closed map.
+An observation maps an exit code listed in the operation's exit map to its state, and, with an output map, maps the trimmed output to a state only when it equals one template exactly. Anything else (an unlisted exit code, unrecognized or truncated output, a signal, an unknown completion) is an error for observations. For a mutate operation, an unlisted exit code is a failure that may have changed the target (change `possible`); a signal, a timeout, a lost connection or any transport failure after dispatch is Indeterminate (change `possible`, never `none`): the run stops (fail-fast, §17), nothing is retried, and the next run observes first. When an earlier facet of the same resource definitely changed, the change is `changed`. After a successful mutation the facet is observed again and must have the wanted state; otherwise the resource fails (or is Indeterminate when it cannot be observed). A failed precondition or observation before any mutation is a failure with no change. Standard error is never shown, and standard output only through the closed map.
 
-38.11 plan, apply, audit, JSON and exit codes (PLANNED)
+38.11 plan, apply, audit, JSON and exit codes
 
-plan and audit run prechecks and observe operations only; apply runs a facet's mutate operation only when its observed state differs from the wanted state. The existing statuses and exit codes are used (§33): validation and plugin verification errors 2, plan errors 4, apply failures 5, Indeterminate 6, audit drift 7, audit errors 6. Plan, apply and audit results add the plugin and catalog ids, versions and SHA-256 digests (provenance). No existing JSON field changes.
+plan and audit run prechecks and observe operations only; apply runs a facet's mutate operation only when its observed state differs from the wanted state. plan reports a pending facet as a change with a summary diff (`facet=state`) and lists the operations apply would run; an observation that fails in plan is a plan error. audit reports each differing facet as drift (dimension = facet name), and a failed precondition or observation as an error. The existing statuses and exit codes are used (§33): validation and plugin verification errors 2, plan errors 4, apply failures 5, Indeterminate 6, audit drift 7, audit errors 6, strict audit unchanged (plugin types are auditable). No JSON key is added or changed: the provenance is carried in the existing `notes` of plan/apply results and `reason` of audit results, as one line `plugin=<id>@<version> plugin_sha256=<hex> catalog=<id>@<version> catalog_sha256=<hex> registry=first-party`, followed by `observed=`, `would_run=`, `ran=` and `verified=` lists of operation or facet names. A sensitive resource keeps every §31 redaction. In plan's change analysis (§23) a plugin change counts as an opaque change.
 
 38.12 MCP boundary
 
-Resource Plugins and connection providers (Tunnel, Gateway, MCP) are separate layers. In v1.9.0 MCP refuses plugin types. MCP can never select the plugin root or the trust file. Exposing plugin types through MCP is decided with v2.0 (caller identity, target authorization, approval-based apply that includes plugin provenance in the approved digest).
+Resource Plugins and connection providers (Tunnel, Gateway, MCP) are separate layers. In v1.9.0 MCP refuses plugin types: a manifest that declares `plugins` is refused by every manifest tool before anything is loaded, and MCP's loader has no plugin root, so a plugin type is an unknown resource type there. The MCP tool list is unchanged. MCP can never select the plugin root or the trust file. Exposing plugin types through MCP is decided with v2.0 (caller identity, target authorization, approval-based apply that includes plugin provenance in the approved digest).
 
 38.13 Limits of the non-mutation guarantee
 
@@ -2655,3 +2661,5 @@ Sinter enforces which operations can run: only operations of reviewed first-part
 38.14 Change history
 
 2026-11-01: section added (Owner decision adopting E3-H; GOALS §16). §1.3 added; §36 prohibition on plugins narrowed to the data-only Resource Plugins of this section and four related prohibitions added.
+
+2026-11-01 (step 2): §38.7, §38.8, §38.10–§38.12 implemented and made precise (activation in the top-level recipe only, the CLI-only plugin root, root-run controllers, the change states of failed and unknown mutations, provenance in existing `notes`/`reason`, the MCP refusal). The release registry stays empty.

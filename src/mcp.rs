@@ -335,6 +335,17 @@ fn redact_bounded(text: &str, needle: &str) -> String {
 /// so no caller-selected controller path is ever opened: the only file
 /// read is the private staged manifest Sinter itself created.
 fn check_mcp_manifest_authority(doc: &Document) -> Result<(), ToolError> {
+    // Resource Plugins are not available over MCP in v1.9.0 (DESIGN §38.12):
+    // MCP can neither enable them nor choose a plugin root or trust file.
+    if !doc.plugins.is_empty() {
+        return Err(ToolError {
+            category: "invalid_manifest",
+            kind: Some("schema"),
+            message: "MCP manifests may not use \"plugins:\" — Resource Plugins are \
+                      not available over MCP"
+                .to_string(),
+        });
+    }
     if !doc.includes.is_empty() {
         return Err(ToolError {
             category: "invalid_manifest",

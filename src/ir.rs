@@ -124,7 +124,11 @@ pub const TOP_LEVEL_FIELDS: &[&str] = &[
     "targets",
     // Recipe-wide default environment for `package`/`command` resources.
     "env",
+    // Resource Plugins the recipe enables (DESIGN §38.7).
+    "plugins",
 ];
+/// Fields of one `plugins` entry.
+pub const PLUGIN_REF_FIELDS: &[&str] = &["id", "version"];
 /// Fields of the top-level `backup` map.
 pub const BACKUP_FIELDS: &[&str] = &["paths"];
 /// Fields of the top-level `targets` map.

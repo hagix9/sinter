@@ -224,7 +224,10 @@ fn edit(base: &str, from: &str, to: &str) -> String {
 fn valid_plugin_catalog_and_trust_load_into_a_sealed_model() {
     let r = Root::new(CATALOG, PLUGIN);
     let set = load_root(&r, CATALOG).expect("valid input loads");
-    assert!(!set.execution_available());
+    assert!(
+        set.execution_available(),
+        "step 2 has the execution channels"
+    );
     assert_eq!(set.plugins().len(), 1);
     let p = &set.plugins()[0];
     assert_eq!((p.id(), p.version()), ("firewalld", "0.1.0"));
@@ -304,7 +307,10 @@ fn an_operation_the_owner_did_not_list_loads_but_stays_disabled() {
 #[test]
 fn production_registry_is_empty_so_no_catalog_is_usable_in_step_1() {
     assert!(FIRST_PARTY_CATALOGS.is_empty());
-    const { assert!(!EXECUTION_AVAILABLE) };
+    // Step 2 has the execution channels, but no catalog is usable in a
+    // production build because the release registry is empty.
+    const { assert!(EXECUTION_AVAILABLE) };
+    assert!(!production_enabled());
     let r = Root::new(CATALOG, PLUGIN);
     let m = err(load(&r.open().unwrap(), &fw()));
     assert!(m.contains("not a reviewed first-party catalog"), "{}", m);
@@ -312,10 +318,15 @@ fn production_registry_is_empty_so_no_catalog_is_usable_in_step_1() {
 
 #[test]
 fn the_loader_has_no_path_to_a_target_or_a_process() {
-    // Structural guard: the non-test sources of this module never name the
-    // target, executor or process APIs, so loading cannot run a command.
+    // Structural guard: the loading code (the three data modules and the
+    // `load_with` function of mod.rs) never names the target, executor or
+    // process APIs, so loading cannot run a command. Execution lives only in
+    // `exec.rs` and `run.rs`.
+    let module = include_str!("mod.rs");
+    let start = module.find("pub(crate) fn load_with(").expect("load_with");
+    let end = module[start..].find("\n}\n").expect("end of load_with") + start;
     for (name, src) in [
-        ("mod.rs", include_str!("mod.rs")),
+        ("mod.rs load_with", &module[start..end]),
         ("format.rs", include_str!("format.rs")),
         ("protect.rs", include_str!("protect.rs")),
         ("verify.rs", include_str!("verify.rs")),

@@ -2112,3 +2112,122 @@ impl FakePostgres {
         out(0, "sinter-pgrole-applied\n", "")
     }
 }
+
+// ---------------------------------------------------------------------------
+// Scripted firewalld (Resource Plugin tests, DESIGN §38)
+// ---------------------------------------------------------------------------
+
+/// A scripted firewalld answering `firewall-cmd` argv the way the draft
+/// first-party catalog expects (SINTER_PLUGIN_FIREWALLD_DESIGN §4.5). The
+/// exit codes are the documented ones and are NOT confirmed on real hosts.
+/// Anything it does not model is exit 2, so a test notices an unexpected
+/// command. `forced` answers (argv substring, output) win once, in order.
+#[derive(Debug, Clone, Default)]
+pub struct FakeFirewalld {
+    pub running: bool,
+    pub zones: BTreeSet<String>,
+    pub services: BTreeSet<String>,
+    pub runtime: BTreeSet<(String, String)>,
+    pub permanent: BTreeSet<(String, String)>,
+    /// Every argv that changed state, in order.
+    pub mutations: Vec<Vec<String>>,
+    /// Every argv received, in order.
+    pub received: Vec<Vec<String>>,
+    pub forced: Vec<(String, Output)>,
+    /// When set, a successful `--add-service` reports success without
+    /// changing anything (a tool that lies), for post-condition tests.
+    pub add_is_noop: bool,
+}
+
+impl FakeFirewalld {
+    /// A running firewalld with zone `public`, services `http`, `https`,
+    /// `ssh`, and `ssh` allowed in `public` (runtime and permanent).
+    pub fn typical() -> Self {
+        let mut f = FakeFirewalld {
+            running: true,
+            ..Default::default()
+        };
+        f.zones.insert("public".into());
+        for s in ["http", "https", "ssh"] {
+            f.services.insert(s.into());
+        }
+        f.runtime.insert(("public".into(), "ssh".into()));
+        f.permanent.insert(("public".into(), "ssh".into()));
+        f
+    }
+
+    pub fn run(&mut self, args: &[String]) -> Output {
+        self.received.push(args.to_vec());
+        let joined = args.join(" ");
+        if let Some(i) = self
+            .forced
+            .iter()
+            .position(|(k, _)| joined.contains(k.as_str()))
+        {
+            return self.forced.remove(i).1;
+        }
+        if args == ["--state"] {
+            return if self.running {
+                fw_out(0, "running\n", "")
+            } else {
+                fw_out(252, "", "not running\n")
+            };
+        }
+        if !self.running {
+            return fw_out(252, "", "FirewallD is not running\n");
+        }
+        let perm = args.iter().any(|a| a == "--permanent");
+        let val = |p: &str| {
+            args.iter()
+                .find_map(|a| a.strip_prefix(p).map(str::to_string))
+        };
+        if let Some(z) = val("--info-zone=") {
+            return if self.zones.contains(&z) {
+                fw_out(0, "public (active)\n  interfaces: eth0\n", "")
+            } else {
+                fw_out(112, "", "Error: INVALID_ZONE\n")
+            };
+        }
+        if let Some(sv) = val("--info-service=") {
+            return if self.services.contains(&sv) {
+                fw_out(0, "http\n  ports: 80/tcp\n", "")
+            } else {
+                fw_out(101, "", "Error: INVALID_SERVICE\n")
+            };
+        }
+        let Some(zone) = val("--zone=") else {
+            return fw_out(2, "", "usage\n");
+        };
+        if !self.zones.contains(&zone) {
+            return fw_out(112, "", "Error: INVALID_ZONE\n");
+        }
+        if let Some(sv) = val("--query-service=") {
+            let set = if perm { &self.permanent } else { &self.runtime };
+            return if set.contains(&(zone, sv)) {
+                fw_out(0, "yes\n", "")
+            } else {
+                fw_out(1, "no\n", "")
+            };
+        }
+        if let Some(sv) = val("--add-service=") {
+            if !self.services.contains(&sv) {
+                return fw_out(101, "", "Error: INVALID_SERVICE\n");
+            }
+            if !self.add_is_noop {
+                self.mutations.push(args.to_vec());
+                let set = if perm {
+                    &mut self.permanent
+                } else {
+                    &mut self.runtime
+                };
+                set.insert((zone, sv));
+            }
+            return fw_out(0, "success\n", "");
+        }
+        fw_out(2, "", "usage\n")
+    }
+}
+
+fn fw_out(code: i32, stdout: &str, stderr: &str) -> Output {
+    out(code, stdout.to_string(), stderr.to_string())
+}

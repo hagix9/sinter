@@ -646,6 +646,60 @@ impl TargetFs {
         self.ex.run(req)
     }
 
+    /// The read-only plugin channel (DESIGN §38.8). It takes no program or
+    /// argv, only a call built by `plugin::exec` from a verified observe
+    /// operation that the Owner attested, with operands checked again. It
+    /// needs no permit, so plan and audit can observe; it is the only way a
+    /// plugin observation reaches the target. The request uses the baseline
+    /// environment and never a tree identity.
+    pub(crate) fn plugin_observe(
+        &mut self,
+        call: &crate::plugin::exec::ObserveCall,
+    ) -> Result<Output> {
+        let req = self.plugin_request(
+            call.program(),
+            call.argv(),
+            call.sensitive(),
+            call.timeout_secs(),
+        );
+        self.ex.run(&req)
+    }
+
+    /// The mutating plugin channel: like [`Self::plugin_observe`] but for an
+    /// allowed mutate operation, and it requires the mutation permit exactly
+    /// as [`Self::exec`] does, so a read-only (plan/audit) target can never
+    /// reach it.
+    pub(crate) fn plugin_mutate(
+        &mut self,
+        _permit: &MutationPermit,
+        call: &crate::plugin::exec::MutateCall,
+    ) -> Result<Output> {
+        self.identity_memo.clear();
+        let req = self.plugin_request(
+            call.program(),
+            call.argv(),
+            call.sensitive(),
+            call.timeout_secs(),
+        );
+        self.ex.run(&req)
+    }
+
+    fn plugin_request(
+        &self,
+        program: &str,
+        argv: &[String],
+        sensitive: bool,
+        timeout_secs: u64,
+    ) -> ExecRequest {
+        let mut req = ExecRequest::new(program);
+        req.args = argv.to_vec();
+        req.env = base_env();
+        req.env.insert("HOME".to_string(), self.home_env());
+        req.sensitive = sensitive;
+        req.timeout_secs = timeout_secs;
+        req
+    }
+
     /// The statistics handle of the executor (performance measurement).
     pub fn exec_stats(&self) -> crate::executor::ExecStatsHandle {
         self.ex.stats_handle()

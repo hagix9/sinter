@@ -3,7 +3,9 @@ mod limited;
 use clap::{Args, Parser, Subcommand};
 use limited::Limited;
 use sinter::audit::{run_audit, AuditReport};
-use sinter::bundle::{load_source, prepare_source, RecipeUnit, Source};
+#[cfg(test)]
+use sinter::bundle::load_source;
+use sinter::bundle::{load_source_with_plugins, prepare_source_with_plugins, RecipeUnit, Source};
 use sinter::diff::sanitize_line;
 use sinter::engine::{Engine, Mode, RunOptions, RunReport, SshSpec, TargetSpec};
 use sinter::error::{ErrorKind, SinterError};
@@ -192,6 +194,17 @@ struct ExecOpts {
     /// --vars-file; a recipe it leaves no host is skipped, not frozen.
     #[arg(long, value_name = "ITEMS")]
     limit: Option<String>,
+    /// Resource Plugin root on this controller (DESIGN §38.5): the directory
+    /// with trust.toml, catalogs/ and plugins/ [default:
+    /// $XDG_CONFIG_HOME/sinter/plugins, else ~/.config/sinter/plugins]. Read
+    /// only when a recipe enables plugins (`plugins:`).
+    #[arg(long, value_name = "DIR")]
+    plugin_root: Option<PathBuf>,
+}
+
+/// The controller's plugin context for these options (DESIGN §38.7).
+fn plugin_ctx(exec: &ExecOpts) -> sinter::plugin::PluginContext {
+    sinter::plugin::PluginContext::controller(exec.plugin_root.as_deref())
 }
 
 #[derive(Args, Debug)]
@@ -379,7 +392,7 @@ fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
     let format = parse_format(&a.format)?;
     let Some(vars_path) = &a.exec.vars_file else {
         if a.exec.limit.is_none() {
-            let source = load_source(&a.recipe)?;
+            let source = load_source_with_plugins(&a.recipe, &plugin_ctx(&a.exec))?;
             return print_validate(&source, format, None, None);
         }
         // An explicit `--limit` is checked even without a variables file: its
@@ -842,7 +855,7 @@ fn run_phase_with(
         session.end(scope_outcome(&planned));
         return run_executions(phase, &source, planned?, a, &ro, progress);
     }
-    let source = load_source(&a.recipe)?;
+    let source = load_source_with_plugins(&a.recipe, &plugin_ctx(&a.exec))?;
     if let Some(inv) = &a.exec.inventory {
         // Several executions follow, so target resolution is a progress scope
         // of its own; each execution then gets its own.
@@ -962,7 +975,7 @@ fn limit_source(
     exec: &ExecOpts,
     limit: &ParsedLimit,
 ) -> Result<LimitGate, SinterError> {
-    let prepared = prepare_source(recipe)?;
+    let prepared = prepare_source_with_plugins(recipe, &plugin_ctx(exec))?;
     let inv_path = exec
         .inventory
         .as_ref()
@@ -1018,7 +1031,7 @@ fn vars_gate(
     limit: &ParsedLimit,
 ) -> Result<VarsGate, SinterError> {
     use sinter::varsfile::{freeze_executions_in, load_vars_file, Mode as VarsMode, Scope};
-    let prepared = prepare_source(recipe)?;
+    let prepared = prepare_source_with_plugins(recipe, &plugin_ctx(exec))?;
     let inventory = match &exec.inventory {
         Some(p) => Some(load_inventory(p)?),
         None => None,

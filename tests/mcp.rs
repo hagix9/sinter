@@ -489,6 +489,45 @@ fn include_is_policy_rejected_without_path_echo() {
     assert!(raw.contains("recipe:"), "logical prefix missing: {raw}");
 }
 
+#[test]
+fn plugins_are_refused_by_every_manifest_tool() {
+    // Resource Plugins are not available over MCP (DESIGN §38.12): a manifest
+    // that enables one is refused before anything is loaded, by every tool
+    // that accepts a manifest, and MCP has no way to name a plugin root.
+    let mut m = Mcp::start();
+    init(&mut m);
+    let manifest = "version: 1\nplugins:\n  - { id: firewalld, version: 0.1.0 }\nresources:\n  - id: a\n    type: firewalld.service\n    with: { zone: public, service: http, state: present }\n";
+    let calls = [
+        ("sinter_validate_manifest", json!({"manifest": manifest})),
+        ("sinter_inspect_manifest", json!({"manifest": manifest})),
+        (
+            "sinter_plan",
+            json!({"manifest": manifest, "target": "rocky9"}),
+        ),
+        (
+            "sinter_plan_host",
+            json!({"manifest": manifest, "target": "web01"}),
+        ),
+        (
+            "sinter_audit_host",
+            json!({"manifest": manifest, "target": "web01"}),
+        ),
+    ];
+    for (i, (tool, args)) in calls.into_iter().enumerate() {
+        let (is_err, v) = Mcp::payload(&m.tool(10 + i as u64, tool, args));
+        assert!(is_err, "{tool} accepted a plugin manifest: {v}");
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("plugins"), "{tool}: {msg}");
+    }
+    // A plugin type without `plugins:` is an unknown type over MCP.
+    let (_is_err, v) = Mcp::payload(&m.tool(
+        20,
+        "sinter_validate_manifest",
+        json!({"manifest": "version: 1\nresources:\n  - id: a\n    type: firewalld.service\n    with: { zone: public }\n"}),
+    ));
+    assert!(v.to_string().contains("unknown resource type"), "{v}");
+}
+
 // ---------------------------------------------------------------------------
 // F-03: JSON-RPC batch receive support (MCP 2025-03-26)
 // ---------------------------------------------------------------------------

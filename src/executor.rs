@@ -2733,6 +2733,10 @@ pub struct FakeTarget {
     /// Scripted local PostgreSQL server reached through `psql` (the
     /// `postgresql_role` resource). Not running unless a test sets it up.
     pub pg: crate::fakesys::FakePostgres,
+    /// Scripted firewalld reached through `/usr/bin/firewall-cmd` (Resource
+    /// Plugin tests, DESIGN §38). Absent unless a test sets it up; clones of
+    /// the target share it, so a test can read the state a run left.
+    pub firewalld: Option<std::sync::Arc<std::sync::Mutex<crate::fakesys::FakeFirewalld>>>,
 }
 
 /// One change of the scripted filesystem, applied by [`FsEvent`].
@@ -2912,6 +2916,7 @@ impl FakeTarget {
             setpriv_missing: false,
             fs_events: Vec::new(),
             pg: crate::fakesys::FakePostgres::default(),
+            firewalld: None,
         }
     }
 
@@ -2985,6 +2990,7 @@ impl FakeTarget {
             setpriv_missing: false,
             fs_events: Vec::new(),
             pg: crate::fakesys::FakePostgres::default(),
+            firewalld: None,
         }
     }
 
@@ -3044,6 +3050,7 @@ impl FakeTarget {
             setpriv_missing: false,
             fs_events: Vec::new(),
             pg: crate::fakesys::FakePostgres::default(),
+            firewalld: None,
         }
     }
 
@@ -3106,6 +3113,7 @@ impl FakeTarget {
             setpriv_missing: false,
             fs_events: Vec::new(),
             pg: crate::fakesys::FakePostgres::default(),
+            firewalld: None,
         }
     }
 
@@ -3162,6 +3170,7 @@ impl FakeTarget {
             setpriv_missing: false,
             fs_events: Vec::new(),
             pg: crate::fakesys::FakePostgres::default(),
+            firewalld: None,
         }
     }
 
@@ -3195,6 +3204,15 @@ impl FakeTarget {
     /// Make `setpriv` unavailable on the scripted target.
     pub fn without_setpriv(mut self) -> Self {
         self.setpriv_missing = true;
+        self
+    }
+
+    /// Attach a scripted firewalld (shared with the caller).
+    pub fn with_firewalld(
+        mut self,
+        fw: std::sync::Arc<std::sync::Mutex<crate::fakesys::FakeFirewalld>>,
+    ) -> Self {
+        self.firewalld = Some(fw);
         self
     }
 
@@ -3492,6 +3510,11 @@ impl FakeExecutor {
             .next()
             .unwrap_or(&req.program)
             .to_string();
+        if req.program == "/usr/bin/firewall-cmd" {
+            if let Some(fw) = &self.target.firewalld {
+                return fw.lock().unwrap_or_else(|e| e.into_inner()).run(&req.args);
+            }
+        }
         // `psql` talks to the scripted PostgreSQL server as the identity it
         // runs as (peer authentication).
         if prog == "psql" {

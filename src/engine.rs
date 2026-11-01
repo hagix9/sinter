@@ -843,6 +843,9 @@ impl Engine {
             "group" => self.run_group(res, item),
             "user" => self.run_user(res, item),
             "postgresql_role" => self.run_postgresql_role(res, item),
+            // Resource Plugin types (DESIGN §38): only types an enabled,
+            // verified plugin provides were frozen.
+            t if crate::plugin::run::is_plugin_type(t) => self.run_plugin(res, item),
             other => Err(SinterError::schema(format!(
                 "{}: unknown resource type {}",
                 res.id, other

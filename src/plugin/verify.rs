@@ -437,28 +437,46 @@ impl ResourceType {
     /// declared fields, each a valid operand for every slot it fills. Error
     /// messages name the field, never the value (DESIGN §38.9).
     pub fn check_values(&self, values: &BTreeMap<String, String>) -> Result<()> {
-        let declared: BTreeSet<&String> = self.fields.keys().collect();
-        let given: BTreeSet<&String> = values.keys().collect();
+        self.check_field_names(values.keys().map(String::as_str), &self.name)?;
+        for (k, v) in values {
+            self.check_field(k, v, &self.name)?;
+        }
+        Ok(())
+    }
+
+    /// The given field names must be exactly the type's fields.
+    pub fn check_field_names<'a>(
+        &self,
+        names: impl Iterator<Item = &'a str>,
+        ctx: &str,
+    ) -> Result<()> {
+        let given: BTreeSet<&str> = names.collect();
+        let declared: BTreeSet<&str> = self.fields.keys().map(String::as_str).collect();
         if let Some(extra) = given.difference(&declared).next() {
-            return Err(refuse(format!("{}: unknown field {}", self.name, extra)));
+            return Err(refuse(format!("{}: unknown field {}", ctx, extra)));
         }
         if let Some(missing) = declared.difference(&given).next() {
-            return Err(refuse(format!("{}: missing field {}", self.name, missing)));
+            return Err(refuse(format!("{}: missing field {}", ctx, missing)));
         }
-        for (k, kind) in &self.fields {
-            let v = &values[k];
-            let ok = match kind {
-                FieldKind::Ident => {
-                    operand_ok(v, *self.operand_limit.get(k).unwrap_or(&MAX_OPERAND))
-                }
-                FieldKind::Enum(allowed) => allowed.iter().any(|a| a == v),
-            };
-            if !ok {
-                return Err(refuse(format!(
-                    "{}: field {} is not a valid value for this type (the value is not shown)",
-                    self.name, k
-                )));
-            }
+        Ok(())
+    }
+
+    /// One field's value: a valid operand for every slot it fills (ident) or
+    /// one of the declared values (enum). The value is never shown.
+    pub fn check_field(&self, field: &str, value: &str, ctx: &str) -> Result<()> {
+        let ok = match self.fields.get(field) {
+            None => return Err(refuse(format!("{}: unknown field {}", ctx, field))),
+            Some(FieldKind::Ident) => operand_ok(
+                value,
+                *self.operand_limit.get(field).unwrap_or(&MAX_OPERAND),
+            ),
+            Some(FieldKind::Enum(allowed)) => allowed.iter().any(|a| a == value),
+        };
+        if !ok {
+            return Err(refuse(format!(
+                "{}: field {} is not a valid value for this type (the value is not shown)",
+                ctx, field
+            )));
         }
         Ok(())
     }

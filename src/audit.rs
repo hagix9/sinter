@@ -385,6 +385,9 @@ fn audit_resource(engine: &mut Engine, res: &FrozenResource) -> AuditResourceRes
         "group" => audit_group(engine, res, item.as_ref(), sensitive),
         "user" => audit_user(engine, res, item.as_ref(), sensitive),
         "postgresql_role" => audit_postgresql_role(engine, res, item.as_ref(), sensitive),
+        t if crate::plugin::run::is_plugin_type(t) => {
+            audit_plugin(engine, res, item.as_ref(), sensitive)
+        }
         other => {
             let mut r =
                 AuditResourceResult::base(res, AuditResourceStatus::NotAuditable, sensitive);
@@ -1342,6 +1345,48 @@ fn audit_group(
         Ok(c) => account_audit_result(res, sensitive, c),
         Err(r) => *r,
     }
+}
+
+/// A Resource Plugin type (DESIGN §38.11): prechecks and observe operations
+/// only, through the observe channel (no permit exists here). A failed or
+/// unlisted observation is an Error, never drift; a facet whose observed
+/// state differs from the wanted one is drift on that facet. The reason
+/// carries the plugin provenance and the operations observed.
+fn audit_plugin(
+    engine: &mut Engine,
+    res: &FrozenResource,
+    item: Option<&EvalVal>,
+    sensitive: bool,
+) -> AuditResourceResult {
+    let obs = match obs_or_error(res, sensitive, engine.plugin_observe_resource(res, item)) {
+        Ok(o) => o,
+        Err(r) => return *r,
+    };
+    let sensitive = sensitive || obs.sensitive;
+    let mut details = Vec::new();
+    for f in &obs.facets {
+        if f.observed != f.want {
+            details.push(AuditDriftDetail::new(
+                &f.name,
+                f.observed.clone(),
+                f.want.clone(),
+                sensitive,
+            ));
+        }
+    }
+    let status = if details.is_empty() {
+        AuditResourceStatus::Compliant
+    } else {
+        AuditResourceStatus::Drift
+    };
+    let mut r = AuditResourceResult::base(res, status, sensitive);
+    r.details = details;
+    r.reason = Some(format!(
+        "{} observed={}",
+        obs.provenance,
+        obs.ops_run.join(",")
+    ));
+    r
 }
 
 /// `postgresql_role`: observe the role read-only and compare the declared
