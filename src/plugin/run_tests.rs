@@ -1,7 +1,8 @@
 //! Step 2 tests: plugin resource types through the real model, engine, audit
-//! and output paths, against a scripted firewalld on a FakeTarget. A test
-//! registry stands in for the release's first-party registry, which is
-//! empty (no catalog is usable in a production build).
+//! and output paths, against a scripted firewalld on a FakeTarget. The
+//! catalog and the plugin definition are the first-party files of the
+//! repository (`plugins/first-party/`), loaded through the release's own
+//! registry (step 5).
 
 use super::protect::sha256_hex;
 use super::*;
@@ -14,99 +15,14 @@ use crate::result::{Change, Disposition, Execution, Verification};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Mutex};
 
-const CATALOG: &str = r#"format = 1
-id = "firewalld"
-version = "0.1.0"
+/// The attested first-party catalog, byte for byte (its SHA-256 is the
+/// registry entry).
+const CATALOG: &str =
+    include_str!("../../plugins/first-party/catalogs/firewalld-0.1.0.catalog.toml");
 
-[[op]]
-id = "state"
-class = "observe"
-program = "/usr/bin/firewall-cmd"
-argv = ["--state"]
-timeout_secs = 30
-exit = { "0" = "running", "252" = "not_running" }
-
-[[op]]
-id = "zone_defined"
-class = "observe"
-program = "/usr/bin/firewall-cmd"
-argv = ["--permanent", "--info-zone={zone}"]
-timeout_secs = 30
-slots = { zone = { class = "ident", max_len = 17 } }
-exit = { "0" = "defined", "112" = "undefined" }
-
-[[op]]
-id = "service_defined"
-class = "observe"
-program = "/usr/bin/firewall-cmd"
-argv = ["--permanent", "--info-service={service}"]
-timeout_secs = 30
-slots = { service = { class = "ident", max_len = 64 } }
-exit = { "0" = "defined", "101" = "undefined" }
-
-[[op]]
-id = "query_service_runtime"
-class = "observe"
-program = "/usr/bin/firewall-cmd"
-argv = ["--zone={zone}", "--query-service={service}"]
-timeout_secs = 30
-slots = { zone = { class = "ident", max_len = 17 }, service = { class = "ident", max_len = 64 } }
-exit = { "0" = "present", "1" = "absent" }
-
-[[op]]
-id = "query_service_permanent"
-class = "observe"
-program = "/usr/bin/firewall-cmd"
-argv = ["--permanent", "--zone={zone}", "--query-service={service}"]
-timeout_secs = 30
-slots = { zone = { class = "ident", max_len = 17 }, service = { class = "ident", max_len = 64 } }
-exit = { "0" = "present", "1" = "absent" }
-
-[[op]]
-id = "add_service_runtime"
-class = "mutate"
-program = "/usr/bin/firewall-cmd"
-argv = ["--zone={zone}", "--add-service={service}"]
-timeout_secs = 60
-slots = { zone = { class = "ident", max_len = 17 }, service = { class = "ident", max_len = 64 } }
-exit = { "0" = "ok" }
-
-[[op]]
-id = "add_service_permanent"
-class = "mutate"
-program = "/usr/bin/firewall-cmd"
-argv = ["--permanent", "--zone={zone}", "--add-service={service}"]
-timeout_secs = 60
-slots = { zone = { class = "ident", max_len = 17 }, service = { class = "ident", max_len = 64 } }
-exit = { "0" = "ok" }
-"#;
-
-const PLUGIN_FW: &str = r#"format = 1
-id = "firewalld"
-version = "0.1.0"
-catalog = { id = "firewalld", version = "0.1.0" }
-
-[[type]]
-name = "firewalld.service"
-fields = { zone = { kind = "ident" }, service = { kind = "ident" }, state = { kind = "enum", values = ["present"] } }
-precheck = [
-  { op = "state", expect = "running" },
-  { op = "zone_defined", expect = "defined" },
-  { op = "service_defined", expect = "defined" },
-]
-
-[[type.facet]]
-name = "runtime"
-observe = "query_service_runtime"
-want = "field:state"
-ensure = { present = "add_service_runtime" }
-
-[[type.facet]]
-name = "permanent"
-observe = "query_service_permanent"
-want = "field:state"
-ensure = { present = "add_service_permanent" }
-"#;
+/// The first-party plugin definition that was accepted on real hosts.
+const PLUGIN_FW: &str =
+    include_str!("../../plugins/first-party/plugins/firewalld-0.1.0.plugin.toml");
 
 /// A second, different resource type from a different plugin, reusing the
 /// same verified catalog (no new capability, so no Core change).
@@ -195,16 +111,13 @@ impl Setup {
         write_mode(&self.root.join("trust.toml"), &t, 0o600);
     }
 
+    /// The release's own registry; only the ancestor check is limited to
+    /// the temporary directory.
     fn ctx(&self) -> PluginContext {
-        let sha: &'static str = Box::leak(sha256_hex(CATALOG.as_bytes()).into_boxed_str());
         PluginContext::Test {
             root: self.root.clone(),
             boundary: self.boundary.clone(),
-            registry: vec![FirstPartyCatalog {
-                id: "firewalld",
-                version: "0.1.0",
-                sha256: sha,
-            }],
+            registry: FIRST_PARTY_CATALOGS.to_vec(),
         }
     }
 
@@ -438,29 +351,114 @@ fn a_tampered_plugin_or_catalog_is_refused_at_load() {
     );
 }
 
+const ATTESTED_CATALOG_SHA256: &str =
+    "27741bcc6b72dfbf69d918282fb454c324e7229b764873334a5c6c0af04707ff";
+const ATTESTED_PLUGIN_SHA256: &str =
+    "47f33f171d239103cbb97450d17b57c857ce22436620ddf809fdd2be94948544";
+
 #[test]
-fn the_production_registry_refuses_every_catalog() {
-    // A correct, Owner-pinned setup with the release's own registry (empty):
-    // refused at the registry, so no catalog is usable in a production build.
+fn the_registry_lists_exactly_the_attested_firewalld_catalog() {
+    // One entry, and it is the repository file measured on real hosts.
+    assert_eq!(FIRST_PARTY_CATALOGS.len(), 1);
+    let f = FIRST_PARTY_CATALOGS[0];
+    assert_eq!(
+        (f.id, f.version, f.sha256),
+        ("firewalld", "0.1.0", ATTESTED_CATALOG_SHA256)
+    );
+    assert_eq!(sha256_hex(CATALOG.as_bytes()), ATTESTED_CATALOG_SHA256);
+    assert_eq!(sha256_hex(PLUGIN_FW.as_bytes()), ATTESTED_PLUGIN_SHA256);
+    assert!(production_enabled());
+    // The Owner-pinned repository files load through the release registry.
     let s = Setup::new();
-    let ctx = PluginContext::Test {
-        root: s.root.clone(),
-        boundary: s.boundary.clone(),
-        registry: FIRST_PARTY_CATALOGS.to_vec(),
-    };
-    let e = load_model_with_plugins(&s.recipe("p.yml", ALLOW_HTTP), &ctx).expect_err("refused");
+    let m = s.model(ALLOW_HTTP).unwrap();
+    let prov = m.plugins.as_ref().unwrap().provenance();
+    assert_eq!(prov[0].catalog_sha256, ATTESTED_CATALOG_SHA256);
+    assert_eq!(prov[0].plugin_sha256, ATTESTED_PLUGIN_SHA256);
+    assert_eq!(prov[0].catalog_registry, "first-party");
+}
+
+#[test]
+fn the_attested_catalog_has_only_the_seven_reviewed_operations() {
+    let s = Setup::new();
+    let m = s.model(ALLOW_HTTP).unwrap();
+    let set = m.plugins.as_ref().unwrap();
+    let c = set.catalog(set.plugins()[0].catalog()).unwrap();
+    let mut ops: Vec<(String, OpClass, bool)> = c
+        .ops()
+        .map(|o| (o.id().to_string(), o.class(), o.is_enabled()))
+        .collect();
+    ops.sort_by(|a, b| a.0.cmp(&b.0));
+    let want = [
+        ("add_service_permanent", OpClass::Mutate),
+        ("add_service_runtime", OpClass::Mutate),
+        ("query_service_permanent", OpClass::Observe),
+        ("query_service_runtime", OpClass::Observe),
+        ("service_defined", OpClass::Observe),
+        ("state", OpClass::Observe),
+        ("zone_defined", OpClass::Observe),
+    ];
+    assert_eq!(
+        ops,
+        want.into_iter()
+            .map(|(i, c)| (i.to_string(), c, true))
+            .collect::<Vec<_>>()
+    );
+    // No reload, removal, zone, interface or direct-rule capability.
+    for banned in [
+        "--reload",
+        "--complete-reload",
+        "--remove-",
+        "--change-",
+        "--new-zone",
+        "--delete-",
+        "--set-",
+        "--direct",
+        "--policy",
+        "--runtime-to-permanent",
+        "--panic",
+        "--lockdown",
+    ] {
+        assert!(!CATALOG.contains(banned), "{}", banned);
+    }
+    // The plugin keeps the precheck that a service exists: a permanent
+    // query of an unknown service answers 1 ("absent") on real hosts.
+    assert!(PLUGIN_FW.contains("{ op = \"service_defined\", expect = \"defined\" }"));
+}
+
+#[test]
+fn the_production_registry_refuses_any_other_catalog_bytes() {
+    // One added byte, pinned by the Owner: refused at the registry.
+    let s = Setup::new();
+    let edited = format!("{}# edited\n", CATALOG);
+    write_mode(
+        &s.root.join("catalogs/firewalld-0.1.0.catalog.toml"),
+        &edited,
+        0o644,
+    );
+    let t = std::fs::read_to_string(s.root.join("trust.toml"))
+        .unwrap()
+        .replace(ATTESTED_CATALOG_SHA256, &sha256_hex(edited.as_bytes()));
+    write_mode(&s.root.join("trust.toml"), &t, 0o600);
+    let e = s.model(ALLOW_HTTP).expect_err("refused");
     assert!(
         e.message.contains("not a reviewed first-party catalog"),
         "{}",
         e.message
     );
-    assert!(!production_enabled());
-    // The production loader (all ancestors checked) also refuses it.
-    assert!(load_model_with_plugins(
-        &s.recipe("q.yml", ALLOW_HTTP),
-        &PluginContext::Root(s.root.clone())
-    )
-    .is_err());
+    // Another id or version with the attested bytes is refused too.
+    for (id, version) in [("firewalld", "0.1.1"), ("firewalld2", "0.1.0")] {
+        let reg = vec![FirstPartyCatalog {
+            id,
+            version,
+            sha256: ATTESTED_CATALOG_SHA256,
+        }];
+        let ctx = PluginContext::Test {
+            root: s.root.clone(),
+            boundary: s.boundary.clone(),
+            registry: reg,
+        };
+        assert!(load_model_with_plugins(&s.recipe("q.yml", ALLOW_HTTP), &ctx).is_err());
+    }
 }
 
 // ---------------------------------------------------------------------------

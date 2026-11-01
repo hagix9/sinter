@@ -1,0 +1,25 @@
+format = 1
+id = "firewalld"
+version = "0.1.0"
+catalog = { id = "firewalld", version = "0.1.0" }
+
+[[type]]
+name = "firewalld.service"
+fields = { zone = { kind = "ident" }, service = { kind = "ident" }, state = { kind = "enum", values = ["present"] } }
+precheck = [
+  { op = "state", expect = "running" },
+  { op = "zone_defined", expect = "defined" },
+  { op = "service_defined", expect = "defined" },
+]
+
+[[type.facet]]
+name = "runtime"
+observe = "query_service_runtime"
+want = "field:state"
+ensure = { present = "add_service_runtime" }
+
+[[type.facet]]
+name = "permanent"
+observe = "query_service_permanent"
+want = "field:state"
+ensure = { present = "add_service_permanent" }

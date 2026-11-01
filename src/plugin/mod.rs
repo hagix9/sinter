@@ -10,8 +10,9 @@
 //! the engine runs plugin resource types through the two channels of
 //! `TargetFs` (observe, and mutate with the mutation permit), and audit
 //! observes only. A catalog is usable only when this release's first-party
-//! registry lists it; that registry is empty ([`production_enabled`] is
-//! `false`), so no plugin can run in a production build yet.
+//! registry lists its exact bytes. Step 5 lists one catalog, firewalld 0.1.0,
+//! whose exit codes were measured on real hosts; its files are kept in the
+//! repository under `plugins/first-party/`.
 
 pub mod exec;
 pub mod format;
@@ -42,8 +43,8 @@ use std::path::{Path, PathBuf};
 pub const EXECUTION_AVAILABLE: bool = true;
 
 /// Whether any plugin can run in this build: only when the release lists at
-/// least one reviewed first-party catalog. `false` in v1.9.0 so far: the
-/// firewalld catalog is not yet attested on real hosts.
+/// least one reviewed first-party catalog (firewalld 0.1.0 since step 5).
+/// It says what the build can do, not that a release is approved.
 pub fn production_enabled() -> bool {
     !FIRST_PARTY_CATALOGS.is_empty()
 }
@@ -59,10 +60,19 @@ pub struct FirstPartyCatalog {
     pub sha256: &'static str,
 }
 
-/// The reviewed first-party catalogs of this release. Empty in step 1: the
-/// firewalld catalog is a draft until its exit codes are confirmed on real
-/// hosts (SINTER_PLUGIN_FIREWALLD_DESIGN §4.5), so no catalog is usable yet.
-pub const FIRST_PARTY_CATALOGS: &[FirstPartyCatalog] = &[];
+/// The reviewed first-party catalogs of this release (DESIGN §38.4). Each
+/// entry is the SHA-256 of the exact bytes of a file under
+/// `plugins/first-party/catalogs/`; a test checks that they agree.
+///
+/// firewalld 0.1.0: the seven operations of the firewalld design, with the
+/// exit codes measured directly on Rocky Linux 9.8 (firewalld 1.3.4), Rocky
+/// Linux 10.2 (2.4.3) and Ubuntu 24.04 (2.1.1) on 2026-11-01. Other versions
+/// are not verified.
+pub const FIRST_PARTY_CATALOGS: &[FirstPartyCatalog] = &[FirstPartyCatalog {
+    id: "firewalld",
+    version: "0.1.0",
+    sha256: "27741bcc6b72dfbf69d918282fb454c324e7229b764873334a5c6c0af04707ff",
+}];
 
 /// A plugin a recipe enables (`plugins: [{ id, version }]`, DESIGN §38.7).
 #[derive(Debug, Clone, PartialEq, Eq)]

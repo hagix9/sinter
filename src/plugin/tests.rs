@@ -1,6 +1,7 @@
 //! Step 1 tests: loading and verification only. Every test builds its own
 //! plugin root inside a fresh temporary directory and uses a test registry
-//! of first-party catalogs (the production registry is empty).
+//! of first-party catalogs. The fixture catalog here is not the attested
+//! file (it has no header comment), so the production registry refuses it.
 
 use super::protect::sha256_hex;
 use super::*;
@@ -305,12 +306,17 @@ fn an_operation_the_owner_did_not_list_loads_but_stays_disabled() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn production_registry_is_empty_so_no_catalog_is_usable_in_step_1() {
-    assert!(FIRST_PARTY_CATALOGS.is_empty());
-    // Step 2 has the execution channels, but no catalog is usable in a
-    // production build because the release registry is empty.
+fn the_production_registry_admits_only_the_exact_attested_bytes() {
+    // The release registry lists one catalog (firewalld 0.1.0, step 5). The
+    // fixture catalog has the same operations but different bytes, so even
+    // pinned by the Owner it is refused: the registry is matched by digest.
+    assert_eq!(FIRST_PARTY_CATALOGS.len(), 1);
+    assert_ne!(
+        FIRST_PARTY_CATALOGS[0].sha256,
+        sha256_hex(CATALOG.as_bytes())
+    );
     const { assert!(EXECUTION_AVAILABLE) };
-    assert!(!production_enabled());
+    assert!(production_enabled());
     let r = Root::new(CATALOG, PLUGIN);
     let m = err(load(&r.open().unwrap(), &fw()));
     assert!(m.contains("not a reviewed first-party catalog"), "{}", m);

@@ -56,7 +56,7 @@ Planned features are listed so that their boundaries are fixed before they are b
 
 1.3 Resource Plugin note (v1.9.0, Owner decision 2026-11-01)
 
-§38 adds restricted, data-only Resource Plugins (design E3-H). It uses the same three labels as §1.2. IMPLEMENTED: reading and verifying the plugin root (step 1) and, in step 2, recipe activation, the two execution channels, plan/apply/audit, results and the MCP refusal. No catalog is usable in a release build yet, because the release's registry of first-party catalogs is empty (§38.4); the first entry is PLANNED after the firewalld catalog is confirmed on real hosts. No existing resource type, JSON key or exit code changes. The §36 prohibition on plugins is narrowed only as §36 states, and GOALS §16 records why.
+§38 adds restricted, data-only Resource Plugins (design E3-H). It uses the same three labels as §1.2. IMPLEMENTED: reading and verifying the plugin root (step 1) and, in step 2, recipe activation, the two execution channels, plan/apply/audit, results and the MCP refusal; in step 5 the release's registry of first-party catalogs lists its first catalog, firewalld 0.1.0, after it was confirmed on real hosts (§38.1, §38.4). No existing resource type, JSON key or exit code changes. The §36 prohibition on plugins is narrowed only as §36 states, and GOALS §16 records why.
 
 2. Six v0.1 contracts
 
@@ -2556,7 +2556,9 @@ IMPLEMENTED (step 1): §38.3–§38.6 and the value check of §38.9.
 
 IMPLEMENTED (step 2): activation (§38.7), the execution channels (§38.8), result classification (§38.10), plan/apply/audit with the existing results and exit codes (§38.11) and the MCP refusal (§38.12). Verified against a scripted target only.
 
-PLANNED: the first first-party catalog in the release registry (firewalld; `firewalld.service`, present only, runtime and permanent, no reload, no removal, no zone or interface change), after its exit codes are confirmed on real hosts and the trust-file checks of §38.5 are confirmed on a Linux controller. Until then the registry is empty and no plugin can run in a release build.
+IMPLEMENTED (step 5): the first first-party catalog in the release registry, firewalld 0.1.0 (SHA-256 `27741bcc6b72dfbf69d918282fb454c324e7229b764873334a5c6c0af04707ff`), with its plugin definition firewalld 0.1.0 (`firewalld.service`, present only, runtime and permanent, no reload, no removal, no zone or interface change; SHA-256 `47f33f171d239103cbb97450d17b57c857ce22436620ddf809fdd2be94948544`). Both files are kept under `plugins/first-party/`. Its seven operations and their exit codes were measured directly with `firewall-cmd`, and the plugin was run through Sinter, on Rocky Linux 9.8 (firewalld 1.3.4), Rocky Linux 10.2 (firewalld 2.4.3) and Ubuntu 24.04 (firewalld 2.1.1) on 2026-11-01; the trust-file checks of §38.5 were confirmed on the same three as Linux controllers. It is not yet in a published release.
+
+NOT VERIFIED: other OS or firewalld versions (Sinter does not check the version); the release acceptance with this registry on its other five target labels; a mutation whose outcome is unknown because Sinter's own timeout expired, on a real host (covered by tests only: with the daemon stopped, `firewall-cmd` gave up by itself and the result was a failure that may have changed something); POSIX ACLs on a macOS controller (§38.5).
 
 UNCHANGED LIMIT: no code runs from a plugin; third-party catalogs are not supported; plugin types are not offered through MCP (§38.12); Command Audit expectations cannot use plugin types in v1.9.0.
 
@@ -2586,7 +2588,7 @@ A plugin file has no key for a program, argv, environment, working directory or 
 
 38.4 Versions, digests and first-party catalogs
 
-Identifiers are `[a-z][a-z0-9_]*` (at most 32 bytes); versions are `MAJOR.MINOR.PATCH` without leading zeros. A plugin is used only when the trust file has an entry with its exact id and version and the SHA-256 of the exact bytes read equals that entry. A catalog is used only when, in addition, the same id, version and SHA-256 appear in the release's registry of reviewed first-party catalogs, which is compiled into Sinter. A catalog that the trust file pins but the registry does not list is refused: third-party catalogs need a separate safety review and Owner approval and are not supported in v1.9.0. The digest of a catalog is checked against the trust file and the registry before the catalog is parsed.
+Identifiers are `[a-z][a-z0-9_]*` (at most 32 bytes); versions are `MAJOR.MINOR.PATCH` without leading zeros. A plugin is used only when the trust file has an entry with its exact id and version and the SHA-256 of the exact bytes read equals that entry. A catalog is used only when, in addition, the same id, version and SHA-256 appear in the release's registry of reviewed first-party catalogs, which is compiled into Sinter. A catalog that the trust file pins but the registry does not list is refused: third-party catalogs need a separate safety review and Owner approval and are not supported in v1.9.0. The digest of a catalog is checked against the trust file and the registry before the catalog is parsed. In v1.9.0 the registry has one entry, firewalld 0.1.0 (§38.1); its file is kept in the repository and a test checks that the file's digest and the entry agree. A new catalog, or a new version of one, needs its own measurements on real hosts and its own entry.
 
 An operation is usable only when the trust file lists it under the list of its own class (`attested_observe` for observe, `allowed_mutate` for mutate). An operation listed under the other class, listed twice, or not defined by the catalog is an error; an operation the catalog defines but the trust file does not list loads and stays disabled.
 
@@ -2602,7 +2604,7 @@ the root, catalogs/ and plugins/: directories owned by root or the invoking user
 
 each file: a regular file opened without following a final symbolic link (and without blocking on a FIFO), owned by root or the invoking user, not writable by group or others, at most 64 KiB
 
-A file is read from the checked descriptor. Its device, inode, size, modification time and change time must be identical before and after the read, otherwise the file is refused as changed while it was being read; a replacement by rename is therefore either invisible (the original bytes are used) or refused, and the replacement's bytes are never used. The digest is computed over exactly the bytes that are parsed. Every failure is a refusal (exit 2 once wired); nothing falls back. ACLs are not inspected. On a non-Unix controller plugins are refused.
+A file is read from the checked descriptor. Its device, inode, size, modification time and change time must be identical before and after the read, otherwise the file is refused as changed while it was being read; a replacement by rename is therefore either invisible (the original bytes are used) or refused, and the replacement's bytes are never used. The digest is computed over exactly the bytes that are parsed. Every failure is a refusal (exit 2); nothing falls back. ACLs are not inspected directly. On Linux a POSIX ACL entry that grants write to another user or group shows in the group bits of the mode through the ACL mask, so the mode check refuses it (confirmed on Rocky Linux 9.8 and 10.2 and Ubuntu 24.04, 2026-11-01); on macOS ACLs do not show in the mode and are not detected. On a non-Unix controller plugins are refused.
 
 Root ownership is not required: a root owned by the user (for example under the user's configuration directory) is accepted.
 
@@ -2663,3 +2665,7 @@ Sinter enforces which operations can run: only operations of reviewed first-part
 2026-11-01: section added (Owner decision adopting E3-H; GOALS §16). §1.3 added; §36 prohibition on plugins narrowed to the data-only Resource Plugins of this section and four related prohibitions added.
 
 2026-11-01 (step 2): §38.7, §38.8, §38.10–§38.12 implemented and made precise (activation in the top-level recipe only, the CLI-only plugin root, root-run controllers, the change states of failed and unknown mutations, provenance in existing `notes`/`reason`, the MCP refusal). The release registry stays empty.
+
+2026-11-01 (step 4, real hosts): §38.5 ACL sentence made precise from measurements on Linux controllers.
+
+2026-11-01 (step 5): firewalld 0.1.0 added to the release registry from the step 4 measurements (§38.1, §38.4); what is not verified listed in §38.1.

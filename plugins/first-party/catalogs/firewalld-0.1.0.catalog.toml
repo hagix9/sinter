@@ -1,0 +1,71 @@
+# First-party capability catalog firewalld 0.1.0 (candidate, not released).
+# Exit codes measured directly with firewall-cmd on 2026-11-01 (F0):
+# Rocky Linux 9.8 / firewalld 1.3.4, Rocky Linux 10.2 / firewalld 2.4.3,
+# Ubuntu 24.04 / firewalld 2.1.1. Operations require root. Codes not listed
+# here (253 authorization failed, 127 not installed, 252 except for state,
+# 101 from a runtime query) are errors by the Core rules.
+format = 1
+id = "firewalld"
+version = "0.1.0"
+
+[[op]]
+id = "state"
+class = "observe"
+program = "/usr/bin/firewall-cmd"
+argv = ["--state"]
+timeout_secs = 30
+exit = { "0" = "running", "252" = "not_running" }
+
+[[op]]
+id = "zone_defined"
+class = "observe"
+program = "/usr/bin/firewall-cmd"
+argv = ["--permanent", "--info-zone={zone}"]
+timeout_secs = 30
+slots = { zone = { class = "ident", max_len = 17 } }
+exit = { "0" = "defined", "112" = "undefined" }
+
+[[op]]
+id = "service_defined"
+class = "observe"
+program = "/usr/bin/firewall-cmd"
+argv = ["--permanent", "--info-service={service}"]
+timeout_secs = 30
+slots = { service = { class = "ident", max_len = 64 } }
+exit = { "0" = "defined", "101" = "undefined" }
+
+[[op]]
+id = "query_service_runtime"
+class = "observe"
+program = "/usr/bin/firewall-cmd"
+argv = ["--zone={zone}", "--query-service={service}"]
+timeout_secs = 30
+slots = { zone = { class = "ident", max_len = 17 }, service = { class = "ident", max_len = 64 } }
+exit = { "0" = "present", "1" = "absent" }
+
+[[op]]
+id = "query_service_permanent"
+class = "observe"
+program = "/usr/bin/firewall-cmd"
+argv = ["--permanent", "--zone={zone}", "--query-service={service}"]
+timeout_secs = 30
+slots = { zone = { class = "ident", max_len = 17 }, service = { class = "ident", max_len = 64 } }
+exit = { "0" = "present", "1" = "absent" }
+
+[[op]]
+id = "add_service_runtime"
+class = "mutate"
+program = "/usr/bin/firewall-cmd"
+argv = ["--zone={zone}", "--add-service={service}"]
+timeout_secs = 60
+slots = { zone = { class = "ident", max_len = 17 }, service = { class = "ident", max_len = 64 } }
+exit = { "0" = "ok" }
+
+[[op]]
+id = "add_service_permanent"
+class = "mutate"
+program = "/usr/bin/firewall-cmd"
+argv = ["--permanent", "--zone={zone}", "--add-service={service}"]
+timeout_secs = 60
+slots = { zone = { class = "ident", max_len = 17 }, service = { class = "ident", max_len = 64 } }
+exit = { "0" = "ok" }
