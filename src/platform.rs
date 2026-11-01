@@ -638,6 +638,10 @@ fn dpkg_reports_absent(out: &Output, name: &str) -> bool {
     out.stderr == canonical.as_bytes() || out.stderr == bare.as_bytes()
 }
 
+/// A package query that exited with a code no contract accepts. The captured
+/// output is target text that may carry anything (N151-03), so it is never
+/// copied into the message: only the size of the withheld output is shown,
+/// as for a failed dnf mutation. A sensitive resource does not get even that.
 fn observation_error(
     backend: PackageBackend,
     name_disp: &str,
@@ -645,7 +649,8 @@ fn observation_error(
     out: &Output,
     sensitive: bool,
 ) -> SinterError {
-    if sensitive {
+    let withheld = out.stdout.len() + out.stderr.len();
+    if sensitive || withheld == 0 {
         SinterError::apply(format!(
             "package observation failed for {}: {} query exited {}",
             name_disp,
@@ -654,11 +659,13 @@ fn observation_error(
         ))
     } else {
         SinterError::apply(format!(
-            "package observation failed for {}: {} query exited {} ({})",
+            "package observation failed for {}: {} query exited {} ({} bytes of query output \
+             withheld; run `{}` for this package on the target to see it)",
             name_disp,
             backend.label(),
             code,
-            String::from_utf8_lossy(&out.stderr).trim()
+            withheld,
+            backend.query_program()
         ))
     }
 }
@@ -1268,6 +1275,75 @@ mod tests {
         assert!(PackageBackend::Dnf
             .classify_observation(&o, "nano", "nano", false)
             .is_err());
+    }
+
+    #[test]
+    fn a_failed_query_never_copies_its_output_into_the_message() {
+        // N151-03: not sensitive, both backends and both observation paths.
+        // The canary is synthetic; the message keeps the backend, the name,
+        // the exit status and the size of what was withheld.
+        let o = exited(
+            2,
+            "SINTER-TEST-CANARY-OUT\n",
+            "error: SINTER-TEST-CANARY-ERR token=example-not-a-secret\n\x1b[31mmore\n",
+        );
+        let withheld = o.stdout.len() + o.stderr.len();
+        for (backend, label, program) in [
+            (PackageBackend::Apt, "apt", "/usr/bin/dpkg-query"),
+            (PackageBackend::Dnf, "dnf", "/usr/bin/rpm"),
+        ] {
+            let mut messages = vec![
+                backend
+                    .classify_observation(&o, "nano", "nano", false)
+                    .unwrap_err()
+                    .message,
+            ];
+            if backend == PackageBackend::Apt {
+                messages.push(
+                    PackageBackend::classify_apt_instances(&o, "nano", "nano", false)
+                        .unwrap_err()
+                        .message,
+                );
+            }
+            for m in messages {
+                assert!(!m.contains("CANARY"), "{}", m);
+                assert!(!m.contains("example-not-a-secret"), "{}", m);
+                assert!(!m.contains('\x1b') && !m.contains('\n'), "{:?}", m);
+                assert!(
+                    m.starts_with(&format!(
+                        "package observation failed for nano: {} query exited 2 ({} bytes of query output withheld; run `{}`",
+                        label, withheld, program
+                    )),
+                    "{}",
+                    m
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_query_without_output_says_only_the_exit_status() {
+        let o = exited(3, "", "");
+        let e = PackageBackend::Dnf
+            .classify_observation(&o, "nano", "nano", false)
+            .unwrap_err();
+        assert_eq!(
+            e.message,
+            "package observation failed for nano: dnf query exited 3"
+        );
+    }
+
+    #[test]
+    fn a_sensitive_failed_query_shows_neither_output_nor_its_size() {
+        let o = exited(2, "SINTER-TEST-CANARY-OUT", "SINTER-TEST-CANARY-ERR");
+        for backend in [PackageBackend::Apt, PackageBackend::Dnf] {
+            let e = backend
+                .classify_observation(&o, "secretpkg", "[redacted]", true)
+                .unwrap_err();
+            assert!(!e.message.contains("CANARY"), "{}", e.message);
+            assert!(!e.message.contains("withheld"), "{}", e.message);
+            assert!(!e.message.contains("secretpkg"), "{}", e.message);
+        }
     }
 
     #[test]

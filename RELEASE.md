@@ -488,6 +488,13 @@ Minimum matrix per target:
 - [ ] command resource: guard (`creates`) honored
 - [ ] Pre-mutation failure reports failed, no false Changed, no mutation
 - [ ] Sensitive values redacted in output/diffs/errors
+- [ ] `audit --audit-policy strict` exits 8 for a not-auditable command
+      (with `audit_policy` in JSON); the default policy is unchanged; the
+      command never runs (from v1.9.0)
+- [ ] `SINTER_PROGRESS=plain` package apply: only `progress:` lines on stderr,
+      stages closed, nothing on stdout; no progress with `--format json` or by
+      default on a non-terminal stderr. Package detail words are recorded, not
+      judged (from v1.9.0)
 - [ ] No residue after operations (temp dirs, snapshots)
 
 Step 9: keep one raw, sanitized log per target, named by its label.

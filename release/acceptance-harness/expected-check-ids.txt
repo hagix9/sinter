@@ -1,6 +1,8 @@
 artifact-arch
 artifact-sha256
+audit-default-policy-unchanged
 audit-no-drift
+audit-strict-not-auditable
 command-guard-first-run
 command-guard-honored
 command-plan
@@ -20,6 +22,10 @@ package-install-idempotent
 package-install-plan
 package-native-parser
 package-normalise-ok
+package-progress-json-silent
+package-progress-off-by-default
+package-progress-plain
+package-progress-restore
 package-remove-apply
 platform-detect
 pre-mutation-failure

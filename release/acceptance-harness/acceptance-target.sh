@@ -222,6 +222,77 @@ echo "PKG_ABSENT2_RC=$R change=$CHG3"
 if [ "$R" -eq 0 ] && [ "$CHG3" = none ]; then check package-absent-idempotent ok "second absent apply made no change"
 else check package-absent-idempotent FAIL "rc=$R change=$CHG3"; fi
 
+# ------------------------------------------------ package progress (v1.9.0)
+# BEGIN progress-checks
+# The stable, documented part of progress only (docs: CLI reference, "Progress
+# output"): with SINTER_PROGRESS=plain and text output every stderr line starts
+# with "progress: ", the run and the apply stage open and close, nothing reaches
+# stdout and no control sequence is written; with --format json, and on a
+# non-terminal stderr by default, there is no progress at all. Package detail
+# words are not a stable contract and a manager may print none, so the number
+# of detail lines is recorded but never required. The package is absent here.
+progress_verdict() { # <stdout> <stderr> <rc> <want: plain|none|json> -> verdict file, exit 0 = ok
+  python3 - "$1" "$2" "$3" "$4" <<'PYEOF'
+import json, sys
+out = open(sys.argv[1], "rb").read(); err = open(sys.argv[2], "rb").read()
+rc, want = sys.argv[3], sys.argv[4]
+bad = []
+if rc != "0": bad.append("exit %s" % rc)
+if b"progress:" in out: bad.append("a progress line on stdout")
+if want == "plain":
+    try: text = err.decode("ascii")
+    except UnicodeDecodeError: bad.append("stderr is not ASCII"); text = err.decode("utf-8", "replace")
+    if "\x1b" in text or "\r" in text: bad.append("control characters on stderr")
+    lines = [l for l in text.split("\n") if l]
+    other = [l for l in lines if not l.startswith("progress: ")]
+    if other: bad.append("a stderr line that is not progress: %r" % other[0][:120])
+    for need in ("progress: run: apply started", "progress: apply: start 0/1",
+                 "progress: apply: done 1/1", "progress: run: apply completed"):
+        if not any(l.startswith(need) for l in lines): bad.append("missing %r" % need)
+    if any(l.startswith(("progress: run: apply failed", "progress: run: apply indeterminate",
+                         "progress: apply: failed", "progress: apply: indeterminate")) for l in lines):
+        bad.append("a failed or indeterminate stage end")
+    if b"== Sinter APPLY ==" not in out: bad.append("no text report on stdout")
+    print("PROGRESS_LINES=%d PROGRESS_DETAIL_LINES=%d" % (len(lines), sum(" on package:acc_pkg, " in l for l in lines)))
+elif want == "none":
+    if b"progress:" in err: bad.append("progress on a non-terminal stderr without SINTER_PROGRESS")
+    if b"== Sinter APPLY ==" not in out: bad.append("no text report on stdout")
+else:
+    if err: bad.append("stderr is not empty with --format json (%d bytes)" % len(err))
+    try:
+        d = json.loads(out)
+        r = [x for x in d.get("resources", []) if x.get("id") == "acc_pkg"]
+        if not r or r[0].get("change") != "none": bad.append("JSON: acc_pkg change is not none")
+    except Exception as e:
+        bad.append("stdout is not one JSON document: %s" % type(e).__name__)
+print("ok" if not bad else "; ".join(bad))
+sys.exit(0 if not bad else 3)
+PYEOF
+}
+SINTER_PROGRESS=plain "$EXE" apply "$S/pkg-present.yaml" --sudo > "$S/pp1.out" 2> "$S/pp1.err"; R=$?
+progress_verdict "$S/pp1.out" "$S/pp1.err" "$R" plain > "$S/pp1.verdict" 2>&1; V=$?
+echo "PROGRESS_PLAIN_RC=$R"; cat "$S/pp1.verdict"; echo "PROGRESS_PLAIN_STDERR<<"; cat "$S/pp1.err"; echo ">>"
+if [ "$V" -eq 0 ] && pkg_present; then check package-progress-plain ok "plain progress lines only on stderr, stages closed, package installed"
+else check package-progress-plain FAIL "$(tail -1 "$S/pp1.verdict") installed=$(pkg_present && echo yes || echo no)"; fi
+
+"$EXE" apply "$S/pkg-present.yaml" --sudo > "$S/pp2.out" 2> "$S/pp2.err"; R=$?
+progress_verdict "$S/pp2.out" "$S/pp2.err" "$R" none > "$S/pp2.verdict" 2>&1; V=$?
+echo "PROGRESS_DEFAULT_RC=$R"; cat "$S/pp2.verdict"
+if [ "$V" -eq 0 ]; then check package-progress-off-by-default ok "no progress on a non-terminal stderr without SINTER_PROGRESS"
+else check package-progress-off-by-default FAIL "$(tail -1 "$S/pp2.verdict")"; fi
+
+SINTER_PROGRESS=plain "$EXE" apply "$S/pkg-present.yaml" --sudo --format json > "$S/pp3.json" 2> "$S/pp3.err"; R=$?
+progress_verdict "$S/pp3.json" "$S/pp3.err" "$R" json > "$S/pp3.verdict" 2>&1; V=$?
+echo "PROGRESS_JSON_RC=$R"; cat "$S/pp3.verdict"
+if [ "$V" -eq 0 ]; then check package-progress-json-silent ok "--format json with SINTER_PROGRESS=plain: no progress on any stream"
+else check package-progress-json-silent FAIL "$(tail -1 "$S/pp3.verdict")"; fi
+
+"$EXE" apply "$S/pkg-absent.yaml" --sudo --format json > "$S/pp4.json" 2>"$S/pp4.err"; R=$?
+echo "PROGRESS_RESTORE_RC=$R"
+if [ "$R" -eq 0 ] && ! pkg_present; then check package-progress-restore ok "package absent again after the progress checks"
+else check package-progress-restore FAIL "rc=$R installed=$(pkg_present && echo yes || echo no)"; fi
+# END progress-checks
+
 # ----------------------------------------------------------------- files
 cat > "$S/file.yaml" <<'YAML'
 version: 1
@@ -338,6 +409,68 @@ print(r[0].get('change') if r else 'missing')
 echo "CMD_APPLY2_RC=$R disposition=$DISP2 change=$CHG6"
 if [ "$R" -eq 0 ] && [ "$DISP2" = guard_satisfied ] && [ "$CHG6" = none ]; then check command-guard-honored ok "creates guard skipped the second run with no change"; else check command-guard-honored FAIL "rc=$R disposition=$DISP2 change=$CHG6"; fi
 
+# ---------------------------------------------- strict audit (v1.9.0)
+# BEGIN strict-audit-checks
+# DESIGN §33: `audit --audit-policy strict` exits 8 when a resource is
+# not_auditable and nothing drifted or failed; the statuses stay the same, the
+# JSON gains `audit_policy`, and a command resource is never run. Without the
+# option the result is unchanged (exit 0, no `audit_policy`). The command would
+# create the sentinel if it ever ran.
+rm -f /opt/sinter-acceptance/state/strict-sentinel.txt
+cat > "$S/strict.yaml" <<'YAML'
+version: 1
+resources:
+  - id: acc_strict_dir
+    type: directory
+    with:
+      path: /opt/sinter-acceptance/state
+      state: present
+      mode: "0755"
+  - id: acc_strict_cmd
+    type: command
+    with:
+      program: /usr/bin/touch
+      args: ["/opt/sinter-acceptance/state/strict-sentinel.txt"]
+      creates: /opt/sinter-acceptance/state/strict-sentinel.txt
+YAML
+strict_verdict() { # <audit json> <rc> <want: strict|default> -> verdict file, exit 0 = ok
+  python3 - "$1" "$2" "$3" <<'PYEOF'
+import json, sys
+rc, want = sys.argv[2], sys.argv[3]
+bad = []
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception as e:
+    print("audit JSON unreadable: %s" % type(e).__name__); sys.exit(3)
+st = {r.get("id"): r.get("status") for r in d.get("resources", [])}
+if st.get("acc_strict_dir") != "compliant": bad.append("acc_strict_dir is %s" % st.get("acc_strict_dir"))
+if st.get("acc_strict_cmd") != "not_auditable": bad.append("acc_strict_cmd is %s" % st.get("acc_strict_cmd"))
+pol = d.get("audit_policy")
+if want == "strict":
+    if rc != "8": bad.append("exit %s, not 8" % rc)
+    if not isinstance(pol, dict) or pol.get("mode") != "strict" or pol.get("not_auditable_total") != 1 or pol.get("effective_exit_code") != 8:
+        bad.append("audit_policy is %r" % (pol,))
+else:
+    if rc != "0": bad.append("exit %s, not 0" % rc)
+    if "audit_policy" in d: bad.append("audit_policy present without --audit-policy strict")
+print("ok status=%s summary=%s" % (d.get("status"), d.get("summary")) if not bad else "; ".join(bad))
+sys.exit(0 if not bad else 3)
+PYEOF
+}
+"$EXE" audit "$S/strict.yaml" --sudo --audit-policy strict --format json > "$S/sa1.json" 2>"$S/sa1.err"; R=$?
+strict_verdict "$S/sa1.json" "$R" strict > "$S/sa1.verdict" 2>&1; V=$?
+[ -e /opt/sinter-acceptance/state/strict-sentinel.txt ] && RAN=yes || RAN=no
+echo "STRICT_AUDIT_RC=$R command_ran=$RAN"; cat "$S/sa1.verdict"
+if [ "$V" -eq 0 ] && [ "$RAN" = no ]; then check audit-strict-not-auditable ok "strict audit exited 8 with audit_policy, command not run"
+else check audit-strict-not-auditable FAIL "$(tail -1 "$S/sa1.verdict") command_ran=$RAN"; fi
+"$EXE" audit "$S/strict.yaml" --sudo --format json > "$S/sa2.json" 2>"$S/sa2.err"; R=$?
+strict_verdict "$S/sa2.json" "$R" default > "$S/sa2.verdict" 2>&1; V=$?
+[ -e /opt/sinter-acceptance/state/strict-sentinel.txt ] && RAN=yes || RAN=no
+echo "DEFAULT_AUDIT_RC=$R command_ran=$RAN"; cat "$S/sa2.verdict"
+if [ "$V" -eq 0 ] && [ "$RAN" = no ]; then check audit-default-policy-unchanged ok "default audit exited 0 without audit_policy, command not run"
+else check audit-default-policy-unchanged FAIL "$(tail -1 "$S/sa2.verdict") command_ran=$RAN"; fi
+# END strict-audit-checks
+
 # ------------------------------------------- pre-mutation failure truth
 cat > "$S/fail.yaml" <<'YAML'
 version: 1
@@ -430,7 +563,7 @@ resources:
       path: /opt/sinter-acceptance/state/managed.conf
       state: absent
 YAML
-sudo rm -f /opt/sinter-acceptance/state/created.txt
+sudo rm -f /opt/sinter-acceptance/state/created.txt /opt/sinter-acceptance/state/strict-sentinel.txt
 "$EXE" apply "$S/cleanup.yaml" --sudo --format json > "$S/cl.json" 2>"$S/cl.err"; R=$?
 LEFT=$(sudo find /opt/sinter-acceptance/state -mindepth 1 2>/dev/null | wc -l)
 echo "CLEANUP_RC=$R leftover=$LEFT"
