@@ -10,7 +10,7 @@ mod common;
 
 use std::net::TcpListener;
 use std::os::unix::fs::{symlink, PermissionsExt};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
 
 struct Fx {
@@ -54,9 +54,28 @@ impl Fx {
         self.dir.path().join(name)
     }
 
+    /// Creates `name` and any missing parents below the fixture root with mode
+    /// 755, whatever the umask. A directory that already exists keeps its mode
+    /// (a test may have loosened it on purpose), and a symbolic link on the way
+    /// is an error: nothing is followed, nothing outside the root is touched.
     fn mkdir(&self, name: &str) {
-        std::fs::create_dir_all(self.path(name)).unwrap();
-        std::fs::set_permissions(self.path(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut p = self.dir.path().to_path_buf();
+        for part in Path::new(name).components() {
+            let Component::Normal(part) = part else {
+                panic!("{name} is not a relative path below the fixture root");
+            };
+            p.push(part);
+            match std::fs::create_dir(&p) {
+                Ok(()) => {
+                    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap()
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let md = std::fs::symlink_metadata(&p).unwrap();
+                    assert!(md.is_dir(), "{} is not a directory", p.display());
+                }
+                Err(e) => panic!("{}: {e}", p.display()),
+            }
+        }
     }
 
     fn write(&self, name: &str, body: &str) -> String {
