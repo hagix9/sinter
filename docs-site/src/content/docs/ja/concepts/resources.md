@@ -3,12 +3,14 @@ title: リソース
 description: リソースモデル — 共通フィールド、順序、依存関係、通知。
 ---
 
-リソースは目的の状態の単位です。v1.8.0 では 10 のタイプが実装されて
+リソースは目的の状態の単位です。v1.9.0 では 10 の組み込みタイプが実装されて
 います: `file`、`directory`、`link`、`template`、`command`、`package`、
 `service`、ローカル Linux アカウントを扱う
 [`group`](/ja/reference/resources/group/) と
 [`user`](/ja/reference/resources/user/)、ローカルの PostgreSQL サーバーを扱う
-[`postgresql_role`](/ja/reference/resources/postgresql_role/) です。
+[`postgresql_role`](/ja/reference/resources/postgresql_role/) です。v1.9.0 からは、
+`<plugin>.<name>` というタイプを追加する、データのみの
+[Resource Plugins](/ja/reference/resource-plugins/) もレシピで有効にできます。
 
 ## 共通フィールド
 

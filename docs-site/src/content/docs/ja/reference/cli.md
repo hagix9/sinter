@@ -19,7 +19,7 @@ Commands:
 `secrets`サブコマンドについては[sinter secrets](/ja/reference/secrets/)を
 参照してください。
 
-`sinter --version` はバージョンを表示します（例: `sinter 1.8.0`）。
+`sinter --version` はバージョンを表示します（例: `sinter 1.9.0`）。
 
 ## validate
 
@@ -145,7 +145,7 @@ sinter secrets list    [--format text|json] [--recipe <FILE>...] [<PATH>...]
 ## ターゲットオプション
 
 `validate`、`plan`、`apply`、`audit` が受け付けます（`validate` は無視します。
-ただし `--vars-file`・`--limit` と、それらに伴う `--inventory`・`--host` は別です）。
+ただし `--vars-file`・`--limit`・`--plugin-root` と、それらに伴う `--inventory`・`--host` は別です）。
 
 | フラグ | デフォルト | 説明 |
 |--------|-----------|------|
@@ -158,6 +158,7 @@ sinter secrets list    [--format text|json] [--recipe <FILE>...] [<PATH>...]
 | `--known-hosts <PATH>` | インベントリ、ssh_config の `UserKnownHostsFile`、なければ `~/.ssh/known_hosts` | ホスト鍵データベース（厳格）。 |
 | `--identity <PATH>` | インベントリ、ssh_config の `IdentityFile`、なければ `~/.ssh/id_ed25519`、`id_ecdsa`、`id_rsa` | SSH 秘密鍵ファイル。複数回指定可能。引き継いだ一覧を置き換えます。[シークレット](/ja/reference/secrets/)には使われません。 |
 | `--no-ssh-config` | off | OpenSSH クライアント設定を参照しない。 |
+| `--plugin-root <DIR>` | `$XDG_CONFIG_HOME/sinter/plugins`、なければ `~/.config/sinter/plugins` | コントローラー上の Resource Plugin ルート。レシピがプラグインを有効にしたときだけ読む（v1.9.0 から）。[Resource Plugins](/ja/reference/resource-plugins/) を参照。 |
 | `--sudo` | off | ターゲット側操作を `sudo -n -u root` 経由で実行。ターゲットのユーザーがすでに root なら sudo を使わずに実行します。`password_hash` を持つ `user` リソースには root が必要です（root のログインか `--sudo`）。 |
 | `--verbose` | off | 詳細な出力。 |
 | `--format` | `text` | `text` または `json`。 |

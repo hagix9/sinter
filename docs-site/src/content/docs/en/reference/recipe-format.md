@@ -25,11 +25,13 @@ targets: { hosts: [...], groups: [...] }   # optional, v1.1.0+ (inventory runs)
 backup: { paths: [...] }      # optional, v1.1.0+ (copied before apply)
 
 env: { NAME: value }          # optional default environment for package/command
+
+plugins: [{ id, version }]    # optional, v1.9.0+ (top-level recipe only)
 ```
 
 Top-level fields allowed: `version`, `vars`, `include`, `resources`,
-`handlers`, (from v1.1.0) `targets` and `backup`, and `env`. Anything else is
-a schema error.
+`handlers`, (from v1.1.0) `targets` and `backup`, `env`, and (from v1.9.0)
+`plugins`. Anything else is a schema error.
 
 ## env
 
@@ -136,12 +138,18 @@ vars:
   [Host and group variables](/en/reference/cli/#host-and-group-variables)
   (available from v1.6.0).
 
+## plugins
+
+*Available from v1.9.0.* Enables [Resource Plugins](/en/reference/resource-plugins/) by
+`id` and `version`. Allowed only in the top-level recipe; an included file that
+declares `plugins` is rejected.
+
 ## resources
 
 | Field | Required | Type | Notes |
 |-------|----------|------|-------|
 | `id` | yes | string | Unique; also used by `depends_on`, `notify`, `registers`. |
-| `type` | yes | string | `file`, `directory`, `link`, `template`, `command`, `package`, `service`, [`group`](/en/reference/resources/group/) and [`user`](/en/reference/resources/user/). |
+| `type` | yes | string | `file`, `directory`, `link`, `template`, `command`, `package`, `service`, [`group`](/en/reference/resources/group/) and [`user`](/en/reference/resources/user/), or a `<plugin>.<name>` type from an enabled [Resource Plugin](/en/reference/resource-plugins/) (from v1.9.0). |
 | `with` | yes | map | Type-specific parameters (see each resource page). |
 | `when` | no | string | Boolean expression gating this resource and dependents. |
 | `loop` | no | list | Expand once per item; `{{ item }}` in fields. |

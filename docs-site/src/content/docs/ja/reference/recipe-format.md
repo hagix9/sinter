@@ -25,11 +25,13 @@ targets: { hosts: [...], groups: [...] }   # 省略可。v1.1.0 以降（イン�
 backup: { paths: [...] }      # 省略可。v1.1.0 以降（apply 前にコピー）
 
 env: { NAME: value }          # 省略可。package/command の既定環境変数
+
+plugins: [{ id, version }]    # 省略可。v1.9.0 以降（トップレベルのレシピのみ）
 ```
 
 許可されるトップレベルフィールド: `version`、`vars`、`include`、
-`resources`、`handlers`、（v1.1.0 以降）`targets` と `backup`、および `env`。
-それ以外はスキーマエラーです。
+`resources`、`handlers`、（v1.1.0 以降）`targets` と `backup`、`env`、および（v1.9.0 以降）
+`plugins`。それ以外はスキーマエラーです。
 
 ## env
 
@@ -134,12 +136,18 @@ vars:
   [ホスト変数とグループ変数](/ja/reference/cli/#ホスト変数とグループ変数)を
   参照してください（v1.6.0 から利用できます）。
 
+## plugins
+
+*v1.9.0 から利用できます。* [Resource Plugins](/ja/reference/resource-plugins/) を `id` と
+`version` で有効にします。書けるのはトップレベルのレシピだけで、include されたファイルに
+`plugins` を書くと拒否します。
+
 ## resources
 
 | フィールド | 必須 | 型 | 補足 |
 |-----------|------|-----|------|
 | `id` | はい | string | 一意。`depends_on`、`notify`、`registers` でも使われる。 |
-| `type` | はい | string | `file`、`directory`、`link`、`template`、`command`、`package`、`service`、[`group`](/ja/reference/resources/group/) と [`user`](/ja/reference/resources/user/)。 |
+| `type` | はい | string | `file`、`directory`、`link`、`template`、`command`、`package`、`service`、[`group`](/ja/reference/resources/group/) と [`user`](/ja/reference/resources/user/)、または有効にした [Resource Plugin](/ja/reference/resource-plugins/) の `<plugin>.<name>` タイプ（v1.9.0 から）。 |
 | `with` | はい | map | タイプ固有のパラメータ（各リソースページを参照）。 |
 | `when` | いいえ | string | このリソースと依存先をゲートする boolean 式。 |
 | `loop` | いいえ | list | アイテムごとに 1 回展開。フィールド内で `{{ item }}`。 |

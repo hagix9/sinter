@@ -1,9 +1,9 @@
 ---
 title: リソースリファレンス
-description: v1.8.0 に実装されているすべての Sinter リソースタイプ。
+description: v1.9.0 に実装されているすべての組み込み Sinter リソースタイプ。
 ---
 
-Sinter v1.8.0 は 10 のリソースタイプを実装しています（`postgresql_role` は v1.5.1 で追加）。以下の
+Sinter v1.9.0 は 10 の組み込みリソースタイプを実装しています（`postgresql_role` は v1.5.1 で追加）。[Resource Plugins](/ja/reference/resource-plugins/) で追加することもできます。以下の
 パラメータはサポートされる完全なセットであり、未知の `with`
 フィールドはスキーマエラーです。
 

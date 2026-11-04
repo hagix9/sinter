@@ -114,6 +114,7 @@ export default defineConfig({
             { slug: 'reference/cli' },
             { slug: 'reference/secrets' },
             { slug: 'reference/recipe-format' },
+            { slug: 'reference/resource-plugins' },
             {
               label: 'Resource Reference',
               translations: { ja: 'リソースリファレンス' },

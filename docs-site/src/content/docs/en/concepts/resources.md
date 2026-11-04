@@ -3,12 +3,14 @@ title: Resources
 description: The resource model — common fields, ordering, dependencies, notifications.
 ---
 
-Resources are the unit of desired state. v1.8.0 implements ten types:
+Resources are the unit of desired state. v1.9.0 implements ten built-in types:
 `file`, `directory`, `link`, `template`, `command`, `package`, `service`,
 for local Linux accounts [`group`](/en/reference/resources/group/) and
 [`user`](/en/reference/resources/user/), and
 [`postgresql_role`](/en/reference/resources/postgresql_role/) for a local
-PostgreSQL server.
+PostgreSQL server. From v1.9.0 a recipe can also enable data-only
+[Resource Plugins](/en/reference/resource-plugins/), which add types named
+`<plugin>.<name>`.
 
 ## Common fields
 

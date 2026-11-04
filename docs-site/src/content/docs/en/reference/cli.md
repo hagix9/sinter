@@ -19,7 +19,7 @@ See [Core MCP](/en/reference/mcp/) for the `mcp` subcommand and `--targets-file`
 and [sinter secrets](/en/reference/secrets/) for the `secrets`
 subcommand.
 
-`sinter --version` prints the version (e.g. `sinter 1.8.0`).
+`sinter --version` prints the version (e.g. `sinter 1.9.0`).
 
 ## validate
 
@@ -145,7 +145,7 @@ Two interactions with the commands above:
 ## Target options
 
 Accepted by `validate`, `plan`, `apply` and `audit`; `validate` ignores them,
-except `--vars-file`, `--limit` and the `--inventory` and `--host` that go with them.
+except `--vars-file`, `--limit`, `--plugin-root` and the `--inventory` and `--host` that go with them.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -158,6 +158,7 @@ except `--vars-file`, `--limit` and the `--inventory` and `--host` that go with 
 | `--known-hosts <PATH>` | inventory, ssh_config `UserKnownHostsFile`, else `~/.ssh/known_hosts` | Host-key database (strict). |
 | `--identity <PATH>` | inventory, ssh_config `IdentityFile`, else `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa` | SSH identity file; repeatable; replaces the inherited list. Never used for [secrets](/en/reference/secrets/#identities-private-keys-and-where-they-live). |
 | `--no-ssh-config` | off | Do not consult the OpenSSH client configuration. |
+| `--plugin-root <DIR>` | `$XDG_CONFIG_HOME/sinter/plugins`, else `~/.config/sinter/plugins` | Resource Plugin root on the controller, read only when a recipe enables plugins (from v1.9.0). See [Resource Plugins](/en/reference/resource-plugins/). |
 | `--sudo` | off | Run target-side operations via `sudo -n -u root`. A target user that is already root runs directly, without sudo. A `user` resource with `password_hash` needs root (a root login or `--sudo`). |
 | `--verbose` | off | Verbose output. |
 | `--format` | `text` | `text` or `json`. |

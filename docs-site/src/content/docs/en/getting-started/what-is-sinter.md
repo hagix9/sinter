@@ -11,8 +11,9 @@ where privilege escalation is needed.
 
 ## Design goals
 
-- **Small enough to understand.** A deliberately narrow scope: no inventory,
-  roles, plugins, orchestration, or embedded scripting.
+- **Small enough to understand.** A deliberately narrow scope: a small
+  fail-closed inventory and data-only [Resource Plugins](/en/reference/resource-plugins/),
+  but no roles, plugins that run code, orchestration, or embedded scripting.
 - **Strong enough to trust.** Observation-only plans, re-observation before
   every mutation, strict SSH host-key checking, fail-closed parsing, and
   truthful result reporting.

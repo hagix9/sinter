@@ -23,10 +23,14 @@ DNF backend. It is expected to be compatible with the corresponding Red
 Hat-family implementation, but it is not currently part of Sinter's
 real-host acceptance matrix.
 
-**Package removal (`state: absent`, since v1.8.0)** has its own, narrower
-verification: it was exercised on real hosts only on Ubuntu 24.04, Rocky Linux
-9.8 and Rocky Linux 10.2. Ubuntu 26.04, RHEL, AlmaLinux, Oracle Linux and Rocky
-Linux 8 use the same tools but are not verified for removal. See the
+**Package removal (`state: absent`, since v1.8.0)** was verified at two
+depths. The v1.9.0 release acceptance removed one package (`sl` on Ubuntu, `tree`
+on the Red Hat family) on all eight labels and confirmed it with the native
+package tool. The wider cases (dependency refusal, lock contention, script
+failure, cancellation) were exercised on real hosts only on Ubuntu 24.04, Rocky
+Linux 9.8 and Rocky Linux 10.2. Ubuntu 26.04, RHEL and AlmaLinux use the same tools
+but those cases are not verified on them. Oracle Linux and Rocky Linux 8 are not
+verified for removal. See the
 [package reference](/en/reference/resources/package/#removal-state-absent-on-apt-and-dnf-targets).
 
 On RHEL-family targets, standard configured DNF repositories must be
@@ -37,7 +41,7 @@ is required.
 
 ## Unified Linux x86_64 distribution
 
-Sinter v1.8.0 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for all
+Sinter v1.9.0 uses one `sinter-v<VERSION>-linux-x86_64.tar.gz` for all
 supported x86_64 version lines. The executable is unified; runtime platform
 detection still selects APT on Ubuntu and DNF on RHEL-family targets. This
 is not a claim of support for arbitrary Linux systems or architectures.
@@ -47,18 +51,25 @@ artifact on the eight supported targets before it is published; the
 acceptance manifest, raw logs, and checksums are published as release assets
 (see [acceptance evidence](https://github.com/hagix9/sinter/blob/main/release/ACCEPTANCE_EVIDENCE.md)).
 
-The current release, Sinter v1.8.0, passed the Linux x86_64 validation gate
+The current release, Sinter v1.9.0, passed the Linux x86_64 validation gate
 and was then acceptance-tested as its exact release artifact,
-`sinter-v1.8.0-linux-x86_64.tar.gz`, on eight real x86_64 Linux hosts. The
+`sinter-v1.9.0-linux-x86_64.tar.gz`, on eight real x86_64 Linux hosts. The
 tested point releases were Ubuntu 24.04, Ubuntu 26.04, Rocky
 Linux 9.8, Rocky Linux 10.2, RHEL 9.8, RHEL 10.2, AlmaLinux 9.8, and
 AlmaLinux 10.2, all x86_64. On every host the tarball and the extracted
 executable were verified byte-identical (SHA-256) and ran the release
 acceptance scenario: artifact identity, platform detection, SSH command
 execution, `package` install and remove with independent native verification
-and idempotency, `file`, `service`, `command` guards, a pre-mutation failure,
-secret redaction, `audit`, and a no-residue check.
-**Result: 264 checks passed, 0 failed (33 per target)** (see the
+and idempotency, package progress output, `file`, `service`, `command` guards, a
+pre-mutation failure, secret redaction, `audit` (including the strict and default
+audit policies), and a no-residue check.
+**Result: 312 checks passed, 0 failed (39 per target)** (see the
+[v1.9.0 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.9.0) and its
+[manifest](https://github.com/hagix9/sinter/blob/main/release/evidence/v1.9.0/acceptance-manifest.json)).
+This result covers that scenario on those point releases. It is not a guarantee
+for other point releases or for every environment, and the scenario does not run
+[Resource Plugins](/en/reference/resource-plugins/).
+Sinter v1.8.0 passed the earlier eight-host acceptance (264 checks, 0 failed;
 [v1.8.0 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.8.0)).
 Sinter v1.7.0 passed the earlier eight-host acceptance (264 checks, 0 failed;
 [v1.7.0 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.7.0)).
@@ -220,7 +231,8 @@ Limits of this record, stated rather than implied:
 
 ## Scope
 
-Sinter scope does not include dynamic inventory, roles, plugins,
-orchestration, or embedded scripting. See the
+Sinter scope does not include dynamic inventory, roles, plugins that run code,
+orchestration, or embedded scripting. [Resource Plugins](/en/reference/resource-plugins/)
+(from v1.9.0) are data only and limited to first-party catalogs. See the
 [CHANGELOG](https://github.com/hagix9/sinter/blob/main/CHANGELOG.md) for
 release history.
