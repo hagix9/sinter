@@ -64,14 +64,19 @@ recipe with exit 2 before anything runs.
 
 ## Enable a plugin in a recipe
 
+Declare the plugin at the top level of the recipe:
+
 ```yaml
-version: 1
 plugins:
   - { id: firewalld, version: 0.1.0 }
-resources:
-  - id: allow_http
-    type: firewalld.service
-    with: { zone: public, service: http, state: present }
+```
+
+Then use its type under `resources`:
+
+```yaml
+- id: allow_http
+  type: firewalld.service
+  with: { zone: public, service: http, state: present }
 ```
 
 `plugins` is allowed only in the top-level recipe. An included file that declares

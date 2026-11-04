@@ -64,14 +64,19 @@ sha256 = "47f33f171d239103cbb97450d17b57c857ce22436620ddf809fdd2be94948544"
 
 ## レシピでプラグインを有効にする
 
+レシピのトップレベルでプラグインを宣言します。
+
 ```yaml
-version: 1
 plugins:
   - { id: firewalld, version: 0.1.0 }
-resources:
-  - id: allow_http
-    type: firewalld.service
-    with: { zone: public, service: http, state: present }
+```
+
+`resources` の下で、そのタイプを使います。
+
+```yaml
+- id: allow_http
+  type: firewalld.service
+  with: { zone: public, service: http, state: present }
 ```
 
 `plugins` を書けるのはトップレベルのレシピだけです。include されたファイルに書くと拒否します。
