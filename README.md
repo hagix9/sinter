@@ -76,8 +76,9 @@ sinter audit --host server.example.com --sudo recipe.yaml
 This repository implements Sinter as specified by [`GOALS.md`](GOALS.md) and [`DESIGN.md`](DESIGN.md),
 which are the authoritative specification. It manages Ubuntu (`apt`) and
 RHEL-family (Rocky Linux, RHEL, AlmaLinux — `dnf`) targets. The
-implementation still adds no roles, plugins, orchestration, or embedded
-scripting. Multiple hosts are handled by a deliberately small, fail-closed
+implementation still adds no roles, plugin code, orchestration, or embedded
+scripting; [Resource Plugins](docs-site/src/content/docs/en/reference/resource-plugins.md)
+are data only. Multiple hosts are handled by a deliberately small, fail-closed
 inventory (hosts, flat groups, explicit per-recipe `targets`) — see
 [Multiple hosts](#multiple-hosts-bundles-and-backups).
 
@@ -197,7 +198,11 @@ sinter apply nginx.yaml --inventory hosts.yaml
   `web01,@db`) names the hosts directly and finds `hosts.yaml`, `hosts.yml` or
   `hosts.toml` in the current or the recipe's directory. A recipe without
   `targets` then runs on exactly those hosts. Without that argument nothing is
-  detected and the target stays `--host` or the local host.
+  detected and the target stays `--host` or the local host. A detected file is
+  refused when it or its directory is writable by group or others (as after
+  `umask 002`); `--inventory` still uses it. The checks do not stop a `hosts.yaml`
+  from a repository you cloned, so read the path shown, run `plan` first, and
+  name `--inventory` in CI and on important systems.
 - A bundle (`version: 1` + `recipes: [common.yaml, nginx.yaml]`) runs several
   recipes; each is resolved against its own `targets`.
 - `apply` stops at the first execution that exits non-zero (for any reason)
@@ -346,9 +351,10 @@ problem appeared (a race with a writer that does not use dnf's lock is
 reported only if its commit came before that read). Removals are not recorded in `dnf history` /
 `/var/log/apt/history.log`. Locking is exact for apt (dpkg's locks) and covers dnf,
 dnf-automatic and yum on dnf targets, but **not** PackageKit, `microdnf` or a
-hand-run `rpm`. Verified on real hosts: Ubuntu 24.04, Rocky Linux 9.8 and 10.2;
-**not** verified for removal: Ubuntu 26.04, RHEL, AlmaLinux, Oracle Linux, Rocky
-Linux 8. On dnf targets a removal takes seconds to a couple of minutes on small
+hand-run `rpm`. Exercised on real hosts, including dependency refusal, lock
+contention and failures: Ubuntu 24.04, Rocky Linux 9.8 and 10.2. On Ubuntu 26.04,
+RHEL 9/10 and AlmaLinux 9/10 only the release acceptance's removal of one package
+was verified. **Not** verified: Oracle Linux, Rocky Linux 8. On dnf targets a removal takes seconds to a couple of minutes on small
 VMs. Details, failure modes and the dpkg `deinstall ok installed` caveat:
 [package reference](docs-site/src/content/docs/en/reference/resources/package.md).
 

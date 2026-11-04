@@ -15,8 +15,9 @@ and a new registry entry.
 | `catalogs/firewalld-0.1.0.catalog.toml` | `27741bcc6b72dfbf69d918282fb454c324e7229b764873334a5c6c0af04707ff` |
 | `plugins/firewalld-0.1.0.plugin.toml` | `47f33f171d239103cbb97450d17b57c857ce22436620ddf809fdd2be94948544` |
 
-Status: registered in the source tree for v1.9.0 (2026-11-01). Not yet in a
-published release.
+Status: registered in the source tree for v1.9.0 and available from that release
+(published 2026-11-04). These files stay in the source repository and are not part
+of the release archive.
 
 ## firewalld 0.1.0
 

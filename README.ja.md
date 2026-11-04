@@ -76,8 +76,10 @@ sinter audit --host server.example.com --sudo recipe.yaml
 
 このリポジトリは、[`GOALS.md`](GOALS.md)と[`DESIGN.md`](DESIGN.md)で定義された Sinter を実装しています。
 これら2ファイルが正式な仕様です。Ubuntu（`apt`）と RHEL 系（Rocky Linux、RHEL、
-AlmaLinux — `dnf`）のターゲットを管理します。roles、plugins、orchestration、
-embedded scriptingは依然として実装対象に含めません。複数ホストは、意図的に
+AlmaLinux — `dnf`）のターゲットを管理します。roles、プラグインのコード、orchestration、
+embedded scriptingは依然として実装対象に含めません。
+[Resource Plugins](docs-site/src/content/docs/ja/reference/resource-plugins.md) は
+データだけです。複数ホストは、意図的に
 小さくフェイルクローズなinventory（ホスト、フラットなグループ、レシピごとの
 明示的な `targets`）で扱います（[複数ホスト](#複数ホストバンドルバックアップ)参照）。
 
@@ -196,7 +198,10 @@ sinter apply nginx.yaml --inventory hosts.yaml
   `web01,@db` も可）はホストを直接指定し、カレントディレクトリかレシピのディレクトリに
   ある `hosts.yaml`、`hosts.yml`、`hosts.toml` を見つけます。`targets` のないレシピは、
   指定したホストだけで実行します。この引数がなければ何も検出せず、対象は `--host` か
-  ローカルホストのままです。
+  ローカルホストのままです。検出したファイルやそのディレクトリにグループや他者の書き込み
+  権限があると（`umask 002` で作った場合など）拒否します。`--inventory` を指定すれば
+  使えます。clone したリポジトリの `hosts.yaml` はこの検査では止まらないので、表示された
+  パスを確認して先に `plan` を実行し、CI や重要な環境では `--inventory` を指定してください。
 - バンドル（`version: 1` + `recipes: [common.yaml, nginx.yaml]`）は複数の
   レシピを実行し、各レシピはそれぞれ自身の `targets` で解決されます。
 - `apply` は（理由を問わず）終了コードが 0 でない最初の実行で止まり残りを
@@ -344,9 +349,10 @@ v1.8.0 から、apt / dnf ターゲットの
 失敗とします（dnf のロックを使わない writer との競合は、その commit がこの読取りより前の
 場合に限り検出されます）。削除は `dnf history` / `/var/log/apt/history.log` に記録されません。ロックは
 apt では厳密（dpkg のロック）、dnf ターゲットでは dnf・dnf-automatic・yum を排他しますが、
-PackageKit・`microdnf`・手で実行した `rpm` は**排他しません**。実機で検証済み: Ubuntu 24.04、
-Rocky Linux 9.8 / 10.2。削除は**未検証**: Ubuntu 26.04、RHEL、AlmaLinux、Oracle Linux、
-Rocky Linux 8。dnf ターゲットでは、小さな VM で 1 回の削除に数秒から数分かかります。
+PackageKit・`microdnf`・手で実行した `rpm` は**排他しません**。依存による拒否、ロックの競合、
+失敗の場合まで実機で確認済み: Ubuntu 24.04、Rocky Linux 9.8 / 10.2。Ubuntu 26.04、RHEL 9/10、
+AlmaLinux 9/10 で確認済みなのは、リリース受入での 1 パッケージの削除だけです。**未検証**:
+Oracle Linux、Rocky Linux 8。dnf ターゲットでは、小さな VM で 1 回の削除に数秒から数分かかります。
 詳細・失敗の種類・dpkg の `deinstall ok installed` の注意は
 [package リファレンス](docs-site/src/content/docs/ja/reference/resources/package.md)
 を参照してください。
