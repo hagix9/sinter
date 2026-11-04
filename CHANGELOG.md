@@ -2,6 +2,34 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+Not part of v1.9.0. Implemented and tested on a development controller; live
+Linux acceptance has not been run.
+
+### Added
+
+- **Selector argument.** `validate`, `plan`, `apply` and `audit` take an optional
+  second argument naming inventory hosts and groups: `sinter apply nginx.yaml
+  web01`, `@web`, `web01,web02`, `@web,@db`. `NAME` is a host, `@NAME` a group.
+  It narrows a recipe's `targets` and never widens them; one plain recipe without
+  `targets` runs on exactly the hosts named. Unknown names, an empty selection and
+  a selector with `--host` or `--limit` are exit 2 before any `ssh -G` or
+  connection. JSON adds `selector`, `inventory_source` and `targets_declared`.
+- **Inventory auto-detection, with a selector only.** Without `--inventory`,
+  exactly one of `hosts.yaml`, `hosts.yml`, `hosts.toml` is taken from the current
+  directory or the recipe's directory, and the path is shown. Several candidates,
+  a symbolic link, a file or directory others can write to, `known_hosts`, and a
+  relative `identity_files` entry are refused. Parents and the home directory are
+  not searched.
+- **Short options.** `-H` (`--host`), `-p` (`--port`), `-u` (`--user`), `-i`
+  (`--identity`).
+
+### Unchanged
+
+- Every command without a selector: targets, output and exit codes. The SSH key
+  precedence, ssh-agent handling and strict host-key checking.
+
 ## [1.9.0] - 2026-11-01
 
 ### Added

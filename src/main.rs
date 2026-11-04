@@ -9,7 +9,11 @@ use sinter::bundle::{load_source_with_plugins, prepare_source_with_plugins, Reci
 use sinter::diff::sanitize_line;
 use sinter::engine::{Engine, Mode, RunOptions, RunReport, SshSpec, TargetSpec};
 use sinter::error::{ErrorKind, SinterError};
-use sinter::inventory::{load_inventory, parse_limit, Inventory, ParsedLimit, Resolution};
+use sinter::inventory::{
+    load_inventory, parse_limit, parse_selector, resolve_with_selector, Inventory, ParsedLimit,
+    Resolution,
+};
+use sinter::inventory_detect::detect_inventory;
 use sinter::model::Model;
 use sinter::output::{
     audit_report_json, render_apply, render_audit, render_plan, run_report_json, OutputFormat,
@@ -48,7 +52,8 @@ enum Command {
     /// Only the recipe (or bundle and its recipes) is checked. Target options
     /// (--host, --inventory, --user, --port, --identity, ...) are accepted for
     /// a uniform command line and ignored: no host, inventory, key or
-    /// known_hosts file is read. With --vars-file the recipes are checked with
+    /// known_hosts file is read. A selector is checked the way plan checks it:
+    /// the inventory is read and the selection evaluated. With --vars-file the recipes are checked with
     /// the values that file gives, exactly as plan, apply and audit check them
     /// before contacting a host; the variables file and, with --inventory, the
     /// inventory are then read (and --host and --inventory stay exclusive).
@@ -151,7 +156,7 @@ struct McpArgs {
 struct ExecOpts {
     /// SSH host or ~/.ssh/config Host alias. If omitted (and no inventory is
     /// given), the target is localhost.
-    #[arg(long)]
+    #[arg(short = 'H', long)]
     host: Option<String>,
     /// Inventory file (YAML or TOML) defining hosts and groups. Each recipe
     /// runs only on the hosts its own `targets` select. Mutually exclusive
@@ -159,10 +164,10 @@ struct ExecOpts {
     #[arg(long, visible_alias = "hosts", value_name = "PATH")]
     inventory: Option<PathBuf>,
     /// SSH port [default: inventory port, ssh_config Port, else 22].
-    #[arg(long)]
+    #[arg(short = 'p', long)]
     port: Option<u16>,
     /// SSH user [default: inventory user, ssh_config User, else $USER].
-    #[arg(long)]
+    #[arg(short = 'u', long)]
     user: Option<String>,
     /// known_hosts file [default: inventory known_hosts, ssh_config
     /// UserKnownHostsFile, else ~/.ssh/known_hosts].
@@ -170,7 +175,7 @@ struct ExecOpts {
     known_hosts: Option<PathBuf>,
     /// SSH identity file (may be repeated); replaces inventory and
     /// ssh_config IdentityFile.
-    #[arg(long = "identity")]
+    #[arg(short = 'i', long = "identity")]
     identity: Vec<PathBuf>,
     /// Do not consult the OpenSSH client configuration (`ssh -G`).
     #[arg(long)]
@@ -211,6 +216,15 @@ fn plugin_ctx(exec: &ExecOpts) -> sinter::plugin::PluginContext {
 struct ValidateArgs {
     /// Recipe or bundle file.
     recipe: PathBuf,
+    /// Inventory hosts to run on: NAME is a host, @NAME a group, and a
+    /// comma-separated list combines them (web01,@db). The inventory is
+    /// --inventory, else hosts.yaml, hosts.yml or hosts.toml in the current
+    /// directory or the recipe's directory. It narrows a recipe's `targets`;
+    /// a single recipe without `targets` runs on exactly the hosts named.
+    /// Without a selector nothing is detected and the target stays --host or
+    /// localhost. Excludes --host and --limit.
+    #[arg(value_name = "SELECTOR")]
+    selector: Option<String>,
     /// Output format: text or json.
     #[arg(long, default_value = "text")]
     format: String,
@@ -229,6 +243,15 @@ struct TargetArgs {
     audit_strict: bool,
     /// Recipe or bundle file.
     recipe: PathBuf,
+    /// Inventory hosts to run on: NAME is a host, @NAME a group, and a
+    /// comma-separated list combines them (web01,@db). The inventory is
+    /// --inventory, else hosts.yaml, hosts.yml or hosts.toml in the current
+    /// directory or the recipe's directory. It narrows a recipe's `targets`;
+    /// a single recipe without `targets` runs on exactly the hosts named.
+    /// Without a selector nothing is detected and the target stays --host or
+    /// localhost. Excludes --host and --limit.
+    #[arg(value_name = "SELECTOR")]
+    selector: Option<String>,
     #[command(flatten)]
     exec: ExecOpts,
     /// Verbose output.
@@ -351,9 +374,12 @@ struct VarsReport {
     warnings: Vec<Vec<String>>,
 }
 
-/// What `--limit` selected among what the recipes' `targets` select.
+/// What `--limit` or a selector selected among what the recipes' `targets`
+/// select.
 struct LimitReport {
     items: Vec<String>,
+    /// A selector: the inventory it used and where that came from.
+    selector: Option<(String, &'static str)>,
     /// (recipe, host) executions `--limit` leaves.
     selected: usize,
     /// (recipe, host) executions before `--limit`.
@@ -361,15 +387,46 @@ struct LimitReport {
 }
 
 impl LimitReport {
-    fn of(limited: &Limited, limit: &ParsedLimit) -> Option<LimitReport> {
+    fn of(
+        limited: &Limited,
+        limit: &ParsedLimit,
+        inventory: Option<&Inventory>,
+        exec: &ExecOpts,
+    ) -> Option<LimitReport> {
         limit.given().then(|| {
             let rs = limited.resolutions();
             LimitReport {
                 items: limit.items(),
+                selector: limit.is_selector().then(|| {
+                    (
+                        inventory
+                            .map(|i| i.path.display().to_string())
+                            .unwrap_or_default(),
+                        inventory_source(exec),
+                    )
+                }),
                 selected: rs.iter().map(|r| r.selected().count()).sum(),
                 targeted: rs.iter().map(|r| r.targeted().count()).sum(),
             }
         })
+    }
+
+    /// How text output names what narrowed the run.
+    fn option(&self) -> &'static str {
+        if self.selector.is_some() {
+            "selector"
+        } else {
+            "--limit"
+        }
+    }
+}
+
+/// `inventory_source` of a selector run: `--inventory` always wins.
+fn inventory_source(exec: &ExecOpts) -> &'static str {
+    if exec.inventory.is_some() {
+        "explicit"
+    } else {
+        "detected"
     }
 }
 
@@ -387,25 +444,27 @@ const MAX_VALIDATE_WARNINGS: usize = 50;
 /// with the values the file gives, by the very static gate `plan`, `apply`
 /// and `audit` run before they contact a host (DESIGN §19.5): the
 /// variables file and, with `--inventory`, the inventory are read, and still
-/// nothing is contacted and no `ssh -G` runs.
+/// nothing is contacted and no `ssh -G` runs. A selector (DESIGN §39.2) is
+/// handled as `--limit` is, with the inventory it found.
 fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
     let format = parse_format(&a.format)?;
+    let selector = a.selector.as_deref();
     let Some(vars_path) = &a.exec.vars_file else {
-        if a.exec.limit.is_none() {
+        if a.exec.limit.is_none() && selector.is_none() {
             let source = load_source_with_plugins(&a.recipe, &plugin_ctx(&a.exec))?;
             return print_validate(&source, format, None, None);
         }
         // An explicit `--limit` is checked even without a variables file: its
         // syntax, the inventory and which hosts it selects (DESIGN §19.2).
-        exclusive_target_options(&a.exec)?;
-        let limit = limit_option(&a.exec)?;
-        let gate = limit_source(&a.recipe, &a.exec, &limit)?;
-        let report = LimitReport::of(&gate.limited, &limit);
+        exclusive_target_options(&a.exec, selector)?;
+        let limit = limit_option(&a.exec, selector)?;
+        let gate = limit_source(&a.recipe, &a.exec, &limit, format)?;
+        let report = LimitReport::of(&gate.limited, &limit, Some(&gate.inventory), &a.exec);
         return print_validate(&gate.source, format, None, report.as_ref());
     };
-    exclusive_target_options(&a.exec)?;
-    let limit = limit_option(&a.exec)?;
-    let gate = vars_gate(&a.recipe, &a.exec, vars_path, &limit)?;
+    exclusive_target_options(&a.exec, selector)?;
+    let limit = limit_option(&a.exec, selector)?;
+    let gate = vars_gate(&a.recipe, &a.exec, vars_path, &limit, format)?;
     // The first thing `plan` checks of `--host` after the gate (a pure check).
     if let Some(host) = &a.exec.host {
         sinter::sshconfig::validate_host_arg(host)?;
@@ -423,7 +482,7 @@ fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
     let limit_report = gate
         .limited
         .as_ref()
-        .and_then(|l| LimitReport::of(l, &limit));
+        .and_then(|l| LimitReport::of(l, &limit, gate.inventory.as_ref(), &a.exec));
     let report = VarsReport {
         file: vars_path.display().to_string(),
         executions: gate.frozen.len(),
@@ -448,7 +507,8 @@ fn shown_warnings(vars: Option<&VarsReport>, i: usize, u: &RecipeUnit) -> (Vec<S
 }
 
 /// `variables` is present only when `--vars-file` was given, `limit` only
-/// when `--limit` was.
+/// when `--limit` was, and `selector`, `inventory` and `inventory_source` only
+/// when a selector was.
 fn add_variables(
     doc: &mut serde_json::Value,
     vars: Option<&VarsReport>,
@@ -461,7 +521,14 @@ fn add_variables(
         });
     }
     if let Some(l) = limit {
-        doc["limit"] = serde_json::json!(l.items);
+        match &l.selector {
+            Some((inventory, source)) => {
+                doc["selector"] = serde_json::json!(l.items);
+                doc["inventory"] = serde_json::json!(inventory);
+                doc["inventory_source"] = serde_json::json!(source);
+            }
+            None => doc["limit"] = serde_json::json!(l.items),
+        }
         match vars {
             Some(_) => doc["variables"]["targeted_executions"] = serde_json::json!(l.targeted),
             None => {
@@ -540,7 +607,9 @@ fn print_validate(
                         rec["resources"] = serde_json::Value::Null;
                         rec["handlers"] = serde_json::Value::Null;
                         rec["vars"] = serde_json::Value::Null;
-                        rec["excluded_by"] = serde_json::json!("limit");
+                        rec["excluded_by"] = serde_json::json!(narrowing_key(
+                            limit.is_some_and(|l| l.selector.is_some())
+                        ));
                     }
                     let (warnings, omitted) = shown_warnings(vars, i, u);
                     if !warnings.is_empty() {
@@ -597,9 +666,10 @@ fn print_validate(
                 };
                 if u.unfrozen {
                     println!(
-                        "  {}  {}: excluded by --limit, not frozen; {}",
+                        "  {}  {}: excluded by {}, not frozen; {}",
                         style::status("skip", color),
                         sanitize_line(&u.label),
+                        limit.map_or("--limit", LimitReport::option),
                         targets
                     );
                     continue;
@@ -627,8 +697,9 @@ fn print_validate(
         }
         if let Some(l) = limit {
             println!(
-                "{}: --limit {} selects {} of {} execution(s)",
+                "{}: {} {} selects {} of {} execution(s)",
                 style::status("ok", color),
+                l.option(),
                 sanitize_line(&l.items.join(",")),
                 l.selected,
                 l.targeted
@@ -807,18 +878,32 @@ fn run_phase(phase: Phase, a: &TargetArgs) -> Result<u8, SinterError> {
 
 /// `--host` names one target and `--inventory` selects several through the
 /// recipes' `targets`: giving both is a validation error (exit 2).
-fn exclusive_target_options(exec: &ExecOpts) -> Result<(), SinterError> {
+fn exclusive_target_options(exec: &ExecOpts, selector: Option<&str>) -> Result<(), SinterError> {
     if exec.host.is_some() && exec.inventory.is_some() {
         return Err(SinterError::schema(
             "--host and --inventory (--hosts) are mutually exclusive: give one host, or select hosts through the recipe targets and an inventory",
+        ));
+    }
+    if selector.is_some() && exec.host.is_some() {
+        return Err(SinterError::schema(
+            "a selector and --host are mutually exclusive: a selector names inventory hosts, --host one host outside any inventory",
+        ));
+    }
+    if selector.is_some() && exec.limit.is_some() {
+        return Err(SinterError::schema(
+            "a selector and --limit are mutually exclusive: give the hosts in one of them",
         ));
     }
     Ok(())
 }
 
 /// `--limit` (DESIGN §19.2): its syntax, and that an inventory is there to
-/// narrow. Nothing is read and nothing is contacted.
-fn limit_option(exec: &ExecOpts) -> Result<ParsedLimit, SinterError> {
+/// narrow. A selector (DESIGN §39.2) takes the same road; it finds its own
+/// inventory later if none is named. Nothing is read and nothing is contacted.
+fn limit_option(exec: &ExecOpts, selector: Option<&str>) -> Result<ParsedLimit, SinterError> {
+    if let Some(selector) = selector {
+        return parse_selector(selector);
+    }
     let parsed = parse_limit(exec.limit.as_deref())?;
     if parsed.given() && exec.inventory.is_none() {
         return Err(SinterError::schema(
@@ -834,8 +919,8 @@ fn run_phase_with(
     format: OutputFormat,
     progress: &ProgressOptions,
 ) -> Result<u8, SinterError> {
-    exclusive_target_options(&a.exec)?;
-    let limit = limit_option(&a.exec)?;
+    exclusive_target_options(&a.exec, a.selector.as_deref())?;
+    let limit = limit_option(&a.exec, a.selector.as_deref())?;
     let ro = RenderOptions {
         verbose: a.verbose,
         format,
@@ -849,7 +934,7 @@ fn run_phase_with(
             source,
             inventory,
             limited,
-        } = limit_source(&a.recipe, &a.exec, &limit)?;
+        } = limit_source(&a.recipe, &a.exec, &limit, format)?;
         let session = progress.begin(source_info(phase, &source));
         let planned = inventory_targets(&inventory, limited, a, &session);
         session.end(scope_outcome(&planned));
@@ -970,24 +1055,69 @@ struct LimitGate {
     limited: Limited,
 }
 
+/// The inventory of a run with a selector (DESIGN §39.3): `--inventory`, which
+/// never falls back to anything, else the detected one. It is shown before the
+/// hosts are evaluated, so a wrong file can be noticed whatever happens next:
+/// in text output on stdout, and on stderr where stdout is one JSON document.
+fn selector_inventory(
+    recipe: &Path,
+    exec: &ExecOpts,
+    format: OutputFormat,
+) -> Result<Inventory, SinterError> {
+    let (inventory, how) = match &exec.inventory {
+        Some(path) => (load_inventory(path)?, "--inventory"),
+        None => (detect_inventory(recipe)?, "auto-detected"),
+    };
+    let line = format!(
+        "inventory: {} ({how})",
+        sanitize_line(&inventory.path.display().to_string())
+    );
+    match format {
+        OutputFormat::Text => println!("{line}"),
+        OutputFormat::Json => eprintln!("{line}"),
+    }
+    Ok(inventory)
+}
+
+/// Resolve each recipe's `targets` in a run with `--limit` or a selector.
+fn limit_resolutions(
+    inventory: &Inventory,
+    prepared: &sinter::bundle::PreparedSource,
+    limit: &ParsedLimit,
+) -> Result<Vec<Resolution>, SinterError> {
+    let units = prepared
+        .units
+        .iter()
+        .map(|u| (u.label.as_str(), u.item.targets()));
+    if limit.is_selector() {
+        let in_bundle = prepared.bundle.is_some();
+        units
+            .map(|(label, targets)| {
+                resolve_with_selector(inventory, targets, label, limit, in_bundle)
+            })
+            .collect()
+    } else {
+        resolve_targets(inventory, units)
+    }
+}
+
 fn limit_source(
     recipe: &Path,
     exec: &ExecOpts,
     limit: &ParsedLimit,
+    format: OutputFormat,
 ) -> Result<LimitGate, SinterError> {
     let prepared = prepare_source_with_plugins(recipe, &plugin_ctx(exec))?;
-    let inv_path = exec
-        .inventory
-        .as_ref()
-        .ok_or_else(|| model_mismatch("--limit without an inventory"))?;
-    let inventory = load_inventory(inv_path)?;
-    let resolutions = resolve_targets(
-        &inventory,
-        prepared
-            .units
-            .iter()
-            .map(|u| (u.label.as_str(), u.item.targets())),
-    )?;
+    let inventory = if limit.is_selector() {
+        selector_inventory(recipe, exec, format)?
+    } else {
+        let inv_path = exec
+            .inventory
+            .as_ref()
+            .ok_or_else(|| model_mismatch("--limit without an inventory"))?;
+        load_inventory(inv_path)?
+    };
+    let resolutions = limit_resolutions(&inventory, &prepared, limit)?;
     let limited = limited::limit(&inventory, resolutions, limit)?;
     // A recipe no host runs is not frozen (DESIGN §19.2); the others are, with
     // their own values, exactly as loading them without `--limit` would.
@@ -1029,23 +1159,19 @@ fn vars_gate(
     exec: &ExecOpts,
     vars_path: &Path,
     limit: &ParsedLimit,
+    format: OutputFormat,
 ) -> Result<VarsGate, SinterError> {
     use sinter::varsfile::{freeze_executions_in, load_vars_file, Mode as VarsMode, Scope};
     let prepared = prepare_source_with_plugins(recipe, &plugin_ctx(exec))?;
     let inventory = match &exec.inventory {
+        _ if limit.is_selector() => Some(selector_inventory(recipe, exec, format)?),
         Some(p) => Some(load_inventory(p)?),
         None => None,
     };
     let vars = load_vars_file(vars_path).map_err(static_failure)?;
     let (limited, pairs): (Option<Limited>, Vec<(usize, String)>) = match &inventory {
         Some(inv) => {
-            let resolutions = resolve_targets(
-                inv,
-                prepared
-                    .units
-                    .iter()
-                    .map(|u| (u.label.as_str(), u.item.targets())),
-            )?;
+            let resolutions = limit_resolutions(inv, &prepared, limit)?;
             // Which hosts run is settled here, before any variable of a host
             // is resolved and long before `ssh -G`; `selected()` is what is
             // left after `--limit`.
@@ -1136,7 +1262,7 @@ fn run_phase_vars(
         inventory,
         limited,
         frozen,
-    } = vars_gate(&a.recipe, &a.exec, vars_path, limit)?;
+    } = vars_gate(&a.recipe, &a.exec, vars_path, limit, ro.format)?;
     let Some(inv) = inventory else {
         return run_one_target(phase, &source, Some(frozen), a, ro, progress);
     };
@@ -1439,7 +1565,7 @@ fn inventory_targets(
 ) -> Result<ExecutionPlan, SinterError> {
     // The option as the caller got it must agree with what was applied: a
     // `--limit` that was somehow not applied must not run on every host.
-    if a.exec.limit.is_some() != limited.allowed().is_some() {
+    if (a.exec.limit.is_some() || a.selector.is_some()) != limited.allowed().is_some() {
         return Err(limit_mismatch("--limit was not applied to the selection"));
     }
     let (resolutions, allowed, limit_items) = limited.into_parts();
@@ -1552,7 +1678,18 @@ fn limit_mismatch(detail: &str) -> SinterError {
     ))
 }
 
-fn print_resolution(source: &Source, plan: &ExecutionPlan, ro: &RenderOptions) {
+/// The name of what narrowed the run: the output key holding its items, and the
+/// value of `excluded_by`.
+fn narrowing_key(selector: bool) -> &'static str {
+    if selector {
+        "selector"
+    } else {
+        "limit"
+    }
+}
+
+fn print_resolution(source: &Source, plan: &ExecutionPlan, selector: bool, ro: &RenderOptions) {
+    let narrowed_by = if selector { "the selector" } else { "--limit" };
     if let Source::Bundle(b) = source {
         println!(
             "== bundle {} ({}) ==",
@@ -1563,7 +1700,11 @@ fn print_resolution(source: &Source, plan: &ExecutionPlan, ro: &RenderOptions) {
     if plan.inventory.is_some() {
         println!("== target resolution ==");
         if let Some(items) = &plan.limit {
-            println!("limit: {}", sanitize_line(&items.join(",")));
+            println!(
+                "{}: {}",
+                narrowing_key(selector),
+                sanitize_line(&items.join(","))
+            );
         }
         for (u, r) in source.units().iter().zip(&plan.resolutions) {
             println!(
@@ -1571,6 +1712,10 @@ fn print_resolution(source: &Source, plan: &ExecutionPlan, ro: &RenderOptions) {
                 sanitize_line(&u.label),
                 sanitize_line(&u.path.display().to_string())
             );
+            let no_targets = selector && u.model.targets.is_none();
+            if no_targets {
+                println!("  targets: none declared; running on the hosts the selector names");
+            }
             let width = r.hosts.iter().map(|h| h.name.len()).max().unwrap_or(0);
             for h in &r.hosts {
                 if h.selected() {
@@ -1582,18 +1727,20 @@ fn print_resolution(source: &Source, plan: &ExecutionPlan, ro: &RenderOptions) {
                     );
                 } else if h.excluded_by_limit() {
                     println!(
-                        "  {:width$}  SKIP   excluded by --limit (matched: {})",
+                        "  {:width$}  SKIP   excluded by {narrowed_by} (matched: {})",
                         h.name,
                         h.reasons.join(", ")
                     );
+                } else if no_targets {
+                    println!("  {:width$}  SKIP   not named by the selector", h.name);
                 } else {
                     println!("  {:width$}  SKIP   no matching target", h.name);
                 }
             }
             let selected = r.selected().count();
-            let by_limit = if plan.limit.is_some() {
+            let by_limit = if plan.limit.is_some() && !no_targets {
                 format!(
-                    " ({} by --limit)",
+                    " ({} by {narrowed_by})",
                     r.hosts.iter().filter(|h| h.excluded_by_limit()).count()
                 )
             } else {
@@ -1607,7 +1754,7 @@ fn print_resolution(source: &Source, plan: &ExecutionPlan, ro: &RenderOptions) {
             );
             if u.unfrozen {
                 println!(
-                    "  {}   recipe not run: --limit leaves no host for it",
+                    "  {}   recipe not run: {narrowed_by} leaves no host for it",
                     style::status("SKIP", ro.color)
                 );
             }
@@ -1718,6 +1865,7 @@ fn run_executions(
     progress: &ProgressOptions,
 ) -> Result<u8, SinterError> {
     let text = ro.format == OutputFormat::Text;
+    let selector = a.selector.is_some();
     let units = source.units();
     // A recipe no host runs was never frozen: nothing may run it.
     if plan
@@ -1730,7 +1878,7 @@ fn run_executions(
         ));
     }
     if text {
-        print_resolution(source, &plan, ro);
+        print_resolution(source, &plan, a.selector.is_some(), ro);
     }
     let run_id = sinter::backup::new_run_id();
     let mut results: Vec<ExecResult> = Vec::new();
@@ -1888,13 +2036,16 @@ fn run_executions(
                                 "reasons": h.reasons,
                             });
                             if h.excluded_by_limit() {
-                                o["excluded_by"] = serde_json::json!("limit");
+                                o["excluded_by"] = serde_json::json!(narrowing_key(selector));
                             }
                             o
                         }).collect::<Vec<_>>(),
                     });
                     if u.unfrozen {
-                        rec["excluded_by"] = serde_json::json!("limit");
+                        rec["excluded_by"] = serde_json::json!(narrowing_key(selector));
+                    }
+                    if selector {
+                        rec["targets_declared"] = serde_json::json!(u.model.targets.is_some());
                     }
                     rec
                 })
@@ -1916,7 +2067,10 @@ fn run_executions(
             "executions": executions,
         });
         if let Some(items) = &plan.limit {
-            doc["limit"] = serde_json::json!(items);
+            doc[narrowing_key(selector)] = serde_json::json!(items);
+        }
+        if selector {
+            doc["inventory_source"] = serde_json::json!(inventory_source(&a.exec));
         }
         println!("{}", serde_json::to_string_pretty(&doc).unwrap());
     }
@@ -4759,5 +4913,138 @@ mod tests {
         let mut ex = planned(PLAN);
         assert!(attach_models(&mut ex, frozen(&PLAN[..3]), &units(2)).is_err());
         assert!(ex.iter().all(|e| e.model.is_none()));
+    }
+
+    // -----------------------------------------------------------------------
+    // FR-072 / FR-074: the selector and the short options (DESIGN §39).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_cli_definition_has_no_conflict_in_any_subcommand() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn short_options_parse_exactly_like_the_long_ones() {
+        for (cmd_is_validate, phase) in [
+            (true, "validate"),
+            (false, "plan"),
+            (false, "apply"),
+            (false, "audit"),
+        ] {
+            let exec = |argv: &[&str]| {
+                let mut full = vec!["sinter", phase, "r.yaml"];
+                full.extend_from_slice(argv);
+                match Cli::try_parse_from(full).unwrap().command {
+                    Command::Validate(a) => {
+                        assert!(cmd_is_validate);
+                        format!("{:?}", a.exec)
+                    }
+                    Command::Plan(a) | Command::Apply(a) => format!("{:?}", a.exec),
+                    Command::Audit(a) => format!("{:?}", a.target.exec),
+                    _ => unreachable!(),
+                }
+            };
+            assert_eq!(exec(&["-H", "h"]), exec(&["--host", "h"]));
+            assert_eq!(exec(&["-p", "2222"]), exec(&["--port", "2222"]));
+            assert_eq!(exec(&["-u", "root"]), exec(&["--user", "root"]));
+            assert_eq!(
+                exec(&["-i", "/k/a", "-i", "/k/b"]),
+                exec(&["--identity", "/k/a", "--identity", "/k/b"])
+            );
+            assert_eq!(
+                exec(&["--hosts", "i.yaml"]),
+                exec(&["--inventory", "i.yaml"])
+            );
+            // Long-only by decision (D-5).
+            for no in ["-s", "-f", "-l", "-I", "-U", "-P"] {
+                assert!(
+                    Cli::try_parse_from(["sinter", phase, "r.yaml", no, "x"]).is_err(),
+                    "{phase} {no}"
+                );
+            }
+        }
+        // `secrets decrypt -i` and `encrypt -f` keep their own meaning.
+        assert!(Cli::try_parse_from(["sinter", "secrets", "decrypt", "f", "-i", "k"]).is_ok());
+        assert!(Cli::try_parse_from(["sinter", "secrets", "encrypt", "f", "-f"]).is_ok());
+    }
+
+    #[test]
+    fn one_selector_at_most_and_only_on_the_four_commands() {
+        for phase in ["validate", "plan", "apply", "audit"] {
+            assert!(Cli::try_parse_from(["sinter", phase, "r.yaml", "web01"]).is_ok());
+            assert!(Cli::try_parse_from(["sinter", phase, "r.yaml", "web01", "web02"]).is_err());
+            assert!(Cli::try_parse_from(["sinter", phase, "r.yaml", "-web"]).is_err());
+        }
+        assert!(Cli::try_parse_from(["sinter", "mcp", "web01"]).is_err());
+    }
+
+    /// The key files a selector run would use for its first host.
+    fn selected_keys(argv: &[&str]) -> Vec<PathBuf> {
+        let a = target_args(Phase::Plan, argv);
+        let limit = limit_option(&a.exec, a.selector.as_deref()).unwrap();
+        let gate = limit_source(&a.recipe, &a.exec, &limit, OutputFormat::Json).unwrap();
+        let w = wiring(ProgressMode::Disabled);
+        let session = w.opts.begin(source_info(Phase::Plan, &gate.source));
+        let plan = inventory_targets(&gate.inventory, gate.limited, &a, &session).unwrap();
+        session.end(RunOutcome::Completed);
+        let ssh = plan.executions[0].target.spec.ssh.clone().unwrap();
+        ssh.identity_files
+    }
+
+    #[test]
+    fn the_key_precedence_is_the_same_with_a_selector() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", RECIPE);
+        let inv = write(
+            &dir,
+            "inv.yaml",
+            "hosts:\n  own:\n    address: 127.0.0.1\n    user: u\n    identity_files: [/k/inventory]\n  plain:\n    address: 127.0.0.2\n    user: u\n",
+        );
+        let common = ["--inventory", inv.as_str(), "--no-ssh-config"];
+        let with = |selector: &str, more: &[&str]| {
+            let mut argv = vec![r.as_str(), selector];
+            argv.extend_from_slice(&common);
+            argv.extend_from_slice(more);
+            selected_keys(&argv)
+        };
+        let p = |v: &[&str]| v.iter().map(PathBuf::from).collect::<Vec<_>>();
+        // --identity replaces the inventory's list, whole, in both spellings.
+        assert_eq!(with("own", &["-i", "/k/cli"]), p(&["/k/cli"]));
+        assert_eq!(with("own", &["--identity", "/k/cli"]), p(&["/k/cli"]));
+        // The inventory's list applies to its own host, and to no other.
+        assert_eq!(with("own", &[]), p(&["/k/inventory"]));
+        // A host with none stays empty, which means the standard keys
+        // (`SshSpec::identity_files`); ssh_config comes between them and is
+        // covered by `sshconfig`'s own precedence tests.
+        assert!(with("plain", &[]).is_empty());
+    }
+
+    #[test]
+    fn a_selector_is_a_limit_that_the_run_cannot_forget() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", WEB_RECIPE);
+        let inv = inventory(&dir);
+        let a = target_args(Phase::Plan, &[&r, "web01", "--inventory", &inv]);
+        let unlimited = {
+            let prepared = prepare_source_with_plugins(&a.recipe, &plugin_ctx(&a.exec)).unwrap();
+            let inventory = load_inventory(Path::new(&inv)).unwrap();
+            let rs = limit_resolutions(&inventory, &prepared, &ParsedLimit::default()).unwrap();
+            limited::limit(&inventory, rs, &ParsedLimit::default()).unwrap()
+        };
+        let w = wiring(ProgressMode::Disabled);
+        let inventory = load_inventory(Path::new(&inv)).unwrap();
+        let session = w.opts.begin(SessionInfo {
+            kind: RunKind::Plan,
+            references_secrets: false,
+        });
+        RESOLVING.with(|h| h.borrow_mut().clear());
+        let e = inventory_targets(&inventory, unlimited, &a, &session)
+            .err()
+            .expect("a selector that was not applied stops the run");
+        session.end(RunOutcome::Completed);
+        assert!(e.message.contains("no host was contacted"), "{}", e.message);
+        assert!(RESOLVING.with(|h| h.borrow().is_empty()));
     }
 }

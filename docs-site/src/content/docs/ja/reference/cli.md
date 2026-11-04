@@ -24,8 +24,12 @@ Commands:
 ## validate
 
 ```sh
-sinter validate <RECIPE|BUNDLE> [--format text|json] [ターゲットオプション]
+sinter validate <RECIPE|BUNDLE> [SELECTOR] [--format text|json] [ターゲットオプション]
 ```
+
+*次期版の機能で、v1.9.0 にはありません。* [選択引数](#コマンドラインでホストを選ぶ)を
+指定すると、`validate` は `plan` と同じようにインベントリを読み、選択を評価します。
+この場合も接続せず、`ssh` も実行しません。
 
 どのターゲットにも接続せずにレシピの構造と意味をチェックします。
 成功時は終了コード 0 です。結果はレシピだけで決まります。
@@ -149,19 +153,22 @@ sinter secrets list    [--format text|json] [--recipe <FILE>...] [<PATH>...]
 
 | フラグ | デフォルト | 説明 |
 |--------|-----------|------|
-| `--host <HOST>` | localhost | SSH ホスト、または `~/.ssh/config` の `Host` 別名。省略でローカル実行。 |
+| `-H`, `--host <HOST>` | localhost | SSH ホスト、または `~/.ssh/config` の `Host` 別名。省略でローカル実行。 |
 | `--inventory <PATH>`（別名 `--hosts`） | — | ホストとグループの定義。各レシピは自身の `targets` が選んだホストでだけ実行されます。[複数ホスト](#複数ホスト)参照。`--host` とは併用不可。 |
 | `--limit <ITEMS>` | — | `--inventory` と併用: これらのホストだけで実行します（ホスト名、グループ名、`host:<name>`、`group:<name>`、パターンのカンマ区切り）。[実行の絞り込み](#実行の絞り込み)参照。 |
 | `--vars-file <PATH>` | — | 変数ファイル（YAML または TOML）。レシピが宣言した変数に、実行全体・インベントリのグループ・ホストごとの値を与えます。[ホスト変数とグループ変数](#ホスト変数とグループ変数)参照。 |
-| `--port <PORT>` | インベントリ、ssh_config の `Port`、なければ `22` | SSH ポート。 |
-| `--user <USER>` | インベントリ、ssh_config の `User`、なければ `$USER` | SSH ユーザ。 |
+| `-p`, `--port <PORT>` | インベントリ、ssh_config の `Port`、なければ `22` | SSH ポート。 |
+| `-u`, `--user <USER>` | インベントリ、ssh_config の `User`、なければ `$USER` | SSH ユーザ。 |
 | `--known-hosts <PATH>` | インベントリ、ssh_config の `UserKnownHostsFile`、なければ `~/.ssh/known_hosts` | ホスト鍵データベース（厳格）。 |
-| `--identity <PATH>` | インベントリ、ssh_config の `IdentityFile`、なければ `~/.ssh/id_ed25519`、`id_ecdsa`、`id_rsa` | SSH 秘密鍵ファイル。複数回指定可能。引き継いだ一覧を置き換えます。[シークレット](/ja/reference/secrets/)には使われません。 |
+| `-i`, `--identity <PATH>` | インベントリ、ssh_config の `IdentityFile`、なければ `~/.ssh/id_ed25519`、`id_ecdsa`、`id_rsa` | SSH 秘密鍵ファイル。複数回指定可能。引き継いだ一覧を置き換えます。[シークレット](/ja/reference/secrets/)には使われません。 |
 | `--no-ssh-config` | off | OpenSSH クライアント設定を参照しない。 |
 | `--plugin-root <DIR>` | `$XDG_CONFIG_HOME/sinter/plugins`、なければ `~/.config/sinter/plugins` | コントローラー上の Resource Plugin ルート。レシピがプラグインを有効にしたときだけ読む（v1.9.0 から）。[Resource Plugins](/ja/reference/resource-plugins/) を参照。 |
 | `--sudo` | off | ターゲット側操作を `sudo -n -u root` 経由で実行。ターゲットのユーザーがすでに root なら sudo を使わずに実行します。`password_hash` を持つ `user` リソースには root が必要です（root のログインか `--sudo`）。 |
 | `--verbose` | off | 詳細な出力。 |
 | `--format` | `text` | `text` または `json`。 |
+
+短縮形の `-H`、`-p`、`-u`、`-i` は次期版の機能で、v1.9.0 にはありません。長いオプションは
+そのまま使えます。`--inventory`、`--limit`、`--sudo`、`--format` に短縮形はありません。
 
 ### OpenSSH の設定
 
@@ -254,7 +261,8 @@ executions: 2 (1 recipe(s), 3 host(s))
 
 フェイルクローズの規則（いずれも接続前に終了コード 2）:
 
-- `--inventory` 使用時に `targets` のないレシピ
+- `--inventory` 使用時に `targets` のないレシピ（次期版の
+  [選択引数](#コマンドラインでホストを選ぶ)だけが例外）
 - インベントリにないホスト名・グループ名を指す `targets`
 - 1 台も選ばない `targets`
 - 同じアドレスとポートに解決される 2 つの選択ホスト
@@ -271,6 +279,80 @@ executions: 2 (1 recipe(s), 3 host(s))
 `--limit` にだけあります。ホスト変数・グループ変数は別のファイルで与えます
 （v1.6.0 から利用できます）。
 [ホスト変数とグループ変数](#ホスト変数とグループ変数)を参照してください。
+
+### コマンドラインでホストを選ぶ
+
+*次期版の機能で、v1.9.0 にはありません。*
+
+省略可能な 2 番目の引数で、インベントリのホストとグループを指定します。
+
+```sh
+sinter plan  nginx.yaml web01
+sinter apply nginx.yaml @web
+sinter apply nginx.yaml web01,web02
+sinter audit nginx.yaml @web,@db
+```
+
+| 項目 | 選択するもの |
+|------|-------------|
+| `web01` | ホスト `web01`。グループにはなりません |
+| `@web` | グループ `web` のホスト。ホストにはなりません |
+| `web01,@db` | その両方。同じホストは 1 回だけ実行します |
+
+パターン、接頭辞、除外、暗黙の「全台」はありません。パターンは
+[`--limit`](#実行の絞り込み) を使います。動作はレシピによって変わります。
+
+| レシピ | 結果 |
+|--------|------|
+| `targets` あり | `--limit` と同じく絞り込みます。`targets` の外の名前は exit 2 で、広げることはありません。 |
+| `targets` なしの単一レシピ | 指定したホストだけで実行します。 |
+| バンドル内の `targets` なしのレシピ | インベントリを使うときと同じく exit 2 です。 |
+
+未定義の名前、`@` のないグループ名、`@` の付いたホスト名、対象 0 件、`--host` や
+`--limit` との併用は、`ssh -G` と接続の前に exit 2 になります。`targets` のないレシピでは、
+`--inventory` だけや `--limit` でホストが選ばれることはありません。
+
+**インベントリの見つけ方。** `--inventory <PATH>` が最優先で、ほかへフォールバックしません。
+指定がなければ、カレントディレクトリとレシピのディレクトリで `hosts.yaml`、`hosts.yml`、
+`hosts.toml` を探します。親ディレクトリとホームディレクトリは探しません。選択引数がなければ
+何も検出しないので、`hosts.yaml` が隣にあっても `sinter apply nginx.yaml` はローカル実行の
+ままです。
+
+```text
+project/
+├── hosts.yaml
+└── recipes/
+    ├── nginx.yaml
+    └── security.yaml
+```
+
+```sh
+cd project
+sinter plan  recipes/nginx.yaml web01
+sinter apply recipes/nginx.yaml @web
+```
+
+使ったパスは、最初に `inventory: /path/to/project/hosts.yaml (auto-detected)` と表示します
+（`--format json` では stderr）。
+
+検出したファイルは利用者が指定したものではないので、次の場合は exit 2 で拒否します。
+信頼できるファイルには `--inventory` を使ってください。
+
+- 候補が複数ある（Sinter は選びません）
+- シンボリックリンク、またはシンボリックリンクを通るレシピのディレクトリ
+- ファイルかそのディレクトリの所有者が別のユーザー（root を除く）、またはグループや他者が
+  書き込める
+- いずれかのホストに `known_hosts` がある
+- いずれかのホストの `identity_files` が相対パス（`~/...` と絶対パスは使えます）
+- ファイルが不正、通常ファイルではない、または 1 MiB を超える
+
+これらの検査では、自分が clone したリポジトリの `hosts.yaml` は止まりません。所有者が
+自分だからです。そのファイルは `address` を任意のホストに向けられますが、到達できるのは
+自分の `known_hosts` で信頼済みのホストだけです。表示されたパスを確認し、先に `plan` を
+実行し、自動化では `--inventory` を指定してください。
+
+SSH の鍵の扱いは [SSH アイデンティティのルール](#ssh-アイデンティティのルール) のとおりです。普段の鍵を使うときは、
+インベントリに `identity_files` を書かないでください。
 
 ### 実行の絞り込み
 
@@ -1207,6 +1289,12 @@ targets、解決、重複ホスト）ではドキュメントを出力せず、
 バンドルに対する `validate` は、ドキュメントに `bundle`（文字列）と
 `recipes`（レシピごとの `recipe`、`path`、`resources`、`handlers`、`vars`、
 `targets`）を追加し、`resources`・`handlers`・`vars` は合計値になります。
+
+[選択引数](#コマンドラインでホストを選ぶ)（次期版の機能で、v1.9.0 にはありません）は常にこの
+集約文書を出力します。`limit` の代わりに `selector`（項目）を出力し、`inventory_source`
+（`detected` か `explicit`）、各 `resolution` の `targets_declared`、`excluded_by: "selector"`
+が加わります。`validate` の文書には `selector`、`inventory`、`inventory_source`、
+`selected_executions`、`targeted_executions` が加わります。
 
 ### 互換性のルール
 

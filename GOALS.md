@@ -362,7 +362,7 @@ http_request
 
 remote_directory synchronization
 
-dynamic inventory, host and group variables, nested groups, and host patterns (a static inventory with flat host groups and explicit recipe targets exists; DESIGN §19.2)
+dynamic inventory, host and group variables, nested groups, and host patterns (a static inventory with flat host groups and explicit recipe targets exists; DESIGN §19.2. A host or group named explicitly on the command line may stand in for the targets of one recipe that declares none; an inventory still selects nothing by itself; DESIGN §39.2)
 
 parallel or orchestrated execution across multiple targets
 

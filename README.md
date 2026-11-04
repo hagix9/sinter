@@ -193,6 +193,11 @@ sinter apply nginx.yaml --inventory hosts.yaml
   contacted.
 - `--limit web01` (or `web01,web02`, `group:web`, `'web-*'`) runs only those of
   the selected hosts; the rest are never contacted.
+- Next version, not in v1.9.0: `sinter apply nginx.yaml web01` (or `@web`,
+  `web01,@db`) names the hosts directly and finds `hosts.yaml`, `hosts.yml` or
+  `hosts.toml` in the current or the recipe's directory. A recipe without
+  `targets` then runs on exactly those hosts. Without that argument nothing is
+  detected and the target stays `--host` or the local host.
 - A bundle (`version: 1` + `recipes: [common.yaml, nginx.yaml]`) runs several
   recipes; each is resolved against its own `targets`.
 - `apply` stops at the first execution that exits non-zero (for any reason)

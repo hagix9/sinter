@@ -5,7 +5,7 @@
 //! compile, so a run cannot silently go back to every host the recipes
 //! target. The fields are private to this module for the same reason.
 
-use sinter::error::Result;
+use sinter::error::{Result, SinterError};
 use sinter::inventory::{match_limit, Inventory, ParsedLimit, Resolution};
 use std::collections::BTreeSet;
 
@@ -65,6 +65,12 @@ pub(crate) fn limit(
     let (resolutions, allowed) = tests::tamper(resolutions, unmarked, allowed);
     #[cfg(not(test))]
     let allowed = Some(allowed);
+    // A selector never reports success having selected nothing.
+    if limit.is_selector() && resolutions.iter().all(|r| r.selected().count() == 0) {
+        return Err(SinterError::schema(
+            "the selector selects no host to run on",
+        ));
+    }
     Ok(Limited {
         resolutions,
         allowed,

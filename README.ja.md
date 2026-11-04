@@ -192,6 +192,11 @@ sinter apply nginx.yaml --inventory hosts.yaml
   しません。
 - `--limit web01`（`web01,web02`、`group:web`、`'web-*'` も可）は、選択されたホストの
   うち名指ししたものだけで実行し、残りのホストには接続しません。
+- 次期版の機能で、v1.9.0 にはありません: `sinter apply nginx.yaml web01`（`@web`、
+  `web01,@db` も可）はホストを直接指定し、カレントディレクトリかレシピのディレクトリに
+  ある `hosts.yaml`、`hosts.yml`、`hosts.toml` を見つけます。`targets` のないレシピは、
+  指定したホストだけで実行します。この引数がなければ何も検出せず、対象は `--host` か
+  ローカルホストのままです。
 - バンドル（`version: 1` + `recipes: [common.yaml, nginx.yaml]`）は複数の
   レシピを実行し、各レシピはそれぞれ自身の `targets` で解決されます。
 - `apply` は（理由を問わず）終了コードが 0 でない最初の実行で止まり残りを

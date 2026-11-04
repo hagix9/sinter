@@ -13,6 +13,7 @@ pub mod fakepkg;
 pub mod fakesys;
 pub mod fsstage;
 pub mod inventory;
+pub mod inventory_detect;
 pub mod ir;
 pub mod manager;
 pub mod mcp;

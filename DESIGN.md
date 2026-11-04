@@ -1269,9 +1269,11 @@ every selected host (and only selected hosts) is resolved per §19.1; two select
 
 `--host` and `--inventory` are mutually exclusive (exit 2).
 
+A selector argument (§39.2, not in v1.9.0) is the one exception to the first of these rules: one plain recipe without `targets` runs on exactly the hosts the selector names. Everything else in this section still holds for it, and an inventory alone, or `--limit`, never selects a host for such a recipe.
+
 `--limit <ITEMS>` narrows a run with `--inventory` to some of the hosts the recipes' `targets` select. It never adds a host: the hosts that run are those a recipe targets and `--limit` names. `<ITEMS>` is a comma-separated list (at most 256 items of at most 64 characters, one `--limit` option only); each item is a host name, a group name, `host:<name>`, `group:<name>`, or a pattern. A bare name that is a host and also a group is ambiguous and an error — write `host:<name>` or `group:<name>`. A pattern uses `*` (any run of characters) and `?` (one character), matches host names only, and may be written with `host:`; quote it so the shell does not expand it. There is no exclusion (`!`). `--limit` needs `--inventory` and is exit 2 with a single target (`--host` or the local host).
 
-`--limit` fails closed, with exit 2 and before any `ssh -G`, connection or command: an empty list or item, a character outside the name rules, a name that is neither a host nor a group of the inventory, a pattern that matches no host, and an item that reaches no host any recipe's `targets` select (it would run nothing). The hosts are chosen once, by evaluating `--limit` against the target resolution and before any host is resolved; the unfiltered selection is not passed on, and `ssh -G` (which may run local commands through an OpenSSH `Match exec`), the connection and the variables of a host left out by `--limit` are never evaluated. A recipe of a bundle that no host remains for is skipped: no value from the variables file or from a host is applied to it, no model is built for running it, no execution is planned for it and no `ssh -G` runs for its hosts. It is still held to what does not depend on a variable's value: it is parsed as a document when the bundle is loaded (syntax, schema, includes, declarations, its `targets` against the inventory) and `Prepared::check_structure` freezes it with its own defaults and keeps every failure except one that may depend on what a variable holds. A field that references a declared variable and fails its static check with the defaults is left out (the field is given no value), unless it fails whatever the variables hold: the check evaluates the field once more with a neutral value of its declared type for every non-sensitive variable, trying every combination of the boolean variables the field names because a boolean can decide which side of `||` or `&&` is evaluated (`Tolerance::may_depend_on_values`), so an undeclared variable, a fact or register, a sensitive value and a variable of another type are kept, and no message is inspected. The resource's other checks, and those of the other resources, go on. What is not judged, and is made when a host runs the recipe, is only what a variable's value decides: such a field, a conflict over a path or a name that such a field takes part in (`ownership_may_depend_on_values`), and a template file a variable chooses (its body is read only when the default resolves to a file, and a failure there is not judged). A field whose literal part is invalid whatever the variable holds (`rel/{{ vars.x }}`) is not refused either: only the evaluation is judged, not the checks that follow it. Known limits of the evaluation: at most 8 boolean variables named by one field are combined (a field naming more is left undecided), and only booleans are varied, so a comparison that decides which side of `||` or `&&` is evaluated (`vars.x == "a" || vars.x`) can still be refused although another value would make it valid. Unknown resource types and fields, duplicate ids, `depends_on`/`notify` references and cycles, secret references, undeclared variables, literal fields (`owner`, `group`, `mode`, `content` with `source`, `state`, `creates` with `removes`) and conflicts between literal paths or names are kept. A freeze that runs a recipe does not use this tolerance: there the first failing check fails, as before. It is listed as skipped (text `SKIP   recipe not run: --limit leaves no host for it`, JSON `excluded_by: "limit"` on its `resolution` entry and `null` counts in a `validate` bundle document). The ban on overriding a sensitive variable still covers the variables it declares. Text output prints a `limit:` line, marks the hosts left out `SKIP excluded by --limit (matched: …)` and counts them; JSON output adds the `limit` array and `excluded_by: "limit"` on those hosts, and keeps their `reasons`. Without `--limit` the output, the checks and the order are unchanged. By design `--limit` does not cover: the duplicate-address check among the hosts that run (hosts left out are not compared); a misspelled variable name in the layer of a host left out; and the drift of the hosts left out (an `audit` that exits 0 says nothing about them). `excluded_by` is an open set of values (today only `"limit"`).
+`--limit` fails closed, with exit 2 and before any `ssh -G`, connection or command: an empty list or item, a character outside the name rules, a name that is neither a host nor a group of the inventory, a pattern that matches no host, and an item that reaches no host any recipe's `targets` select (it would run nothing). The hosts are chosen once, by evaluating `--limit` against the target resolution and before any host is resolved; the unfiltered selection is not passed on, and `ssh -G` (which may run local commands through an OpenSSH `Match exec`), the connection and the variables of a host left out by `--limit` are never evaluated. A recipe of a bundle that no host remains for is skipped: no value from the variables file or from a host is applied to it, no model is built for running it, no execution is planned for it and no `ssh -G` runs for its hosts. It is still held to what does not depend on a variable's value: it is parsed as a document when the bundle is loaded (syntax, schema, includes, declarations, its `targets` against the inventory) and `Prepared::check_structure` freezes it with its own defaults and keeps every failure except one that may depend on what a variable holds. A field that references a declared variable and fails its static check with the defaults is left out (the field is given no value), unless it fails whatever the variables hold: the check evaluates the field once more with a neutral value of its declared type for every non-sensitive variable, trying every combination of the boolean variables the field names because a boolean can decide which side of `||` or `&&` is evaluated (`Tolerance::may_depend_on_values`), so an undeclared variable, a fact or register, a sensitive value and a variable of another type are kept, and no message is inspected. The resource's other checks, and those of the other resources, go on. What is not judged, and is made when a host runs the recipe, is only what a variable's value decides: such a field, a conflict over a path or a name that such a field takes part in (`ownership_may_depend_on_values`), and a template file a variable chooses (its body is read only when the default resolves to a file, and a failure there is not judged). A field whose literal part is invalid whatever the variable holds (`rel/{{ vars.x }}`) is not refused either: only the evaluation is judged, not the checks that follow it. Known limits of the evaluation: at most 8 boolean variables named by one field are combined (a field naming more is left undecided), and only booleans are varied, so a comparison that decides which side of `||` or `&&` is evaluated (`vars.x == "a" || vars.x`) can still be refused although another value would make it valid. Unknown resource types and fields, duplicate ids, `depends_on`/`notify` references and cycles, secret references, undeclared variables, literal fields (`owner`, `group`, `mode`, `content` with `source`, `state`, `creates` with `removes`) and conflicts between literal paths or names are kept. A freeze that runs a recipe does not use this tolerance: there the first failing check fails, as before. It is listed as skipped (text `SKIP   recipe not run: --limit leaves no host for it`, JSON `excluded_by: "limit"` on its `resolution` entry and `null` counts in a `validate` bundle document). The ban on overriding a sensitive variable still covers the variables it declares. Text output prints a `limit:` line, marks the hosts left out `SKIP excluded by --limit (matched: …)` and counts them; JSON output adds the `limit` array and `excluded_by: "limit"` on those hosts, and keeps their `reasons`. Without `--limit` the output, the checks and the order are unchanged. By design `--limit` does not cover: the duplicate-address check among the hosts that run (hosts left out are not compared); a misspelled variable name in the layer of a host left out; and the drift of the hosts left out (an `audit` that exits 0 says nothing about them). `excluded_by` is an open set of values (`"limit"`, and `"selector"` for a selector, §39.2).
 
 19.3 Recipe bundles
 
@@ -1297,7 +1299,7 @@ The invocation exit code is the most severe exit code among executions that ran,
 
 Text output shows the target resolution (MATCH with reasons / SKIP per host and recipe) before running and an execution summary after. JSON output is one document for the invocation with the resolution and, per execution, the recipe, the target identity (inventory name, address, port, user), status, exit code, the single-target document or error, and an execution-level backup record (§4.12): null when the recipe declares no backup or in audit; otherwise its status (planned, completed, failed, not_started, not_run) with run id, run directory and per-path entries — never content.
 
-`validate` accepts every target option and ignores it; it reads no inventory and no variables file — except with `--vars-file`, when it runs the static gate of §19.5 (and then reads the variables file and, with `--inventory`, the inventory) and still contacts no host. With `--vars-file` and `--inventory`, `--limit` narrows that check to the selected hosts exactly as it does for `plan`; the success output adds `limit` and `variables.targeted_executions` (JSON) or a line `ok: --limit … selects N of M execution(s)` (text). An explicit `--limit` is checked by `validate` with or without `--vars-file`: without a variables file `validate` reads the inventory, resolves each recipe's `targets` and evaluates `--limit` as `plan` does before it connects (a bad `--limit`, a broken inventory, a recipe without `targets` and `--host` with `--inventory` are exit 2), resolves no variable beyond loading the recipes some host runs, and contacts nothing. Without `--limit`, `validate` reads no inventory and ignores the other target options.
+`validate` accepts every target option and ignores it; it reads no inventory and no variables file — except with `--vars-file`, when it runs the static gate of §19.5 (and then reads the variables file and, with `--inventory`, the inventory) and still contacts no host. With `--vars-file` and `--inventory`, `--limit` narrows that check to the selected hosts exactly as it does for `plan`; the success output adds `limit` and `variables.targeted_executions` (JSON) or a line `ok: --limit … selects N of M execution(s)` (text). An explicit `--limit` is checked by `validate` with or without `--vars-file`: without a variables file `validate` reads the inventory, resolves each recipe's `targets` and evaluates `--limit` as `plan` does before it connects (a bad `--limit`, a broken inventory, a recipe without `targets` and `--host` with `--inventory` are exit 2), resolves no variable beyond loading the recipes some host runs, and contacts nothing. Without `--limit` or a selector (§39.2), `validate` reads no inventory and ignores the other target options.
 
 19.5 Variables files (common, group and host variables)
 
@@ -2675,3 +2677,91 @@ Sinter enforces which operations can run: only operations of reviewed first-part
 2026-11-01 (step 4, real hosts): §38.5 ACL sentence made precise from measurements on Linux controllers.
 
 2026-11-01 (step 5): firewalld 0.1.0 added to the release registry from the step 4 measurements (§38.1, §38.4); what is not verified listed in §38.1.
+
+39. CLI usability: selector, inventory detection, short options
+
+Status: IMPLEMENTED IN THE NEXT VERSION, NOT RELEASED; live Linux acceptance not yet run. Sinter v1.9.0 does not contain it. The version is undecided. It is not a completion condition of the v2.0 Secure MCP Tunnel and does not change that roadmap. Register entries (local work register): FR-072 selector (§39.2), FR-073 inventory detection (§39.3, §39.4), FR-074 short options (§39.5). Owner decisions D-1 to D-5 of 2026-11-04 settled what were open questions U-1 to U-10 of the earlier proposal.
+
+39.1 What does not change
+
+With no selector, every existing command behaves as in v1.9.0: same targets, same output byte for byte, same exit codes. With neither `--host` nor `--inventory` the target is the local host, and a file named `hosts.yaml` next to the recipe has no effect. `--limit` still needs `--inventory`, and still narrows only. `mcp` has no selector and no detection.
+
+39.2 Selector argument (FR-072)
+
+`validate`, `plan`, `apply` and `audit` take an optional second positional argument:
+
+sinter validate nginx.yaml web01
+sinter plan nginx.yaml web01
+sinter apply nginx.yaml web01
+sinter audit nginx.yaml web01
+sinter apply nginx.yaml @web
+sinter apply nginx.yaml web01,web02
+sinter audit nginx.yaml @web,@db
+
+Grammar: a comma-separated list of at most 256 items. `NAME` is an inventory host and only a host. `@NAME` is an inventory group and only a group, so a host and a group may share a name. Names follow §19.2. A repeated item, and a host reached twice, runs once. There are no patterns, `host:` or `group:` prefixes, exclusions or implicit "all"; those are refused, and patterns stay with `--limit`. One selector argument only: `web01 web02` is a usage error.
+
+Meaning, by recipe:
+
+A recipe with `targets`, alone or in a bundle: the selector works as `--limit` does in §19.2. It narrows and never widens: a name outside `targets` is exit 2, a host of `@group` outside `targets` does not run, and a recipe of a bundle left with no host is skipped.
+
+One plain recipe without `targets`: the selector names the hosts it runs on, and no others. This gives an explicit name the authority `--host` already has; an inventory still selects nothing by itself.
+
+A recipe of a bundle without `targets`: exit 2, as with any inventory. A one-recipe bundle is a bundle.
+
+Failures, all exit 2 before any `ssh -G`, connection or command: an empty selector or item, a character outside the name rules, a name the inventory does not define as that kind (the message points out a group written without `@` and a host written with it), an item that reaches no host any recipe's `targets` select, a selection of no host, a selector with `--host` (`-H`) or with `--limit`, and no inventory (§39.3). A name never falls back to an `~/.ssh/config` alias or to `--host` behaviour. `localhost` has no special meaning: it works only if the inventory defines it.
+
+Implementation: the selector is parsed into the same `ParsedLimit` as `--limit` and evaluated by the same `match_limit`, `Resolution` and `Limited`, so there is one selection path. For a recipe without `targets` its names become the `TargetSelector` passed to the same `resolve`. A selector that was not applied stops the run as a `--limit` that was not applied does (§19.2).
+
+`validate` with a selector reads the inventory, evaluates the selection as `plan` does, checks the variables of the selected hosts with `--vars-file`, and contacts nothing and runs no `ssh -G`. `--vars-file` otherwise works as with `--limit` (§19.5), with the inventory the selector found.
+
+Output, only with a selector. Text: an `inventory: <path> (auto-detected)` or `(--inventory)` line first, a `selector:` line instead of `limit:`, hosts left out marked `excluded by the selector`, and for a recipe without `targets` the line `targets: none declared; running on the hosts the selector names`. JSON: always the aggregate document of §19.4, with `selector` (the items) instead of `limit`, `inventory`, `inventory_source` (`detected` or `explicit`), `targets_declared` on each `resolution` entry and `excluded_by: "selector"`. A `validate` document gains `selector`, `inventory`, `inventory_source`, `selected_executions` and `targeted_executions`. With JSON the `inventory:` line goes to stderr. Exit codes are those of §33.
+
+39.3 Inventory auto-detection (FR-073)
+
+Detection runs only with a selector and without `--inventory`. `--inventory PATH` always wins, keeps every rule it has today (no new check), and a broken or missing named file is an error that never falls through to detection.
+
+The names are `hosts.yaml`, `hosts.yml` and `hosts.toml`, and the places are the current directory and the directory of the recipe or bundle as named on the command line (a symbolic link to a recipe does not move it). Parent directories and the home directory are not searched, and there is no environment variable or per-user default.
+
+Exactly one file may be found. Two names in one directory, or files in both places, are exit 2 listing the candidates: Sinter never picks by priority. Two hard links of one file are two candidates, since their format can differ. The same directory reached twice counts once.
+
+A candidate that exists and cannot be used is an error, never a miss: nothing falls back to another file, another host or the local host. Refused, with exit 2 before any `ssh -G`:
+
+a symbolic link, also a dangling one, and also when another candidate exists;
+
+a recipe directory reached through a symbolic link, except, for an invoking user other than root, one owned by root anywhere but the last component (the system's own layout, such as `/var` on macOS). A root run gets no exception, because everything it clones or unpacks is root's too;
+
+anything but a regular file, without blocking on a FIFO;
+
+a file not owned by the invoking user or root, or writable by group or others;
+
+a directory holding the file that is not owned by the invoking user or root, or is writable by group or others (a sticky bit does not excuse it);
+
+a file larger than 1 MiB, not valid UTF-8, or invalid under §19.2;
+
+`known_hosts` on any host: it could satisfy strict verification for a host of the file's choosing, so only `--inventory` may set it;
+
+a relative `identity_files` entry on any host, including `~other/...`, whose meaning would depend on the current directory. Absolute and `~/` entries stay allowed (§39.4).
+
+Time of check and time of use: a candidate is opened with `openat` and `O_NOFOLLOW`, every check is made on that descriptor, and the bytes parsed are read from it; a change to its size, times or link count during the read is refused. The file is read once, so replacing it later changes nothing about the run.
+
+The path used is absolute and shown before the hosts are evaluated (§39.2).
+
+Known limits. A cloned repository's `hosts.yaml` is owned by whoever cloned it, so the owner checks do not stop it. It can aim `address` at any host, and the protection left is strict verification against the user's own known_hosts (it reaches only hosts already trusted), `targets`, the path shown, and `plan` first. ACLs the mode bits do not show (macOS extended ACLs) are not inspected. Ancestors of the directory are checked for symbolic links only, not for modes: replacing one can bring in only directories and files this user or root already owns, because the owner checks apply to what is opened, and a stricter rule would refuse ordinary group-writable parents. Automation should name `--inventory`.
+
+39.4 SSH authentication (no new mechanism)
+
+Host management and key management stay separate; §19.1 is unchanged. The key file list is taken whole from the first source that names any: `--identity` > inventory `identity_files` > OpenSSH `IdentityFile` > standard keys. ssh-agent is a separate path tried first, as §19.1 describes. The usual way to use the operating system's keys is to omit `identity_files`; a host that needs its own key sets it, and `--identity` overrides for one run. Strict known_hosts verification (§19) is unchanged, and `--known-hosts` on the command line still applies.
+
+39.5 Short options (FR-074)
+
+`-H` is `--host`, `-p` is `--port`, `-u` is `--user` and `-i` is `--identity`, on `validate`, `plan`, `apply` and `audit`. Long options all stay, and a short option means exactly its long option, including where `validate` ignores it. `--inventory`, `--limit`, `--sudo` and `--format` have no short form. `secrets decrypt -i` and `secrets encrypt -r`, `-o`, `-f` are separate subcommands and keep their meanings. `-H` with a selector is exit 2, as `--host` is.
+
+39.6 Verification status
+
+Tests: `tests/cli_selector.rs` and the unit tests of `src/inventory.rs`, `src/inventory_detect.rs` and `src/main.rs`, with a scripted `ssh` and counting listeners. Not verified by them: real SSH hosts and Linux controllers, whose acceptance is a separate step; and a file really owned by another user, which needs root while the release gate runs as a non-root user: that refusal is proven on real descriptors judged as a stand-in user, and the same goes for its directory.
+
+39.7 Change history
+
+2026-11-04: section added as a proposal after the v1.9.0 publication (Owner direction). No implementation, test, or earlier section changed.
+
+2026-11-04: implemented under Owner decisions D-1 to D-5 (FR-072 to FR-074), replacing the proposal text and the open questions. §19.2 gained the exception for one plain recipe without `targets`; §19.4 and the value set of `excluded_by` were extended. Nothing released.

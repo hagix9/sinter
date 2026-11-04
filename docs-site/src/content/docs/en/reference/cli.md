@@ -24,8 +24,12 @@ subcommand.
 ## validate
 
 ```sh
-sinter validate <RECIPE|BUNDLE> [--format text|json] [target options]
+sinter validate <RECIPE|BUNDLE> [SELECTOR] [--format text|json] [target options]
 ```
+
+*Next version, not in v1.9.0.* With a [selector](#selecting-hosts-on-the-command-line),
+`validate` reads the inventory and evaluates the selection the way `plan` does.
+It still contacts nothing and runs no `ssh`.
 
 Checks recipe structure and semantics without contacting any target. Exits 0
 on success. The result depends only on the recipe: the
@@ -149,19 +153,23 @@ except `--vars-file`, `--limit`, `--plugin-root` and the `--inventory` and `--ho
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--host <HOST>` | localhost | SSH host or `~/.ssh/config` `Host` alias. Omit for local execution. |
+| `-H`, `--host <HOST>` | localhost | SSH host or `~/.ssh/config` `Host` alias. Omit for local execution. |
 | `--inventory <PATH>` (alias `--hosts`) | — | Hosts and groups; each recipe runs only on the hosts its `targets` select. See [Multiple hosts](#multiple-hosts). Mutually exclusive with `--host`. |
 | `--limit <ITEMS>` | — | With `--inventory`: run only on these hosts (a comma-separated list of host names, group names, `host:<name>`, `group:<name>` and patterns). See [Limiting a run](#limiting-a-run). |
 | `--vars-file <PATH>` | — | Variables file (YAML or TOML) with values for the whole run, per inventory group and per host, for variables the recipes declare. See [Host and group variables](#host-and-group-variables). |
-| `--port <PORT>` | inventory, ssh_config `Port`, else `22` | SSH port. |
-| `--user <USER>` | inventory, ssh_config `User`, else `$USER` | SSH user. |
+| `-p`, `--port <PORT>` | inventory, ssh_config `Port`, else `22` | SSH port. |
+| `-u`, `--user <USER>` | inventory, ssh_config `User`, else `$USER` | SSH user. |
 | `--known-hosts <PATH>` | inventory, ssh_config `UserKnownHostsFile`, else `~/.ssh/known_hosts` | Host-key database (strict). |
-| `--identity <PATH>` | inventory, ssh_config `IdentityFile`, else `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa` | SSH identity file; repeatable; replaces the inherited list. Never used for [secrets](/en/reference/secrets/#identities-private-keys-and-where-they-live). |
+| `-i`, `--identity <PATH>` | inventory, ssh_config `IdentityFile`, else `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa` | SSH identity file; repeatable; replaces the inherited list. Never used for [secrets](/en/reference/secrets/#identities-private-keys-and-where-they-live). |
 | `--no-ssh-config` | off | Do not consult the OpenSSH client configuration. |
 | `--plugin-root <DIR>` | `$XDG_CONFIG_HOME/sinter/plugins`, else `~/.config/sinter/plugins` | Resource Plugin root on the controller, read only when a recipe enables plugins (from v1.9.0). See [Resource Plugins](/en/reference/resource-plugins/). |
 | `--sudo` | off | Run target-side operations via `sudo -n -u root`. A target user that is already root runs directly, without sudo. A `user` resource with `password_hash` needs root (a root login or `--sudo`). |
 | `--verbose` | off | Verbose output. |
 | `--format` | `text` | `text` or `json`. |
+
+The short forms `-H`, `-p`, `-u` and `-i` are in the next version, not in v1.9.0.
+The long options stay. `--inventory`, `--limit`, `--sudo` and `--format` have no
+short form.
 
 ### OpenSSH configuration
 
@@ -254,7 +262,9 @@ executions: 2 (1 recipe(s), 3 host(s))
 
 Fail-closed rules (all exit 2, before anything connects):
 
-- a recipe without `targets` used with `--inventory`;
+- a recipe without `targets` used with `--inventory` (a
+  [selector](#selecting-hosts-on-the-command-line), next version, is the one
+  exception);
 - a target host or group the inventory does not define;
 - targets that select no host;
 - two selected hosts that resolve to the same address and port;
@@ -271,6 +281,82 @@ parallel runs; `targets` names hosts and groups exactly, and patterns exist
 only in `--limit`. Host and group variables come from a separate
 file (available from v1.6.0): see
 [Host and group variables](#host-and-group-variables).
+
+### Selecting hosts on the command line
+
+*Next version, not in v1.9.0.*
+
+An optional second argument names inventory hosts and groups:
+
+```sh
+sinter plan  nginx.yaml web01
+sinter apply nginx.yaml @web
+sinter apply nginx.yaml web01,web02
+sinter audit nginx.yaml @web,@db
+```
+
+| Item | Selects |
+|------|---------|
+| `web01` | the host `web01`, never a group |
+| `@web` | the hosts of the group `web`, never a host |
+| `web01,@db` | both; a host reached twice runs once |
+
+There are no patterns, prefixes, exclusions or implicit "all": use
+[`--limit`](#limiting-a-run) for patterns. What it does depends on the recipe:
+
+| Recipe | Result |
+|--------|--------|
+| With `targets` | Narrows, like `--limit`. A name outside `targets` is exit 2; it never widens. |
+| One recipe without `targets` | Runs on exactly the hosts named. |
+| A bundle's recipe without `targets` | Exit 2, as with any inventory. |
+
+Exit 2, before any `ssh -G` or connection: an unknown name, a group written
+without `@` or a host written with it, an empty selection, and a selector with
+`--host` or `--limit`. `--inventory` alone or `--limit` never select a host for a
+recipe without `targets`.
+
+**Finding the inventory.** `--inventory <PATH>` comes first and never falls back
+to anything. Otherwise Sinter looks for `hosts.yaml`, `hosts.yml` and `hosts.toml`
+in the current directory and the recipe's directory. Parent directories and the
+home directory are not searched. Without a selector nothing is detected, so
+`sinter apply nginx.yaml` stays a local run even next to a `hosts.yaml`.
+
+```text
+project/
+├── hosts.yaml
+└── recipes/
+    ├── nginx.yaml
+    └── security.yaml
+```
+
+```sh
+cd project
+sinter plan  recipes/nginx.yaml web01
+sinter apply recipes/nginx.yaml @web
+```
+
+The path used is shown first, as `inventory: /path/to/project/hosts.yaml
+(auto-detected)` (on stderr with `--format json`).
+
+A detected file was not named by you, so these are refused with exit 2. Use
+`--inventory` for a file you trust:
+
+- several candidates (Sinter never picks one);
+- a symbolic link, or a recipe directory reached through one;
+- a file or its directory owned by another user (other than root), or writable by
+  group or others;
+- `known_hosts` on any host;
+- a relative `identity_files` entry on any host (`~/...` and absolute paths are
+  fine);
+- a file that is invalid, not a regular file, or larger than 1 MiB.
+
+Those checks do not stop a `hosts.yaml` from a repository you cloned, which you
+own. It can point `address` at any host, and only hosts your own `known_hosts`
+already trusts can be reached. Read the path shown, run `plan` first, and name
+`--inventory` in automation.
+
+SSH keys work as described in [SSH identity rules](#ssh-identity-rules). To use
+your usual keys, leave `identity_files` out of the inventory.
 
 ### Limiting a run
 
@@ -1246,6 +1332,13 @@ exits as described in [Framing and errors](#framing-and-errors).
 `validate` on a bundle adds `bundle` (string) and `recipes` (per recipe:
 `recipe`, `path`, `resources`, `handlers`, `vars`, `targets`) to its document;
 `resources`, `handlers` and `vars` are then totals.
+
+A [selector](#selecting-hosts-on-the-command-line) (next version, not in v1.9.0)
+always gives this aggregate document, with `selector` (the items) instead of
+`limit`, `inventory_source` (`detected` or `explicit`), `targets_declared` on each
+`resolution` entry and `excluded_by: "selector"`. A `validate` document gains
+`selector`, `inventory`, `inventory_source`, `selected_executions` and
+`targeted_executions`.
 
 ### Compatibility rules
 

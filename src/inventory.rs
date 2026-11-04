@@ -25,6 +25,11 @@
 //! `--limit` ([`parse_limit`], [`match_limit`], DESIGN §19.2) only ever
 //! *narrows* the hosts the recipes' `targets` select; it never adds one.
 //!
+//! The selector argument ([`parse_selector`], DESIGN §39.2) is evaluated by the
+//! same code. It differs in two ways: its grammar says exactly what each item
+//! is (`NAME` a host, `@NAME` a group), and for one plain recipe without
+//! `targets` its names stand in for them ([`resolve_with_selector`]).
+//!
 //! Deliberately absent: nested groups, variables in the inventory file,
 //! patterns in the inventory or in `targets` (a `--limit` glob only narrows),
 //! an implicit "all" group, dynamic inventory, per-host sudo
@@ -112,9 +117,16 @@ fn expand_home(p: PathBuf) -> PathBuf {
 /// Load and validate an inventory. Every problem is a validation error
 /// (exit 2) raised before any connection is attempted.
 pub fn load_inventory(path: &Path) -> Result<Inventory> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        SinterError::schema(format!("cannot read inventory {}: {e}", path.display()))
+    })?;
+    parse_inventory(&text, path)
+}
+
+/// Parse and validate the text of an inventory. `path` picks the format by its
+/// extension and names the inventory in messages; it is not read.
+pub(crate) fn parse_inventory(text: &str, path: &Path) -> Result<Inventory> {
     let ctx = path.display();
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| SinterError::schema(format!("cannot read inventory {ctx}: {e}")))?;
     let is_yaml = matches!(
         path.extension()
             .and_then(|e| e.to_str())
@@ -123,12 +135,12 @@ pub fn load_inventory(path: &Path) -> Result<Inventory> {
         Some("yaml" | "yml")
     );
     let parsed: InventoryFile = if is_yaml {
-        let v = crate::yaml::parse_yaml(&text)
+        let v = crate::yaml::parse_yaml(text)
             .map_err(|e| SinterError::schema(format!("invalid inventory {ctx}: {}", e.message)))?;
         serde_json::from_value(value_to_json(&v))
             .map_err(|e| SinterError::schema(format!("invalid inventory {ctx}: {e}")))?
     } else {
-        toml::from_str(&text)
+        toml::from_str(text)
             .map_err(|e| SinterError::schema(format!("invalid inventory {ctx}: {e}")))?
     };
     if parsed.hosts.is_empty() {
@@ -352,6 +364,8 @@ pub struct LimitItem {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ParsedLimit {
     given: bool,
+    /// Parsed from the selector argument rather than `--limit`.
+    selector: bool,
     items: Vec<LimitItem>,
 }
 
@@ -359,6 +373,19 @@ impl ParsedLimit {
     /// `--limit` was given.
     pub fn given(&self) -> bool {
         self.given
+    }
+
+    fn option_name(&self) -> &'static str {
+        if self.selector {
+            "selector"
+        } else {
+            "--limit"
+        }
+    }
+
+    /// This came from the selector argument ([`parse_selector`]).
+    pub fn is_selector(&self) -> bool {
+        self.selector
     }
 
     /// The items as written, without repeats, in order of first appearance.
@@ -374,6 +401,10 @@ impl ParsedLimit {
 }
 
 fn limit_error(raw: &str, what: &str) -> SinterError {
+    item_error("--limit", raw, what)
+}
+
+fn item_error(option: &str, raw: &str, what: &str) -> SinterError {
     // An item can be as long as the command line allows: show its start.
     let shown: String = if raw.chars().count() > MAX_LIMIT_ITEM_CHARS + 8 {
         let mut s: String = raw.chars().take(MAX_LIMIT_ITEM_CHARS + 8).collect();
@@ -382,7 +413,7 @@ fn limit_error(raw: &str, what: &str) -> SinterError {
     } else {
         raw.to_string()
     };
-    SinterError::schema(format!("--limit item {shown:?}: {what}"))
+    SinterError::schema(format!("{option} item {shown:?}: {what}"))
 }
 
 /// Check the syntax of `--limit` (DESIGN §19.2). Items are separated by `,`;
@@ -469,7 +500,101 @@ pub fn parse_limit(value: Option<&str>) -> Result<ParsedLimit> {
             raw: raw.to_string(),
         });
     }
-    Ok(ParsedLimit { given: true, items })
+    Ok(ParsedLimit {
+        given: true,
+        selector: false,
+        items,
+    })
+}
+
+/// Check the syntax of the selector argument (DESIGN §39.2). Items are
+/// separated by `,`; `NAME` is an inventory host and only a host, `@NAME` an
+/// inventory group and only a group. There are no patterns, prefixes or
+/// exclusions, and no name means "all". Nothing about the inventory is checked
+/// here.
+pub fn parse_selector(value: &str) -> Result<ParsedLimit> {
+    const OPTION: &str = "selector";
+    if value.is_empty() {
+        return Err(SinterError::schema("the selector must not be empty"));
+    }
+    let mut items = Vec::new();
+    for raw in value.split(',') {
+        if items.len() >= MAX_LIMIT_ITEMS {
+            return Err(SinterError::schema(format!(
+                "the selector names more than {MAX_LIMIT_ITEMS} items"
+            )));
+        }
+        if raw.is_empty() {
+            return Err(SinterError::schema(
+                "the selector has an empty item (a doubled or trailing comma)",
+            ));
+        }
+        let (kind, text) = match raw.strip_prefix('@') {
+            Some(rest) => (LimitKind::Group, rest),
+            None => (LimitKind::Host, raw),
+        };
+        if !valid_name(text) {
+            return Err(item_error(
+                OPTION,
+                raw,
+                "write a host as NAME or a group as @NAME; a name has letters, digits, '.', '_', '-', starts alphanumeric and is at most 64 characters (patterns belong to --limit)",
+            ));
+        }
+        items.push(LimitItem {
+            kind,
+            text: text.to_string(),
+            glob: false,
+            raw: raw.to_string(),
+        });
+    }
+    Ok(ParsedLimit {
+        given: true,
+        selector: true,
+        items,
+    })
+}
+
+/// What a selector's names stand for when a recipe declares no `targets`: the
+/// named hosts and groups. Every name must exist; nothing else is selected.
+fn selector_targets(inv: &Inventory, limit: &ParsedLimit) -> Result<TargetSelector> {
+    let mut sel = TargetSelector {
+        hosts: Vec::new(),
+        groups: Vec::new(),
+    };
+    for item in &limit.items {
+        item_hosts(inv, limit, item)?;
+        let list = match item.kind {
+            LimitKind::Group => &mut sel.groups,
+            _ => &mut sel.hosts,
+        };
+        if !list.contains(&item.text) {
+            list.push(item.text.clone());
+        }
+    }
+    Ok(sel)
+}
+
+/// Target resolution of one recipe in a run with a selector (DESIGN §39.2):
+///
+/// * a recipe with `targets`: exactly [`resolve`]; the selector then narrows it
+///   ([`match_limit`]) and never widens it;
+/// * one plain recipe without `targets`: the selector names the hosts;
+/// * a recipe of a bundle without `targets`: an error, as with any inventory.
+pub fn resolve_with_selector(
+    inv: &Inventory,
+    targets: Option<&TargetSelector>,
+    recipe: &str,
+    limit: &ParsedLimit,
+    in_bundle: bool,
+) -> Result<Resolution> {
+    debug_assert!(limit.is_selector());
+    match (targets, in_bundle) {
+        (Some(_), _) => resolve(inv, targets, recipe),
+        (None, false) => resolve(inv, Some(&selector_targets(inv, limit)?), recipe),
+        (None, true) => Err(SinterError::schema(format!(
+            "recipe {recipe} declares no targets; in a bundle every recipe must name the hosts or groups it may run on, and a selector only narrows them"
+        ))),
+    }
 }
 
 /// `*` matches any run of characters (also none), `?` exactly one; the whole
@@ -516,53 +641,10 @@ pub fn match_limit(
     let targeted: BTreeSet<&str> = resolutions.iter().flat_map(|r| r.targeted()).collect();
     let mut allowed = BTreeSet::new();
     for item in &limit.items {
-        let hosts: BTreeSet<String> = if item.glob {
-            inv.hosts
-                .keys()
-                .filter(|h| glob_match(&item.text, h))
-                .cloned()
-                .collect()
-        } else {
-            let as_host = inv.hosts.contains_key(&item.text);
-            let as_group = inv.groups.get(&item.text);
-            match (item.kind, as_host, as_group) {
-                (LimitKind::Host, true, _) | (LimitKind::Bare, true, None) => {
-                    BTreeSet::from([item.text.clone()])
-                }
-                (LimitKind::Group, _, Some(members)) | (LimitKind::Bare, false, Some(members)) => {
-                    members.iter().cloned().collect()
-                }
-                (LimitKind::Bare, true, Some(_)) => {
-                    return Err(limit_error(
-                        &item.raw,
-                        &format!(
-                            "is both a host and a group of inventory {}; write host:{} or group:{}",
-                            inv.path.display(),
-                            item.text,
-                            item.text
-                        ),
-                    ));
-                }
-                _ => BTreeSet::new(),
-            }
-        };
-        if hosts.is_empty() {
-            let what = if item.glob {
-                "matches no host of inventory"
-            } else {
-                match item.kind {
-                    LimitKind::Host => "is not a host of inventory",
-                    LimitKind::Group => "is not a group of inventory",
-                    LimitKind::Bare => "is neither a host nor a group of inventory",
-                }
-            };
-            return Err(limit_error(
-                &item.raw,
-                &format!("{what} {}", inv.path.display()),
-            ));
-        }
+        let hosts = item_hosts(inv, limit, item)?;
         if !hosts.iter().any(|h| targeted.contains(h.as_str())) {
-            return Err(limit_error(
+            return Err(item_error(
+                limit.option_name(),
                 &item.raw,
                 "names inventory hosts, but no recipe's targets select any of them, so it would run nothing",
             ));
@@ -570,6 +652,69 @@ pub fn match_limit(
         allowed.extend(hosts);
     }
     Ok(allowed)
+}
+
+/// The inventory hosts one item names; an item that names none, or is
+/// ambiguous, is an error.
+fn item_hosts(inv: &Inventory, limit: &ParsedLimit, item: &LimitItem) -> Result<BTreeSet<String>> {
+    let hosts: BTreeSet<String> = if item.glob {
+        inv.hosts
+            .keys()
+            .filter(|h| glob_match(&item.text, h))
+            .cloned()
+            .collect()
+    } else {
+        let as_host = inv.hosts.contains_key(&item.text);
+        let as_group = inv.groups.get(&item.text);
+        match (item.kind, as_host, as_group) {
+            (LimitKind::Host, true, _) | (LimitKind::Bare, true, None) => {
+                BTreeSet::from([item.text.clone()])
+            }
+            (LimitKind::Group, _, Some(members)) | (LimitKind::Bare, false, Some(members)) => {
+                members.iter().cloned().collect()
+            }
+            (LimitKind::Bare, true, Some(_)) => {
+                return Err(limit_error(
+                    &item.raw,
+                    &format!(
+                        "is both a host and a group of inventory {}; write host:{} or group:{}",
+                        inv.path.display(),
+                        item.text,
+                        item.text
+                    ),
+                ));
+            }
+            _ => BTreeSet::new(),
+        }
+    };
+    if hosts.is_empty() {
+        let what = if item.glob {
+            "matches no host of inventory"
+        } else {
+            match item.kind {
+                LimitKind::Host => "is not a host of inventory",
+                LimitKind::Group => "is not a group of inventory",
+                LimitKind::Bare => "is neither a host nor a group of inventory",
+            }
+        };
+        // A selector item says what it is, so a name of the other kind is a
+        // mistake to point out, never a match.
+        let hint = match (limit.is_selector(), item.kind) {
+            (true, LimitKind::Host) if inv.groups.contains_key(&item.text) => {
+                format!("; it is a group, write @{}", item.text)
+            }
+            (true, LimitKind::Group) if inv.hosts.contains_key(&item.text) => {
+                format!("; it is a host, write {}", item.text)
+            }
+            _ => String::new(),
+        };
+        return Err(item_error(
+            limit.option_name(),
+            &item.raw,
+            &format!("{what} {}{hint}", inv.path.display()),
+        ));
+    }
+    Ok(hosts)
 }
 
 #[cfg(test)]
@@ -958,6 +1103,136 @@ mod tests {
         let one = resolutions(&i, &[sel(&["web01"], &[])]);
         let e = allowed_by(&i, &one, "web01,web02").expect_err("web02 targeted by none");
         assert!(e.message.contains("web02"), "{}", e.message);
+    }
+
+    fn selector(value: &str) -> ParsedLimit {
+        parse_selector(value).unwrap_or_else(|e| panic!("{value}: {}", e.message))
+    }
+
+    #[test]
+    fn selector_syntax_accepts_hosts_and_groups_only() {
+        for v in ["web01", "@web", "web01,web02", "@web,@db", "web01,@db"] {
+            assert!(selector(v).is_selector(), "{v}");
+            assert!(selector(v).given(), "{v}");
+        }
+        assert_eq!(selector("b,@a,b,@a").items(), vec!["b", "@a"]);
+        let long = "x".repeat(65);
+        let many = vec!["a"; MAX_LIMIT_ITEMS + 1].join(",");
+        for v in [
+            "",
+            ",",
+            "a,",
+            ",a",
+            "a,,b",
+            "@",
+            "@@web",
+            "a@b",
+            "@a,@",
+            "*",
+            "web*",
+            "?eb",
+            "@web*",
+            "host:web01",
+            "group:web",
+            "!web01",
+            "-web",
+            ".web",
+            "we b",
+            "web/01",
+            "../web",
+            "w\u{e9}b",
+            "web\n01",
+            "web01\0",
+            "$(x)",
+            "~",
+            "a=b",
+            "all,*",
+            long.as_str(),
+            many.as_str(),
+        ] {
+            let e = parse_selector(v).expect_err(v);
+            assert_eq!(e.kind, crate::error::ErrorKind::Schema, "{v:?}");
+        }
+        assert!(parse_selector(&"x".repeat(64)).is_ok());
+        assert!(parse_selector(&vec!["a"; MAX_LIMIT_ITEMS].join(",")).is_ok());
+    }
+
+    #[test]
+    fn selector_tells_a_host_from_a_group_of_the_same_name() {
+        let body = "hosts:\n  web: {}\n  web01: {}\n  web02: {}\ngroups:\n  web:\n    hosts: [web01, web02]\n";
+        let i = inv(body, "h.yaml").unwrap();
+        let rs = resolutions(&i, &[sel(&["web"], &["web"])]);
+        let got = |v: &str| {
+            match_limit(&i, &rs, &selector(v))
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(got("web"), vec!["web"]);
+        assert_eq!(got("@web"), vec!["web01", "web02"]);
+        assert_eq!(got("web,@web"), vec!["web", "web01", "web02"]);
+    }
+
+    #[test]
+    fn selector_names_must_exist_as_the_kind_written() {
+        let i = inv(INV, "h.yaml").unwrap();
+        let rs = resolutions(&i, &[sel(&[], &["web", "db"])]);
+        for (v, hint) in [
+            ("nosuch", "not a host"),
+            ("@nosuch", "not a group"),
+            // A group without `@`, a host with it: never a match, and said so.
+            ("web", "write @web"),
+            ("@web01", "write web01"),
+            ("web01,nosuch", "not a host"),
+        ] {
+            let e = match_limit(&i, &rs, &selector(v)).expect_err(v);
+            assert_eq!(e.kind, crate::error::ErrorKind::Schema, "{v}");
+            assert!(e.message.contains("selector item"), "{v}: {}", e.message);
+            assert!(e.message.contains(hint), "{v}: {}", e.message);
+        }
+    }
+
+    #[test]
+    fn selector_narrows_declared_targets_and_never_widens_them() {
+        let i = inv(INV, "h.yaml").unwrap();
+        let web = sel(&[], &["web"]);
+        let run = |v: &str| -> Result<Vec<String>> {
+            let l = selector(v);
+            let mut r = resolve_with_selector(&i, Some(&web), "x", &l, false)?;
+            let allowed = match_limit(&i, std::slice::from_ref(&r), &l)?;
+            r.apply_allowed(&allowed);
+            Ok(r.selected().map(str::to_string).collect())
+        };
+        assert_eq!(run("web01").unwrap(), vec!["web01"]);
+        assert_eq!(run("@web").unwrap(), vec!["web01", "web02"]);
+        assert_eq!(run("web01,web01,@web").unwrap(), vec!["web01", "web02"]);
+        // Outside `targets`: refused rather than widened.
+        assert!(run("db01").is_err());
+        assert!(run("@db").is_err());
+        assert!(run("web01,db01").is_err());
+    }
+
+    #[test]
+    fn selector_stands_in_for_targets_only_in_one_plain_recipe() {
+        let i = inv(INV, "h.yaml").unwrap();
+        let l = selector("web01,@db,web01");
+        let r = resolve_with_selector(&i, None, "x", &l, false).unwrap();
+        assert_eq!(r.selected().collect::<Vec<_>>(), vec!["db01", "web01"]);
+        // Only the named hosts: web02 is in the inventory and not selected.
+        let web02 = r.hosts.iter().find(|h| h.name == "web02").unwrap();
+        assert!(!web02.targeted());
+        assert_eq!(
+            r.hosts.iter().find(|h| h.name == "db01").unwrap().reasons,
+            vec!["group:db"]
+        );
+        // Unknown names fail as selector items.
+        let e = resolve_with_selector(&i, None, "x", &selector("nosuch"), false).unwrap_err();
+        assert!(e.message.contains("selector item"), "{}", e.message);
+        // In a bundle a recipe without targets stays an error.
+        let e = resolve_with_selector(&i, None, "x", &l, true).unwrap_err();
+        assert!(e.message.contains("declares no targets"), "{}", e.message);
+        // `--limit` and a bare inventory never stand in for targets.
+        assert!(resolve(&i, None, "x").is_err());
     }
 
     #[test]
