@@ -605,6 +605,15 @@ listen_port = 8081
   digits, `.`, `_` and `-`, starting with a letter or digit, at most 64
   characters.
 
+**Several files**
+
+*Next version, not in v1.9.0.* `--vars-file` may be repeated, and a
+[project file](#project-file) can list `vars_files`. The project's come first, then the command
+line's, in order, and a later file wins. Each layer (`vars`, `groups.<g>`, `hosts.<h>`) is merged by
+variable name, then the precedence below applies, so a host value of an earlier file still beats a
+common value of a later one. A variable's value is replaced whole: a map or list is never merged with
+an earlier one.
+
 **Precedence**
 
 For each host and variable: the recipe's `value` < `vars` < `groups` <
@@ -621,9 +630,15 @@ For each host and variable: the recipe's `value` < `vars` < `groups` <
 
 **What the file may set**
 
-- Every variable in the file must be declared by at least one recipe of the
-  run (for a bundle, any of its recipes, includes counted). In a bundle, a
-  value applies only to the recipes that declare that variable.
+- A variable no recipe of the run declares (for a bundle, any of its recipes,
+  includes counted) is a warning, since a file shared between recipes holds such
+  names, and `--strict-vars` or `strict_vars: true` makes it an error, as it always was
+  up to v1.9.0. A name close to a declared one (`app_prot` for `app_port`: up to two
+  edits, or differing only in case or `-`/`_`) is an error in every mode and names the
+  likely variable. In a bundle, a value applies only to the recipes that declare that
+  variable.
+- A variable declared `required: true` needs a value from a variables file for every
+  host that runs the recipe, or the run stops before contacting anything.
 - A value must have the type of the declared value: string, integer, float,
   boolean, list and map are different types (`8080` is not `"8080"`, `1` is
   not `1.0`). Only the outer type is checked, not list or map elements.
@@ -703,6 +718,89 @@ output is empty.
   some static recipe errors are reported differs (a `recipe <recipe> @ <host>:`
   prefix, the final `variables: ...` line and, in a bundle, their order).
 
+## Project file
+
+*Next version, not in v1.9.0.* A project file holds what you would otherwise repeat on every
+command line, so that `sinter apply moge.yaml web01` works from your project directory
+wherever the recipe is.
+
+```text
+# sinter.project.yaml
+version: 1
+recipe_paths:              # directories searched for a bare recipe name
+  - /opt/sinter/recipes
+  - ./recipes
+inventory: ./hosts.yaml
+vars_files:                # lowest precedence first
+  - ./vars/common.yaml
+  - ./vars/production.yaml
+backup:
+  directory: /var/backups/sinter   # a path on each target
+default_target: "@web"     # optional
+allow_implicit_apply: false
+strict_vars: false
+```
+
+Every field but `version` is optional. Relative paths are relative to the file, and `~` and
+environment variables are not expanded.
+
+- **Where it is read from.** `--config PATH`, or `sinter.project.yaml`, `.yml` or `.toml` in the
+  current directory. Parent directories, the recipe's directory and the home directory are never
+  searched. `--no-config` ignores it. `mcp` and `secrets` never read it. Without one, nothing
+  changes.
+- **What is refused.** A file found in the current directory is held to the rules of a detected
+  inventory: exactly one, not a symbolic link, file and directory owned by you or root and not
+  writable by group or others. So is every file a project file names (a recipe found by search,
+  `inventory`, `vars_files`), however the project file was found. A bad project file is exit 2, it
+  never means "no project".
+- **Which recipe.** Anything with a `/` is a path, used as given. A bare name is looked for in
+  `recipe_paths` and the current directory. Two different files are exit 2, and `./name` or a full
+  path settles it; none is exit 2. No other recipe is tried and no extension is added. A bundle's
+  `recipes` stay relative to the bundle.
+- **Which inventory.** `--inventory`, else the project's `inventory`, else, for a selector, the
+  detected one; a recipe found through `recipe_paths` adds no place to look.
+- **Which hosts**, strongest first: `--host`; a selector; `--inventory` or the project's `inventory`
+  with the recipes' `targets` (and `--limit`); `default_target`; the local target, only when the
+  project names no inventory and no default target. `--host` turns the project's hosts off for that
+  command. **No failure falls back to the local target.** To run locally in such a directory, use
+  `--no-config`.
+- **`apply` naming no host.** An `apply` with no `--host`, selector, `--limit` or `--inventory` that would
+  reach hosts through the project's `inventory` or `default_target` is refused (exit 2) unless the file
+  also says `allow_implicit_apply: true`. `plan`, `audit` and `validate` go on. No prompt is added.
+
+What is in effect is shown first (`config:`, `recipe:`, `inventory:`, `vars:`, `backup store:`), on
+stderr with `--format json`, whose document has a `resolved` object.
+
+## Partial runs
+
+*Next version, not in v1.9.0.* `--skip-recipe NAME` and `--skip-resource ID` may be repeated, on
+`validate`, `plan`, `apply` and `audit`, with one meaning: what is excluded is not observed, changed
+or reported as passed. `ID` is a resource id, a loop's base id or one instance (`id[2]`), or
+`recipe/id` in a bundle.
+
+```text
+$ sinter plan bundle.yaml --skip-recipe ssh-hardening --skip-resource nginx/extra
+Included:
+  nginx/config
+  nginx/service
+Excluded:
+  ssh-hardening/*  SKIPPED_BY_USER
+  nginx/extra      SKIPPED_BY_USER
+Blocked dependencies:
+  none
+```
+
+Exit 2 before `ssh -G` or any connection: a name that matches nothing; a recipe label two recipes
+share, or an id several recipes have without `recipe/`; a handler id (a handler runs only when an
+included resource notifies it); an included resource whose `depends_on` names an excluded one, since
+nothing is excluded automatically; nothing left to run; and `--audit-policy strict`, which answers for
+the whole recipe. An excluded recipe is still validated. A declared backup of a recipe that runs is
+taken in full.
+
+Exit codes do not change, so the exclusion is always visible: the list above comes first, a final
+`PARTIAL_APPLY`, `PARTIAL_PLAN` or `PARTIAL_AUDIT` line ends the output, and JSON has `skips` with
+`partial: true` and each excluded resource with its reason.
+
 ## Backups before apply
 
 *Available from Sinter v1.1.0.*
@@ -736,6 +834,20 @@ resources:
   mode, ACLs, ownership and timestamps preserved; other extended attributes
   and SELinux labels are best effort. A path that does not exist is recorded
   as `absent`.
+- *Next version, not in v1.9.0.* `--backup-dir PATH` or the project file's
+  `backup.directory` names another store. It is a path **on each target**, and a recipe cannot
+  name one. Only that directory is created (mode 0700); its parent must exist. It is checked like
+  the default store: no symbolic link, no directory another account owns or others can write, not
+  directly in `/tmp`, and it may not overlap a declared path. `plan` reports the same refusals.
+- *Next version, not in v1.9.0.* As root, a **regular file in another account's directory**, such
+  as `/var/lib/pgsql/.pgpass` (owner `postgres`, mode 0600, directory mode 0700), is read as that
+  account and written by root into the private run directory, keeping owner, group, mode, times and
+  ACL. Refused: a directory there, a symbolic link, a file owned by anyone else, a file with several
+  hard links, a setuid or setgid file, a file over 1 GiB, a file that changes while it is read,
+  anything directly in `/tmp`, and a declared directory owned by another account (`cp -a` accepted that
+  up to v1.9.0). Declared paths that overlap are refused for every recipe, in every phase. Other extended attributes and SELinux labels are not copied.
+  **This is not a database backup:** to back up a live PostgreSQL data directory, use PostgreSQL's
+  own tools.
 - If any backup fails, apply stops before any resource runs (exit 5) and the
   error names the partial run directory, which is kept.
 - Backup content never appears in output. Sinter never restores, rotates or
@@ -1339,6 +1451,18 @@ always gives this aggregate document, with `selector` (the items) instead of
 `resolution` entry and `excluded_by: "selector"`. A `validate` document gains
 `selector`, `inventory`, `inventory_source`, `selected_executions` and
 `targeted_executions`.
+
+### Project file and partial runs
+
+*Next version, not in v1.9.0.* Present only when in effect, so other documents are unchanged:
+
+- `resolved`: `config` (`path`, `source`: `explicit` or `detected`), `recipe` (`path`, `via`: `given` or
+  `recipe_paths`), `inventory` (`path`, `source`: `explicit` or `project`), `default_target`, `vars_files`,
+  `backup_directory`.
+- `skips`: `partial: true`, `requested` (`recipes`, `resources`), `included`, `excluded` (`recipe`, `resource`,
+  null for a whole recipe, and `reason`: `SKIPPED_BY_USER`) and `blocked`.
+- `vars_warnings`: variables no recipe of the run declares. `inventory_source` can also be `project`.
+- `validate`: `variables.files` replaces `variables.file` when there are several files.
 
 ### Compatibility rules
 

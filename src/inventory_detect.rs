@@ -44,11 +44,30 @@ pub const MAX_DETECTED_BYTES: u64 = 1024 * 1024;
 
 const ASK: &str = "name a file you trust with --inventory";
 
-fn refuse(path: &Path, what: impl std::fmt::Display) -> SinterError {
+/// Who a refusal is about, and what the person can do instead: the rules are the
+/// same for everything that arrives without having been named (DESIGN §40.1).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Who {
+    pub(crate) label: &'static str,
+    pub(crate) ask: &'static str,
+}
+
+const INVENTORY: Who = Who {
+    label: "auto-detected inventory",
+    ask: ASK,
+};
+
+fn refuse_as(who: Who, path: &Path, what: impl std::fmt::Display) -> SinterError {
     SinterError::schema(format!(
-        "auto-detected inventory {}: {what}; {ASK}",
-        path.display()
+        "{} {}: {what}; {}",
+        who.label,
+        path.display(),
+        who.ask
     ))
+}
+
+fn refuse(path: &Path, what: impl std::fmt::Display) -> SinterError {
+    refuse_as(INVENTORY, path, what)
 }
 
 fn open_at(dir: Option<&OwnedFd>, name: &std::ffi::OsStr, flags: i32) -> std::io::Result<OwnedFd> {
@@ -102,6 +121,10 @@ struct Place {
 /// system's own layout (for example `/var` and `/tmp` on macOS), not something a
 /// project can bring along.
 fn recipe_place(recipe: &Path, cwd: &Path, me: u32) -> Result<Place> {
+    place_as(INVENTORY, recipe, cwd, me)
+}
+
+fn place_as(who: Who, recipe: &Path, cwd: &Path, me: u32) -> Result<Place> {
     let dir = match recipe.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -112,10 +135,12 @@ fn recipe_place(recipe: &Path, cwd: &Path, me: u32) -> Result<Place> {
     for c in dir.components() {
         walked.push(c);
         if matches!(c, Component::Normal(_)) {
-            let md = std::fs::symlink_metadata(&walked)
-                .map_err(|e| refuse(&shown, format!("cannot inspect the directory: {e}")))?;
+            let md = std::fs::symlink_metadata(&walked).map_err(|e| {
+                refuse_as(who, &shown, format!("cannot inspect the directory: {e}"))
+            })?;
             if md.file_type().is_symlink() && !link_is_system_layout(md.uid(), me) {
-                return Err(refuse(
+                return Err(refuse_as(
+                    who,
                     &shown,
                     format!(
                         "the recipe's directory is reached through the symbolic link {}",
@@ -128,9 +153,14 @@ fn recipe_place(recipe: &Path, cwd: &Path, me: u32) -> Result<Place> {
     // The walk above saw the whole path; this also holds if the last component
     // was changed into a link since.
     let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW;
-    let fd = open_at(None, shown.as_os_str(), flags)
-        .map_err(|e| refuse(&shown, format!("cannot open the recipe's directory: {e}")))?;
-    let md = fstat(&fd).map_err(|e| refuse(&shown, e))?;
+    let fd = open_at(None, shown.as_os_str(), flags).map_err(|e| {
+        refuse_as(
+            who,
+            &shown,
+            format!("cannot open the recipe's directory: {e}"),
+        )
+    })?;
+    let md = fstat(&fd).map_err(|e| refuse_as(who, &shown, e))?;
     Ok(Place { fd, md, shown })
 }
 
@@ -171,16 +201,26 @@ fn read_trusted(
     me: u32,
     after_check: &mut dyn FnMut(),
 ) -> Result<(Vec<u8>, PathBuf)> {
+    read_trusted_as(INVENTORY, found, me, after_check)
+}
+
+fn read_trusted_as(
+    who: Who,
+    found: Found,
+    me: u32,
+    after_check: &mut dyn FnMut(),
+) -> Result<(Vec<u8>, PathBuf)> {
     let Found { fd, path, dir } = found;
-    let before = fstat(&fd).map_err(|e| refuse(&path, e))?;
+    let before = fstat(&fd).map_err(|e| refuse_as(who, &path, e))?;
     if !before.file_type().is_file() {
-        return Err(refuse(&path, "not a regular file"));
+        return Err(refuse_as(who, &path, "not a regular file"));
     }
     if !owner_ok(&before, me) {
-        return Err(refuse(&path, "owned by another user"));
+        return Err(refuse_as(who, &path, "owned by another user"));
     }
     if before.mode() & 0o022 != 0 {
-        return Err(refuse(
+        return Err(refuse_as(
+            who,
             &path,
             format!(
                 "writable by group or others (mode {:o})",
@@ -189,10 +229,15 @@ fn read_trusted(
         ));
     }
     if !owner_ok(&dir, me) {
-        return Err(refuse(&path, "its directory is owned by another user"));
+        return Err(refuse_as(
+            who,
+            &path,
+            "its directory is owned by another user",
+        ));
     }
     if dir.mode() & 0o022 != 0 {
-        return Err(refuse(
+        return Err(refuse_as(
+            who,
             &path,
             format!(
                 "its directory is writable by group or others (mode {:o})",
@@ -200,7 +245,13 @@ fn read_trusted(
             ),
         ));
     }
-    let too_large = || refuse(&path, format!("larger than {MAX_DETECTED_BYTES} bytes"));
+    let too_large = || {
+        refuse_as(
+            who,
+            &path,
+            format!("larger than {MAX_DETECTED_BYTES} bytes"),
+        )
+    };
     if before.len() > MAX_DETECTED_BYTES {
         return Err(too_large());
     }
@@ -210,11 +261,11 @@ fn read_trusted(
     (&mut file)
         .take(MAX_DETECTED_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|e| refuse(&path, format!("cannot read it: {e}")))?;
+        .map_err(|e| refuse_as(who, &path, format!("cannot read it: {e}")))?;
     if bytes.len() as u64 > MAX_DETECTED_BYTES {
         return Err(too_large());
     }
-    let after = file.metadata().map_err(|e| refuse(&path, e))?;
+    let after = file.metadata().map_err(|e| refuse_as(who, &path, e))?;
     let same = before.len() == after.len()
         && before.nlink() == after.nlink()
         && before.mtime() == after.mtime()
@@ -223,7 +274,7 @@ fn read_trusted(
         && before.ctime_nsec() == after.ctime_nsec()
         && bytes.len() as u64 == after.len();
     if !same {
-        return Err(refuse(&path, "it changed while it was being read"));
+        return Err(refuse_as(who, &path, "it changed while it was being read"));
     }
     Ok((bytes, path))
 }
@@ -259,6 +310,73 @@ pub fn detect_inventory(recipe: &Path) -> Result<Inventory> {
         ))
     })?;
     detect_from(&cwd, recipe, &mut || {})
+}
+
+/// [`detect_inventory`] for a recipe found through a project's `recipe_paths`:
+/// only the current directory, since a shared recipe directory's inventory is not
+/// this project's (DESIGN §40.3).
+pub fn detect_inventory_here() -> Result<Inventory> {
+    let cwd = std::env::current_dir().map_err(|e| {
+        SinterError::schema(format!(
+            "cannot determine the current directory to look for an inventory: {e}; {ASK}"
+        ))
+    })?;
+    detect_from(&cwd, Path::new("recipe"), &mut || {})
+}
+
+/// Open one name in the place and judge it. A symbolic link is refused.
+fn read_in_place(who: Who, place: Place, name: &std::ffi::OsStr) -> Result<(Vec<u8>, PathBuf)> {
+    let path = place.shown.join(name);
+    let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY;
+    let fd = open_at(Some(&place.fd), name, flags).map_err(|e| {
+        if matches!(e.raw_os_error(), Some(libc::ELOOP | libc::EMLINK)) {
+            refuse_as(who, &path, "refusing a symbolic link")
+        } else {
+            refuse_as(who, &path, format!("cannot open it: {e}"))
+        }
+    })?;
+    let found = Found {
+        fd,
+        path,
+        dir: place.md,
+    };
+    read_trusted_as(who, found, euid(), &mut || {})
+}
+
+/// The bytes of `name` in the directory `cwd`, when it passes the rules of a
+/// detected file: the file and its directory are judged on open descriptors.
+pub(crate) fn read_candidate_trusted(
+    who: Who,
+    cwd: &Path,
+    name: &str,
+) -> Result<(Vec<u8>, PathBuf)> {
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY;
+    let fd = open_at(None, cwd.as_os_str(), flags)
+        .map_err(|e| refuse_as(who, cwd, format!("cannot open the directory: {e}")))?;
+    let md = fstat(&fd).map_err(|e| refuse_as(who, cwd, e))?;
+    let place = Place {
+        fd,
+        md,
+        shown: cwd.to_path_buf(),
+    };
+    read_in_place(who, place, std::ffi::OsStr::new(name))
+}
+
+/// The bytes of a file a project file names, under the same rules; a symbolic
+/// link on the way there is treated as on the way to a recipe's directory.
+pub(crate) fn read_named_trusted(who: Who, path: &Path) -> Result<(Vec<u8>, PathBuf)> {
+    let cwd = std::env::current_dir().map_err(|e| {
+        refuse_as(
+            who,
+            path,
+            format!("cannot determine the current directory: {e}"),
+        )
+    })?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| refuse_as(who, path, "it names no file"))?;
+    let place = place_as(who, path, &cwd, euid())?;
+    read_in_place(who, place, name)
 }
 
 /// `cwd` is the absolute current directory, as the operating system reports it.

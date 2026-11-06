@@ -13,7 +13,7 @@ use sinter::inventory::{
     load_inventory, parse_limit, parse_selector, resolve_with_selector, Inventory, ParsedLimit,
     Resolution,
 };
-use sinter::inventory_detect::detect_inventory;
+use sinter::inventory_detect::{detect_inventory, detect_inventory_here};
 use sinter::model::Model;
 use sinter::output::{
     audit_report_json, render_apply, render_audit, render_plan, run_report_json, OutputFormat,
@@ -27,12 +27,14 @@ use sinter::progress_session::{
     SessionInfo,
 };
 use sinter::progress_tty::stderr_consumer_factory;
+use sinter::project::{check_named_file, load_project, resolve_recipe, ProjectFile, RecipeVia};
+use sinter::skips::{SkipPlan, SkipRequest, UnitView};
 use sinter::sshconfig::TargetRequest;
 use sinter::style;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -186,10 +188,37 @@ struct ExecOpts {
     sudo: bool,
     /// Variables file (YAML or TOML): common (`vars`), per-group (`groups`,
     /// needs --inventory) and per-host (`hosts`) values for variables the
-    /// recipes declare. Every host is checked before any is contacted. Plain
-    /// text: never put secrets in it; sensitive variables cannot be set here.
+    /// recipes declare. May be repeated: a later file wins, variable by variable
+    /// and layer by layer, after any `vars_files` of the project file. Every
+    /// host is checked before any is contacted. Plain text: never put secrets in
+    /// it; sensitive variables cannot be set here.
     #[arg(long, value_name = "PATH")]
-    vars_file: Option<PathBuf>,
+    vars_file: Vec<PathBuf>,
+    /// A variable no recipe of this run declares is an error, not a warning.
+    #[arg(long)]
+    strict_vars: bool,
+    /// Project file to use [default: sinter.project.yaml, .yml or .toml in the
+    /// current directory; parents are never searched].
+    #[arg(long, value_name = "PATH", conflicts_with = "no_config")]
+    config: Option<PathBuf>,
+    /// Ignore any project file.
+    #[arg(long)]
+    no_config: bool,
+    /// Keep this run's backups under this directory on each target, instead of
+    /// the default store. Only the directory itself is created; its parent must
+    /// exist and pass the same trust checks.
+    #[arg(long, value_name = "TARGET_PATH")]
+    backup_dir: Option<String>,
+    /// Leave this recipe of a bundle out (may be repeated). It is still validated.
+    #[arg(long, value_name = "NAME")]
+    skip_recipe: Vec<String>,
+    /// Leave this resource out (may be repeated): an id, a loop's base id, or
+    /// recipe/id. Refused if an included resource depends on it.
+    #[arg(long, value_name = "ID")]
+    skip_resource: Vec<String>,
+    /// What the project file and the checks settled for this run.
+    #[arg(skip)]
+    resolved: Resolved,
     /// Run only on these inventory hosts (needs --inventory). A comma-separated
     /// list of host names, group names, `host:NAME`, `group:NAME` and patterns
     /// (`*`, `?`; quote them) that match host names only. It narrows what the
@@ -207,6 +236,263 @@ struct ExecOpts {
     plugin_root: Option<PathBuf>,
 }
 
+/// What a run took from its project file (DESIGN §40), and what its static checks
+/// found that later steps and the output need.
+#[derive(Debug, Default, Clone)]
+struct Resolved {
+    project: Option<Arc<ProjectFile>>,
+    recipe_via: RecipeVia,
+    inventory_from_project: bool,
+    default_target: bool,
+    backup_dir: Option<String>,
+    strict_vars: bool,
+    /// Warnings of the variables gate, for JSON output.
+    vars_warnings: OnceLock<Vec<String>>,
+    /// The checked exclusions, set once before anything is resolved.
+    skips: OnceLock<SkipPlan>,
+}
+
+impl ExecOpts {
+    fn backup_store(&self) -> Option<String> {
+        self.backup_dir
+            .clone()
+            .or_else(|| self.resolved.backup_dir.clone())
+    }
+
+    fn skips(&self) -> Option<&SkipPlan> {
+        self.resolved.skips.get()
+    }
+
+    /// Whether anything of recipe `unit` runs.
+    fn unit_runs(&self, unit: usize) -> bool {
+        self.skips().is_none_or(|s| s.runs(unit))
+    }
+}
+
+/// Apply the project file (DESIGN §40) to what the command line said: the recipe
+/// to run, the selector and the options the rest of the run reads. The command
+/// line wins every time, and without a project file nothing changes.
+fn apply_project(
+    phase: Option<Phase>,
+    recipe: &Path,
+    selector: Option<&str>,
+    exec: &ExecOpts,
+) -> Result<(PathBuf, Option<String>, ExecOpts), SinterError> {
+    let mut exec = exec.clone();
+    let mut selector = selector.map(str::to_string);
+    let project = load_project(exec.config.as_deref(), exec.no_config)?;
+    let Some(project) = project else {
+        return Ok((recipe.to_path_buf(), selector, exec));
+    };
+    let (recipe, via) = resolve_recipe(recipe, Some(&project))?;
+    exec.resolved.recipe_via = via;
+    exec.resolved.strict_vars = project.strict_vars;
+    exec.resolved.backup_dir = project.backup_directory.clone();
+    let cli_inventory = exec.inventory.is_some();
+    // `--host` means that host: the project's hosts do not come into it.
+    if exec.host.is_none() {
+        if !cli_inventory {
+            if let Some(path) = &project.inventory {
+                check_named_file(path)?;
+                exec.inventory = Some(path.clone());
+                exec.resolved.inventory_from_project = true;
+            }
+        }
+        if selector.is_none() && exec.limit.is_none() && !cli_inventory {
+            // An apply that names no host must not reach machines because of a file
+            // nobody on this command line mentioned (DESIGN §40.4).
+            let reaches = project.default_target.as_deref().or(project
+                .inventory
+                .as_ref()
+                .map(|_| "the targets of the recipes"));
+            if let (Some(what), Some(Phase::Apply), false) =
+                (reaches, phase, project.allow_implicit_apply)
+            {
+                return Err(SinterError::schema(format!(
+                    "apply names no host, and project file {} would select {}: name the hosts on the command line, or set allow_implicit_apply: true in that file",
+                    project.path.display(),
+                    what
+                )));
+            }
+            if let Some(default) = &project.default_target {
+                selector = Some(default.clone());
+                exec.resolved.default_target = true;
+            }
+        }
+    }
+    let mut files = Vec::with_capacity(project.vars_files.len() + exec.vars_file.len());
+    for path in &project.vars_files {
+        check_named_file(path)?;
+        files.push(path.clone());
+    }
+    files.append(&mut exec.vars_file);
+    exec.vars_file = files;
+    exec.resolved.project = Some(Arc::new(project));
+    Ok((recipe, selector, exec))
+}
+
+/// What the run is about to use, before anything runs. Text goes to stdout; with
+/// JSON, where stdout is one document, to stderr (the document has `resolved`).
+fn print_resolved(recipe: &Path, selector: Option<&str>, exec: &ExecOpts, format: OutputFormat) {
+    let mut lines = Vec::new();
+    if let Some(p) = &exec.resolved.project {
+        lines.push(format!(
+            "config: {} ({})",
+            sanitize_line(&p.path.display().to_string()),
+            p.source.label()
+        ));
+        lines.push(format!(
+            "recipe: {} ({})",
+            sanitize_line(&recipe.display().to_string()),
+            match exec.resolved.recipe_via {
+                RecipeVia::Given => "as given",
+                RecipeVia::RecipePaths => "found through recipe_paths",
+            }
+        ));
+        // With a selector the inventory is shown when it is loaded.
+        match (selector, &exec.inventory) {
+            (None, Some(inv)) => lines.push(format!(
+                "inventory: {} ({})",
+                sanitize_line(&inv.display().to_string()),
+                if exec.resolved.inventory_from_project {
+                    "project file"
+                } else {
+                    "--inventory"
+                }
+            )),
+            (None, None) => lines.push(format!("target: {}", sanitize_line(one_target_name(exec)))),
+            _ => {}
+        }
+        if let (Some(s), true) = (selector, exec.resolved.default_target) {
+            lines.push(format!(
+                "target: {} (default_target of the project file)",
+                sanitize_line(s)
+            ));
+        }
+        for f in &exec.vars_file {
+            lines.push(format!("vars: {}", sanitize_line(&f.display().to_string())));
+        }
+    }
+    if let Some(dir) = exec.backup_store() {
+        lines.push(format!(
+            "backup store: {} (on each target)",
+            sanitize_line(&dir)
+        ));
+    }
+    for line in lines {
+        match format {
+            OutputFormat::Text => println!("{line}"),
+            OutputFormat::Json => eprintln!("{line}"),
+        }
+    }
+}
+
+/// The `resolved` object of JSON documents: only when a project file or a named
+/// backup store is in effect, so other documents are unchanged.
+fn resolved_json(recipe: &Path, exec: &ExecOpts) -> Option<serde_json::Value> {
+    let r = &exec.resolved;
+    if r.project.is_none() && exec.backup_store().is_none() {
+        return None;
+    }
+    let inventory_source = if r.inventory_from_project {
+        "project"
+    } else {
+        "explicit"
+    };
+    Some(serde_json::json!({
+        "config": r.project.as_ref().map(|p| serde_json::json!({
+            "path": p.path.display().to_string(),
+            "source": p.source.key(),
+        })),
+        "recipe": {
+            "path": recipe.display().to_string(),
+            "via": r.recipe_via.key(),
+        },
+        "inventory": exec.inventory.as_ref().map(|p| serde_json::json!({
+            "path": p.display().to_string(),
+            "source": inventory_source,
+        })),
+        "default_target": r.default_target,
+        "vars_files": exec.vars_file.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        "backup_directory": exec.backup_store(),
+    }))
+}
+
+/// Add what this section's features contribute to a JSON document.
+fn add_run_extras(doc: &mut serde_json::Value, recipe: &Path, exec: &ExecOpts) {
+    if let Some(v) = resolved_json(recipe, exec) {
+        doc["resolved"] = v;
+    }
+    if let Some(s) = exec.skips() {
+        doc["skips"] = s.json();
+    }
+    if let Some(w) = exec.resolved.vars_warnings.get().filter(|w| !w.is_empty()) {
+        doc["vars_warnings"] = serde_json::json!(w);
+    }
+}
+
+/// The checks that need the loaded recipes and come before `ssh -G` or any
+/// contact: files of a bundle found by search, and the exclusions (DESIGN §40.8).
+/// The preview is shown whether or not the exclusions can run.
+fn skip_gate(
+    phase: &str,
+    strict_audit: bool,
+    exec: &ExecOpts,
+    source: &Source,
+    frozen: Option<&[FrozenExecution]>,
+    format: OutputFormat,
+) -> Result<(), SinterError> {
+    if exec.resolved.recipe_via == RecipeVia::RecipePaths {
+        for u in source.units() {
+            check_named_file(&u.path)?;
+        }
+    }
+    let request = SkipRequest {
+        recipes: exec.skip_recipe.clone(),
+        resources: exec.skip_resource.clone(),
+    };
+    if request.is_empty() {
+        return Ok(());
+    }
+    if strict_audit {
+        return Err(SinterError::schema(
+            "--audit-policy strict answers for the whole recipe and cannot exclude anything",
+        ));
+    }
+    let views: Vec<UnitView<'_>> = source
+        .units()
+        .iter()
+        .enumerate()
+        .map(|(i, u)| UnitView {
+            label: &u.label,
+            unfrozen: u.unfrozen,
+            models: match frozen {
+                Some(all) if !u.unfrozen => all
+                    .iter()
+                    .filter(|f| f.unit == i)
+                    .map(|f| &f.model)
+                    .collect(),
+                _ => vec![&u.model],
+            },
+        })
+        .collect();
+    let plan = SkipPlan::build(&request, &views)?;
+    if format == OutputFormat::Text {
+        println!("== partial {phase} ==");
+        let stdout = std::io::stdout();
+        plan.render(style::stdout_color(), &mut stdout.lock())
+            .map_err(io_error)?;
+        println!();
+    }
+    if let Some(e) = plan.refusal() {
+        return Err(e);
+    }
+    exec.resolved
+        .skips
+        .set(plan)
+        .map_err(|_| model_mismatch("the exclusions were checked twice"))
+}
+
 /// The controller's plugin context for these options (DESIGN §38.7).
 fn plugin_ctx(exec: &ExecOpts) -> sinter::plugin::PluginContext {
     sinter::plugin::PluginContext::controller(exec.plugin_root.as_deref())
@@ -214,7 +500,8 @@ fn plugin_ctx(exec: &ExecOpts) -> sinter::plugin::PluginContext {
 
 #[derive(Args, Debug)]
 struct ValidateArgs {
-    /// Recipe or bundle file.
+    /// Recipe or bundle file. A bare name is searched for when a project file
+    /// has `recipe_paths`; anything with a `/` is a path.
     recipe: PathBuf,
     /// Inventory hosts to run on: NAME is a host, @NAME a group, and a
     /// comma-separated list combines them (web01,@db). The inventory is
@@ -241,7 +528,8 @@ struct ValidateArgs {
 struct TargetArgs {
     #[arg(skip)]
     audit_strict: bool,
-    /// Recipe or bundle file.
+    /// Recipe or bundle file. A bare name is searched for when a project file
+    /// has `recipe_paths`; anything with a `/` is a path.
     recipe: PathBuf,
     /// Inventory hosts to run on: NAME is a host, @NAME a group, and a
     /// comma-separated list combines them (web01,@db). The inventory is
@@ -288,7 +576,18 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<u8, SinterError> {
     match cli.command {
-        Command::Validate(a) => validate(&a),
+        Command::Validate(a) => {
+            let (recipe, selector, exec) =
+                apply_project(None, &a.recipe, a.selector.as_deref(), &a.exec)?;
+            let a = ValidateArgs {
+                recipe,
+                selector,
+                exec,
+                format: a.format,
+                verbose: a.verbose,
+            };
+            validate(&a)
+        }
         Command::Plan(a) => run_phase(Phase::Plan, &a),
         Command::Apply(a) => run_phase(Phase::Apply, &a),
         Command::Audit(mut a) => {
@@ -368,7 +667,8 @@ fn secrets_command(a: SecretsArgs) -> Result<u8, SinterError> {
 /// as given, how many (recipe, host) executions were checked with it, and
 /// each recipe's warnings over all of them (DESIGN §19.5).
 struct VarsReport {
-    file: String,
+    /// The files, lowest precedence first.
+    files: Vec<String>,
     executions: usize,
     /// Per recipe, in order: its executions' warnings, without repeats.
     warnings: Vec<Vec<String>>,
@@ -423,7 +723,9 @@ impl LimitReport {
 
 /// `inventory_source` of a selector run: `--inventory` always wins.
 fn inventory_source(exec: &ExecOpts) -> &'static str {
-    if exec.inventory.is_some() {
+    if exec.resolved.inventory_from_project {
+        "project"
+    } else if exec.inventory.is_some() {
         "explicit"
     } else {
         "detected"
@@ -449,22 +751,34 @@ const MAX_VALIDATE_WARNINGS: usize = 50;
 fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
     let format = parse_format(&a.format)?;
     let selector = a.selector.as_deref();
-    let Some(vars_path) = &a.exec.vars_file else {
+    check_store_option(&a.exec)?;
+    print_resolved(&a.recipe, selector, &a.exec, format);
+    if a.exec.vars_file.is_empty() {
         if a.exec.limit.is_none() && selector.is_none() {
             let source = load_source_with_plugins(&a.recipe, &plugin_ctx(&a.exec))?;
-            return print_validate(&source, format, None, None);
+            skip_gate("validate", false, &a.exec, &source, None, format)?;
+            return print_validate(&source, format, None, None, a);
         }
         // An explicit `--limit` is checked even without a variables file: its
         // syntax, the inventory and which hosts it selects (DESIGN §19.2).
         exclusive_target_options(&a.exec, selector)?;
         let limit = limit_option(&a.exec, selector)?;
         let gate = limit_source(&a.recipe, &a.exec, &limit, format)?;
+        skip_gate("validate", false, &a.exec, &gate.source, None, format)?;
         let report = LimitReport::of(&gate.limited, &limit, Some(&gate.inventory), &a.exec);
-        return print_validate(&gate.source, format, None, report.as_ref());
-    };
+        return print_validate(&gate.source, format, None, report.as_ref(), a);
+    }
     exclusive_target_options(&a.exec, selector)?;
     let limit = limit_option(&a.exec, selector)?;
-    let gate = vars_gate(&a.recipe, &a.exec, vars_path, &limit, format)?;
+    let gate = vars_gate(&a.recipe, &a.exec, &a.exec.vars_file, &limit, format)?;
+    skip_gate(
+        "validate",
+        false,
+        &a.exec,
+        &gate.source,
+        Some(&gate.frozen),
+        format,
+    )?;
     // The first thing `plan` checks of `--host` after the gate (a pure check).
     if let Some(host) = &a.exec.host {
         sinter::sshconfig::validate_host_arg(host)?;
@@ -484,11 +798,22 @@ fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
         .as_ref()
         .and_then(|l| LimitReport::of(l, &limit, gate.inventory.as_ref(), &a.exec));
     let report = VarsReport {
-        file: vars_path.display().to_string(),
+        files: a
+            .exec
+            .vars_file
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect(),
         executions: gate.frozen.len(),
         warnings,
     };
-    print_validate(&gate.source, format, Some(&report), limit_report.as_ref())
+    print_validate(
+        &gate.source,
+        format,
+        Some(&report),
+        limit_report.as_ref(),
+        a,
+    )
 }
 
 /// A recipe's warnings to show, and how many more are left out.
@@ -516,9 +841,13 @@ fn add_variables(
 ) {
     if let Some(v) = vars {
         doc["variables"] = serde_json::json!({
-            "file": v.file,
             "executions": v.executions,
         });
+        // One file keeps the established `file`; several are `files`, in order.
+        match v.files.as_slice() {
+            [one] => doc["variables"]["file"] = serde_json::json!(one),
+            many => doc["variables"]["files"] = serde_json::json!(many),
+        }
     }
     if let Some(l) = limit {
         match &l.selector {
@@ -544,6 +873,7 @@ fn print_validate(
     format: OutputFormat,
     vars: Option<&VarsReport>,
     limit: Option<&LimitReport>,
+    a: &ValidateArgs,
 ) -> Result<u8, SinterError> {
     let color = style::stdout_color();
     let counts = |m: &Model| (m.resources.len(), m.handlers.len(), m.vars.len());
@@ -565,6 +895,7 @@ fn print_validate(
                 }
             }
             add_variables(&mut doc, vars, limit);
+            add_run_extras(&mut doc, &a.recipe, &a.exec);
             println!("{}", serde_json::to_string_pretty(&doc).unwrap());
         }
         (Source::Recipe(u), OutputFormat::Text) => {
@@ -633,6 +964,7 @@ fn print_validate(
                 "recipes": recipes,
             });
             add_variables(&mut doc, vars, limit);
+            add_run_extras(&mut doc, &a.recipe, &a.exec);
             println!("{}", serde_json::to_string_pretty(&doc).unwrap());
         }
         (Source::Bundle(b), OutputFormat::Text) => {
@@ -689,9 +1021,10 @@ fn print_validate(
     if format == OutputFormat::Text {
         if let Some(v) = vars {
             println!(
-                "{}: variables file {} checked: {} execution(s)",
+                "{}: variables file{} {} checked: {} execution(s)",
                 style::status("ok", color),
-                sanitize_line(&v.file),
+                if v.files.len() == 1 { "" } else { "s" },
+                sanitize_line(&v.files.join(", ")),
                 v.executions
             );
         }
@@ -704,6 +1037,9 @@ fn print_validate(
                 l.selected,
                 l.targeted
             );
+        }
+        if let Some(s) = a.exec.skips() {
+            println!("{}", s.summary_line("validate", color));
         }
     }
     Ok(0)
@@ -873,7 +1209,27 @@ fn run_phase(phase: Phase, a: &TargetArgs) -> Result<u8, SinterError> {
     // transient line (S4) and everything else (pipes, CI, TERM=dumb) none.
     let mode = mode_from_environment(format == OutputFormat::Json);
     let progress = ProgressOptions::new(mode).with_consumer_factory(consumer_factory_for(mode));
-    run_phase_with(phase, a, format, &progress)
+    let (recipe, selector, exec) =
+        apply_project(Some(phase), &a.recipe, a.selector.as_deref(), &a.exec)?;
+    let a = TargetArgs {
+        audit_strict: a.audit_strict,
+        recipe,
+        selector,
+        exec,
+        verbose: a.verbose,
+        format: a.format.clone(),
+    };
+    check_store_option(&a.exec)?;
+    print_resolved(&a.recipe, a.selector.as_deref(), &a.exec, format);
+    run_phase_with(phase, &a, format, &progress)
+}
+
+/// `--backup-dir` is a path on the target: checked as such before anything runs.
+fn check_store_option(exec: &ExecOpts) -> Result<(), SinterError> {
+    match &exec.backup_dir {
+        Some(dir) => sinter::backup::validate_store_dir(dir),
+        None => Ok(()),
+    }
 }
 
 /// `--host` names one target and `--inventory` selects several through the
@@ -926,8 +1282,8 @@ fn run_phase_with(
         format,
         color: format == OutputFormat::Text && style::stdout_color(),
     };
-    if let Some(vars) = &a.exec.vars_file {
-        return run_phase_vars(phase, a, vars, &limit, &ro, progress);
+    if !a.exec.vars_file.is_empty() {
+        return run_phase_vars(phase, a, &a.exec.vars_file, &limit, &ro, progress);
     }
     if limit.given() {
         let LimitGate {
@@ -935,12 +1291,14 @@ fn run_phase_with(
             inventory,
             limited,
         } = limit_source(&a.recipe, &a.exec, &limit, format)?;
+        skip_gate(phase.name(), a.audit_strict, &a.exec, &source, None, format)?;
         let session = progress.begin(source_info(phase, &source));
         let planned = inventory_targets(&inventory, limited, a, &session);
         session.end(scope_outcome(&planned));
         return run_executions(phase, &source, planned?, a, &ro, progress);
     }
     let source = load_source_with_plugins(&a.recipe, &plugin_ctx(&a.exec))?;
+    skip_gate(phase.name(), a.audit_strict, &a.exec, &source, None, format)?;
     if let Some(inv) = &a.exec.inventory {
         // Several executions follow, so target resolution is a progress scope
         // of its own; each execution then gets its own.
@@ -979,12 +1337,32 @@ fn run_one_target(
                     .ok_or_else(|| model_mismatch("no model for the recipe"))?,
                 None => u.model.clone(),
             };
+            let model = match a.exec.skips() {
+                Some(s) => s.filter(0, model),
+                None => model,
+            };
             let session = progress.begin(unit_info(phase, u));
             let executed = single_target(a, Some(&session))
                 .and_then(|target| execute(phase, model, target.spec, a, None, session.sink()));
             session.end(run_outcome_of(&executed));
             let outcome = executed?;
-            outcome.render(phase, ro, a.audit_strict)?;
+            let extras = resolved_json(&a.recipe, &a.exec).is_some()
+                || a.exec.skips().is_some()
+                || a.exec
+                    .resolved
+                    .vars_warnings
+                    .get()
+                    .is_some_and(|w| !w.is_empty());
+            if extras && ro.format == OutputFormat::Json {
+                let mut doc = outcome.json(phase, a.audit_strict);
+                add_run_extras(&mut doc, &a.recipe, &a.exec);
+                println!("{}", serde_json::to_string_pretty(&doc).unwrap());
+            } else {
+                outcome.render(phase, ro, a.audit_strict)?;
+                if let (Some(s), OutputFormat::Text) = (a.exec.skips(), ro.format) {
+                    println!("{}", s.summary_line(phase.name(), ro.color));
+                }
+            }
             Ok(outcome.policy_exit_code(a.audit_strict))
         }
         Source::Bundle(b) => {
@@ -1008,6 +1386,9 @@ fn run_one_target(
                     ),
                     None => None,
                 };
+                if !a.exec.unit_runs(i) {
+                    continue;
+                }
                 executions.push(Execution {
                     unit: i,
                     target: target.clone(),
@@ -1065,7 +1446,13 @@ fn selector_inventory(
     format: OutputFormat,
 ) -> Result<Inventory, SinterError> {
     let (inventory, how) = match &exec.inventory {
+        Some(path) if exec.resolved.inventory_from_project => {
+            (load_inventory(path)?, "project file")
+        }
         Some(path) => (load_inventory(path)?, "--inventory"),
+        None if exec.resolved.recipe_via == RecipeVia::RecipePaths => {
+            (detect_inventory_here()?, "auto-detected")
+        }
         None => (detect_inventory(recipe)?, "auto-detected"),
     };
     let line = format!(
@@ -1157,18 +1544,34 @@ fn unrun_units(limited: Option<&Limited>, units: usize) -> Vec<bool> {
 fn vars_gate(
     recipe: &Path,
     exec: &ExecOpts,
-    vars_path: &Path,
+    vars_paths: &[PathBuf],
     limit: &ParsedLimit,
     format: OutputFormat,
 ) -> Result<VarsGate, SinterError> {
-    use sinter::varsfile::{freeze_executions_in, load_vars_file, Mode as VarsMode, Scope};
+    use sinter::varsfile::{
+        freeze_executions_with, load_vars_file, merge_vars_files, Mode as VarsMode, Problems,
+        Scope, UnknownVars,
+    };
     let prepared = prepare_source_with_plugins(recipe, &plugin_ctx(exec))?;
     let inventory = match &exec.inventory {
         _ if limit.is_selector() => Some(selector_inventory(recipe, exec, format)?),
         Some(p) => Some(load_inventory(p)?),
         None => None,
     };
-    let vars = load_vars_file(vars_path).map_err(static_failure)?;
+    // Every file is read and checked, so all their problems are reported at once.
+    let mut files = Vec::with_capacity(vars_paths.len());
+    let mut unreadable = Vec::new();
+    for path in vars_paths {
+        match load_vars_file(path) {
+            Ok(f) => files.push(f),
+            Err(Problems(p)) => unreadable.extend(p),
+        }
+    }
+    if !unreadable.is_empty() {
+        return Err(static_failure(Problems(unreadable)));
+    }
+    let vars = merge_vars_files(files)
+        .ok_or_else(|| model_mismatch("a variables gate without a variables file"))?;
     let (limited, pairs): (Option<Limited>, Vec<(usize, String)>) = match &inventory {
         Some(inv) => {
             let resolutions = limit_resolutions(inv, &prepared, limit)?;
@@ -1203,8 +1606,30 @@ fn vars_gate(
     } else {
         Scope::All
     };
-    let models = freeze_executions_in(&prepared.units, &vars, &mode, &pairs, scope)
-        .map_err(static_failure)?;
+    let unknown = if exec.strict_vars || exec.resolved.strict_vars {
+        UnknownVars::Error
+    } else {
+        UnknownVars::Warn
+    };
+    let mut warnings = Vec::new();
+    let models = freeze_executions_with(
+        &prepared.units,
+        &vars,
+        &mode,
+        &pairs,
+        scope,
+        unknown,
+        &mut warnings,
+    )
+    .map_err(static_failure)?;
+    for w in &warnings {
+        eprintln!(
+            "{} {}",
+            style::status("warning:", style::stderr_color()),
+            sanitize_line(w)
+        );
+    }
+    let _ = exec.resolved.vars_warnings.set(warnings);
     // From here on a model travels with the (recipe, host) it was frozen
     // for; it is only ever assigned by that key, never by position alone.
     #[allow(unused_mut)]
@@ -1252,7 +1677,7 @@ fn vars_gate(
 fn run_phase_vars(
     phase: Phase,
     a: &TargetArgs,
-    vars_path: &Path,
+    vars_paths: &[PathBuf],
     limit: &ParsedLimit,
     ro: &RenderOptions,
     progress: &ProgressOptions,
@@ -1262,7 +1687,15 @@ fn run_phase_vars(
         inventory,
         limited,
         frozen,
-    } = vars_gate(&a.recipe, &a.exec, vars_path, limit, ro.format)?;
+    } = vars_gate(&a.recipe, &a.exec, vars_paths, limit, ro.format)?;
+    skip_gate(
+        phase.name(),
+        a.audit_strict,
+        &a.exec,
+        &source,
+        Some(&frozen),
+        ro.format,
+    )?;
     let Some(inv) = inventory else {
         return run_one_target(phase, &source, Some(frozen), a, ro, progress);
     };
@@ -1272,6 +1705,11 @@ fn run_phase_vars(
     let planned = inventory_targets(&inv, limited, a, &session);
     session.end(scope_outcome(&planned));
     let mut plan = planned?;
+    // An excluded recipe has no execution, so its models have no place.
+    let frozen: Vec<FrozenExecution> = frozen
+        .into_iter()
+        .filter(|f| a.exec.unit_runs(f.unit))
+        .collect();
     // Checked in every build, before any execution connects.
     attach_models(&mut plan.executions, frozen, source.units())?;
     run_executions(phase, &source, plan, a, ro, progress)
@@ -1572,10 +2010,17 @@ fn inventory_targets(
     let mut targets: BTreeMap<String, Target> = BTreeMap::new();
     // `Resolve` stage: one item per distinct selected host, each of which costs
     // a local `ssh -G` evaluation. Absent when that evaluation is skipped.
-    let distinct: BTreeSet<&str> = resolutions.iter().flat_map(|r| r.selected()).collect();
+    // An excluded recipe's hosts are not resolved unless another recipe needs them.
+    let runs = |i: usize| a.exec.unit_runs(i);
+    let distinct: BTreeSet<&str> = resolutions
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| runs(*i))
+        .flat_map(|(_, r)| r.selected())
+        .collect();
     let mut stage = (!a.exec.no_ssh_config && !distinct.is_empty())
         .then(|| session.resolve_stage(distinct.len()));
-    for r in &resolutions {
+    for (_, r) in resolutions.iter().enumerate().filter(|(i, _)| runs(*i)) {
         for name in r.selected() {
             if targets.contains_key(name) {
                 continue;
@@ -1634,7 +2079,7 @@ fn inventory_targets(
     }
     #[allow(unused_mut)]
     let mut executions = Vec::new();
-    for (i, r) in resolutions.iter().enumerate() {
+    for (i, r) in resolutions.iter().enumerate().filter(|(i, _)| runs(*i)) {
         for name in r.selected() {
             executions.push(Execution {
                 unit: i,
@@ -1688,7 +2133,13 @@ fn narrowing_key(selector: bool) -> &'static str {
     }
 }
 
-fn print_resolution(source: &Source, plan: &ExecutionPlan, selector: bool, ro: &RenderOptions) {
+fn print_resolution(
+    source: &Source,
+    plan: &ExecutionPlan,
+    selector: bool,
+    ro: &RenderOptions,
+    exec: &ExecOpts,
+) {
     let narrowed_by = if selector { "the selector" } else { "--limit" };
     if let Source::Bundle(b) = source {
         println!(
@@ -1706,7 +2157,7 @@ fn print_resolution(source: &Source, plan: &ExecutionPlan, selector: bool, ro: &
                 sanitize_line(&items.join(","))
             );
         }
-        for (u, r) in source.units().iter().zip(&plan.resolutions) {
+        for (i, (u, r)) in source.units().iter().zip(&plan.resolutions).enumerate() {
             println!(
                 "recipe {} ({})",
                 sanitize_line(&u.label),
@@ -1756,6 +2207,12 @@ fn print_resolution(source: &Source, plan: &ExecutionPlan, selector: bool, ro: &
                 println!(
                     "  {}   recipe not run: {narrowed_by} leaves no host for it",
                     style::status("SKIP", ro.color)
+                );
+            }
+            if !exec.unit_runs(i) {
+                println!(
+                    "  {}   recipe not run",
+                    style::status("SKIPPED_BY_USER", ro.color)
                 );
             }
         }
@@ -1878,7 +2335,7 @@ fn run_executions(
         ));
     }
     if text {
-        print_resolution(source, &plan, a.selector.is_some(), ro);
+        print_resolution(source, &plan, a.selector.is_some(), ro, &a.exec);
     }
     let run_id = sinter::backup::new_run_id();
     let mut results: Vec<ExecResult> = Vec::new();
@@ -1906,6 +2363,10 @@ fn run_executions(
         // have no scope.
         let session = progress.begin(unit_info(phase, u));
         let model = ex.model.take().unwrap_or_else(|| u.model.clone());
+        let model = match a.exec.skips() {
+            Some(s) => s.filter(ex.unit, model),
+            None => model,
+        };
         let executed = execute(
             phase,
             model,
@@ -2002,6 +2463,9 @@ fn run_executions(
             results.len() - zero - not_run,
             not_run
         );
+        if let Some(s) = a.exec.skips() {
+            println!("{}", s.summary_line(phase.name(), ro.color));
+        }
     } else {
         let executions: Vec<serde_json::Value> = results
             .iter()
@@ -2072,6 +2536,7 @@ fn run_executions(
         if selector {
             doc["inventory_source"] = serde_json::json!(inventory_source(&a.exec));
         }
+        add_run_extras(&mut doc, &a.recipe, &a.exec);
         println!("{}", serde_json::to_string_pretty(&doc).unwrap());
     }
     Ok(overall)
@@ -2110,6 +2575,7 @@ fn execute(
     if let Some(id) = backup_run_id {
         engine = engine.with_backup_run_id(id.to_string());
     }
+    engine = engine.with_backup_store(a.exec.backup_store());
     Ok(match phase {
         Phase::Audit => Outcome::Audit(run_audit(engine)?),
         _ => Outcome::Run(Box::new(engine.run()?)),
@@ -5046,5 +5512,139 @@ mod tests {
         session.end(RunOutcome::Completed);
         assert!(e.message.contains("no host was contacted"), "{}", e.message);
         assert!(RESOLVING.with(|h| h.borrow().is_empty()));
+    }
+
+    // ------------------------------------------------------------------
+    // DESIGN §40.8: what runs is the filtered model, on every path to a run.
+
+    fn executed_ids(phase: Phase, argv: &[&str], targets: Vec<FakeTarget>) -> Vec<Vec<String>> {
+        let w = wiring(ProgressMode::Disabled);
+        EXECUTED_MODELS.with(|m| m.borrow_mut().clear());
+        drive(phase, argv, &w, targets).unwrap();
+        EXECUTED_MODELS.with(|m| {
+            m.borrow()
+                .iter()
+                .map(|model| model.resources.iter().map(|r| r.id.clone()).collect())
+                .collect()
+        })
+    }
+
+    const TWO: &str = "version: 1\nvars:\n  root: { value: /etc/perf }\nresources:\n  - id: a\n    type: file\n    with: { path: \"{{ vars.root }}/a\", content: x }\n  - id: b\n    type: file\n    with: { path: \"{{ vars.root }}/b\", content: x }\n";
+
+    #[test]
+    fn an_exclusion_reaches_the_engine_on_a_single_target() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", TWO);
+        let ids = executed_ids(
+            Phase::Plan,
+            &[&r, "--skip-resource", "b", "--format", "json"],
+            vec![base()],
+        );
+        assert_eq!(ids, [["a"]]);
+    }
+
+    #[test]
+    fn an_exclusion_reaches_the_engine_with_a_variables_file() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", TWO);
+        let v = write(&dir, "v.yaml", "version: 1\nvars: { root: /etc/perf }\n");
+        let ids = executed_ids(
+            Phase::Plan,
+            &[
+                &r,
+                "--vars-file",
+                &v,
+                "--skip-resource",
+                "a",
+                "--format",
+                "json",
+            ],
+            vec![base()],
+        );
+        assert_eq!(ids, [["b"]]);
+    }
+
+    #[test]
+    fn an_excluded_recipe_of_a_bundle_is_not_run_on_a_single_target() {
+        let dir = fixture();
+        write(&dir, "one.yaml", TWO);
+        write(
+            &dir,
+            "two.yaml",
+            &TWO.replace("/a", "/c")
+                .replace("/b", "/d")
+                .replace("id: a", "id: c")
+                .replace("id: b", "id: d"),
+        );
+        let b = write(
+            &dir,
+            "b.yaml",
+            "version: 1\nrecipes: [one.yaml, two.yaml]\n",
+        );
+        let ids = executed_ids(
+            Phase::Plan,
+            &[&b, "--skip-recipe", "two", "--format", "json"],
+            vec![base()],
+        );
+        assert_eq!(ids, [["a", "b"]]);
+        // With a variables file as well: the frozen model of the excluded recipe
+        // is dropped, and the others still match their executions.
+        let v = write(&dir, "v.yaml", "version: 1\nvars: { root: /etc/perf }\n");
+        let ids = executed_ids(
+            Phase::Plan,
+            &[
+                &b,
+                "--vars-file",
+                &v,
+                "--skip-recipe",
+                "one",
+                "--format",
+                "json",
+            ],
+            vec![base()],
+        );
+        assert_eq!(ids, [["c", "d"]]);
+    }
+
+    #[test]
+    fn a_refused_exclusion_runs_nothing() {
+        let dir = fixture();
+        let r = write(&dir, "r.yaml", TWO);
+        let w = wiring(ProgressMode::Disabled);
+        EXECUTED_MODELS.with(|m| m.borrow_mut().clear());
+        for argv in [
+            vec![r.as_str(), "--skip-resource", "nope"],
+            vec![r.as_str(), "--skip-resource", "a", "--skip-resource", "b"],
+            vec![r.as_str(), "--skip-recipe", "r"],
+        ] {
+            let e = drive(Phase::Apply, &argv, &w, vec![base()]).unwrap_err();
+            assert_eq!(e.kind, ErrorKind::Schema, "{}", e.message);
+        }
+        assert!(EXECUTED_MODELS.with(|m| m.borrow().is_empty()));
+    }
+
+    #[test]
+    fn a_named_store_reaches_the_engine() {
+        let dir = fixture();
+        let r = write(
+            &dir,
+            "r.yaml",
+            "version: 1\nbackup:\n  paths: [/etc/perf/old]\nresources:\n  - id: a\n    type: file\n    with: { path: /etc/perf/a, content: x }\n",
+        );
+        let w = wiring(ProgressMode::Disabled);
+        let mut t = base();
+        let fs = t.fs.as_mut().unwrap();
+        fs.mkdir_node("/var", 0o755, 0, 0);
+        fs.mkdir_node("/var/backups", 0o755, 0, 0);
+        // Absent as a file on purpose: the store is what this test is about. Below an
+        // existing, trusted parent the named store is made and the run goes on, while
+        // the default store's parents do not exist on this target.
+        let code = drive(
+            Phase::Apply,
+            &[&r, "--backup-dir", "/var/backups/x", "--format", "json"],
+            &w,
+            vec![t],
+        );
+        assert_eq!(code.unwrap(), 0);
     }
 }

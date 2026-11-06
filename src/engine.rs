@@ -197,6 +197,9 @@ pub struct Engine {
     /// Backup run id shared across one invocation's targets; generated on
     /// demand when unset.
     pub(crate) backup_run_id: Option<String>,
+    /// The backup store the operator named (`--backup-dir`, a project file);
+    /// `None` is the default store. DESIGN §40.6.
+    pub(crate) backup_store: Option<String>,
     /// Target-local systemd manager synchronization state.
     pub(crate) manager: crate::manager::ManagerState,
     /// Where `content: { secret: … }` is opened. `None` (the default) means
@@ -217,7 +220,10 @@ impl Engine {
     /// directory that exists, or is not a directory, is not created by apply
     /// and is left alone; one that cannot be observed is assumed created.
     fn record_backup_store_change(&mut self) {
-        let chain = crate::backup::store_chain(self.fs.sudo(), &self.fs.home_env());
+        let chain = match &self.backup_store {
+            Some(dir) => vec![dir.clone()],
+            None => crate::backup::store_chain(self.fs.sudo(), &self.fs.home_env()),
+        };
         self.fs.set_stats_scope("backup");
         for dir in chain {
             let creates = match self.fs.inspect(&dir) {
@@ -357,6 +363,7 @@ impl Engine {
             registers: BTreeMap::new(),
             opts,
             backup_run_id: None,
+            backup_store: None,
             manager: crate::manager::ManagerState::default(),
             secrets: None,
             progress,
@@ -375,6 +382,13 @@ impl Engine {
     /// target's backup directory carries the same name).
     pub fn with_backup_run_id(mut self, id: String) -> Self {
         self.backup_run_id = Some(id);
+        self
+    }
+
+    /// Keep this run's backups in `dir` on the target instead of the default
+    /// store (DESIGN §40.6). Checked with the same rules, in plan and in apply.
+    pub fn with_backup_store(mut self, dir: Option<String>) -> Self {
+        self.backup_store = dir;
         self
     }
 
@@ -412,10 +426,19 @@ impl Engine {
             // A failure leaves through `?`; the tracker then ends the stage
             // as `Failed` with the items attempted so far.
             let mut stage = StageTracker::start(&*progress, Stage::Backup, Some(paths.len()));
-            let report = crate::backup::perform(&mut self.fs, &paths, &id, &mut stage)?;
+            let store = self.backup_store.clone();
+            let report =
+                crate::backup::perform(&mut self.fs, &paths, &id, store.as_deref(), &mut stage)?;
             stage.end(StageOutcome::Completed);
             Some(report)
         } else {
+            // Plan reports what apply would refuse about a store the operator
+            // named; it creates nothing.
+            if let Some(dir) = self.backup_store.clone() {
+                self.fs.set_stats_scope("backup");
+                crate::backup::check_named_store(&mut self.fs, &dir, &self.model.backups)
+                    .map_err(|e| SinterError::plan(e.message))?;
+            }
             Some(crate::backup::planned(&self.model.backups))
         };
         let mut results: BTreeMap<String, usize> = BTreeMap::new();

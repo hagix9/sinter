@@ -449,7 +449,16 @@ fn validate_rejects_a_bad_variables_file_without_a_value_or_a_host() {
             f.write(name, &body)
         };
         for format in ["text", "json"] {
-            let o = f.run(&["validate", &r, "--vars-file", &v, "--format", format]);
+            // --strict-vars: the undeclared case is a warning without it (DESIGN §40.5).
+            let o = f.run(&[
+                "validate",
+                &r,
+                "--vars-file",
+                &v,
+                "--strict-vars",
+                "--format",
+                format,
+            ]);
             let ctx = format!("{name} {format}");
             assert_eq!(o.status.code(), Some(2), "{ctx}: {}", text(&o.stderr));
             let (out, err) = (text(&o.stdout), text(&o.stderr));
@@ -1019,10 +1028,19 @@ fn bundle_error_order_with_and_without_a_variables_file() {
 }
 
 #[test]
-fn one_variables_file_per_invocation() {
+fn the_variables_file_option_may_be_repeated_and_every_file_is_read() {
+    // Until v1.9.0 a second --vars-file was a usage error (DESIGN §40.5).
     let f = Fx::new();
     let r = f.write("r.yaml", "version: 1\nresources: []\n");
     let v = f.write("v.yaml", "version: 1\n");
-    let o = f.run(&["plan", &r, "--vars-file", &v, "--vars-file", &v]);
+    let o = f.run(&["validate", &r, "--vars-file", &v, "--vars-file", &v]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
+    let missing = f.path("missing.yaml").display().to_string();
+    let o = f.run(&["validate", &r, "--vars-file", &v, "--vars-file", &missing]);
     assert_eq!(o.status.code(), Some(2), "{}", text(&o.stderr));
+    assert!(
+        text(&o.stderr).contains("missing.yaml"),
+        "{}",
+        text(&o.stderr)
+    );
 }

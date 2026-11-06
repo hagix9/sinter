@@ -25,9 +25,40 @@ Linux acceptance has not been run.
 - **Short options.** `-H` (`--host`), `-p` (`--port`), `-u` (`--user`), `-i`
   (`--identity`).
 
+- **Project file.** `sinter.project.yaml`, `.yml` or `.toml` in the current directory, or
+  `--config`, sets `recipe_paths`, `inventory`, `vars_files`, `backup.directory`, `default_target`
+  and `strict_vars`; `--no-config` ignores it. Parents are never searched, a found file must pass
+  the rules of a detected inventory, and what is in effect is shown first and in `resolved` in JSON.
+  A bare recipe name is searched for only with `recipe_paths`; two files are refused, and no other
+  recipe is tried. No failure falls back to the local target, and `apply` refuses `default_target`
+  or through a project `inventory` for an `apply` naming no host, unless the file sets `allow_implicit_apply: true`.
+- **Several variables files.** `--vars-file` may be repeated. A later file wins, layer by layer and
+  variable by variable; a map or list value is replaced whole. `required: true` on a variable asks a
+  variables file for its value.
+- **Backup store.** `--backup-dir` or `backup.directory` names the store on the target, held to the
+  checks of the default store. A recipe cannot name one.
+- **A regular file in another account's directory is backed up.** Read as that account, written by
+  root into the private run directory, keeping owner, mode, times and ACL. A directory, a symbolic
+  link, a file of another owner or with several hard links, and anything directly in `/tmp` are
+  refused. A file copy is not a database backup.
+- **Partial runs.** `--skip-recipe` and `--skip-resource` on `validate`, `plan`, `apply` and `audit`.
+  Refused before any contact: unknown or ambiguous names, a handler, a broken `depends_on`, nothing
+  left to run, `--audit-policy strict`. Always shown (`SKIPPED_BY_USER`, `PARTIAL_APPLY`) and in
+  `skips` in JSON.
+
+### Changed
+
+- **A declared backup directory owned by another account is now refused** (`cp -a` as root accepted it
+  until v1.9.0): root does not walk a tree another account controls. List the files instead.
+- **Backup paths that overlap are now refused** in every phase (`/srv` with `/srv/app`): a second copy
+  could write through a link the first left in the run directory.
+- **A variable no recipe of the run declares is now a warning**, not exit 2, because a file shared
+  between recipes holds such names. `--strict-vars` or `strict_vars: true` restores the error. A name
+  close to a declared one stays an error in every mode and names the likely variable.
+
 ### Unchanged
 
-- Every command without a selector: targets, output and exit codes. The SSH key
+- Every command without a selector or a project file: targets, output and exit codes, apart from the unknown-variable change above. The SSH key
   precedence, ssh-agent handling and strict host-key checking.
 
 ## [1.9.0] - 2026-11-01

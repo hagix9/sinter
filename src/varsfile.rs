@@ -46,6 +46,97 @@ pub struct VarsFile {
     pub groups: BTreeMap<String, BTreeMap<String, Value>>,
     /// `hosts.<name>`.
     pub hosts: BTreeMap<String, BTreeMap<String, Value>>,
+    /// After [`merge_vars_files`] of several files: which file the value of a
+    /// `layer` + variable came from, for messages only.
+    pub origins: BTreeMap<(String, String), PathBuf>,
+}
+
+/// Layer several files, lowest precedence first (DESIGN §40.5). Inside each
+/// layer a later file's variable replaces an earlier one's, whole: a map or list
+/// value is never merged. The precedence of the layers is untouched: a host value
+/// of an earlier file still beats a common value of a later one.
+pub fn merge_vars_files(files: Vec<VarsFile>) -> Option<VarsFile> {
+    let many = files.len() > 1;
+    let mut iter = files.into_iter();
+    let mut out = iter.next()?;
+    if many {
+        out.origins = origins_of(&out);
+    }
+    for f in iter {
+        let from = origins_of(&f);
+        out.common.extend(f.common);
+        for (target, source) in [(&mut out.groups, f.groups), (&mut out.hosts, f.hosts)] {
+            for (name, vars) in source {
+                target.entry(name).or_default().extend(vars);
+            }
+        }
+        out.origins.extend(from);
+        out.path = f.path;
+    }
+    Some(out)
+}
+
+fn origins_of(f: &VarsFile) -> BTreeMap<(String, String), PathBuf> {
+    f.entries()
+        .into_iter()
+        .map(|(_, label, name, _)| ((label, name.clone()), f.path.clone()))
+        .collect()
+}
+
+/// What to do about a name no recipe of the run declares (DESIGN §40.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnknownVars {
+    /// Exit 2: `--strict-vars`, `strict_vars: true`, and the library's default.
+    Error,
+    /// A warning, unless the name looks like a typo of a declared one.
+    Warn,
+}
+
+/// The declared variable `name` is probably a typo of: the same but for case and
+/// `-`/`_`, or at most two edits away. Names that differ only in digits are told
+/// apart on purpose (`web1_port`, `web2_port`), and short names say too little.
+fn likely_typo<'a>(name: &str, declared: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let norm = |s: &str| s.to_ascii_lowercase().replace('-', "_");
+    let wanted = norm(name);
+    let digitless = |s: &str| -> String { s.chars().filter(|c| !c.is_ascii_digit()).collect() };
+    let mut best: Option<(usize, &str)> = None;
+    for d in declared {
+        if d == name {
+            return None;
+        }
+        let other = norm(d);
+        let dist = if other == wanted {
+            0
+        } else if wanted.len() < 4
+            || other.len() < 4
+            || digitless(&wanted) == digitless(&other)
+            || wanted.len().abs_diff(other.len()) > 2
+        {
+            continue;
+        } else {
+            edit_distance(&wanted, &other)
+        };
+        if dist <= 2 && best.is_none_or(|(b, _)| dist < b) {
+            best = Some((dist, d));
+        }
+    }
+    best.map(|(_, d)| d)
+}
+
+/// Levenshtein distance of two short names.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur.push((prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
 }
 
 /// Why a variables file or a run's variables were refused: every problem
@@ -148,7 +239,7 @@ fn line_col(prefix: &[u8]) -> (usize, usize) {
 /// position only. A scanner error carries its position; a problem the front
 /// end finds afterwards (duplicate key, anchor, tag, number range, several
 /// documents) has none that is free of content, so none is given.
-fn parse_yaml_quiet(text: &str) -> Result<Value, String> {
+pub(crate) fn parse_yaml_quiet(text: &str) -> Result<Value, String> {
     let mut parser = saphyr_parser::Parser::new_from_str(text);
     while let Some(ev) = parser.next_event() {
         if let Err(e) = ev {
@@ -170,7 +261,7 @@ fn parse_yaml_quiet(text: &str) -> Result<Value, String> {
 
 /// TOML likewise: a syntax error with its position, a datetime or non-finite
 /// number (refused by the front end) without one.
-fn parse_toml_quiet(text: &str) -> Result<Value, String> {
+pub(crate) fn parse_toml_quiet(text: &str) -> Result<Value, String> {
     if let Err(e) = text.parse::<toml::Value>() {
         return Err(match e.span() {
             Some(span) => {
@@ -194,6 +285,7 @@ fn check_schema(path: &Path, ctx: &str, root: &Value) -> Result<VarsFile, Proble
         common: BTreeMap::new(),
         groups: BTreeMap::new(),
         hosts: BTreeMap::new(),
+        origins: BTreeMap::new(),
     };
     let Some(map) = root.as_map() else {
         return Err(Problems(vec![format!(
@@ -385,6 +477,29 @@ pub fn freeze_executions_in(
     pairs: &[(usize, String)],
     scope: Scope,
 ) -> Result<Vec<Model>, Problems> {
+    let mut warnings = Vec::new();
+    freeze_executions_with(
+        units,
+        vf,
+        mode,
+        pairs,
+        scope,
+        UnknownVars::Error,
+        &mut warnings,
+    )
+}
+
+/// [`freeze_executions_in`] with a choice of what a name no recipe declares is
+/// ([`UnknownVars`]). Warnings name variables and files, never a value.
+pub fn freeze_executions_with(
+    units: &[Loaded<Prepared>],
+    vf: &VarsFile,
+    mode: &Mode,
+    pairs: &[(usize, String)],
+    scope: Scope,
+    unknown: UnknownVars,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<Model>, Problems> {
     // The layers that apply to the executions of `pairs`.
     let applicable: Option<(BTreeSet<&str>, BTreeSet<String>)> = match scope {
         Scope::All => None,
@@ -410,6 +525,10 @@ pub fn freeze_executions_in(
             (Some((hosts, _)), Layer::Host(h)) => hosts.contains(h),
             (Some((_, groups)), Layer::Group(g)) => groups.contains(g),
         };
+        let from = vf
+            .origins
+            .get(&(label.clone(), name.clone()))
+            .map_or(String::new(), |p| format!(" (in {})", p.display()));
         let mut declaring = 0;
         for (u, decl) in units.iter().zip(&declared) {
             let Some((default, sensitive)) = decl.get(name.as_str()) else {
@@ -418,13 +537,13 @@ pub fn freeze_executions_in(
             declaring += 1;
             if *sensitive {
                 problems.push(format!(
-                    "{label}: variable {name} is declared sensitive by recipe {}; a variables \
+                    "{label}: variable {name}{from} is declared sensitive by recipe {}; a variables \
                      file cannot override a sensitive variable",
                     u.label
                 ));
             } else if in_scope && default.type_name() != value.type_name() {
                 problems.push(format!(
-                    "{label}: variable {name}: recipe {} declares {} {}, the variables file \
+                    "{label}: variable {name}{from}: recipe {} declares {} {}, the variables file \
                      gives {} {}",
                     u.label,
                     article(default.type_name()),
@@ -435,9 +554,23 @@ pub fn freeze_executions_in(
             }
         }
         if in_scope && declaring == 0 {
-            problems.push(format!(
-                "{label}: variable {name} is not declared by any recipe of this run"
-            ));
+            let names = declared.iter().flat_map(|d| d.keys().copied());
+            if let Some(typo) = likely_typo(name, names) {
+                problems.push(format!(
+                    "{label}: variable {name}{from} is not declared by any recipe of this run; did you mean {typo}?"
+                ));
+            } else if unknown == UnknownVars::Error {
+                problems.push(format!(
+                    "{label}: variable {name}{from} is not declared by any recipe of this run"
+                ));
+            } else {
+                let line = format!(
+                    "{label}: variable {name}{from} is not declared by any recipe of this run; ignored (--strict-vars makes this an error)"
+                );
+                if !warnings.contains(&line) {
+                    warnings.push(line);
+                }
+            }
         }
     }
     match mode {
@@ -565,6 +698,230 @@ fn capped(mut lines: Vec<String>) -> Vec<String> {
         lines.push(format!("... and {more} more problem(s) not listed"));
     }
     lines
+}
+
+#[cfg(test)]
+mod layering_tests {
+    use super::*;
+    use crate::bundle::prepare_source;
+
+    const CANARY: &str = "SINTER_LAYER_CANARY_DO_NOT_PRINT";
+
+    fn write(d: &tempfile::TempDir, name: &str, body: &str) -> PathBuf {
+        let p = d.path().join(name);
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    fn load(d: &tempfile::TempDir, name: &str, body: &str) -> VarsFile {
+        load_vars_file(&write(d, name, body)).unwrap()
+    }
+
+    fn string(m: &Model, name: &str) -> String {
+        m.vars[name].value.as_str().unwrap().to_string()
+    }
+
+    const RECIPE: &str = "version: 1\nvars:\n  app_port: { value: \"d\" }\n  app_root: { value: \"d\" }\n  conf: { value: { a: 1 } }\n";
+
+    fn freeze(
+        d: &tempfile::TempDir,
+        recipe: &str,
+        vf: &VarsFile,
+        unknown: UnknownVars,
+    ) -> (Result<Vec<Model>, Problems>, Vec<String>) {
+        let units = prepare_source(&write(d, "r.yaml", recipe)).unwrap().units;
+        let mut warnings = Vec::new();
+        let r = freeze_executions_with(
+            &units,
+            vf,
+            &Mode::Single,
+            &[(0, "h".to_string())],
+            Scope::All,
+            unknown,
+            &mut warnings,
+        );
+        (r, warnings)
+    }
+
+    #[test]
+    fn a_later_file_wins_variable_by_variable() {
+        let d = tempfile::tempdir().unwrap();
+        let a = load(
+            &d,
+            "a.yaml",
+            "version: 1\nvars: { app_port: \"a\", app_root: \"a\" }\n",
+        );
+        let b = load(&d, "b.toml", "version = 1\n[vars]\napp_port = \"b\"\n");
+        let vf = merge_vars_files(vec![a.clone(), b.clone()]).unwrap();
+        let (r, _) = freeze(&d, RECIPE, &vf, UnknownVars::Error);
+        let m = &r.unwrap()[0];
+        assert_eq!(string(m, "app_port"), "b");
+        assert_eq!(string(m, "app_root"), "a");
+        // The other order gives the other answer: nothing is sorted.
+        let vf = merge_vars_files(vec![b, a]).unwrap();
+        let (r, _) = freeze(&d, RECIPE, &vf, UnknownVars::Error);
+        assert_eq!(string(&r.unwrap()[0], "app_port"), "a");
+    }
+
+    #[test]
+    fn a_map_value_is_replaced_whole_never_merged() {
+        let d = tempfile::tempdir().unwrap();
+        let a = load(&d, "a.yaml", "version: 1\nvars: { conf: { a: 2, b: 2 } }\n");
+        let b = load(&d, "b.yaml", "version: 1\nvars: { conf: { c: 3 } }\n");
+        let vf = merge_vars_files(vec![a, b]).unwrap();
+        let (r, _) = freeze(&d, RECIPE, &vf, UnknownVars::Error);
+        let v = r.unwrap()[0].vars["conf"].value.clone();
+        let m = v.as_map().unwrap();
+        assert_eq!(m.len(), 1, "{m:?}");
+        assert!(m.contains_key("c"));
+    }
+
+    #[test]
+    fn layers_merge_separately_and_a_host_value_of_an_earlier_file_still_wins() {
+        let d = tempfile::tempdir().unwrap();
+        let a = load(
+            &d,
+            "a.yaml",
+            "version: 1\nhosts: { h: { app_port: \"host-a\" } }\n",
+        );
+        let b = load(
+            &d,
+            "b.yaml",
+            "version: 1\nvars: { app_port: \"common-b\" }\n",
+        );
+        let vf = merge_vars_files(vec![a, b]).unwrap();
+        let (r, _) = freeze(&d, RECIPE, &vf, UnknownVars::Error);
+        assert_eq!(string(&r.unwrap()[0], "app_port"), "host-a");
+    }
+
+    #[test]
+    fn a_sensitive_variable_cannot_be_set_from_any_file_even_when_shadowed() {
+        let d = tempfile::tempdir().unwrap();
+        let recipe = "version: 1\nvars:\n  tok: { value: \"x\", sensitive: true }\n";
+        let a = load(
+            &d,
+            "a.yaml",
+            &format!("version: 1\nvars: {{ tok: \"{CANARY}\" }}\n"),
+        );
+        let b = load(&d, "b.yaml", "version: 1\nvars: { tok: \"shadowing\" }\n");
+        let vf = merge_vars_files(vec![a, b]).unwrap();
+        let (r, _) = freeze(&d, recipe, &vf, UnknownVars::Warn);
+        let p = r.unwrap_err().0.join("\n");
+        assert!(p.contains("cannot override a sensitive variable"), "{p}");
+        assert!(p.contains("b.yaml"), "the file is named: {p}");
+        assert!(!p.contains(CANARY) && !p.contains("shadowing"), "{p}");
+    }
+
+    #[test]
+    fn the_final_type_is_checked_and_no_value_is_shown() {
+        let d = tempfile::tempdir().unwrap();
+        let a = load(&d, "a.yaml", "version: 1\nvars: { app_port: \"ok\" }\n");
+        let b = load(
+            &d,
+            "b.yaml",
+            &format!("version: 1\nvars: {{ app_port: [\"{CANARY}\"] }}\n"),
+        );
+        let vf = merge_vars_files(vec![a, b]).unwrap();
+        let (r, _) = freeze(&d, RECIPE, &vf, UnknownVars::Warn);
+        let p = r.unwrap_err().0.join("\n");
+        assert!(p.contains("declares a string"), "{p}");
+        assert!(!p.contains(CANARY), "{p}");
+    }
+
+    #[test]
+    fn an_unknown_name_is_a_warning_unless_strict_and_names_its_file() {
+        let d = tempfile::tempdir().unwrap();
+        let a = load(
+            &d,
+            "a.yaml",
+            &format!("version: 1\nvars: {{ other_recipes_thing: \"{CANARY}\" }}\n"),
+        );
+        let b = load(&d, "b.yaml", "version: 1\n");
+        let vf = merge_vars_files(vec![a, b]).unwrap();
+        let (r, w) = freeze(&d, RECIPE, &vf, UnknownVars::Warn);
+        assert!(r.is_ok());
+        assert_eq!(w.len(), 1);
+        assert!(
+            w[0].contains("other_recipes_thing") && w[0].contains("a.yaml"),
+            "{w:?}"
+        );
+        assert!(!w[0].contains(CANARY));
+        let (r, w) = freeze(&d, RECIPE, &vf, UnknownVars::Error);
+        assert!(r.is_err() && w.is_empty());
+    }
+
+    #[test]
+    fn a_likely_typo_stops_the_run_in_every_mode() {
+        let d = tempfile::tempdir().unwrap();
+        for typo in ["app_prot", "APP_PORT", "app_ports", "ap_port"] {
+            let v = load(
+                &d,
+                "a.yaml",
+                &format!("version: 1\nvars: {{ {typo}: \"{CANARY}\" }}\n"),
+            );
+            let (r, w) = freeze(&d, RECIPE, &v, UnknownVars::Warn);
+            let p = r.unwrap_err().0.join("\n");
+            assert!(p.contains("did you mean app_port?"), "{typo}: {p}");
+            assert!(w.is_empty());
+            assert!(!p.contains(CANARY));
+        }
+    }
+
+    #[test]
+    fn names_that_differ_only_in_digits_or_are_short_are_not_typos() {
+        let names = ["web1_port", "abc", "db_host"];
+        let found = |n: &str| likely_typo(n, names.iter().copied());
+        assert_eq!(found("web2_port"), None);
+        assert_eq!(found("abd"), None);
+        assert_eq!(found("db_post"), Some("db_host"));
+        assert_eq!(found("unrelated_name"), None);
+        // A declared name is not a typo of itself.
+        assert_eq!(found("db_host"), None);
+        assert_eq!(found("DB-HOST"), Some("db_host"));
+    }
+
+    #[test]
+    fn a_required_variable_needs_a_value_from_a_file() {
+        let d = tempfile::tempdir().unwrap();
+        let recipe = "version: 1\nvars:\n  need: { value: \"type\", required: true }\n";
+        let empty = load(&d, "e.yaml", "version: 1\n");
+        let (r, _) = freeze(&d, recipe, &empty, UnknownVars::Warn);
+        let p = r.unwrap_err().0.join("\n");
+        assert!(p.contains("variable need is required"), "{p}");
+        let given = load(&d, "g.yaml", "version: 1\nvars: { need: \"v\" }\n");
+        let (r, _) = freeze(&d, recipe, &given, UnknownVars::Warn);
+        assert_eq!(string(&r.unwrap()[0], "need"), "v");
+        // Without any file, loading it says so too; a recipe no host runs is not asked.
+        let path = write(&d, "n.yaml", recipe);
+        let e = crate::model::load_model(&path).unwrap_err();
+        assert!(e.message.contains("required"), "{}", e.message);
+        assert!(crate::model::prepare(&path)
+            .unwrap()
+            .check_structure()
+            .is_ok());
+    }
+
+    #[test]
+    fn required_and_sensitive_cannot_be_combined() {
+        let d = tempfile::tempdir().unwrap();
+        let path = write(
+            &d,
+            "x.yaml",
+            "version: 1\nvars:\n  s: { value: \"v\", required: true, sensitive: true }\n",
+        );
+        let e = crate::model::load_model(&path).unwrap_err();
+        assert!(
+            e.message.contains("both required and sensitive"),
+            "{}",
+            e.message
+        );
+        let path = write(
+            &d,
+            "y.yaml",
+            "version: 1\nvars:\n  s: { value: \"v\", required: 1 }\n",
+        );
+        assert!(crate::model::load_model(&path).is_err());
+    }
 }
 
 #[cfg(test)]

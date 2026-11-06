@@ -12,7 +12,7 @@ description: 完全なレシピスキーマ — トップレベルフィール�
 version: 1                    # 必須
 
 vars:                         # 省略可
-  <name>: { value: ..., sensitive: <bool> }
+  <name>: { value: ..., sensitive: <bool>, required: <bool> }
 
 include: [...]                # 省略可。レシピファイルのリスト
 
@@ -128,6 +128,8 @@ vars:
 
 - `value` はリテラルです。変数が他の変数を補間することはできないため、
   前方参照や循環は存在し得ません。
+- `required: true`（*次のバージョン。v1.9.0 にはありません*）は、変数ファイルで値を与える必要があることを示します。
+  型は `value` で示します。`sensitive: true` とは併用できません。
 - `sensitive: true` は、その値とそこから派生するすべてを、あらゆる
   出力と診断情報でマスクします。
 - 変数ファイル（`--vars-file`）を使うと、宣言済みの変数に、実行・インベントリの

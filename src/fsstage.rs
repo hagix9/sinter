@@ -50,6 +50,8 @@ pub fn loggable_args(args: &[String]) -> Vec<String> {
         .map(|a| {
             if a == SCRIPT {
                 format!("[fsstage.sh sha256:{}]", SCRIPT_SHA256)
+            } else if let Some(named) = crate::fsbackup::loggable_arg(a) {
+                named
             } else {
                 a.clone()
             }

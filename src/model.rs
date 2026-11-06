@@ -14,6 +14,8 @@ pub struct VarDef {
     pub name: String,
     pub value: Value,
     pub sensitive: bool,
+    /// A variables file must give it a value (DESIGN §40.5).
+    pub required: bool,
     pub origin: String,
 }
 
@@ -732,6 +734,7 @@ fn expand_document(canon: &Path, doc: Document, state: &mut LoadState) -> Result
             name: v.name.clone(),
             value: v.value.clone(),
             sensitive: v.sensitive,
+            required: v.required,
             origin: v.origin.clone(),
         });
     }
@@ -1740,6 +1743,23 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
         handler_index.insert(h.id.clone(), i);
     }
 
+    // Refused in every phase, before anything is contacted.
+    let declared_backups: Vec<String> = state.backups.iter().map(|(p, _)| p.clone()).collect();
+    crate::backup::check_declared_overlap(&declared_backups)?;
+
+    // A required variable needs a value from a variables file. A recipe no host
+    // runs is not asked (`structure_only`), and nothing about its default is said.
+    if !overrides.structure_only {
+        for v in state.vars.iter().filter(|v| v.required) {
+            if overrides.value(&v.name).is_none() {
+                return Err(SinterError::schema(format!(
+                    "{}: variable {} is required: give it a value with --vars-file",
+                    v.origin, v.name
+                )));
+            }
+        }
+    }
+
     // Build variables.
     let mut vars = BTreeMap::new();
     let mut static_vars: BTreeMap<String, EvalVal> = BTreeMap::new();
@@ -1754,6 +1774,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                 name: v.name.clone(),
                 value: v.value.clone(),
                 sensitive: v.sensitive,
+                required: v.required,
                 origin: v.origin.clone(),
             },
         );

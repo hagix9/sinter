@@ -74,9 +74,9 @@ pub fn tone_for(token: &str) -> Tone {
             Tone::Good
         }
         // attention, not failure
-        "POSSIBLE" | "blocked" | "?" | "DRIFT" | "drift" | "WARN" | "not_run" | "absent" => {
-            Tone::Warn
-        }
+        "POSSIBLE" | "blocked" | "BLOCKED" | "?" | "DRIFT" | "drift" | "WARN" | "not_run"
+        | "absent" | "SKIPPED_BY_USER" | "PARTIAL_APPLY" | "PARTIAL_PLAN" | "PARTIAL_AUDIT"
+        | "PARTIAL_VALIDATE" => Tone::Warn,
         // failure
         "FAILED" | "INDET" | "ERROR" | "plan_error" | "apply_failed" | "indeterminate"
         | "error" | "sinter:" => Tone::Bad,
@@ -130,6 +130,28 @@ pub fn leading_token(line: &str, enabled: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_partial_run_tokens_have_a_tone_and_stay_plain_without_color() {
+        for token in [
+            "SKIPPED_BY_USER",
+            "PARTIAL_APPLY",
+            "PARTIAL_PLAN",
+            "PARTIAL_AUDIT",
+            "BLOCKED",
+        ] {
+            assert_eq!(tone_for(token), Tone::Warn, "{token}");
+            assert_eq!(status(token, false), token);
+            assert!(status(token, true).starts_with("\x1b[33m"));
+        }
+        for token in ["MATCH", "CHANGED", "BACKUP"] {
+            assert_eq!(tone_for(token), Tone::Good, "{token}");
+        }
+        assert_eq!(tone_for("DRIFT"), Tone::Warn);
+        for token in ["FAILED", "ERROR"] {
+            assert_eq!(tone_for(token), Tone::Bad, "{token}");
+        }
+    }
 
     #[test]
     fn tty_enables_color() {

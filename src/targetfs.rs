@@ -1724,6 +1724,75 @@ impl TargetFs {
         }
     }
 
+    /// Forget the tree identity the last parent walk settled. The operations that
+    /// follow are the invocation's own.
+    pub(crate) fn leave_tree(&mut self) {
+        self.identity = None;
+    }
+
+    /// Hard link count of a regular file, observed as the current identity.
+    pub(crate) fn hard_links(&mut self, path: &str) -> Result<u64> {
+        self.stat_nlink(path)
+    }
+
+    /// Copy one regular file out of another account's tree into a private run
+    /// directory: read as the account, written as root (DESIGN §40.7, the fixed
+    /// script `fsbackup`). The invocation's identity must already be its own.
+    pub(crate) fn backup_tree_copy(
+        &mut self,
+        _permit: &MutationPermit,
+        tree: &TreeIdentity,
+        src: &str,
+        dest: &str,
+        acl: bool,
+    ) -> Result<()> {
+        if self.identity.is_some() {
+            return Err(SinterError::apply(
+                "internal error: the backup store would be written as the tree's account",
+            ));
+        }
+        self.identity_memo.clear();
+        let mut req = ExecRequest::new(crate::fsbackup::PROGRAM);
+        req.args = crate::fsbackup::argv(tree.uid, tree.gid, src, dest, acl);
+        req.env = base_env();
+        req.env.insert("HOME".to_string(), self.home_env());
+        req.timeout_secs = BACKUP_COPY_TIMEOUT_SECS;
+        let out = self.ex.run(&req)?;
+        match out.completion {
+            Completion::Exited(0) => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                if text.starts_with("OK ") {
+                    Ok(())
+                } else {
+                    Err(SinterError::apply(
+                        "the copy reported no result; the backup copy may be incomplete",
+                    ))
+                }
+            }
+            Completion::Exited(c) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let reason = stderr
+                    .lines()
+                    .find_map(|l| l.strip_prefix("REJECT: "))
+                    .map(str::to_string);
+                let setpriv = stderr.contains("setpriv");
+                Err(SinterError::apply(match reason {
+                    Some(r) => format!("refused: {}", crate::diff::sanitize_line(&r)),
+                    None if setpriv => "setpriv from util-linux is required to read a file as the \
+                                        account of its directory tree"
+                        .to_string(),
+                    None => format!("copy failed (exit {c})"),
+                }))
+            }
+            Completion::Signaled(s) => Err(SinterError::apply(format!(
+                "copy terminated by signal {s}; the backup copy may be incomplete"
+            ))),
+            Completion::Indeterminate { reason, .. } => Err(SinterError::apply(format!(
+                "copy did not complete ({reason}); the backup copy may be incomplete"
+            ))),
+        }
+    }
+
     pub fn rmdir(&mut self, _permit: &MutationPermit, path: &str) -> Result<()> {
         self.identity_memo.clear();
         self.run_argv_ok_mutating("/bin/rmdir", &["--".to_string(), path.to_string()])?;

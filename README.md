@@ -194,6 +194,14 @@ sinter apply nginx.yaml --inventory hosts.yaml
   contacted.
 - `--limit web01` (or `web01,web02`, `group:web`, `'web-*'`) runs only those of
   the selected hosts; the rest are never contacted.
+- Next version, not in v1.9.0: a project file, `sinter.project.yaml` in the current directory or
+  `--config`, can set `recipe_paths`, `inventory`, `vars_files`, `backup.directory` and a
+  `default_target`, so `sinter apply moge.yaml web01` finds the recipe wherever it is kept.
+  `--vars-file` may be repeated, `--backup-dir` names the store on the target, and
+  `--skip-recipe` and `--skip-resource` leave things out, always visibly (`PARTIAL_APPLY`) and
+  never past a dependency. As root a regular file in another account's directory, such as
+  `/var/lib/pgsql/.pgpass`, is backed up read as that account; a live data directory is not, and
+  a file copy is not a database backup.
 - Next version, not in v1.9.0: `sinter apply nginx.yaml web01` (or `@web`,
   `web01,@db`) names the hosts directly and finds `hosts.yaml`, `hosts.yml` or
   `hosts.toml` in the current or the recipe's directory. A recipe without

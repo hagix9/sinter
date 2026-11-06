@@ -12,7 +12,7 @@ model. The YAML examples below apply equally to TOML.
 version: 1                    # required
 
 vars:                         # optional
-  <name>: { value: ..., sensitive: <bool> }
+  <name>: { value: ..., sensitive: <bool>, required: <bool> }
 
 include: [...]                # optional list of recipe files
 
@@ -130,6 +130,8 @@ vars:
 
 - `value` is a literal — variables may not interpolate other variables, so
   forward references and cycles cannot exist.
+- `required: true` (*next version, not in v1.9.0*) means a variables file must give it a value;
+  `value` still gives the type. It cannot be combined with `sensitive: true`.
 - `sensitive: true` redacts the value — and everything derived from it — in
   all output and diagnostics.
 - A variables file (`--vars-file`) can give a declared variable another

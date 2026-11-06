@@ -423,9 +423,9 @@ apply copies every declared path, in order, on the target before the first resou
 
 audit ignores the declaration; backups are not desired state.
 
-Store: with --sudo `/var/lib/sinter/backups/<run-id>/`, otherwise `<target-user-home>/.sinter/backups/<run-id>/`, on the target. Inside the run directory the original absolute path is reproduced. `<run-id>` is `<UTC YYYYMMDDTHHMMSSZ>-<8 hex>`, one per invocation and shared by all its targets; when several recipes run (§19.3) it is suffixed `-<NN>-<recipe>` per recipe. Backups run only for executions selected by target resolution (§19.2). Store directories created by Sinter are mode 0700; every ancestor of the run directory and of each source path must pass the §23 trust check. An existing run directory is a collision and fails. A declared path that contains, or lies inside, the store fails.
+Store: with --sudo `/var/lib/sinter/backups/<run-id>/`, otherwise `<target-user-home>/.sinter/backups/<run-id>/`, on the target. Inside the run directory the original absolute path is reproduced. `<run-id>` is `<UTC YYYYMMDDTHHMMSSZ>-<8 hex>`, one per invocation and shared by all its targets; when several recipes run (§19.3) it is suffixed `-<NN>-<recipe>` per recipe. Backups run only for executions selected by target resolution (§19.2). Store directories created by Sinter are mode 0700; every ancestor of the run directory and of each source path must pass the §23 trust check. An existing run directory is a collision and fails. A declared path that contains, or lies inside, the store fails. `--backup-dir` or a project file can name another store on the target (§40.6); a recipe cannot.
 
-Copy rules: regular files, directories (recursively) and symlinks (as links, never followed) are copied; mode (including POSIX ACLs), ownership and timestamps must be preserved or the backup fails; other extended attributes and SELinux labels are preserved on a best-effort basis. Other object types fail. An absent path is recorded as absent and is not a failure.
+Copy rules: a regular file in another account's tree is copied as §40.7 says, and nothing else in such a tree is copied. Elsewhere, regular files, directories (recursively) and symlinks (as links, never followed) are copied; mode (including POSIX ACLs), ownership and timestamps must be preserved or the backup fails; other extended attributes and SELinux labels are preserved on a best-effort basis. Other object types fail. An absent path is recorded as absent and is not a failure.
 
 Backup content is never read by the controller and never appears in any output; only paths, object kinds and store locations do.
 
@@ -1477,7 +1477,7 @@ The path is inside the tree of account U when the first untrusted ancestor D of 
 
 Inside the tree of U, every file operation Sinter performs on the path after the parent walk (observing, creating, writing, renaming, chown, chmod, removing) runs as U: real, effective and saved uid and gid are U's, supplementary groups are U's, capabilities are dropped and no_new_privs is set (setpriv from util-linux; if it is missing the operation fails, nothing is done as root instead). U's primary group is taken from the account database, never from the group of D. A hostile U can therefore redirect Sinter only to what U can already write itself.
 
-Because the operations run as U, only entries owned by U are supported in the tree: a new entry without a recipe owner belongs to U (except in a tree directly inside a shared directory, where an `owner` is required: see below) and its group is U's primary group; an owner other than U, or an existing entry owned by someone else that would have to be preserved, is refused in plan and in apply with the same reason, and nothing is handed to another uid. An account without an entry in the account database, a second foreign owner below D, and a backup of a path in such a tree are refused. A non-root invocation is not changed: its trusted principals remain root and the target execution user.
+Because the operations run as U, only entries owned by U are supported in the tree: a new entry without a recipe owner belongs to U (except in a tree directly inside a shared directory, where an `owner` is required: see below) and its group is U's primary group; an owner other than U, or an existing entry owned by someone else that would have to be preserved, is refused in plan and in apply with the same reason, and nothing is handed to another uid. An account without an entry in the account database and a second foreign owner below D are refused; a backup of a path in such a tree is refused except for the regular file of §40.7. A non-root invocation is not changed: its trusted principals remain root and the target execution user.
 
 A tree directly inside a shared directory (FS-3 C-1). When D is itself an entry of a shared directory (§23.4: /tmp, /var/tmp), any local account could have made D before the recipe's author did, and nothing says it is the directory the recipe means. What Sinter wrote there would belong to U, and U could read it and replace it afterwards; with `owner` left out the recipe gives nothing to compare U with. Sinter therefore manages an entry in such a tree only when the recipe sets `owner`: an entry that would be created, replaced or changed (a file or template, its content or its metadata; a directory, new or with changed metadata) without an `owner` is refused in plan and in apply with the same reason, before anything is written, even when the entry already exists and belongs to U (U may have made it too). An `owner` other than U is refused as above, so a squatted directory is refused for any owner but its own account's; with `owner` equal to U the operation runs as U as above. The check is made where a change is decided with the owner the recipe asked for: an entry that already matches is not a write and is not refused, and audit, which never writes and does not manage an owner that is not named, is unchanged. A link and `state: absent` carry no content and have no owner: they run as U as before. The refusal says how to proceed: make the directory with a directory resource (it is then root's, and a directory another account made first is refused as a directory by the entry gate, §23.4), or use a root-owned location such as /opt or /srv. A sensitive resource's refusal names neither the path nor a uid. Paths below /home/<user> and below any other directory that is not an entry of a shared directory are not affected.
 
@@ -2765,3 +2765,120 @@ Tests: `tests/cli_selector.rs` and the unit tests of `src/inventory.rs`, `src/in
 2026-11-04: section added as a proposal after the v1.9.0 publication (Owner direction). No implementation, test, or earlier section changed.
 
 2026-11-04: implemented under Owner decisions D-1 to D-5 (FR-072 to FR-074), replacing the proposal text and the open questions. §19.2 gained the exception for one plain recipe without `targets`; §19.4 and the value set of `excluded_by` were extended. Nothing released.
+
+40. Project configuration, recipe search, layered variables, backup store, partial runs
+
+Status: IMPLEMENTED, NOT RELEASED; live Linux acceptance not yet run. Without a project file and without the new options, every command behaves as in §39, with one stated exception (§40.5, unknown variables).
+
+40.1 The project file
+
+A project file holds what an operator would otherwise repeat on every command line. It has its own name so that no recipe, inventory or variables file is ever taken for one.
+
+```yaml
+version: 1
+recipe_paths:              # directories searched for a bare recipe name
+  - /opt/sinter/recipes
+  - ./recipes
+inventory: ./hosts.yaml
+vars_files:                # lowest precedence first
+  - ./vars/common.yaml
+  - ./vars/production.yaml
+backup:
+  directory: /var/backups/sinter    # a path on each target
+default_target: "@web"     # optional, see §40.4
+allow_implicit_apply: false
+strict_vars: false
+```
+
+Every field but `version` is optional; an unknown field, a wrong type or a duplicate entry in a list is exit 2. A relative path in the file is relative to the directory holding the file, never to the current directory. `~` and environment variables are not expanded: a path means what it says wherever the command is run.
+
+Discovery. `--config PATH` names the file (it must exist; nothing is searched). `--no-config` ignores any project file, and the two exclude each other. Otherwise the current directory only is looked at for `sinter.project.yaml`, `sinter.project.yml` and `sinter.project.toml`. Parent directories, the recipe's directory and the home directory are never searched: a file in a directory above, or next to a shared recipe, says nothing about what the person running the command wants. Applies to `validate`, `plan`, `apply` and `audit`; `mcp` and `secrets` never read a project file. No file found means no project: the command is what it was before.
+
+A discovered file arrives without having been named, so it is held to the §39.3 rules: exactly one candidate (Sinter never picks by priority), not a symbolic link, a regular file, at most 1 MiB, file and directory owned by this user or root and not writable by group or others, checked on the open descriptor that is then read. Any failure is exit 2, and nothing falls back to "no project file". A file named with `--config` is what the operator asked for: it must be a regular file of at most 1 MiB, as `--inventory` is taken at its word.
+
+A file a project file names (a recipe found through `recipe_paths`, `inventory`, `vars_files`) is held to the same ownership and mode rules, whichever way the project file was found, since it was not named on the command line. The rule is checked immediately before the file is read by path; it holds as long as the directories above it are, which the same limit of §39.3 states. A path named on the command line is taken at its word.
+
+The project file, the recipe, the inventory, the variables files and the backup store in effect are shown before anything runs (`config:`, `recipe:`, `inventory:`, `vars:`, `backup store:` in text; `resolved` in JSON). A run without a project file prints nothing new.
+
+40.2 Which recipe
+
+The first positional argument is, in order:
+
+1. a path when it contains `/`: used as given, relative to the current directory, never searched for;
+2. with no project file or no `recipe_paths`: used as given (the behaviour before this section);
+3. otherwise a *search name*: `<dir>/<name>` is looked at for every directory of `recipe_paths`, and `./<name>` in the current directory. Exactly one existing file (the same file reached twice counts once) is the recipe. Two different files are exit 2, listing both: Sinter never picks one, and writing `./name` or a full path settles it. None is exit 2, listing the places searched: no other recipe is tried and no extension is added. A file found only in the current directory is the path the command line would have meant and is taken as given; one found through `recipe_paths` is held to the §40.1 file rules.
+
+A `recipes:` entry of a bundle stays relative to the bundle file (§19.3), and a recipe's `include` to the recipe.
+
+40.3 Which inventory
+
+`--inventory` (never falls back), else the project file's `inventory`, else, for a selector only, detection as in §39.3, except that a recipe found through `recipe_paths` adds no place to look: a shared recipe directory's `hosts.yaml` is not this project's. `--host` turns the project file's `inventory` and `default_target` off for that command.
+
+40.4 Which hosts
+
+From strongest to weakest; the first that applies decides, and nothing below it is consulted:
+
+1. `--host H`: that host alone.
+2. A selector: the named inventory hosts, as §39.2.
+3. `--inventory`, or the project file's `inventory`, with `--limit` if given: the recipes' `targets`, as §19.2.
+4. `default_target` of the project file as if it were the selector. `plan`, `audit` and `validate` use it. `apply` refuses it unless allowed, as below: an `apply` that names no host must not reach machines because of a file nobody on this command line mentioned. No prompt is added, so unattended runs stay unattended.
+5. Local target, as before §39: only when no project file names an inventory or a default target.
+
+An `apply` that names no host on its command line (no `--host`, selector, `--limit` or `--inventory`) and would reach hosts through the project file's `inventory` or `default_target` is refused (exit 2) unless the file also says `allow_implicit_apply: true`. Between 3 and 4: with a project `inventory` and `default_target` both set, the default target applies. A recipe without `targets` in an inventory run is refused as §19.2 says, never run locally. A name that does not resolve, an empty selection or an unreachable host is an error at its own step and never reaches a lower step: in particular no failure ever falls back to the local target. To run locally in a project directory, use `--no-config`.
+
+40.5 Variables files in layers
+
+`--vars-file` may be repeated. The files in effect are the project's `vars_files`, in order, then the command line's, in order; a later file wins. `--no-config` drops the former.
+
+Merging is by variable name inside each layer: `vars`, `groups.<g>`, `hosts.<h>` of all files are merged separately, then the precedence of §19.5 (recipe default, `vars`, `groups`, `hosts`) applies to the merged layers. A host value of an earlier file therefore beats a common value of a later one. A variable's value is replaced whole: a map or list value is never merged with an earlier one, so what a file says is what the variable holds. A missing file, invalid YAML or TOML, a wrong type of the final value and an attempt to override a sensitive variable are exit 2 before anything is contacted, in any file, shadowed or not for the last one. Every message names variables and files, never a value.
+
+Unknown variables. A file shared between recipes normally holds names a given recipe does not declare, so a name no recipe of this run declares is a warning (changed from exit 2 in v1.9.0; recipes other than those of this run are not looked at). `--strict-vars`, or `strict_vars: true`, makes it exit 2 as before. A name that is one or two edits away from, or differs only in case or `-`/`_` from, a variable the recipes declare is taken for a typo: it is exit 2 in every mode and names the likely variable, because a silent default is the failure a warning would not stop.
+
+Required variables. A declaration `required: true` (with `value` still giving the type) must be given a value by a variables file for every execution that runs the recipe; otherwise exit 2 naming the variable. A recipe no host runs is not asked (§19.2). `required` with `sensitive` is refused: a variables file cannot set a sensitive variable.
+
+40.6 The backup store
+
+`--backup-dir PATH`, else the project file's `backup.directory`, else the store of §4 (§ Store above). A recipe cannot name a store; a recipe declares what to keep, the operator where. The path is on each target, absolute and normalized (no `.`, `..`, `//`, trailing `/`, control characters), and not `/`.
+
+Only the store itself is created (mode 0700, never `-p`); its parent must exist. All of it is checked like the default store: every ancestor by the strict §23 walk (no symbolic link, no account's tree, no ACL, nothing others can write); an existing store must be a directory owned by a trusted principal and not writable by group or others; a symbolic link is refused; a store whose direct parent is a shared directory (§23.4) is refused, since anyone can make a name there first. A run directory that exists is a collision. A declared path that contains or lies inside the store is refused, so a source and its destination never overlap.
+
+40.7 Backing up a file in another account's tree
+
+A path in another account's directory tree (§23.2), such as `/var/lib/pgsql/.pgpass` (owner `postgres`, mode 0600, directory mode 0700), is copied without root reading through a tree that account controls. This is one exception to the sentence of §23.2 that refuses such a backup, and it keeps the rule of §23.2: nothing of a path another account controls is read as the invocation.
+
+The read and the write are two identities in one fixed script (`src/fsbackup.sh`, pinned by digest, §20's limited exception as §23.4; every value is an argument):
+
+- Everything about the source runs as the account U through `setpriv` (real, effective and saved ids, supplementary groups, no_new_privs): `lstat`, the read with `dd iflag=nofollow`, the second `lstat`, `getfacl`. U can therefore make it read only what U can read.
+- Everything about the destination runs as root in the private run directory: the file is created exclusively, filled from the pipe, then given owner, mode, times and ACL.
+- What crosses from U to root is treated as hostile, since U may tamper with a process of its own: the content is bytes written to a file and never interpreted, its length is capped, and the metadata lines must match a strict grammar before use. No archive format is unpacked as root, because a stream U can write would then decide what root creates.
+
+Accepted: exactly a regular file, owned by U, one hard link, no setuid or setgid bit, at most 1 GiB, whose metadata is unchanged between the two `lstat`s (device, inode, mode, owner, group, links, size, mtime, ctime), and whose written size equals its `lstat` size. Owner, group, mode and access and modification times are preserved; an ACL is preserved with `getfacl`/`setfacl`, and a file with an ACL on a target without them fails. Other extended attributes and SELinux labels are not copied here. The metadata of the copy is what the account reports (its group and ACL can name anyone, within what the grammar allows), which the private run directory contains; whoever restores a copy by hand should read it first.
+
+Overlap. A copy of a directory can leave anything its owner put there in the run directory, a symbolic link included, and a second copy into the same place would write through it as the invocation. So declared paths that overlap are refused, in every phase and whichever comes first (exit 2; accepted until v1.9.0). The top of another account's tree (a declared directory with trusted parents and an untrusted owner) is refused for the same reason as a directory inside it; this also changes a declaration that `cp -a` accepted until v1.9.0. A directory a trusted principal owns is still copied with `cp -a`, including what other accounts own below it: links are not followed and the copy stays in the private run directory, but that walk is the invocation's, as it always was.
+
+Refused, each before anything is read: a directory (a tree U controls is not walked as root, and a live PostgreSQL data directory copied file by file would not be a consistent backup anyway: use the database's own tools, and name files here), a symbolic link, any other type, a file owned by another account, a file with more than one link, a tree directly inside a shared directory (§23.2 C-1: no `owner` to compare with), a non-root invocation (§23.2 unchanged), and a target without `setpriv`. The account's processes run in their own session with no terminal on stdin, and what root reads from them into memory is capped. Any failure aborts the apply before any resource runs, as every backup failure does, and removes the partial destination file. Nothing about a path under a store's run directory is readable by U: the run directory is root's, mode 0700, even though the copy keeps U as its owner. A copy of a file is not a database backup, and Sinter does not claim consistency between files.
+
+40.8 Partial runs
+
+`--skip-recipe NAME` and `--skip-resource ID` may be repeated, on `validate`, `plan`, `apply` and `audit`, with one meaning: what is excluded is not observed, changed or reported as passed. `NAME` is a recipe's label (its file stem). `ID` is a resource id, the base id of a loop (all its instances) or one instance (`id[2]`), or `recipe/id` to say which recipe.
+
+Refused with exit 2 before `ssh -G` or any connection, in all commands:
+
+- a name that matches nothing, in any recipe of the run (never ignored);
+- a recipe label two recipes of a bundle share, an id several recipes have without a `recipe/` prefix, and a string that reads both ways;
+- a handler id: a handler is not a resource, and skipping one would leave a change without its restart;
+- an included resource whose `depends_on` names an excluded one, directly. A `register` reference is always also a `depends_on` (§ recipe rules), so it is covered. Nothing is excluded automatically: the message lists each edge, and the operator decides;
+- everything excluded: nothing would run;
+- `--audit-policy strict` with an exclusion: a strict audit answers for the whole recipe.
+
+An excluded recipe is still loaded and validated, and its hosts are not resolved unless another recipe needs them. A declared backup of a recipe that runs is taken in full, also of paths only an excluded resource would change. A handler runs only if an included resource notified it.
+
+Exit codes do not change, so an exclusion must be visible instead: text output always shows `Included`, `Excluded` (`SKIPPED_BY_USER`) and `Blocked dependencies` first and a final `PARTIAL_APPLY`, `PARTIAL_PLAN` or `PARTIAL_AUDIT` line; JSON has `skips` with `partial: true`, the requests and every excluded resource with its reason. There is no `--show-skips`, because `plan` always shows this.
+
+40.9 Parallel execution: not added
+
+Executions run one at a time, recipe-major (§19.3); resources run in dependency order inside one thread; nothing in the engine runs concurrently except I/O helpers of one command. Host-level parallelism would need each execution's output and progress buffered, an answer for apply's stop-at-first-failure, and a review of the per-target `ssh -G` resolution; none of it is local to one module. It is deferred, not refused, as a separate work package with its own acceptance.
+
+40.10 Verification status
+
+Tests: `tests/cli_project.rs`, `tests/cli_skips.rs`, `tests/backup_store_dir.rs`, `tests/backup_tree.rs`, `tests/backup_tree_script.rs` and unit tests. Scripted targets run the production engine. `tests/backup_tree_script.rs` runs the real script text under `/bin/sh` with stand-in tools, so its logic is tested on any Unix, but the stand-ins are not util-linux or coreutils. `tests/backup_tree_real.rs` runs it for real and needs Linux and root. No real target has run any of §40 yet.

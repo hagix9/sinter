@@ -15,6 +15,8 @@ pub struct VarDecl {
     pub name: String,
     pub value: Value,
     pub sensitive: bool,
+    /// A variables file must give it a value (DESIGN §40.5); `value` gives the type.
+    pub required: bool,
     pub origin: String,
 }
 
@@ -147,4 +149,4 @@ pub const COMMON_RESOURCE_FIELDS: &[&str] = &[
 /// and `action` belong to the `service` type, `with` to the `command` type. The
 /// parser rejects a field that does not belong to the handler's type.
 pub const HANDLER_FIELDS: &[&str] = &["id", "type", "service", "action", "with", "sensitive"];
-pub const VAR_FIELDS: &[&str] = &["value", "sensitive"];
+pub const VAR_FIELDS: &[&str] = &["value", "sensitive", "required"];

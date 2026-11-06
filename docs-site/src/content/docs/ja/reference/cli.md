@@ -590,6 +590,13 @@ listen_port = 8081
 - グループ名・ホスト名はインベントリと同じ規則に従います。ASCII 英字・数字・
   `.`・`_`・`-` を使い、先頭は英字か数字、64 文字以下です。
 
+**複数のファイル**
+
+*次のバージョン。v1.9.0 にはありません。* `--vars-file` は繰り返し指定でき、[プロジェクトファイル](#プロジェクトファイル)
+の `vars_files` にも書けます。プロジェクトのものが先で、次にコマンドラインのものを順に読み、後のファイルが優先です。
+各層（`vars`、`groups.<g>`、`hosts.<h>`）を変数名ごとにマージしてから下の優先順位を適用するので、前のファイルの
+ホストの値は、後のファイルの共通の値より優先します。変数の値は丸ごと置き換えます。map や list を前の値とマージすることはありません。
+
 **優先順位**
 
 ホストごと・変数ごとに、レシピの `value` < `vars` < `groups` < `hosts` です。
@@ -605,7 +612,11 @@ listen_port = 8081
 
 **ファイルで設定できるもの**
 
-- ファイルに書く変数は、その実行のいずれかのレシピ（バンドルならその中の
+- *次のバージョン以降*、どのレシピも宣言していない変数は警告です（共有ファイルにはそうした名前があるためです）。
+  `--strict-vars` または `strict_vars: true` でエラーになります（v1.9.0 まではこの動作でした）。宣言された変数に近い名前
+  （`app_port` に対する `app_prot` のように 2 編集以内、または大文字小文字と `-`/`_` だけの違い）は常にエラーで、該当しそうな
+  変数名を示します。`required: true` と宣言された変数は、変数ファイルで値を与えないと接続前に停止します。
+- v1.9.0 までの動作：ファイルに書く変数は、その実行のいずれかのレシピ（バンドルならその中の
   いずれかのレシピ。include も含む）が宣言している必要があります。バンドルでは、
   値はその変数を宣言しているレシピにだけ適用されます。
 - 値の型は、宣言された値の型と一致する必要があります。文字列、整数、浮動小数点数、
@@ -683,6 +694,78 @@ listen_port = 8081
   静的エラーの報告のしかただけです（`recipe <recipe> @ <host>:` の前置き、最後の
   `variables: ...` の行、バンドルではその順序）。
 
+## プロジェクトファイル
+
+*次のバージョン。v1.9.0 にはありません。* 毎回コマンドラインに書く内容をまとめるファイルです。レシピが
+どこにあっても、プロジェクトのディレクトリから `sinter apply moge.yaml web01` と実行できます。
+
+```text
+# sinter.project.yaml
+version: 1
+recipe_paths:              # レシピ名だけを指定したときに探すディレクトリ
+  - /opt/sinter/recipes
+  - ./recipes
+inventory: ./hosts.yaml
+vars_files:                # 先頭ほど優先度が低い
+  - ./vars/common.yaml
+  - ./vars/production.yaml
+backup:
+  directory: /var/backups/sinter   # 各ターゲット上のパス
+default_target: "@web"     # 任意
+allow_implicit_apply: false
+strict_vars: false
+```
+
+`version` 以外は任意です。相対パスはこのファイルの場所が基準で、`~` と環境変数は展開しません。
+
+- **読む場所。** `--config PATH`、またはカレントディレクトリの `sinter.project.yaml`、`.yml`、`.toml` です。
+  親ディレクトリ、レシピのディレクトリ、ホームディレクトリは探しません。`--no-config` で無視します。`mcp` と
+  `secrets` は読みません。ファイルがなければ何も変わりません。
+- **拒否するもの。** カレントディレクトリで見つけたファイルには、自動検出のインベントリと同じ規則を適用します。
+  候補は 1 つだけ、シンボリックリンクは不可、ファイルとディレクトリの所有者は自分か root で、グループと他者が書き込めないこと。
+  プロジェクトファイルが指定するファイル（検索で見つけたレシピ、`inventory`、`vars_files`）も同じです。不正なプロジェクトファイルは
+  exit 2 で、「プロジェクトなし」にはなりません。
+- **どのレシピか。** `/` を含むものはパスで、そのまま使います。名前だけなら `recipe_paths` とカレントディレクトリを探します。
+  別のファイルが 2 つ見つかれば exit 2 で、`./name` かフルパスで指定します。見つからなければ exit 2 です。別のレシピを試すことも、
+  拡張子を補うこともありません。バンドルの `recipes` はバンドルからの相対パスのままです。
+- **どのインベントリか。** `--inventory`、次にプロジェクトの `inventory`、セレクタがあれば次に自動検出です。`recipe_paths` で見つけた
+  レシピのディレクトリは探しません。
+- **どのホストか**（強い順）。`--host`、セレクタ、`--inventory` またはプロジェクトの `inventory` とレシピの `targets`（と `--limit`）、
+  `default_target`、ローカル（プロジェクトがインベントリもデフォルトターゲットも指定しないときだけ）。`--host` を指定すると、そのコマンドでは
+  プロジェクトのホスト指定を使いません。**どの失敗でもローカルにはフォールバックしません。** そのディレクトリでローカルに実行するには
+  `--no-config` を使います。
+- **ホストを指定しない `apply`。** `--host`、セレクタ、`--limit`、`--inventory` のいずれもなく、プロジェクトの `inventory` か `default_target` で
+  ホストに届く `apply` は、ファイルに `allow_implicit_apply: true` がなければ拒否します（exit 2）。`plan`、`audit`、`validate` は続行します。確認プロンプトは追加していません。
+
+有効な設定は最初に表示します（`config:`、`recipe:`、`inventory:`、`vars:`、`backup store:`）。`--format json` では stderr に出し、
+ドキュメントの `resolved` に入ります。
+
+## 部分実行
+
+*次のバージョン。v1.9.0 にはありません。* `--skip-recipe NAME` と `--skip-resource ID` は繰り返し指定でき、`validate`、`plan`、`apply`、
+`audit` で同じ意味です。除外したものは観測も変更もせず、合格としても報告しません。`ID` はリソース ID、ループの基底 ID か 1 つのインスタンス
+（`id[2]`）、バンドルでは `recipe/id` です。
+
+```text
+$ sinter plan bundle.yaml --skip-recipe ssh-hardening --skip-resource nginx/extra
+Included:
+  nginx/config
+  nginx/service
+Excluded:
+  ssh-hardening/*  SKIPPED_BY_USER
+  nginx/extra      SKIPPED_BY_USER
+Blocked dependencies:
+  none
+```
+
+次の場合は `ssh -G` や接続の前に exit 2 です。何にも一致しない名前。2 つのレシピが同じラベルを持つ場合や、複数のレシピにある ID を
+`recipe/` なしで指定した場合。ハンドラの ID（ハンドラは、含まれるリソースが通知したときだけ動きます）。含まれるリソースの `depends_on` が除外対象を
+指す場合（自動では除外しません）。実行するものが残らない場合。`--audit-policy strict`（レシピ全体に責任を持つため）。除外したレシピも検証はします。
+実行するレシピが宣言したバックアップは、すべて取得します。
+
+終了コードは変わらないので、除外は必ず表示します。上の一覧が最初に出て、最後に `PARTIAL_APPLY`、`PARTIAL_PLAN`、`PARTIAL_AUDIT` の行が出ます。
+JSON では `skips` に `partial: true` と、除外した各リソースとその理由が入ります。
+
 ## apply 前のバックアップ
 
 *Sinter v1.1.0 以降で利用できます。*
@@ -717,6 +800,16 @@ resources:
   モード・ACL・所有者・タイムスタンプを保ってコピーします。その他の拡張属性と
   SELinux ラベルはベストエフォートです。存在しないパスは `absent` として
   記録します。
+- *次のバージョン。v1.9.0 にはありません。* `--backup-dir PATH` またはプロジェクトファイルの `backup.directory` で
+  別の保存先を指定できます。**各ターゲット上**のパスで、レシピからは指定できません。作るのはそのディレクトリだけで（モード 0700）、
+  親は存在している必要があります。既定の保存先と同じ検査をします。シンボリックリンク不可、他のアカウントが所有するか他者が書き込める
+  ディレクトリ不可、`/tmp` の直下不可、宣言したパスとの重複不可です。`plan` でも同じ理由で拒否します。
+- *次のバージョン。v1.9.0 にはありません。* root で実行するとき、**他のアカウントのディレクトリにある通常ファイル**
+  （所有者 `postgres`、モード 0600、ディレクトリのモード 0700 の `/var/lib/pgsql/.pgpass` など）は、そのアカウントとして読み、
+  root が非公開の実行ディレクトリに書き込みます。所有者、グループ、モード、時刻、ACL を保ちます。そこにあるディレクトリ、シンボリックリンク、
+  他の所有者のファイル、ハードリンクが複数あるファイル、setuid/setgid のファイル、1 GiB を超えるファイル、読み取り中に変わるファイル、
+  `/tmp` の直下にあるもの、他のアカウントが所有するディレクトリの宣言（v1.9.0 までは `cp -a` で受け付けていました）は拒否します。宣言パスの重なりは、どのレシピでもどのフェーズでも拒否します。その他の拡張属性と SELinux ラベルはコピーしません。
+  **これはデータベースのバックアップではありません。** 稼働中の PostgreSQL のデータディレクトリには PostgreSQL 自身のツールを使ってください。
 - バックアップが 1 つでも失敗すると、リソースを 1 つも実行せずに apply を
   中止します（終了コード 5）。エラーには途中まで書かれた実行ディレクトリが
   示され、そのまま残ります。
@@ -1295,6 +1388,18 @@ targets、解決、重複ホスト）ではドキュメントを出力せず、
 （`detected` か `explicit`）、各 `resolution` の `targets_declared`、`excluded_by: "selector"`
 が加わります。`validate` の文書には `selector`、`inventory`、`inventory_source`、
 `selected_executions`、`targeted_executions` が加わります。
+
+### プロジェクトファイルと部分実行
+
+*次のバージョン。v1.9.0 にはありません。* 有効なときだけ現れるので、他のドキュメントは変わりません。
+
+- `resolved`：`config`（`path`、`source`：`explicit` か `detected`）、`recipe`（`path`、`via`：`given` か
+  `recipe_paths`）、`inventory`（`path`、`source`：`explicit` か `project`）、`default_target`、`vars_files`、
+  `backup_directory`。
+- `skips`：`partial: true`、`requested`（`recipes`、`resources`）、`included`、`excluded`（`recipe`、`resource`（レシピ全体は
+  null）、`reason`：`SKIPPED_BY_USER`）、`blocked`。
+- `vars_warnings`：どのレシピも宣言していない変数。`inventory_source` は `project` にもなります。
+- `validate`：ファイルが複数のとき、`variables.file` の代わりに `variables.files` が入ります。
 
 ### 互換性のルール
 

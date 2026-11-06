@@ -159,10 +159,27 @@ pub fn document_from_value(root: Value, path: &Path, origin: &str) -> Result<Doc
                     )))
                 }
             };
+            let required = match dm.get("required") {
+                None => false,
+                Some(Value::Bool(b)) => *b,
+                Some(_) => {
+                    return Err(SinterError::schema(format!(
+                        "{}: variable {} required must be a boolean",
+                        origin, name
+                    )))
+                }
+            };
+            if required && sensitive {
+                return Err(SinterError::schema(format!(
+                    "{}: variable {} cannot be both required and sensitive: a variables file cannot set a sensitive variable",
+                    origin, name
+                )));
+            }
             vars.push(VarDecl {
                 name: name.clone(),
                 value: value.clone(),
                 sensitive,
+                required,
                 origin: origin.to_string(),
             });
         }

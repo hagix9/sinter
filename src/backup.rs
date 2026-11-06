@@ -10,6 +10,8 @@
 //!
 //! * `--sudo`: `/var/lib/sinter/backups/<run-id>/`
 //! * otherwise: `$HOME/.sinter/backups/<run-id>/` of the target user
+//! * `--backup-dir` or a project file: `<that directory>/<run-id>/` (DESIGN
+//!   §40.6); never from a recipe.
 //!
 //! Inside the run directory the original absolute path is reproduced, e.g.
 //! `/var/lib/sinter/backups/20260928T101530Z-3f9a2c1d/etc/ssh/sshd_config`.
@@ -35,6 +37,9 @@
 //!   basis (GNU `cp -a`). Other object types (devices, FIFOs, sockets) fail.
 //! * Content is never read by the controller and never printed; only paths,
 //!   object kinds and the store location appear in output.
+//! * A regular file in another account's directory tree is read as that account
+//!   and written as root (DESIGN §40.7, [`crate::fsbackup`]). Nothing else in
+//!   such a tree is copied.
 
 use crate::error::{Result, SinterError};
 use crate::progress::StageTracker;
@@ -173,9 +178,73 @@ pub fn planned(paths: &[String]) -> BackupReport {
     }
 }
 
+/// A store path from `--backup-dir` or a project file: absolute, normalized, not
+/// the root directory (DESIGN §40.6). A pure check, made before anything runs.
+pub fn validate_store_dir(path: &str) -> Result<()> {
+    crate::paths::validate_path(path)
+        .map_err(|e| SinterError::schema(format!("backup store {path}: {}", e.message)))?;
+    if path == "/" {
+        return Err(SinterError::schema(
+            "backup store: the root directory cannot be the store",
+        ));
+    }
+    if path.chars().any(char::is_control) {
+        return Err(SinterError::schema(
+            "backup store: the path has a control character",
+        ));
+    }
+    Ok(())
+}
+
+/// What `plan` can say about a store named by the operator without creating
+/// anything: the checks apply makes first. Read-only.
+pub(crate) fn check_named_store(fs: &mut TargetFs, dir: &str, paths: &[String]) -> Result<()> {
+    for p in paths {
+        check_overlap(p, dir)?;
+    }
+    fs.check_trusted_parents_strict(dir)?;
+    if fs.shared_parent() {
+        return Err(SinterError::apply(format!(
+            "backup store {dir} is directly in a shared directory (sticky and writable by other \
+             accounts, such as /tmp), where anyone can make that name first; use another location"
+        )));
+    }
+    let st = fs.inspect(dir)?;
+    match st.kind {
+        ObjKind::Absent => Ok(()),
+        ObjKind::Dir => check_existing_store_dir(fs, dir, &st),
+        other => Err(SinterError::apply(format!(
+            "backup store path {} is a {}, not a directory",
+            dir,
+            other.describe()
+        ))),
+    }
+}
+
+/// `a` is `b` or lies inside it.
+fn inside(a: &str, b: &str) -> bool {
+    a == b || a.starts_with(&format!("{}/", b))
+}
+
+/// Declared paths may not overlap. One of two overlapping paths is a directory,
+/// and a copy of it can leave whatever its owner put there in the run directory,
+/// a symbolic link included, for the other copy to write through as the invocation
+/// (DESIGN §40.7). A pure check on the declaration, so it holds in every phase.
+pub fn check_declared_overlap(paths: &[String]) -> Result<()> {
+    for (i, a) in paths.iter().enumerate() {
+        for b in &paths[i + 1..] {
+            if inside(a, b) || inside(b, a) {
+                return Err(SinterError::schema(format!(
+                    "backup paths {a} and {b} overlap: the copy of one could redirect the other; declare only one of them"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Reject a declared path that contains, or lies inside, the store root.
 pub fn check_overlap(path: &str, root: &str) -> Result<()> {
-    let inside = |a: &str, b: &str| a == b || a.starts_with(&format!("{}/", b));
     if inside(root, path) || inside(path, root) {
         return Err(SinterError::apply(format!(
             "backup path {} overlaps the backup store {}",
@@ -293,11 +362,15 @@ pub(crate) fn perform(
     fs: &mut TargetFs,
     paths: &[String],
     run_id: &str,
+    named_store: Option<&str>,
     stage: &mut StageTracker<'_>,
 ) -> Result<BackupReport> {
     let sudo = fs.sudo();
     let home = fs.home_env();
-    let root = store_root(sudo, &home);
+    let root = match named_store {
+        Some(dir) => dir.to_string(),
+        None => store_root(sudo, &home),
+    };
     let before_store = Progress {
         run_id,
         paths,
@@ -305,12 +378,22 @@ pub(crate) fn perform(
         done: &[],
         failed: None,
     };
+    check_declared_overlap(paths).map_err(|e| fail(&before_store, e))?;
     for p in paths {
         check_overlap(p, &root).map_err(|e| fail(&before_store, e))?;
     }
-    // Create the store chain below an existing trusted base.
-    for d in &store_chain(sudo, &home) {
-        ensure_dir(fs, d).map_err(|e| fail(&before_store, e))?;
+    match named_store {
+        // Only the named directory is made: its parent is the operator's to have.
+        Some(dir) => {
+            check_named_store(fs, dir, paths).map_err(|e| fail(&before_store, e))?;
+            ensure_dir(fs, dir).map_err(|e| fail(&before_store, e))?;
+        }
+        // Create the store chain below an existing trusted base.
+        None => {
+            for d in &store_chain(sudo, &home) {
+                ensure_dir(fs, d).map_err(|e| fail(&before_store, e))?;
+            }
+        }
     }
     let run_dir = format!("{}/{}", root, run_id);
     fs.check_trusted_parents_strict(&run_dir)
@@ -366,10 +449,23 @@ fn copy_one(
     path: &str,
     run_dir: &str,
 ) -> Result<BackupEntry> {
-    // A path inside another account's tree is not backed up: the copy would
-    // have to run as that account into a store only root can write.
-    fs.check_trusted_parents_strict(path)?;
+    // The walk itself is the invocation's. Inside another account's tree it
+    // settles that account's identity, and the path is then handled as that
+    // account only (DESIGN §40.7). A non-root invocation has no such tree: for it
+    // this walk is the strict one.
+    fs.check_trusted_parents(path)?;
+    if let Some(tree) = fs.tree_identity().cloned() {
+        return copy_from_tree(fs, permit, &tree, path, run_dir);
+    }
     let st = fs.inspect(path)?;
+    // The parents are trusted here, but a directory of another account is the top of
+    // its tree: it is not walked as the invocation (DESIGN §40.7).
+    if st.kind == ObjKind::Dir && !fs.is_trusted_owner(st.uid) {
+        return Err(SinterError::apply(format!(
+            "a directory owned by uid {} is not backed up: root does not walk a tree another account controls, and copying a live data directory file by file is not a consistent backup; list the files, and use the service's own backup tool for its data",
+            st.uid
+        )));
+    }
     // FS2-A3. A directory directly in a shared directory is not copied: the
     // entry gate judged only the directory itself, and `cp -a` would read
     // everything below it as root, including what other accounts put there.
@@ -412,6 +508,92 @@ fn copy_one(
         path: path.to_string(),
         status: BackupStatus::BackedUp,
         kind: Some(kind),
+        destination: Some(dest),
+    })
+}
+
+/// One path inside another account's tree. Every observation of it runs as the
+/// account (the identity the walk just set); the checks here give the reason a
+/// person can act on, and the script repeats them on what it really reads.
+fn copy_from_tree(
+    fs: &mut TargetFs,
+    permit: &crate::targetfs::MutationPermit,
+    tree: &crate::targetfs::TreeIdentity,
+    path: &str,
+    run_dir: &str,
+) -> Result<BackupEntry> {
+    let refuse = |what: String| {
+        SinterError::apply(format!(
+            "in the directory tree of uid {} at {}: {what}",
+            tree.uid, tree.root
+        ))
+    };
+    if tree.in_shared {
+        return Err(refuse(
+            "it is directly in a shared directory (such as /tmp), where any account can have \
+             made it, and a backup has no owner to compare with; it is not backed up"
+                .to_string(),
+        ));
+    }
+    let st = fs.inspect(path)?;
+    match st.kind {
+        ObjKind::Absent => {
+            fs.leave_tree();
+            return Ok(BackupEntry {
+                path: path.to_string(),
+                status: BackupStatus::Absent,
+                kind: None,
+                destination: None,
+            });
+        }
+        ObjKind::File => {}
+        ObjKind::Dir => {
+            return Err(refuse(
+                "a directory there is not backed up: root does not walk a tree another account \
+                 controls, and copying a live data directory file by file is not a consistent \
+                 backup; list the files, and use the service's own backup tool for its data"
+                    .to_string(),
+            ))
+        }
+        other => {
+            return Err(refuse(format!(
+                "a {} there is not backed up, only a regular file",
+                other.describe()
+            )))
+        }
+    }
+    if st.uid != tree.uid {
+        return Err(refuse(format!(
+            "the file is owned by uid {}, not by the account of the tree",
+            st.uid
+        )));
+    }
+    if st.mode & 0o6000 != 0 {
+        return Err(refuse("the file is setuid or setgid".to_string()));
+    }
+    let links = fs.hard_links(path)?;
+    if links != 1 {
+        return Err(refuse(format!(
+            "the file has {links} hard links, so it is reachable under another name"
+        )));
+    }
+    let x = fs.xattrs(path)?;
+    if !x.inspected {
+        return Err(refuse(
+            "its access metadata cannot be inspected, so an ACL could be lost".to_string(),
+        ));
+    }
+    let acl = x.attrs.contains_key("system.posix_acl_access");
+    // From here on the invocation works in its own private run directory.
+    fs.leave_tree();
+    let dest = format!("{}{}", run_dir, path);
+    let (parent, _) = crate::paths::parent_and_name(path);
+    fs.mkdir_p(permit, &format!("{}{}", run_dir, parent))?;
+    fs.backup_tree_copy(permit, tree, path, &dest, acl)?;
+    Ok(BackupEntry {
+        path: path.to_string(),
+        status: BackupStatus::BackedUp,
+        kind: Some("file"),
         destination: Some(dest),
     })
 }
@@ -483,6 +665,20 @@ mod tests {
             .filter(|k| k.starts_with(&format!("{}/", RUN_DIR)))
             .cloned()
             .collect()
+    }
+
+    #[test]
+    fn declared_paths_may_not_overlap_in_any_order() {
+        let list = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for bad in [
+            ["/srv/app", "/srv"],
+            ["/srv", "/srv/app"],
+            ["/srv/app", "/srv/app/sub/x"],
+        ] {
+            let e = check_declared_overlap(&list(&bad)).unwrap_err();
+            assert!(e.message.contains("overlap"), "{}", e.message);
+        }
+        assert!(check_declared_overlap(&list(&["/srv/app", "/srv/apple", "/srv/b/x"])).is_ok());
     }
 
     #[test]

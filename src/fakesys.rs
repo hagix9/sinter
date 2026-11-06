@@ -361,6 +361,55 @@ impl FakeFs {
         self.nodes.keys().any(|k| k.starts_with(&prefix))
     }
 
+    /// A model of the fixed backup script (`crate::fsbackup`): its type, owner,
+    /// link, set-id and size checks and its answers, on what the scripted
+    /// filesystem holds. Group and ACL handling are the script's own, tested in
+    /// `tests/backup_tree_script.rs`.
+    fn fsbackup(
+        &mut self,
+        me: u32,
+        tree_uid: &str,
+        _tree_gid: &str,
+        src: &str,
+        dst: &str,
+        max: &str,
+    ) -> Output {
+        if me != 0 {
+            return Self::reject("not running as root");
+        }
+        if self.setpriv_missing {
+            return exited(127, String::new(), "setpriv: not found\n".to_string());
+        }
+        let Ok(owner) = tree_uid.parse::<u32>() else {
+            return Self::reject("bad arguments");
+        };
+        let Some(n) = self.nodes.get(src).cloned() else {
+            return Self::reject("cannot observe the file as its account");
+        };
+        let FakeKind::File(content) = &n.kind else {
+            return Self::reject("not a regular file");
+        };
+        if n.uid != owner {
+            return Self::reject("the file is not owned by the account of its directory tree");
+        }
+        if self.nlink(src) != Some(1) {
+            return Self::reject("the file has more than one hard link");
+        }
+        if n.mode & 0o6000 != 0 {
+            return Self::reject("the file is setuid or setgid");
+        }
+        if content.len() as u64 > max.parse::<u64>().unwrap_or(0) {
+            return Self::reject("the file is larger than the limit");
+        }
+        if self.nodes.contains_key(dst) || !self.nodes.contains_key(&parent_of(dst)) {
+            return Self::reject("the destination exists or cannot be created");
+        }
+        let mut copy = n.clone();
+        copy.ino = self.ino();
+        self.nodes.insert(dst.to_string(), copy);
+        exited(0, format!("OK {}\n", content.len()), String::new())
+    }
+
     /// The model of the fixed staging script (`crate::fsstage`): the same
     /// steps, the same answers, the same exit codes.
     fn fsstage(
@@ -952,6 +1001,12 @@ impl FakeFs {
             }
             ("sh", ["-c", script, "sh", op, rest @ ..]) if *script == crate::fsstage::SCRIPT => {
                 let out = self.fsstage(op, rest, stdin, uid, gid, &mut touched);
+                return Some((out, touched));
+            }
+            ("sh", ["-c", script, "sh", tree_uid, tree_gid, src, dst, max, _acl])
+                if *script == crate::fsbackup::SCRIPT =>
+            {
+                let out = self.fsbackup(uid, tree_uid, tree_gid, src, dst, max);
                 return Some((out, touched));
             }
             ("chmod", [mode, "--", p]) => match self.nodes.get_mut(*p) {

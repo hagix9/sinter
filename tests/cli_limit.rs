@@ -579,6 +579,7 @@ fn host_specific_variable_errors_of_unselected_hosts_do_not_stop_a_limited_run()
                     &inv,
                     "--vars-file",
                     &v,
+                    "--strict-vars",
                     "--no-ssh-config",
                 ];
                 if let Some(l) = limit {

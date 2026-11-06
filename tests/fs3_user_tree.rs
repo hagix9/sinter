@@ -506,7 +506,8 @@ fn the_account_identity_does_not_leak_into_the_next_resource() {
 }
 
 #[test]
-fn a_backup_of_a_path_in_the_tree_is_refused() {
+fn a_backup_of_a_directory_in_the_tree_is_refused() {
+    // A regular file there is read as the account: tests/backup_tree.rs (DESIGN §40.7).
     let dir = tempfile::tempdir().unwrap();
     let mut t = base(true);
     t.fs.as_mut()
@@ -518,11 +519,12 @@ fn a_backup_of_a_path_in_the_tree_is_refused() {
     );
     let p = recipe(&dir, &body);
     match engine(&p, Mode::Apply, false, t).run() {
-        Err(e) => assert!(e.message.contains("is owned by uid 1001"), "{}", e.message),
-        Ok(r) => {
-            assert_ne!(r.status, AggregateStatus::Success);
-            assert!(r.commands.iter().all(|c| c.program != "/usr/bin/setpriv"));
-        }
+        Err(e) => assert!(
+            e.message.contains("a directory there is not backed up"),
+            "{}",
+            e.message
+        ),
+        Ok(r) => panic!("must not run: {:?}", r.status),
     }
 }
 
