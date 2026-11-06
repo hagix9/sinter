@@ -633,9 +633,12 @@ For each host and variable: the recipe's `value` < `vars` < `groups` <
 - A variable no recipe of the run declares (for a bundle, any of its recipes,
   includes counted) is a warning, since a file shared between recipes holds such
   names, and `--strict-vars` or `strict_vars: true` makes it an error, as it always was
-  up to v1.9.0. A name close to a declared one (`app_prot` for `app_port`: up to two
-  edits, or differing only in case or `-`/`_`) is an error in every mode and names the
-  likely variable. In a bundle, a value applies only to the recipes that declare that
+  up to v1.9.0. A variable another recipe in the project's `recipe_paths` declares is
+  accepted without a word, since only the names are read. A name that can only be a typo
+  of a declared one (`app_prot` for `app_port`: two neighbouring letters swapped, or only
+  the case differs) is an error and names the likely variable. A name one or two edits
+  away stays a warning with `did you mean`, because `db_port` and `db_host` are that close
+  and real: mark a variable that must be set `required: true`. In a bundle, a value applies only to the recipes that declare that
   variable.
 - A variable declared `required: true` needs a value from a variables file for every
   host that runs the recipe, or the run stops before contacting anything.

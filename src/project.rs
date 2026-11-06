@@ -330,6 +330,46 @@ pub(crate) fn parse_project(
     })
 }
 
+/// Most files looked at in one directory of `recipe_paths` for variable names.
+const MAX_DECLARATION_FILES: usize = 1000;
+
+/// The variable names the recipes in `recipe_paths` declare (DESIGN §40.5): the
+/// keys of each file's top-level `vars`, and nothing else. Only the files directly
+/// in those directories, held to the rules of a file the project names; `include`
+/// is not followed and nothing is run. No value is kept. A file that cannot be read
+/// or understood adds nothing and never fails the run: it is not this run's recipe.
+pub fn declared_elsewhere(project: &ProjectFile) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    for dir in &project.recipe_paths {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten().take(MAX_DECLARATION_FILES) {
+            let path = entry.path();
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase);
+            let parse: fn(&str) -> std::result::Result<Value, String> = match ext.as_deref() {
+                Some("yaml" | "yml") => crate::varsfile::parse_yaml_quiet,
+                Some("toml") => crate::varsfile::parse_toml_quiet,
+                _ => continue,
+            };
+            let Ok((bytes, _)) = read_named_trusted(NAMED, &path) else {
+                continue;
+            };
+            let Some(root) = std::str::from_utf8(&bytes).ok().and_then(|t| parse(t).ok()) else {
+                continue;
+            };
+            let vars = root.as_map().and_then(|m| m.get("vars"));
+            if let Some(vars) = vars.and_then(Value::as_map) {
+                names.extend(vars.keys().cloned());
+            }
+        }
+    }
+    names
+}
+
 /// A file a project file names, or a recipe found through it: the rules of a
 /// detected file, whichever way the project file was found (DESIGN §40.1).
 pub fn check_named_file(path: &Path) -> Result<()> {
@@ -570,6 +610,38 @@ mod tests {
             resolve_recipe(Path::new("twice.yaml"), Some(&p)).unwrap().0,
             found
         );
+    }
+
+    #[test]
+    fn other_recipes_give_their_variable_names_and_nothing_else() {
+        let a = private_dir();
+        let body = |v: &str| format!("version: 1\nvars:\n  {v}: {{ value: \"SECRET_CANARY\" }}\n");
+        let put = |name: &str, text: &str| {
+            let p = a.path().join(name);
+            std::fs::write(&p, text).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+            p
+        };
+        put("one.yaml", &body("db_port"));
+        put("two.yml", &body("web_port"));
+        put("three.toml", "version = 1\n[vars]\ntoml_var = \"x\"\n");
+        // None of these may fail anything, or add a name.
+        put("broken.yaml", "a: b: c: [\n");
+        put("list.yaml", "- not\n- a map\n");
+        put("novars.yaml", "version: 1\n");
+        put("notes.txt", &body("in_a_text_file"));
+        let open = put("open.yaml", &body("from_a_writable_file"));
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o666)).unwrap();
+        std::os::unix::fs::symlink(a.path().join("one.yaml"), a.path().join("link.yaml")).unwrap();
+        std::fs::create_dir(a.path().join("sub")).unwrap();
+        std::fs::write(a.path().join("sub/deep.yaml"), body("below_the_directory")).unwrap();
+        let p = project(vec![a.path().to_path_buf(), a.path().join("missing")]);
+        let got = declared_elsewhere(&p);
+        let want: std::collections::BTreeSet<String> = ["db_port", "toml_var", "web_port"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(got, want);
     }
 
     #[test]

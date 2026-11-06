@@ -1612,6 +1612,10 @@ fn vars_gate(
         UnknownVars::Warn
     };
     let mut warnings = Vec::new();
+    let elsewhere = match (&unknown, exec.resolved.project.as_deref()) {
+        (UnknownVars::Warn, Some(project)) => sinter::project::declared_elsewhere(project),
+        _ => Default::default(),
+    };
     let models = freeze_executions_with(
         &prepared.units,
         &vars,
@@ -1619,6 +1623,7 @@ fn vars_gate(
         &pairs,
         scope,
         unknown,
+        &elsewhere,
         &mut warnings,
     )
     .map_err(static_failure)?;
@@ -4265,7 +4270,7 @@ mod tests {
             // schema
             ("schema.yaml", "version: 2\n".to_string()),
             // override problem
-            ("unknown.yaml", "version: 1\nvars: { nope: 1 }\nhosts: { web01: { name: a }, web02: { name: b } }\n".to_string()),
+            ("unknown.yaml", "version: 1\nvars: { NAME: 1 }\nhosts: { web01: { name: a }, web02: { name: b } }\n".to_string()),
             // one host's freeze fails (relative path), the other is fine
             ("one.yaml", format!("version: 1\nhosts:\n  web01: {{ name: ok }}\n  web02: {{ name: \"../{CANARY}\" }}\n")),
         ];
@@ -4570,7 +4575,7 @@ mod tests {
                 false,
             ),
             (
-                "hosts: { web01: { name: a }, db01: { nope: 1 } }",
+                "hosts: { web01: { name: a }, db01: { NAME: 1 } }",
                 true,
                 false,
             ),
@@ -4593,7 +4598,7 @@ mod tests {
                 false,
             ),
             (
-                "vars: { nope: 1 }\nhosts: { web01: { name: a } }",
+                "vars: { NAME: 1 }\nhosts: { web01: { name: a } }",
                 false,
                 false,
             ),

@@ -570,15 +570,99 @@ fn unknown_variables_warn_typos_stop_and_values_stay_out() {
         "",
     );
     std::fs::remove_file(f.path("work/sinter.project.yaml")).unwrap();
-    let typo = f.write(
+    // Swapped letters and a different case or separator cannot be anything else.
+    for typo_name in ["app_roto", "APP_ROOT"] {
+        let typo = f.write(
+            "work/typo.yaml",
+            &format!("version: 1\nvars: {{ {typo_name}: \"{CANARY}\" }}\n"),
+        );
+        let o = f.run(&["validate", "r.yaml", "--vars-file", &typo]);
+        code(&o, 2, typo_name);
+        let err = text(&o.stderr);
+        assert!(err.contains("did you mean app_root?"), "{err}");
+        assert!(!err.contains(CANARY), "{err}");
+    }
+    // A hyphen is not a variable name at all: refused, the value not shown.
+    let hyphen = f.write(
         "work/typo.yaml",
+        &format!("version: 1\nvars: {{ app-root: \"{CANARY}\" }}\n"),
+    );
+    let o = f.run(&["validate", "r.yaml", "--vars-file", &hyphen]);
+    code(&o, 2, "hyphen");
+    assert!(!text(&o.stderr).contains(CANARY));
+    // One or two edits may be another recipe's real variable: a warning with the
+    // hint, an error only when strict.
+    let near = f.write(
+        "work/near.yaml",
         &format!("version: 1\nvars: {{ app_rot: \"{CANARY}\" }}\n"),
     );
-    let o = f.run(&["validate", "r.yaml", "--vars-file", &typo]);
-    code(&o, 2, "");
+    let o = f.run(&["validate", "r.yaml", "--vars-file", &near]);
+    code(&o, 0, "");
     let err = text(&o.stderr);
-    assert!(err.contains("did you mean app_root?"), "{err}");
+    assert!(
+        err.contains("warning:") && err.contains("did you mean app_root?"),
+        "{err}"
+    );
     assert!(!err.contains(CANARY), "{err}");
+    code(
+        &f.run(&["validate", "r.yaml", "--vars-file", &near, "--strict-vars"]),
+        2,
+        "",
+    );
+}
+
+#[test]
+fn a_shared_variables_file_works_across_the_recipes_of_a_project() {
+    let f = Fx::new();
+    // db.yaml uses db_host, web.yaml uses web_host and web_port; a typo of db.yaml's
+    // file would have read the other names as typos before.
+    std::fs::create_dir(f.path("work/recipes")).unwrap();
+    set_mode(&f.path("work/recipes"), 0o755);
+    f.write(
+        "work/recipes/db.yaml",
+        "version: 1\nvars:\n  db_host: { value: a }\nresources:\n  - id: a\n    type: directory\n    with: { path: \"/srv/{{ vars.db_host }}\", state: present }\n",
+    );
+    f.write(
+        "work/recipes/web.yaml",
+        "version: 1\nvars:\n  web_host: { value: a }\n  web_port: { value: 1 }\n  db_port: { value: 1 }\nresources: []\n",
+    );
+    f.write("work/recipes/broken.yaml", "a: b: c: [\n");
+    let common = f.write(
+        "work/common.yaml",
+        &format!(
+            "version: 1\nvars: {{ db_host: b, db_port: 5432, web_host: \"{CANARY}\", web_port: 80, unowned: 1 }}\n"
+        ),
+    );
+    f.write(
+        "work/sinter.project.yaml",
+        "version: 1\nrecipe_paths: [./recipes]\n",
+    );
+    let o = f.run(&["validate", "db.yaml", "--vars-file", &common]);
+    code(&o, 0, "");
+    let err = text(&o.stderr);
+    // The broken recipe costs nothing; the only warning is the name nobody declares.
+    assert!(!err.contains("db_port") && !err.contains("web_"), "{err}");
+    assert!(err.contains("unowned"), "{err}");
+    assert!(!err.contains(CANARY), "{err}");
+    // Strict: every name must be used by this run.
+    code(
+        &f.run(&[
+            "validate",
+            "db.yaml",
+            "--vars-file",
+            &common,
+            "--strict-vars",
+        ]),
+        2,
+        "",
+    );
+    // A required variable and a wrong type of a used one still stop the run.
+    let wrong = f.write("work/wrong.yaml", "version: 1\nvars: { db_host: 5 }\n");
+    code(
+        &f.run(&["validate", "db.yaml", "--vars-file", &wrong]),
+        2,
+        "",
+    );
 }
 
 #[test]

@@ -92,35 +92,64 @@ pub enum UnknownVars {
     Warn,
 }
 
-/// The declared variable `name` is probably a typo of: the same but for case and
-/// `-`/`_`, or at most two edits away. Names that differ only in digits are told
-/// apart on purpose (`web1_port`, `web2_port`), and short names say too little.
-fn likely_typo<'a>(name: &str, declared: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+/// How sure a near match is (DESIGN §40.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Typo<'a> {
+    /// Nothing else explains the name: it differs from a declared one only in
+    /// case or `-`/`_`, or by two neighbouring letters swapped. Stops the run.
+    Certain(&'a str),
+    /// One or two edits away. `db_port` and `db_host` are, and so are many pairs
+    /// of real variables, so this is never a reason to stop on its own.
+    Possible(&'a str),
+}
+
+/// Two neighbouring characters swapped, and nothing else.
+fn is_transposition(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let differ: Vec<usize> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
+    matches!(differ[..], [i, j] if j == i + 1 && a[i] == b[j] && a[j] == b[i])
+}
+
+/// The declared variable `name` may be a typo of. Names that differ only in digits
+/// are told apart on purpose (`web1_port`, `web2_port`), and short names say too
+/// little.
+fn likely_typo<'a>(name: &str, declared: impl Iterator<Item = &'a str>) -> Option<Typo<'a>> {
     let norm = |s: &str| s.to_ascii_lowercase().replace('-', "_");
     let wanted = norm(name);
     let digitless = |s: &str| -> String { s.chars().filter(|c| !c.is_ascii_digit()).collect() };
-    let mut best: Option<(usize, &str)> = None;
+    let mut certain = None;
+    let mut possible: Option<(usize, &str)> = None;
     for d in declared {
         if d == name {
             return None;
         }
         let other = norm(d);
-        let dist = if other == wanted {
-            0
-        } else if wanted.len() < 4
+        if other == wanted {
+            certain = certain.or(Some(d));
+            continue;
+        }
+        if wanted.len() < 4
             || other.len() < 4
             || digitless(&wanted) == digitless(&other)
             || wanted.len().abs_diff(other.len()) > 2
         {
             continue;
-        } else {
-            edit_distance(&wanted, &other)
-        };
-        if dist <= 2 && best.is_none_or(|(b, _)| dist < b) {
-            best = Some((dist, d));
+        }
+        if is_transposition(&wanted, &other) {
+            certain = certain.or(Some(d));
+            continue;
+        }
+        let dist = edit_distance(&wanted, &other);
+        if dist <= 2 && possible.is_none_or(|(b, _)| dist < b) {
+            possible = Some((dist, d));
         }
     }
-    best.map(|(_, d)| d)
+    certain
+        .map(Typo::Certain)
+        .or(possible.map(|(_, d)| Typo::Possible(d)))
 }
 
 /// Levenshtein distance of two short names.
@@ -485,12 +514,16 @@ pub fn freeze_executions_in(
         pairs,
         scope,
         UnknownVars::Error,
+        &BTreeSet::new(),
         &mut warnings,
     )
 }
 
 /// [`freeze_executions_in`] with a choice of what a name no recipe declares is
-/// ([`UnknownVars`]). Warnings name variables and files, never a value.
+/// ([`UnknownVars`]). `elsewhere` holds names other recipes of the project declare
+/// (DESIGN §40.5): such a name has an owner, so it is neither a warning nor a typo,
+/// unless the run is strict. Warnings name variables and files, never a value.
+#[allow(clippy::too_many_arguments)]
 pub fn freeze_executions_with(
     units: &[Loaded<Prepared>],
     vf: &VarsFile,
@@ -498,6 +531,7 @@ pub fn freeze_executions_with(
     pairs: &[(usize, String)],
     scope: Scope,
     unknown: UnknownVars,
+    elsewhere: &BTreeSet<String>,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<Model>, Problems> {
     // The layers that apply to the executions of `pairs`.
@@ -555,17 +589,24 @@ pub fn freeze_executions_with(
         }
         if in_scope && declaring == 0 {
             let names = declared.iter().flat_map(|d| d.keys().copied());
-            if let Some(typo) = likely_typo(name, names) {
+            let typo = likely_typo(name, names);
+            let hint = match typo {
+                Some(Typo::Certain(t) | Typo::Possible(t)) => format!("; did you mean {t}?"),
+                None => String::new(),
+            };
+            if unknown == UnknownVars::Error {
                 problems.push(format!(
-                    "{label}: variable {name}{from} is not declared by any recipe of this run; did you mean {typo}?"
+                    "{label}: variable {name}{from} is not declared by any recipe of this run{hint}"
                 ));
-            } else if unknown == UnknownVars::Error {
+            } else if elsewhere.contains(name.as_str()) {
+                // Another recipe's variable, in a file shared between recipes.
+            } else if matches!(typo, Some(Typo::Certain(_))) {
                 problems.push(format!(
-                    "{label}: variable {name}{from} is not declared by any recipe of this run"
+                    "{label}: variable {name}{from} is not declared by any recipe of this run{hint}"
                 ));
             } else {
                 let line = format!(
-                    "{label}: variable {name}{from} is not declared by any recipe of this run; ignored (--strict-vars makes this an error)"
+                    "{label}: variable {name}{from} is not declared by any recipe of this run{hint}; ignored (--strict-vars makes this an error)"
                 );
                 if !warnings.contains(&line) {
                     warnings.push(line);
@@ -738,6 +779,7 @@ mod layering_tests {
             &[(0, "h".to_string())],
             Scope::All,
             unknown,
+            &BTreeSet::new(),
             &mut warnings,
         );
         (r, warnings)
@@ -851,19 +893,105 @@ mod layering_tests {
     }
 
     #[test]
-    fn a_likely_typo_stops_the_run_in_every_mode() {
+    fn a_certain_typo_stops_the_run_in_every_mode() {
         let d = tempfile::tempdir().unwrap();
-        for typo in ["app_prot", "APP_PORT", "app_ports", "ap_port"] {
+        for typo in ["app_prot", "APP_PORT", "App_Port"] {
             let v = load(
                 &d,
                 "a.yaml",
                 &format!("version: 1\nvars: {{ {typo}: \"{CANARY}\" }}\n"),
             );
+            for mode in [UnknownVars::Warn, UnknownVars::Error] {
+                let (r, w) = freeze(&d, RECIPE, &v, mode);
+                let p = r.unwrap_err().0.join("\n");
+                assert!(p.contains("did you mean app_port?"), "{typo}: {p}");
+                assert!(w.is_empty());
+                assert!(!p.contains(CANARY));
+            }
+        }
+    }
+
+    #[test]
+    fn a_near_name_that_may_be_real_warns_and_strict_stops_it() {
+        let d = tempfile::tempdir().unwrap();
+        // app_port is what RECIPE declares: all of these can be real variables of
+        // another recipe, so none may stop the run on a guess.
+        for near in ["app_ports", "ap_port", "app_host", "app_post", "api_port"] {
+            let v = load(
+                &d,
+                "a.yaml",
+                &format!("version: 1\nvars: {{ {near}: \"{CANARY}\" }}\n"),
+            );
             let (r, w) = freeze(&d, RECIPE, &v, UnknownVars::Warn);
-            let p = r.unwrap_err().0.join("\n");
-            assert!(p.contains("did you mean app_port?"), "{typo}: {p}");
+            assert!(r.is_ok(), "{near}");
+            assert_eq!(w.len(), 1, "{near}");
+            assert!(w[0].contains(near) && !w[0].contains(CANARY), "{w:?}");
+            let (r, w) = freeze(&d, RECIPE, &v, UnknownVars::Error);
+            assert!(r.unwrap_err().0.join("\n").contains(near));
             assert!(w.is_empty());
-            assert!(!p.contains(CANARY));
+        }
+    }
+
+    #[test]
+    fn the_reported_pairs_are_not_certain_typos() {
+        for (surplus, declared) in [
+            ("db_port", "db_host"),
+            ("db_host", "db_port"),
+            ("web_port", "web_host"),
+            ("web_host", "web_port"),
+            ("app_url", "api_url"),
+            ("api_url", "app_url"),
+            ("server", "servers"),
+        ] {
+            let got = likely_typo(surplus, [declared].into_iter());
+            assert!(
+                matches!(got, Some(Typo::Possible(_)) | None),
+                "{surplus} {declared}: {got:?}"
+            );
+        }
+        for (typo, declared) in [
+            ("db_hots", "db_host"),
+            ("DB_HOST", "db_host"),
+            ("db-host", "db_host"),
+            ("DB-Host", "db_host"),
+        ] {
+            assert_eq!(
+                likely_typo(typo, [declared].into_iter()),
+                Some(Typo::Certain(declared)),
+                "{typo}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_another_recipe_declares_has_an_owner() {
+        let d = tempfile::tempdir().unwrap();
+        // Even the shape of a certain typo: the exact name is another recipe's.
+        for name in ["db_port", "app_prot", "APP_PORT", "unrelated"] {
+            let units = prepare_source(&write(&d, "r.yaml", RECIPE)).unwrap().units;
+            let v = load(
+                &d,
+                "a.yaml",
+                &format!("version: 1\nvars: {{ {name}: 1 }}\n"),
+            );
+            let elsewhere = BTreeSet::from([name.to_string()]);
+            let run = |unknown, w: &mut Vec<String>| {
+                freeze_executions_with(
+                    &units,
+                    &v,
+                    &Mode::Single,
+                    &[(0, "h".to_string())],
+                    Scope::All,
+                    unknown,
+                    &elsewhere,
+                    w,
+                )
+            };
+            let mut w = Vec::new();
+            assert!(run(UnknownVars::Warn, &mut w).is_ok(), "{name}");
+            assert!(w.is_empty(), "{name}: {w:?}");
+            // Strict means every name of the file is used by this run.
+            assert!(run(UnknownVars::Error, &mut w).is_err(), "{name}");
         }
     }
 
@@ -873,11 +1001,11 @@ mod layering_tests {
         let found = |n: &str| likely_typo(n, names.iter().copied());
         assert_eq!(found("web2_port"), None);
         assert_eq!(found("abd"), None);
-        assert_eq!(found("db_post"), Some("db_host"));
+        assert_eq!(found("db_post"), Some(Typo::Possible("db_host")));
         assert_eq!(found("unrelated_name"), None);
         // A declared name is not a typo of itself.
         assert_eq!(found("db_host"), None);
-        assert_eq!(found("DB-HOST"), Some("db_host"));
+        assert_eq!(found("DB-HOST"), Some(Typo::Certain("db_host")));
     }
 
     #[test]

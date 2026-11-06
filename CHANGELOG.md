@@ -51,7 +51,9 @@ All notable changes to Sinter are documented in this file.
   could write through a link the first left in the run directory.
 - **A variable no recipe of the run declares is now a warning**, not exit 2, because a file shared
   between recipes holds such names. `--strict-vars` or `strict_vars: true` restores the error. A name
-  close to a declared one stays an error in every mode and names the likely variable.
+  another recipe in `recipe_paths` declares is accepted silently; only a name that can only be a typo
+  (swapped letters, a different case) is an error, and one or two edits away is a warning, since
+  `db_port` and `db_host` are that close and real.
 
 ### Unchanged
 
