@@ -132,7 +132,8 @@ pub const TOP_LEVEL_FIELDS: &[&str] = &[
 /// Fields of one `plugins` entry.
 pub const PLUGIN_REF_FIELDS: &[&str] = &["id", "version"];
 /// Fields of the top-level `backup` map.
-pub const BACKUP_FIELDS: &[&str] = &["paths"];
+pub const BACKUP_FIELDS: &[&str] = &["paths", "directory"];
+pub const BACKUP_PATH_FIELDS: &[&str] = &["path", "directory"];
 /// Fields of the top-level `targets` map.
 pub const TARGET_FIELDS: &[&str] = &["hosts", "groups"];
 pub const COMMON_RESOURCE_FIELDS: &[&str] = &[

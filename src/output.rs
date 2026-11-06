@@ -340,6 +340,12 @@ fn render_backup_text(
             sanitize_line(id),
             sanitize_line(dir)
         )?,
+        (Some(id), None) if !b.directories.is_empty() => writeln!(
+            out,
+            "backup: run {} -> {}",
+            sanitize_line(id),
+            sanitize_line(&b.directories.join(", "))
+        )?,
         _ => writeln!(out, "backup: planned (nothing is copied during plan)")?,
     }
     for e in &b.entries {
@@ -352,7 +358,10 @@ fn render_backup_text(
             }
             (crate::backup::BackupStatus::Failed, _, _) => "[failed]".to_string(),
             (crate::backup::BackupStatus::NotRun, _, _) => "[not_run]".to_string(),
-            _ => "[planned]".to_string(),
+            (_, _, _) => match &e.store {
+                Some(s) => format!("[planned] -> {}", sanitize_line(s)),
+                None => "[planned]".to_string(),
+            },
         };
         writeln!(
             out,
@@ -371,11 +380,13 @@ pub fn backup_json(b: &crate::backup::BackupReport) -> serde_json::Value {
     serde_json::json!({
         "run_id": b.run_id,
         "directory": b.directory,
+        "directories": b.directories,
         "entries": b.entries.iter().map(|e| serde_json::json!({
             "path": e.path,
             "status": e.status.label(),
             "kind": e.kind,
             "destination": e.destination,
+            "store": e.store,
         })).collect::<Vec<_>>(),
     })
 }

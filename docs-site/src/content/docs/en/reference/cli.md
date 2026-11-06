@@ -842,9 +842,9 @@ resources:
   mode, ACLs, ownership and timestamps preserved; other extended attributes
   and SELinux labels are best effort. A path that does not exist is recorded
   as `absent`.
-- *Next version, not in v1.9.0.* `--backup-dir PATH` or the project file's
-  `backup.directory` names another store. It is a path **on each target**, and a recipe cannot
-  name one. Only that directory is created (mode 0700); its parent must exist. It is checked like
+- *Next version, not in v1.9.0.* A path's `directory`, else the recipe's `backup.directory`, else
+  the project file's, names another store: see [`backup`](/en/reference/recipe-format/#backup). It
+  is a path **on each target**, and `plan` lists each path with its store. Only that directory is created (mode 0700); its parent must exist. It is checked like
   the default store: no symbolic link, no directory another account owns or others can write, not
   directly in `/tmp`, and it may not overlap a declared path. `plan` reports the same refusals.
 - *Next version, not in v1.9.0.* As root, a **regular file in another account's directory**, such

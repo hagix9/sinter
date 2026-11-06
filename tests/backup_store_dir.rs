@@ -1,4 +1,4 @@
-//! `--backup-dir` and a project file's `backup.directory` (DESIGN §40.6): the store
+//! A project file's `backup.directory` (DESIGN §40.6): the store
 //! the operator names is held to the rules of the default store, in plan and apply.
 #![cfg(unix)]
 
@@ -196,13 +196,17 @@ fn the_path_itself_is_checked_before_anything_runs() {
 }
 
 #[test]
-fn a_recipe_still_cannot_name_a_store() {
+fn a_recipe_names_a_store_only_under_the_same_rules() {
+    // tests/backup_recipe_store.rs has the rest. A directory is static, absolute and
+    // normalized at load; /tmp itself is judged at run time as a shared directory.
     let d = tempfile::tempdir().unwrap();
     let p = d.path().join("r.yaml");
-    std::fs::write(
-        &p,
-        "version: 1\nbackup:\n  paths: [/etc/x]\n  directory: /tmp\n",
-    )
-    .unwrap();
-    assert!(load_model(&p).is_err());
+    for (body, ok) in [
+        ("  paths: [/etc/x]\n  directory: /var/backups/x\n", true),
+        ("  paths: [/etc/x]\n  directory: rel\n", false),
+        ("  paths: [/etc/x]\n  directory: \"{{ x }}\"\n", false),
+    ] {
+        std::fs::write(&p, format!("version: 1\nbackup:\n{body}")).unwrap();
+        assert_eq!(load_model(&p).is_ok(), ok, "{body}");
+    }
 }

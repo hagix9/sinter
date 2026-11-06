@@ -359,15 +359,12 @@ fn the_command_line_wins_over_the_project_file() {
     assert_eq!(d["inventory"], other);
     assert_eq!(d["inventory_source"], "explicit");
     assert_eq!(d["resolved"]["backup_directory"], "/var/backups/p");
-    let o = f.run(&[
-        "validate",
-        "r.yaml",
-        "--backup-dir",
-        "/var/backups/c",
-        "--format",
-        "json",
-    ]);
-    assert_eq!(json(&o)["resolved"]["backup_directory"], "/var/backups/c");
+    // There is no option to override it: the store is read in the recipe or here.
+    code(
+        &f.run(&["validate", "r.yaml", "--backup-dir", "/var/backups/c"]),
+        2,
+        "",
+    );
     // --host means that host: the project's inventory is not in the way.
     let o = f.run(&["validate", "r.yaml", "--host", "h1", "--format", "json"]);
     code(&o, 0, "");
@@ -753,7 +750,13 @@ fn a_store_path_is_checked_on_every_phase_before_anything_runs() {
     f.write("work/r.yaml", FREE);
     for phase in ["validate", "plan", "audit", "apply"] {
         for bad in ["rel/dir", "/a/../b", "/"] {
-            let o = f.run(&[phase, "r.yaml", "--backup-dir", bad]);
+            f.write(
+                "work/s.yaml",
+                &format!(
+                    "version: 1\nbackup:\n  directory: {bad}\n  paths: [/etc/x]\nresources: []\n"
+                ),
+            );
+            let o = f.run(&[phase, "s.yaml"]);
             code(&o, 2, &format!("{phase} {bad}"));
         }
     }

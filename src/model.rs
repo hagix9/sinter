@@ -93,6 +93,9 @@ pub struct Model {
     /// Paths to back up on the target before apply mutates anything
     /// (`backup.paths`, include-expanded in document order, unique).
     pub backups: Vec<String>,
+    /// The store a recipe names for a path of `backups` (DESIGN §40.6). A path not
+    /// here goes to the project file's store, else the default one.
+    pub backup_stores: BTreeMap<String, String>,
     /// Explicit execution targets (`targets`), from the entry recipe only.
     pub targets: Option<TargetSelector>,
     /// Load-time warnings: likely mistakes that are still valid recipes
@@ -136,6 +139,7 @@ impl Model {
             handler_index: BTreeMap::new(),
             register_producers: BTreeMap::new(),
             backups: Vec::new(),
+            backup_stores: BTreeMap::new(),
             targets,
             warnings: Vec::new(),
             plugins: None,
@@ -214,6 +218,7 @@ pub(crate) fn prepare_with_plugins(
         declarations: Vec::new(),
         global_sensitive_vars,
         backups: Vec::new(),
+        backup_stores: BTreeMap::new(),
         entry: None,
         targets: None,
         recipe_env: None,
@@ -621,6 +626,8 @@ struct LoadState {
     global_sensitive_vars: BTreeSet<String>,
     /// `backup.paths` across the include graph: (path, declaring origin).
     backups: Vec<(String, String)>,
+    /// The stores the documents name for those paths.
+    backup_stores: BTreeMap<String, String>,
     /// Canonical path of the entry recipe (the first document loaded).
     entry: Option<PathBuf>,
     /// `targets` of the entry recipe.
@@ -723,6 +730,11 @@ fn expand_document(canon: &Path, doc: Document, state: &mut LoadState) -> Result
         }
         state.backups.push((p.clone(), canon.display().to_string()));
     }
+    state.backup_stores.extend(
+        doc.backup_stores
+            .iter()
+            .map(|(p, d)| (p.clone(), d.clone())),
+    );
     for v in &doc.vars {
         if !state.var_names.insert(v.name.clone()) {
             return Err(SinterError::schema(format!(
@@ -1746,6 +1758,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
     // Refused in every phase, before anything is contacted.
     let declared_backups: Vec<String> = state.backups.iter().map(|(p, _)| p.clone()).collect();
     crate::backup::check_declared_overlap(&declared_backups)?;
+    crate::backup::check_declared_stores(&declared_backups, &state.backup_stores)?;
 
     // A required variable needs a value from a variables file. A recipe no host
     // runs is not asked (`structure_only`), and nothing about its default is said.
@@ -2725,6 +2738,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
         handler_index,
         register_producers,
         backups: state.backups.into_iter().map(|(p, _)| p).collect(),
+        backup_stores: state.backup_stores,
         targets: state.targets,
         warnings,
         plugins: state.plugins,

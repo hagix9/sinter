@@ -197,7 +197,7 @@ sinter apply nginx.yaml --inventory hosts.yaml
 - Since v1.10.0: a project file, `sinter.yaml` in the current directory or
   `--config`, can set `recipe_paths`, `inventory`, `vars_files`, `backup.directory` and a
   `default_target`, so `sinter apply moge.yaml web01` finds the recipe wherever it is kept.
-  `--vars-file` may be repeated, `--backup-dir` names the store on the target, and
+  `--vars-file` may be repeated, `backup.directory` in a recipe names the store on the target, and
   `--skip-recipe` and `--skip-resource` leave things out, always visibly (`PARTIAL_APPLY`) and
   never past a dependency. As root a regular file in another account's directory, such as
   `/var/lib/pgsql/.pgpass`, is backed up read as that account; a live data directory is not, and

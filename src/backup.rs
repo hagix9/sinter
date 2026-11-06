@@ -10,8 +10,8 @@
 //!
 //! * `--sudo`: `/var/lib/sinter/backups/<run-id>/`
 //! * otherwise: `$HOME/.sinter/backups/<run-id>/` of the target user
-//! * `--backup-dir` or a project file: `<that directory>/<run-id>/` (DESIGN
-//!   §40.6); never from a recipe.
+//! * a path's `directory`, else its recipe's `backup.directory`, else a project
+//!   file's: `<that directory>/<run-id>/` (DESIGN §40.6). One apply can use several.
 //!
 //! Inside the run directory the original absolute path is reproduced, e.g.
 //! `/var/lib/sinter/backups/20260928T101530Z-3f9a2c1d/etc/ssh/sshd_config`.
@@ -44,6 +44,7 @@
 use crate::error::{Result, SinterError};
 use crate::progress::StageTracker;
 use crate::targetfs::{ObjKind, TargetFs};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackupStatus {
@@ -80,14 +81,18 @@ pub struct BackupEntry {
     pub kind: Option<&'static str>,
     /// Copy location on the target when copied.
     pub destination: Option<String>,
+    /// The store this path goes to, when known.
+    pub store: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct BackupReport {
     /// Set by apply.
     pub run_id: Option<String>,
-    /// Run directory on the target, set by apply.
+    /// Run directory on the target when there is exactly one, set by apply.
     pub directory: Option<String>,
+    /// Every run directory this invocation made, in order.
+    pub directories: Vec<String>,
     pub entries: Vec<BackupEntry>,
 }
 
@@ -163,9 +168,20 @@ pub fn utc_stamp(secs: u64) -> String {
 
 /// Plan-mode report: declared paths only; nothing observed or created.
 pub fn planned(paths: &[String]) -> BackupReport {
+    planned_in(paths, &BTreeMap::new(), None)
+}
+
+/// [`planned`], saying where each path would go: what the recipe names, else
+/// `fallback` when it is known.
+pub fn planned_in(
+    paths: &[String],
+    stores: &BTreeMap<String, String>,
+    fallback: Option<&str>,
+) -> BackupReport {
     BackupReport {
         run_id: None,
         directory: None,
+        directories: Vec::new(),
         entries: paths
             .iter()
             .map(|p| BackupEntry {
@@ -173,12 +189,16 @@ pub fn planned(paths: &[String]) -> BackupReport {
                 status: BackupStatus::Planned,
                 kind: None,
                 destination: None,
+                store: stores
+                    .get(p)
+                    .cloned()
+                    .or_else(|| fallback.map(str::to_string)),
             })
             .collect(),
     }
 }
 
-/// A store path from `--backup-dir` or a project file: absolute, normalized, not
+/// A store path from a recipe or a project file: absolute, normalized, not
 /// the root directory (DESIGN §40.6). A pure check, made before anything runs.
 pub fn validate_store_dir(path: &str) -> Result<()> {
     crate::paths::validate_path(path)
@@ -243,6 +263,77 @@ pub fn check_declared_overlap(paths: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// One store may not contain another: its run directories would lie in the other's
+/// tree, and what one copy left there would be in the way of the other.
+fn check_stores_apart(a: &str, b: &str) -> Result<()> {
+    if a != b && (inside(a, b) || inside(b, a)) {
+        return Err(SinterError::schema(format!(
+            "backup stores {a} and {b} overlap: one would lie inside the other; use one store, or two apart"
+        )));
+    }
+    Ok(())
+}
+
+/// What a recipe's declaration alone can say about its stores (DESIGN §40.6): no
+/// path overlaps any store, whichever path names it, and no store contains another.
+/// A pure check, so it holds in every phase.
+pub fn check_declared_stores(paths: &[String], stores: &BTreeMap<String, String>) -> Result<()> {
+    let dirs: Vec<&String> = stores.values().collect();
+    for (i, a) in dirs.iter().enumerate() {
+        for b in &dirs[i + 1..] {
+            check_stores_apart(a, b)?;
+        }
+        for p in paths {
+            check_overlap(p, a).map_err(|e| SinterError::schema(e.message))?;
+        }
+    }
+    Ok(())
+}
+
+/// The stores of one run in the order of the declaration, each once, and the store
+/// of each path: its own, else `fallback`.
+fn stores_of<'a>(
+    paths: &'a [String],
+    stores: &'a BTreeMap<String, String>,
+    fallback: &'a str,
+) -> Vec<&'a str> {
+    let mut roots: Vec<&str> = Vec::new();
+    for p in paths {
+        let root = stores.get(p).map_or(fallback, String::as_str);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
+}
+
+/// The checks of every store a plan would use, read-only: what apply would refuse
+/// before it makes anything. `named` is the project file's store.
+pub(crate) fn check_planned_stores(
+    fs: &mut TargetFs,
+    paths: &[String],
+    stores: &BTreeMap<String, String>,
+    named: Option<&str>,
+) -> Result<()> {
+    let default = store_root(fs.sudo(), &fs.home_env());
+    let fallback = named.unwrap_or(&default);
+    let roots = stores_of(paths, stores, fallback);
+    for (i, a) in roots.iter().enumerate() {
+        for b in &roots[i + 1..] {
+            check_stores_apart(a, b)?;
+        }
+        for p in paths {
+            check_overlap(p, a)?;
+        }
+    }
+    for root in &roots {
+        if *root != default || named == Some(*root) || stores.values().any(|d| d == root) {
+            check_named_store(fs, root, paths)?;
+        }
+    }
+    Ok(())
+}
+
 /// Reject a declared path that contains, or lies inside, the store root.
 pub fn check_overlap(path: &str, root: &str) -> Result<()> {
     if inside(root, path) || inside(path, root) {
@@ -258,8 +349,8 @@ pub fn check_overlap(path: &str, root: &str) -> Result<()> {
 struct Progress<'a> {
     run_id: &'a str,
     paths: &'a [String],
-    /// Run directory, once this invocation created it.
-    run_dir: Option<&'a str>,
+    /// Run directories this invocation has created so far.
+    run_dirs: &'a [String],
     /// Entries completed before the failure.
     done: &'a [BackupEntry],
     /// The path whose copy failed, if the failure was per-path.
@@ -271,9 +362,13 @@ struct Progress<'a> {
 /// content) so machine-readable output can report it; the message keeps the
 /// human wording.
 fn fail(p: &Progress<'_>, e: SinterError) -> SinterError {
-    let where_ = match p.run_dir {
-        Some(d) => format!("; partial backup left at {} (not removed)", d),
-        None => String::new(),
+    let where_ = if p.run_dirs.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; partial backup left at {} (not removed)",
+            p.run_dirs.join(", ")
+        )
     };
     let mut entries: Vec<BackupEntry> = p.done.to_vec();
     for path in &p.paths[p.done.len()..] {
@@ -287,6 +382,7 @@ fn fail(p: &Progress<'_>, e: SinterError) -> SinterError {
             status,
             kind: None,
             destination: None,
+            store: None,
         });
     }
     let mut err = SinterError::apply(format!(
@@ -295,7 +391,11 @@ fn fail(p: &Progress<'_>, e: SinterError) -> SinterError {
     ));
     err.backup = Some(Box::new(BackupReport {
         run_id: Some(p.run_id.to_string()),
-        directory: p.run_dir.map(str::to_string),
+        directory: match p.run_dirs {
+            [one] => Some(one.clone()),
+            _ => None,
+        },
+        directories: p.run_dirs.to_vec(),
         entries,
     }));
     err
@@ -361,73 +461,92 @@ fn check_existing_store_dir(fs: &TargetFs, dir: &str, st: &crate::targetfs::Stat
 pub(crate) fn perform(
     fs: &mut TargetFs,
     paths: &[String],
+    stores: &BTreeMap<String, String>,
     run_id: &str,
     named_store: Option<&str>,
     stage: &mut StageTracker<'_>,
 ) -> Result<BackupReport> {
     let sudo = fs.sudo();
     let home = fs.home_env();
-    let root = match named_store {
-        Some(dir) => dir.to_string(),
-        None => store_root(sudo, &home),
-    };
+    let default = store_root(sudo, &home);
+    let fallback = named_store.unwrap_or(&default);
     let before_store = Progress {
         run_id,
         paths,
-        run_dir: None,
+        run_dirs: &[],
         done: &[],
         failed: None,
     };
     check_declared_overlap(paths).map_err(|e| fail(&before_store, e))?;
-    for p in paths {
-        check_overlap(p, &root).map_err(|e| fail(&before_store, e))?;
-    }
-    match named_store {
-        // Only the named directory is made: its parent is the operator's to have.
-        Some(dir) => {
-            check_named_store(fs, dir, paths).map_err(|e| fail(&before_store, e))?;
-            ensure_dir(fs, dir).map_err(|e| fail(&before_store, e))?;
+    let roots = stores_of(paths, stores, fallback);
+    for (i, a) in roots.iter().enumerate() {
+        for b in &roots[i + 1..] {
+            check_stores_apart(a, b).map_err(|e| fail(&before_store, e))?;
         }
-        // Create the store chain below an existing trusted base.
-        None => {
+        for p in paths {
+            check_overlap(p, a).map_err(|e| fail(&before_store, e))?;
+        }
+    }
+    // Every store is checked and made before the first copy, so a store that
+    // cannot be used stops the apply with nothing copied.
+    let mut run_dirs: Vec<String> = Vec::new();
+    for root in &roots {
+        let failing = Progress {
+            run_dirs: &run_dirs,
+            ..before_store
+        };
+        if *root == default && named_store != Some(*root) && !stores.values().any(|d| d == root) {
+            // Create the store chain below an existing trusted base.
             for d in &store_chain(sudo, &home) {
-                ensure_dir(fs, d).map_err(|e| fail(&before_store, e))?;
+                ensure_dir(fs, d).map_err(|e| fail(&failing, e))?;
             }
+        } else {
+            // Only the named directory is made: its parent is the operator's to have.
+            check_named_store(fs, root, paths).map_err(|e| fail(&failing, e))?;
+            ensure_dir(fs, root).map_err(|e| fail(&failing, e))?;
         }
+        let run_dir = format!("{}/{}", root, run_id);
+        fs.check_trusted_parents_strict(&run_dir)
+            .map_err(|e| fail(&failing, e))?;
+        let permit = fs.mutation_permit()?;
+        // Plain (non `-p`) mkdir, mode 0700 from the start: an existing run
+        // directory is a collision and fails. It is not ours, so the failure
+        // report does not name it.
+        fs.mkdir_private(&permit, &run_dir).map_err(|e| {
+            fail(
+                &failing,
+                SinterError::apply(format!(
+                    "cannot create backup run directory {} (collision or store error): {}",
+                    run_dir, e.message
+                )),
+            )
+        })?;
+        run_dirs.push(run_dir.clone());
+        let created = Progress {
+            run_dirs: &run_dirs,
+            ..before_store
+        };
+        fs.chmod(&permit, &run_dir, 0o700)
+            .map_err(|e| fail(&created, e))?;
     }
-    let run_dir = format!("{}/{}", root, run_id);
-    fs.check_trusted_parents_strict(&run_dir)
-        .map_err(|e| fail(&before_store, e))?;
-    let permit = fs.mutation_permit()?;
-    // Plain (non `-p`) mkdir, mode 0700 from the start: an existing run
-    // directory is a collision and fails. It is not ours, so the failure
-    // report names no directory.
-    fs.mkdir_private(&permit, &run_dir).map_err(|e| {
-        fail(
-            &before_store,
-            SinterError::apply(format!(
-                "cannot create backup run directory {} (collision or store error): {}",
-                run_dir, e.message
-            )),
-        )
-    })?;
-    let created = Progress {
-        run_dir: Some(&run_dir),
-        ..before_store
-    };
-    fs.chmod(&permit, &run_dir, 0o700)
-        .map_err(|e| fail(&created, e))?;
 
+    let permit = fs.mutation_permit()?;
     let mut entries: Vec<BackupEntry> = Vec::new();
     for p in paths {
         stage.item_started(None);
+        let root = stores.get(p).map_or(fallback, String::as_str);
+        let run_dir = format!("{}/{}", root, run_id);
         match copy_one(fs, &permit, p, &run_dir) {
-            Ok(entry) => entries.push(entry),
+            Ok(mut entry) => {
+                entry.store = Some(root.to_string());
+                entries.push(entry);
+            }
             Err(e) => {
                 let at = Progress {
+                    run_dirs: &run_dirs,
                     done: &entries,
                     failed: Some(p),
-                    ..created
+                    ..before_store
                 };
                 return Err(fail(
                     &at,
@@ -438,7 +557,11 @@ pub(crate) fn perform(
     }
     Ok(BackupReport {
         run_id: Some(run_id.to_string()),
-        directory: Some(run_dir),
+        directory: match &run_dirs[..] {
+            [one] => Some(one.clone()),
+            _ => None,
+        },
+        directories: run_dirs,
         entries,
     })
 }
@@ -486,6 +609,7 @@ fn copy_one(
                 status: BackupStatus::Absent,
                 kind: None,
                 destination: None,
+                store: None,
             })
         }
         ObjKind::File => "file",
@@ -509,6 +633,7 @@ fn copy_one(
         status: BackupStatus::BackedUp,
         kind: Some(kind),
         destination: Some(dest),
+        store: None,
     })
 }
 
@@ -544,6 +669,7 @@ fn copy_from_tree(
                 status: BackupStatus::Absent,
                 kind: None,
                 destination: None,
+                store: None,
             });
         }
         ObjKind::File => {}
@@ -595,6 +721,7 @@ fn copy_from_tree(
         status: BackupStatus::BackedUp,
         kind: Some("file"),
         destination: Some(dest),
+        store: None,
     })
 }
 

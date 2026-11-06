@@ -197,7 +197,7 @@ pub struct Engine {
     /// Backup run id shared across one invocation's targets; generated on
     /// demand when unset.
     pub(crate) backup_run_id: Option<String>,
-    /// The backup store the operator named (`--backup-dir`, a project file);
+    /// The backup store of the project file;
     /// `None` is the default store. DESIGN §40.6.
     pub(crate) backup_store: Option<String>,
     /// Target-local systemd manager synchronization state.
@@ -220,23 +220,35 @@ impl Engine {
     /// directory that exists, or is not a directory, is not created by apply
     /// and is left alone; one that cannot be observed is assumed created.
     fn record_backup_store_change(&mut self) {
-        let chain = match &self.backup_store {
+        let fallback = match &self.backup_store {
             Some(dir) => vec![dir.clone()],
             None => crate::backup::store_chain(self.fs.sudo(), &self.fs.home_env()),
         };
-        self.fs.set_stats_scope("backup");
-        for dir in chain {
-            let creates = match self.fs.inspect(&dir) {
-                Ok(st) if st.kind == ObjKind::Dir => continue,
-                Ok(st) => st.kind == ObjKind::Absent,
-                Err(_) => true,
+        let mut chains: Vec<Vec<String>> = Vec::new();
+        for p in &self.model.backups {
+            let chain = match self.model.backup_stores.get(p) {
+                Some(dir) => vec![dir.clone()],
+                None => fallback.clone(),
             };
-            if creates {
-                self.planned
-                    .paths
-                    .push((dir, "the backup stage".to_string()));
+            if !chains.contains(&chain) {
+                chains.push(chain);
             }
-            return;
+        }
+        self.fs.set_stats_scope("backup");
+        for chain in chains {
+            for dir in chain {
+                let creates = match self.fs.inspect(&dir) {
+                    Ok(st) if st.kind == ObjKind::Dir => continue,
+                    Ok(st) => st.kind == ObjKind::Absent,
+                    Err(_) => true,
+                };
+                if creates {
+                    self.planned
+                        .paths
+                        .push((dir, "the backup stage".to_string()));
+                }
+                break;
+            }
         }
     }
 
@@ -427,19 +439,35 @@ impl Engine {
             // as `Failed` with the items attempted so far.
             let mut stage = StageTracker::start(&*progress, Stage::Backup, Some(paths.len()));
             let store = self.backup_store.clone();
-            let report =
-                crate::backup::perform(&mut self.fs, &paths, &id, store.as_deref(), &mut stage)?;
+            let stores = self.model.backup_stores.clone();
+            let report = crate::backup::perform(
+                &mut self.fs,
+                &paths,
+                &stores,
+                &id,
+                store.as_deref(),
+                &mut stage,
+            )?;
             stage.end(StageOutcome::Completed);
             Some(report)
         } else {
-            // Plan reports what apply would refuse about a store the operator
-            // named; it creates nothing.
-            if let Some(dir) = self.backup_store.clone() {
-                self.fs.set_stats_scope("backup");
-                crate::backup::check_named_store(&mut self.fs, &dir, &self.model.backups)
-                    .map_err(|e| SinterError::plan(e.message))?;
-            }
-            Some(crate::backup::planned(&self.model.backups))
+            // Plan reports what apply would refuse about a store that was named,
+            // and where each path would go; it creates nothing.
+            let named = self.backup_store.clone();
+            self.fs.set_stats_scope("backup");
+            crate::backup::check_planned_stores(
+                &mut self.fs,
+                &self.model.backups,
+                &self.model.backup_stores,
+                named.as_deref(),
+            )
+            .map_err(|e| SinterError::plan(e.message))?;
+            let default = crate::backup::store_root(self.fs.sudo(), &self.fs.home_env());
+            Some(crate::backup::planned_in(
+                &self.model.backups,
+                &self.model.backup_stores,
+                Some(named.as_deref().unwrap_or(&default)),
+            ))
         };
         let mut results: BTreeMap<String, usize> = BTreeMap::new();
         let mut out_results: Vec<ResourceResult> = Vec::new();

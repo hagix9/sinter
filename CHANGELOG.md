@@ -34,7 +34,7 @@ All notable changes to Sinter are documented in this file.
 - **Several variables files.** `--vars-file` may be repeated. A later file wins, layer by layer and
   variable by variable; a map or list value is replaced whole. `required: true` on a variable asks a
   variables file for its value.
-- **Backup store.** `--backup-dir` or `backup.directory` names the store on the target, held to the
+- **Backup store.** `directory` on a backup path, or `backup.directory` of the recipe or the project file, names the store on the target, held to the
   checks of the default store. A recipe cannot name one.
 - **A regular file in another account's directory is backed up.** Read as that account, written by
   root into the private run directory, keeping owner, mode, times and ACL. A directory, a symbolic

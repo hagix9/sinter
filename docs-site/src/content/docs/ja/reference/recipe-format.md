@@ -114,6 +114,21 @@ backup:
 ファイルにも書けますが重複は不可で、`/` は指定できません。
 [apply 前のバックアップ](/ja/reference/cli/#apply-前のバックアップ)参照。
 
+*次のバージョン。v1.9.0 にはありません。* レシピでコピーの保存先を指定できます。
+
+```yaml
+backup:
+  directory: /var/backups/sinter/web      # このファイルのパスの保存先
+  paths:
+    - /etc/nginx/nginx.conf
+    - path: /var/lib/pgsql/.pgpass        # このパスだけの保存先
+      directory: /var/backups/sinter/pg
+```
+
+パスの `directory`、同じファイルの `backup.directory`（include されたファイルには及びません）、プロジェクトファイル、
+既定の保存先の順に決まります。保存先は静的な絶対パスで、各ターゲット上のパスです。宣言したパスと重なるものと、他の保存先を含むものは
+拒否し、既定の保存先と同じ検査を行います。`plan` が各パスと保存先を表示するので、他の人のレシピを実行する前に確認してください。
+
 ## vars
 
 ```yaml

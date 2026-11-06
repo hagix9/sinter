@@ -1,9 +1,9 @@
 use crate::error::{Result, SinterError};
 use crate::ir::{
     CommandHandlerSpec, HandlerAction, HandlerDecl, HandlerKind, ResourceDecl, VarDecl,
-    BACKUP_FIELDS, COMMON_RESOURCE_FIELDS, HANDLER_COMMAND_FIELDS, HANDLER_DEFAULT_TIMEOUT_SECS,
-    HANDLER_FIELDS, HANDLER_MAX_ARGS, HANDLER_MAX_ARG_BYTES, HANDLER_MAX_TIMEOUT_SECS,
-    TARGET_FIELDS, TOP_LEVEL_FIELDS, VAR_FIELDS,
+    BACKUP_FIELDS, BACKUP_PATH_FIELDS, COMMON_RESOURCE_FIELDS, HANDLER_COMMAND_FIELDS,
+    HANDLER_DEFAULT_TIMEOUT_SECS, HANDLER_FIELDS, HANDLER_MAX_ARGS, HANDLER_MAX_ARG_BYTES,
+    HANDLER_MAX_TIMEOUT_SECS, TARGET_FIELDS, TOP_LEVEL_FIELDS, VAR_FIELDS,
 };
 use crate::toml_front::parse_toml;
 use crate::value::Value;
@@ -22,6 +22,9 @@ pub struct Document {
     pub handlers: Vec<HandlerDecl>,
     /// Paths declared under `backup.paths`, in declaration order.
     pub backup_paths: Vec<String>,
+    /// The store a path of `backup_paths` names (DESIGN §40.6): its own, or the
+    /// `backup.directory` of this document.
+    pub backup_stores: BTreeMap<String, String>,
     /// Inventory hosts/groups this recipe may be applied to (`targets`).
     pub targets: Option<TargetSelector>,
     /// Recipe-wide default environment for `package`/`command` resources
@@ -226,8 +229,8 @@ pub fn document_from_value(root: Value, path: &Path, origin: &str) -> Result<Doc
         }
     }
 
-    let backup_paths = match map.get("backup") {
-        None => Vec::new(),
+    let (backup_paths, backup_stores) = match map.get("backup") {
+        None => (Vec::new(), BTreeMap::new()),
         Some(v) => parse_backup(v, origin)?,
     };
     let targets = match map.get("targets") {
@@ -258,6 +261,7 @@ pub fn document_from_value(root: Value, path: &Path, origin: &str) -> Result<Doc
         resources,
         handlers,
         backup_paths,
+        backup_stores,
         targets,
         env,
         plugins,
@@ -398,19 +402,39 @@ fn parse_targets(v: &Value, origin: &str) -> Result<TargetSelector> {
 ///
 /// ```yaml
 /// backup:
+///   directory: /var/backups/web      # optional: the store of this document's paths
 ///   paths:
 ///     - /etc/ssh/sshd_config
+///     - path: /var/lib/pgsql/.pgpass  # optional: a store of its own
+///       directory: /var/backups/pg
 /// ```
 ///
-/// Paths are static target identifiers (DESIGN §4.9): literal canonical
-/// absolute paths, never interpolated. `/` is rejected because a whole-root
-/// copy would contain the backup store itself.
-fn parse_backup(v: &Value, origin: &str) -> Result<Vec<String>> {
+/// Paths and stores are static target identifiers (DESIGN §4.9, §40.6): literal
+/// canonical absolute paths, never interpolated. `/` is rejected because a
+/// whole-root copy would contain the backup store itself.
+fn parse_backup(v: &Value, origin: &str) -> Result<(Vec<String>, BTreeMap<String, String>)> {
     let ctx = format!("{}: backup", origin);
     let map = v
         .as_map()
         .ok_or_else(|| SinterError::schema(format!("{} must be a map with paths", ctx)))?;
     only_fields(map, BACKUP_FIELDS, &ctx)?;
+    let store = |v: &Value, what: String| -> Result<String> {
+        let s = v
+            .as_str()
+            .ok_or_else(|| SinterError::schema(format!("{what} must be a string")))?;
+        if s.contains("{{") || s.contains("}}") {
+            return Err(SinterError::schema(format!(
+                "{what} must be a static path; interpolation is not allowed"
+            )));
+        }
+        crate::backup::validate_store_dir(s)
+            .map_err(|e| SinterError::schema(format!("{what}: {}", e.message)))?;
+        Ok(s.to_string())
+    };
+    let common = map
+        .get("directory")
+        .map(|d| store(d, format!("{ctx}.directory")))
+        .transpose()?;
     let list = match map.get("paths") {
         None => {
             return Err(SinterError::schema(format!(
@@ -429,10 +453,29 @@ fn parse_backup(v: &Value, origin: &str) -> Result<Vec<String>> {
         )));
     }
     let mut out = Vec::new();
+    let mut stores = BTreeMap::new();
     for (i, item) in list.iter().enumerate() {
-        let p = item
-            .as_str()
-            .ok_or_else(|| SinterError::schema(format!("{}.paths[{}] must be a string", ctx, i)))?;
+        let (p, own) = match item.as_map() {
+            Some(entry) => {
+                let at = format!("{}.paths[{}]", ctx, i);
+                only_fields(entry, BACKUP_PATH_FIELDS, &at)?;
+                let p = entry
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| SinterError::schema(format!("{at}.path must be a string")))?;
+                let own = entry
+                    .get("directory")
+                    .map(|d| store(d, format!("{at}.directory")))
+                    .transpose()?;
+                (p, own)
+            }
+            None => (
+                item.as_str().ok_or_else(|| {
+                    SinterError::schema(format!("{}.paths[{}] must be a string or a map", ctx, i))
+                })?,
+                None,
+            ),
+        };
         if p.contains("{{") || p.contains("}}") {
             return Err(SinterError::schema(format!(
                 "{}.paths[{}] must be a static path; interpolation is not allowed",
@@ -448,8 +491,11 @@ fn parse_backup(v: &Value, origin: &str) -> Result<Vec<String>> {
             )));
         }
         out.push(p.to_string());
+        if let Some(dir) = own.or_else(|| common.clone()) {
+            stores.insert(p.to_string(), dir);
+        }
     }
-    Ok(out)
+    Ok((out, stores))
 }
 
 fn parse_resource(item: &Value, origin: &str, idx: usize) -> Result<ResourceDecl> {

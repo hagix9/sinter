@@ -2798,7 +2798,7 @@ A discovered file arrives without having been named, so it is held to the §39.3
 
 A file a project file names (a recipe found through `recipe_paths`, `inventory`, `vars_files`) is held to the same ownership and mode rules, whichever way the project file was found, since it was not named on the command line. The rule is checked immediately before the file is read by path; it holds as long as the directories above it are, which the same limit of §39.3 states. A path named on the command line is taken at its word.
 
-The project file, the recipe, the inventory, the variables files and the backup store in effect are shown before anything runs (`config:`, `recipe:`, `inventory:`, `vars:`, `backup store:` in text; `resolved` in JSON). A run without a project file prints nothing new.
+The project file, the recipe, the inventory, the variables files and the project's backup store are shown before anything runs (`config:`, `recipe:`, `inventory:`, `vars:`, `backup store:` in text; `resolved` in JSON). A run without a project file prints nothing new.
 
 40.2 Which recipe
 
@@ -2843,9 +2843,20 @@ Required variables. A declaration `required: true` (with `value` still giving th
 
 40.6 The backup store
 
-`--backup-dir PATH`, else the project file's `backup.directory`, else the store of §4 (§ Store above). A recipe cannot name a store; a recipe declares what to keep, the operator where. The path is on each target, absolute and normalized (no `.`, `..`, `//`, trailing `/`, control characters), and not `/`.
+A recipe declares what to keep and may say where. For each path the first that applies decides, and nothing lower ever overrides it:
 
-Only the store itself is created (mode 0700, never `-p`); its parent must exist. All of it is checked like the default store: every ancestor by the strict §23 walk (no symbolic link, no account's tree, no ACL, nothing others can write); an existing store must be a directory owned by a trusted principal and not writable by group or others; a symbolic link is refused; a store whose direct parent is a shared directory (§23.4) is refused, since anyone can make a name there first. A run directory that exists is a collision. A declared path that contains or lies inside the store is refused, so a source and its destination never overlap.
+1. the path's own `directory`: `paths: [{ path: /var/lib/pgsql/.pgpass, directory: /var/backups/pg }]`;
+2. the `backup.directory` of the document that declares the path (an `include` does not inherit it);
+3. the project file's `backup.directory`;
+4. the store of §4 (§ Store above).
+
+A string in `paths` means the same as before. Declaring a path twice stays an error, whichever store each names. There is no command line option: the pairing of a path and its store is read in the recipe. The store is a path on each target, literal (no `{{`), absolute and normalized (no `.`, `..`, `//`, trailing `/`, control characters), and not `/`; the owner and mode of a store cannot be chosen.
+
+Refused before anything is contacted, in every phase: a declared path that contains or lies inside any declared store (whichever path names it), and a store inside another. Refused at run time, by `plan` (read-only) and by `apply`, for every store in use: the same overlaps with the project file's and the default store; and, as for the default store, every ancestor by the strict §23 walk (no symbolic link, no account's tree, no ACL, nothing others can write), an existing store that is not a directory owned by a trusted principal or that group or others can write, a symbolic link, and a store whose direct parent is a shared directory (§23.4), since anyone can make a name there first.
+
+`apply` checks and makes every store, and its run directory, before the first copy, in the order the paths name them. Only the store itself is created (mode 0700, never `-p`); its parent must exist. A run directory that exists is a collision. Any failure stops the apply before any resource runs, and run directories already made are left and named. `plan` lists each path with its store and makes nothing; `audit` does not touch stores. A copy lies at `<store>/<run-id>/<original absolute path>`, and each entry reports its destination; JSON has `store` per entry and `directories`, while `directory` is set only when there is one. Sinter still does not restore anything.
+
+A recipe that names a store gains nothing it did not have: it can already write any file on the target. What it does decide is where the invocation writes copies, so `plan` shows it: read it before running someone else's recipe.
 
 40.7 Backing up a file in another account's tree
 

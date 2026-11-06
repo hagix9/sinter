@@ -116,6 +116,23 @@ changes anything; a failed backup stops the apply before any resource runs.
 files but must be unique; `/` is rejected. See
 [Backups before apply](/en/reference/cli/#backups-before-apply).
 
+*Next version, not in v1.9.0.* A recipe may say where the copies go:
+
+```yaml
+backup:
+  directory: /var/backups/sinter/web      # the store of this file's paths
+  paths:
+    - /etc/nginx/nginx.conf
+    - path: /var/lib/pgsql/.pgpass        # a store of its own
+      directory: /var/backups/sinter/pg
+```
+
+A path's `directory` comes first, then `backup.directory` of the same file (an included file does
+not inherit it), then the project file's, then the default store. A store is static, absolute and
+on each target, may not overlap a declared path or contain another store, and is checked as the
+default store is. `plan` lists each path with its store: read it before running someone else's
+recipe.
+
 ## vars
 
 ```yaml

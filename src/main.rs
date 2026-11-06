@@ -204,11 +204,6 @@ struct ExecOpts {
     /// Ignore any project file.
     #[arg(long)]
     no_config: bool,
-    /// Keep this run's backups under this directory on each target, instead of
-    /// the default store. Only the directory itself is created; its parent must
-    /// exist and pass the same trust checks.
-    #[arg(long, value_name = "TARGET_PATH")]
-    backup_dir: Option<String>,
     /// Leave this recipe of a bundle out (may be repeated). It is still validated.
     #[arg(long, value_name = "NAME")]
     skip_recipe: Vec<String>,
@@ -254,9 +249,7 @@ struct Resolved {
 
 impl ExecOpts {
     fn backup_store(&self) -> Option<String> {
-        self.backup_dir
-            .clone()
-            .or_else(|| self.resolved.backup_dir.clone())
+        self.resolved.backup_dir.clone()
     }
 
     fn skips(&self) -> Option<&SkipPlan> {
@@ -782,7 +775,6 @@ fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
     let format = parse_format(&a.format)?;
     let selector = selector_of(&a.selector);
     let selector = selector.as_deref();
-    check_store_option(&a.exec)?;
     print_resolved(&a.recipe, selector, &a.exec, format);
     if a.exec.vars_file.is_empty() {
         if a.exec.limit.is_none() && selector.is_none() {
@@ -1254,7 +1246,6 @@ fn run_phase(phase: Phase, a: &TargetArgs) -> Result<u8, SinterError> {
         verbose: a.verbose,
         format: a.format.clone(),
     };
-    check_store_option(&a.exec)?;
     print_resolved(
         &a.recipe,
         selector_of(&a.selector).as_deref(),
@@ -1262,14 +1253,6 @@ fn run_phase(phase: Phase, a: &TargetArgs) -> Result<u8, SinterError> {
         format,
     );
     run_phase_with(phase, &a, format, &progress)
-}
-
-/// `--backup-dir` is a path on the target: checked as such before anything runs.
-fn check_store_option(exec: &ExecOpts) -> Result<(), SinterError> {
-    match &exec.backup_dir {
-        Some(dir) => sinter::backup::validate_store_dir(dir),
-        None => Ok(()),
-    }
 }
 
 /// `--host` names one target and `--inventory` selects several through the
@@ -2321,7 +2304,7 @@ fn backup_record(
     unit: &RecipeUnit,
     outcome: Option<&Result<Outcome, SinterError>>,
 ) -> serde_json::Value {
-    use sinter::backup::{planned, BackupStatus};
+    use sinter::backup::{planned, planned_in, BackupStatus};
     if phase == Phase::Audit || unit.model.backups.is_empty() {
         return serde_json::Value::Null;
     }
@@ -2342,7 +2325,10 @@ fn backup_record(
         Some(Ok(Outcome::Audit(_))) => return serde_json::Value::Null,
         Some(Err(e)) => match (&e.backup, phase) {
             (Some(b), _) => ("failed", (**b).clone()),
-            (None, Phase::Plan) => ("planned", planned(&unit.model.backups)),
+            (None, Phase::Plan) => (
+                "planned",
+                planned_in(&unit.model.backups, &unit.model.backup_stores, None),
+            ),
             (None, _) => ("not_started", not_run()),
         },
     };
@@ -5683,15 +5669,23 @@ mod tests {
         let fs = t.fs.as_mut().unwrap();
         fs.mkdir_node("/var", 0o755, 0, 0);
         fs.mkdir_node("/var/backups", 0o755, 0, 0);
+        let project = write(
+            &dir,
+            "p.yaml",
+            "version: 1\nbackup: { directory: /var/backups/x }\n",
+        );
         // Absent as a file on purpose: the store is what this test is about. Below an
         // existing, trusted parent the named store is made and the run goes on, while
         // the default store's parents do not exist on this target.
-        let code = drive(
+        let mut a = target_args(
             Phase::Apply,
-            &[&r, "--backup-dir", "/var/backups/x", "--format", "json"],
-            &w,
-            vec![t],
+            &[&r, "--config", &project, "--format", "json"],
         );
+        let (_, _, exec) = apply_project(Some(Phase::Apply), &a.recipe, None, &a.exec).unwrap();
+        a.exec = exec;
+        FAKE_TARGETS.with(|f| *f.borrow_mut() = vec![t].into());
+        let code = run_phase_with(Phase::Apply, &a, OutputFormat::Json, &w.opts);
+        FAKE_TARGETS.with(|f| f.borrow_mut().clear());
         assert_eq!(code.unwrap(), 0);
     }
 }
