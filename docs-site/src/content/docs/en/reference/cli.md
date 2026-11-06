@@ -291,17 +291,20 @@ An optional second argument names inventory hosts and groups:
 ```sh
 sinter plan  nginx.yaml web01
 sinter apply nginx.yaml @web
-sinter apply nginx.yaml web01,web02
+sinter apply nginx.yaml web01 web02
+sinter apply nginx.yaml group:web
+sinter apply nginx.yaml web01 group:db
 sinter audit nginx.yaml @web,@db
 ```
 
 | Item | Selects |
 |------|---------|
-| `web01` | the host `web01`, never a group |
-| `@web` | the hosts of the group `web`, never a host |
-| `web01,@db` | both; a host reached twice runs once |
+| `web01`, `host:web01` | the host `web01`, never a group |
+| `@web`, `group:web` | the hosts of the group `web`, never a host |
+| `web01 @db`, `web01,@db` | both; a host reached twice runs once |
 
-There are no patterns, prefixes, exclusions or implicit "all": use
+A name that is both a host and a group is exit 2 without a prefix. There are no
+patterns, exclusions or implicit "all": use
 [`--limit`](#limiting-a-run) for patterns. What it does depends on the recipe:
 
 | Recipe | Result |

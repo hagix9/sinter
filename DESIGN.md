@@ -2698,7 +2698,7 @@ sinter apply nginx.yaml @web
 sinter apply nginx.yaml web01,web02
 sinter audit nginx.yaml @web,@db
 
-Grammar: a comma-separated list of at most 256 items. `NAME` is an inventory host and only a host. `@NAME` is an inventory group and only a group, so a host and a group may share a name. Names follow §19.2. A repeated item, and a host reached twice, runs once. There are no patterns, `host:` or `group:` prefixes, exclusions or implicit "all"; those are refused, and patterns stay with `--limit`. One selector argument only: `web01 web02` is a usage error.
+Grammar: one or more arguments, each a comma-separated list; together at most 256 items. `NAME` and `host:NAME` are an inventory host and only a host. `@NAME` and `group:NAME` are an inventory group and only a group. A `NAME` that is both a host and a group of the inventory is refused with the two forms that settle it: what a command means does not depend on how the inventory happens to be named, and a host and a group may still share a name when written with a prefix. Names follow §19.2, so a name has no `:`. A repeated item, and a host reached twice, runs once. There are no patterns, exclusions or implicit "all"; those are refused, and patterns stay with `--limit`.
 
 Meaning, by recipe:
 
@@ -2708,7 +2708,7 @@ One plain recipe without `targets`: the selector names the hosts it runs on, and
 
 A recipe of a bundle without `targets`: exit 2, as with any inventory. A one-recipe bundle is a bundle.
 
-Failures, all exit 2 before any `ssh -G`, connection or command: an empty selector or item, a character outside the name rules, a name the inventory does not define as that kind (the message points out a group written without `@` and a host written with it), an item that reaches no host any recipe's `targets` select, a selection of no host, a selector with `--host` (`-H`) or with `--limit`, and no inventory (§39.3). A name never falls back to an `~/.ssh/config` alias or to `--host` behaviour. `localhost` has no special meaning: it works only if the inventory defines it.
+Failures, all exit 2 before any `ssh -G`, connection or command: an empty selector or item, a character outside the name rules, a name the inventory does not define as that kind (the message points out a group written without a prefix and a host written with one), a bare name that is both a host and a group, an item that reaches no host any recipe's `targets` select, a selection of no host, a selector with `--host` (`-H`) or with `--limit`, and no inventory (§39.3). A name never falls back to an `~/.ssh/config` alias or to `--host` behaviour. `localhost` has no special meaning: it works only if the inventory defines it.
 
 Implementation: the selector is parsed into the same `ParsedLimit` as `--limit` and evaluated by the same `match_limit`, `Resolution` and `Limited`, so there is one selection path. For a recipe without `targets` its names become the `TargetSelector` passed to the same `resolve`. A selector that was not applied stops the run as a `--limit` that was not applied does (§19.2).
 

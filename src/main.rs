@@ -269,6 +269,11 @@ impl ExecOpts {
     }
 }
 
+/// The selector arguments of a command as one list; none means no selector.
+fn selector_of(args: &[String]) -> Option<String> {
+    (!args.is_empty()).then(|| args.join(","))
+}
+
 /// Apply the project file (DESIGN §40) to what the command line said: the recipe
 /// to run, the selector and the options the rest of the run reads. The command
 /// line wins every time, and without a project file nothing changes.
@@ -503,15 +508,17 @@ struct ValidateArgs {
     /// Recipe or bundle file. A bare name is searched for when a project file
     /// has `recipe_paths`; anything with a `/` is a path.
     recipe: PathBuf,
-    /// Inventory hosts to run on: NAME is a host, @NAME a group, and a
-    /// comma-separated list combines them (web01,@db). The inventory is
+    /// Inventory hosts to run on: NAME or host:NAME is a host, @NAME or
+    /// group:NAME a group. Give several, or a comma-separated list (web01 web02,
+    /// web01,group:db). A name that is both a host and a group must say which.
+    /// The inventory is
     /// --inventory, else hosts.yaml, hosts.yml or hosts.toml in the current
     /// directory or the recipe's directory. It narrows a recipe's `targets`;
     /// a single recipe without `targets` runs on exactly the hosts named.
     /// Without a selector nothing is detected and the target stays --host or
     /// localhost. Excludes --host and --limit.
     #[arg(value_name = "SELECTOR")]
-    selector: Option<String>,
+    selector: Vec<String>,
     /// Output format: text or json.
     #[arg(long, default_value = "text")]
     format: String,
@@ -531,15 +538,17 @@ struct TargetArgs {
     /// Recipe or bundle file. A bare name is searched for when a project file
     /// has `recipe_paths`; anything with a `/` is a path.
     recipe: PathBuf,
-    /// Inventory hosts to run on: NAME is a host, @NAME a group, and a
-    /// comma-separated list combines them (web01,@db). The inventory is
+    /// Inventory hosts to run on: NAME or host:NAME is a host, @NAME or
+    /// group:NAME a group. Give several, or a comma-separated list (web01 web02,
+    /// web01,group:db). A name that is both a host and a group must say which.
+    /// The inventory is
     /// --inventory, else hosts.yaml, hosts.yml or hosts.toml in the current
     /// directory or the recipe's directory. It narrows a recipe's `targets`;
     /// a single recipe without `targets` runs on exactly the hosts named.
     /// Without a selector nothing is detected and the target stays --host or
     /// localhost. Excludes --host and --limit.
     #[arg(value_name = "SELECTOR")]
-    selector: Option<String>,
+    selector: Vec<String>,
     #[command(flatten)]
     exec: ExecOpts,
     /// Verbose output.
@@ -577,11 +586,15 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<u8, SinterError> {
     match cli.command {
         Command::Validate(a) => {
-            let (recipe, selector, exec) =
-                apply_project(None, &a.recipe, a.selector.as_deref(), &a.exec)?;
+            let (recipe, selector, exec) = apply_project(
+                None,
+                &a.recipe,
+                selector_of(&a.selector).as_deref(),
+                &a.exec,
+            )?;
             let a = ValidateArgs {
                 recipe,
-                selector,
+                selector: selector.into_iter().collect(),
                 exec,
                 format: a.format,
                 verbose: a.verbose,
@@ -750,7 +763,8 @@ const MAX_VALIDATE_WARNINGS: usize = 50;
 /// handled as `--limit` is, with the inventory it found.
 fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
     let format = parse_format(&a.format)?;
-    let selector = a.selector.as_deref();
+    let selector = selector_of(&a.selector);
+    let selector = selector.as_deref();
     check_store_option(&a.exec)?;
     print_resolved(&a.recipe, selector, &a.exec, format);
     if a.exec.vars_file.is_empty() {
@@ -1209,18 +1223,27 @@ fn run_phase(phase: Phase, a: &TargetArgs) -> Result<u8, SinterError> {
     // transient line (S4) and everything else (pipes, CI, TERM=dumb) none.
     let mode = mode_from_environment(format == OutputFormat::Json);
     let progress = ProgressOptions::new(mode).with_consumer_factory(consumer_factory_for(mode));
-    let (recipe, selector, exec) =
-        apply_project(Some(phase), &a.recipe, a.selector.as_deref(), &a.exec)?;
+    let (recipe, selector, exec) = apply_project(
+        Some(phase),
+        &a.recipe,
+        selector_of(&a.selector).as_deref(),
+        &a.exec,
+    )?;
     let a = TargetArgs {
         audit_strict: a.audit_strict,
         recipe,
-        selector,
+        selector: selector.into_iter().collect(),
         exec,
         verbose: a.verbose,
         format: a.format.clone(),
     };
     check_store_option(&a.exec)?;
-    print_resolved(&a.recipe, a.selector.as_deref(), &a.exec, format);
+    print_resolved(
+        &a.recipe,
+        selector_of(&a.selector).as_deref(),
+        &a.exec,
+        format,
+    );
     run_phase_with(phase, &a, format, &progress)
 }
 
@@ -1275,8 +1298,9 @@ fn run_phase_with(
     format: OutputFormat,
     progress: &ProgressOptions,
 ) -> Result<u8, SinterError> {
-    exclusive_target_options(&a.exec, a.selector.as_deref())?;
-    let limit = limit_option(&a.exec, a.selector.as_deref())?;
+    let selector = selector_of(&a.selector);
+    exclusive_target_options(&a.exec, selector.as_deref())?;
+    let limit = limit_option(&a.exec, selector.as_deref())?;
     let ro = RenderOptions {
         verbose: a.verbose,
         format,
@@ -2008,7 +2032,7 @@ fn inventory_targets(
 ) -> Result<ExecutionPlan, SinterError> {
     // The option as the caller got it must agree with what was applied: a
     // `--limit` that was somehow not applied must not run on every host.
-    if (a.exec.limit.is_some() || a.selector.is_some()) != limited.allowed().is_some() {
+    if (a.exec.limit.is_some() || !a.selector.is_empty()) != limited.allowed().is_some() {
         return Err(limit_mismatch("--limit was not applied to the selection"));
     }
     let (resolutions, allowed, limit_items) = limited.into_parts();
@@ -2327,7 +2351,7 @@ fn run_executions(
     progress: &ProgressOptions,
 ) -> Result<u8, SinterError> {
     let text = ro.format == OutputFormat::Text;
-    let selector = a.selector.is_some();
+    let selector = !a.selector.is_empty();
     let units = source.units();
     // A recipe no host runs was never frozen: nothing may run it.
     if plan
@@ -2340,7 +2364,7 @@ fn run_executions(
         ));
     }
     if text {
-        print_resolution(source, &plan, a.selector.is_some(), ro, &a.exec);
+        print_resolution(source, &plan, !a.selector.is_empty(), ro, &a.exec);
     }
     let run_id = sinter::backup::new_run_id();
     let mut results: Vec<ExecResult> = Vec::new();
@@ -5442,10 +5466,11 @@ mod tests {
     }
 
     #[test]
-    fn one_selector_at_most_and_only_on_the_four_commands() {
+    fn selectors_only_on_the_four_commands() {
         for phase in ["validate", "plan", "apply", "audit"] {
             assert!(Cli::try_parse_from(["sinter", phase, "r.yaml", "web01"]).is_ok());
-            assert!(Cli::try_parse_from(["sinter", phase, "r.yaml", "web01", "web02"]).is_err());
+            assert!(Cli::try_parse_from(["sinter", phase, "r.yaml", "web01", "web02"]).is_ok());
+            assert!(Cli::try_parse_from(["sinter", phase, "r.yaml", "web01", "group:db"]).is_ok());
             assert!(Cli::try_parse_from(["sinter", phase, "r.yaml", "-web"]).is_err());
         }
         assert!(Cli::try_parse_from(["sinter", "mcp", "web01"]).is_err());
@@ -5454,7 +5479,7 @@ mod tests {
     /// The key files a selector run would use for its first host.
     fn selected_keys(argv: &[&str]) -> Vec<PathBuf> {
         let a = target_args(Phase::Plan, argv);
-        let limit = limit_option(&a.exec, a.selector.as_deref()).unwrap();
+        let limit = limit_option(&a.exec, selector_of(&a.selector).as_deref()).unwrap();
         let gate = limit_source(&a.recipe, &a.exec, &limit, OutputFormat::Json).unwrap();
         let w = wiring(ProgressMode::Disabled);
         let session = w.opts.begin(source_info(Phase::Plan, &gate.source));

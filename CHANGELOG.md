@@ -8,7 +8,8 @@ All notable changes to Sinter are documented in this file.
 
 - **Selector argument.** `validate`, `plan`, `apply` and `audit` take an optional
   second argument naming inventory hosts and groups: `sinter apply nginx.yaml
-  web01`, `@web`, `web01,web02`, `@web,@db`. `NAME` is a host, `@NAME` a group.
+  web01`, `web01 web02`, `@web`, `group:web`, `web01 group:db`, `web01,web02`. `NAME` and `host:NAME`
+  are a host, `@NAME` and `group:NAME` a group, and a bare name that is both is refused.
   It narrows a recipe's `targets` and never widens them; one plain recipe without
   `targets` runs on exactly the hosts named. Unknown names, an empty selection and
   a selector with `--host` or `--limit` are exit 2 before any `ssh -G` or

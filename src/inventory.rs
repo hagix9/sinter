@@ -343,6 +343,9 @@ pub const MAX_LIMIT_ITEM_CHARS: usize = 64;
 enum LimitKind {
     /// A bare name: a host or a group (an error if it is both).
     Bare,
+    /// A bare name of a selector: a host, and never a group (an error if it is
+    /// both, so that the command line never depends on the inventory's naming).
+    Name,
     /// `host:<name-or-glob>`.
     Host,
     /// `group:<name>`.
@@ -529,15 +532,20 @@ pub fn parse_selector(value: &str) -> Result<ParsedLimit> {
                 "the selector has an empty item (a doubled or trailing comma)",
             ));
         }
-        let (kind, text) = match raw.strip_prefix('@') {
-            Some(rest) => (LimitKind::Group, rest),
-            None => (LimitKind::Host, raw),
+        let (kind, text) = if let Some(rest) = raw.strip_prefix('@') {
+            (LimitKind::Group, rest)
+        } else if let Some(rest) = raw.strip_prefix("group:") {
+            (LimitKind::Group, rest)
+        } else if let Some(rest) = raw.strip_prefix("host:") {
+            (LimitKind::Host, rest)
+        } else {
+            (LimitKind::Name, raw)
         };
         if !valid_name(text) {
             return Err(item_error(
                 OPTION,
                 raw,
-                "write a host as NAME or a group as @NAME; a name has letters, digits, '.', '_', '-', starts alphanumeric and is at most 64 characters (patterns belong to --limit)",
+                "write a host as NAME or host:NAME and a group as @NAME or group:NAME; a name has letters, digits, '.', '_', '-', starts alphanumeric and is at most 64 characters (patterns belong to --limit)",
             ));
         }
         items.push(LimitItem {
@@ -667,14 +675,15 @@ fn item_hosts(inv: &Inventory, limit: &ParsedLimit, item: &LimitItem) -> Result<
         let as_host = inv.hosts.contains_key(&item.text);
         let as_group = inv.groups.get(&item.text);
         match (item.kind, as_host, as_group) {
-            (LimitKind::Host, true, _) | (LimitKind::Bare, true, None) => {
-                BTreeSet::from([item.text.clone()])
-            }
+            (LimitKind::Host, true, _)
+            | (LimitKind::Bare, true, None)
+            | (LimitKind::Name, true, None) => BTreeSet::from([item.text.clone()]),
             (LimitKind::Group, _, Some(members)) | (LimitKind::Bare, false, Some(members)) => {
                 members.iter().cloned().collect()
             }
-            (LimitKind::Bare, true, Some(_)) => {
-                return Err(limit_error(
+            (LimitKind::Bare | LimitKind::Name, true, Some(_)) => {
+                return Err(item_error(
+                    limit.option_name(),
                     &item.raw,
                     &format!(
                         "is both a host and a group of inventory {}; write host:{} or group:{}",
@@ -692,7 +701,7 @@ fn item_hosts(inv: &Inventory, limit: &ParsedLimit, item: &LimitItem) -> Result<
             "matches no host of inventory"
         } else {
             match item.kind {
-                LimitKind::Host => "is not a host of inventory",
+                LimitKind::Host | LimitKind::Name => "is not a host of inventory",
                 LimitKind::Group => "is not a group of inventory",
                 LimitKind::Bare => "is neither a host nor a group of inventory",
             }
@@ -700,8 +709,11 @@ fn item_hosts(inv: &Inventory, limit: &ParsedLimit, item: &LimitItem) -> Result<
         // A selector item says what it is, so a name of the other kind is a
         // mistake to point out, never a match.
         let hint = match (limit.is_selector(), item.kind) {
-            (true, LimitKind::Host) if inv.groups.contains_key(&item.text) => {
-                format!("; it is a group, write @{}", item.text)
+            (true, LimitKind::Host | LimitKind::Name) if inv.groups.contains_key(&item.text) => {
+                format!(
+                    "; it is a group, write @{} or group:{}",
+                    item.text, item.text
+                )
             }
             (true, LimitKind::Group) if inv.hosts.contains_key(&item.text) => {
                 format!("; it is a host, write {}", item.text)
@@ -1111,7 +1123,16 @@ mod tests {
 
     #[test]
     fn selector_syntax_accepts_hosts_and_groups_only() {
-        for v in ["web01", "@web", "web01,web02", "@web,@db", "web01,@db"] {
+        for v in [
+            "web01",
+            "@web",
+            "web01,web02",
+            "@web,@db",
+            "web01,@db",
+            "host:web01",
+            "group:web",
+            "host:web01,group:db,@x,y",
+        ] {
             assert!(selector(v).is_selector(), "{v}");
             assert!(selector(v).given(), "{v}");
         }
@@ -1132,8 +1153,13 @@ mod tests {
             "web*",
             "?eb",
             "@web*",
-            "host:web01",
-            "group:web",
+            "host:",
+            "group:",
+            "host:a:b",
+            "group:a:b",
+            "x:y",
+            "host:@a",
+            "group:*",
             "!web01",
             "-web",
             ".web",
@@ -1168,9 +1194,18 @@ mod tests {
                 .into_iter()
                 .collect::<Vec<_>>()
         };
-        assert_eq!(got("web"), vec!["web"]);
+        assert_eq!(got("host:web"), vec!["web"]);
         assert_eq!(got("@web"), vec!["web01", "web02"]);
-        assert_eq!(got("web,@web"), vec!["web", "web01", "web02"]);
+        assert_eq!(got("group:web"), vec!["web01", "web02"]);
+        assert_eq!(got("host:web,@web"), vec!["web", "web01", "web02"]);
+        // A bare name that is both is never settled by Sinter.
+        let e = match_limit(&i, &rs, &selector("web")).unwrap_err();
+        assert!(
+            e.message.contains("both a host and a group"),
+            "{}",
+            e.message
+        );
+        assert!(e.message.starts_with("selector item"), "{}", e.message);
     }
 
     #[test]

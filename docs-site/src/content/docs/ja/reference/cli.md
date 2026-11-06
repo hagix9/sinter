@@ -290,16 +290,19 @@ executions: 2 (1 recipe(s), 3 host(s))
 sinter plan  nginx.yaml web01
 sinter apply nginx.yaml @web
 sinter apply nginx.yaml web01,web02
+sinter apply nginx.yaml web01 web02
+sinter apply nginx.yaml group:web
+sinter apply nginx.yaml web01 group:db
 sinter audit nginx.yaml @web,@db
 ```
 
 | 項目 | 選択するもの |
-|------|-------------|
-| `web01` | ホスト `web01`。グループにはなりません |
-| `@web` | グループ `web` のホスト。ホストにはなりません |
-| `web01,@db` | その両方。同じホストは 1 回だけ実行します |
+|------|---------|
+| `web01`、`host:web01` | ホスト `web01`。グループにはなりません |
+| `@web`、`group:web` | グループ `web` のホスト。ホストにはなりません |
+| `web01 @db`、`web01,@db` | その両方。同じホストは 1 回だけ実行します |
 
-パターン、接頭辞、除外、暗黙の「全台」はありません。パターンは
+ホストとグループの両方にある名前は、接頭辞がなければ exit 2 です。パターン、除外、暗黙の「全台」はありません。パターンは
 [`--limit`](#実行の絞り込み) を使います。動作はレシピによって変わります。
 
 | レシピ | 結果 |

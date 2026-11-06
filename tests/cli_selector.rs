@@ -253,10 +253,146 @@ fn a_host_and_a_group_of_one_name_are_told_apart() {
         ),
     );
     f.write("free.yaml", FREE);
-    let o = f.run(&["plan", "free.yaml", "web", "--format", "json"]);
+    // The same name for a host and a group is never settled silently.
+    for phase in ALL {
+        let o = f.run(&[phase, "free.yaml", "web"]);
+        assert_eq!(o.status.code(), Some(2), "{phase}");
+        let err = text(&o.stderr);
+        assert!(err.contains("both a host and a group"), "{err}");
+        assert!(
+            err.contains("host:web") && err.contains("group:web"),
+            "{err}"
+        );
+    }
+    assert!(f.ssh_log().is_empty(), "{:?}", f.ssh_log());
+    let o = f.run(&["plan", "free.yaml", "host:web", "--format", "json"]);
     assert_eq!(executed(&o), ["web"]);
-    let o = f.run(&["plan", "free.yaml", "@web", "--format", "json"]);
-    assert_eq!(executed(&o), ["web01", "web02"]);
+    for group in ["@web", "group:web"] {
+        let o = f.run(&["plan", "free.yaml", group, "--format", "json"]);
+        assert_eq!(executed(&o), ["web01", "web02"], "{group}");
+    }
+}
+
+#[test]
+fn several_arguments_and_prefixes_select_exactly_what_they_name() {
+    let (f, _ports) = project();
+    let cases: &[(&str, &[&str], &[&str])] = &[
+        ("web.yaml", &["web01"], &["web01"]),
+        ("web.yaml", &["web01", "web02"], &["web01", "web02"]),
+        (
+            "web.yaml",
+            &["web02", "web01", "web02"],
+            &["web01", "web02"],
+        ),
+        ("web.yaml", &["group:web"], &["web01", "web02"]),
+        ("web.yaml", &["host:web02"], &["web02"]),
+        ("web.yaml", &["web01", "group:web"], &["web01", "web02"]),
+        ("free.yaml", &["web01", "group:db"], &["db01", "web01"]),
+        (
+            "free.yaml",
+            &["host:web01,group:db", "web02"],
+            &["db01", "web01", "web02"],
+        ),
+        (
+            "free.yaml",
+            &["@web", "host:db01"],
+            &["db01", "web01", "web02"],
+        ),
+    ];
+    for (recipe, selectors, want) in cases {
+        for phase in PHASES {
+            let _ = std::fs::remove_file(f.path("fakebin/ssh.log"));
+            let mut args = vec![phase, recipe];
+            args.extend_from_slice(selectors);
+            args.extend_from_slice(&["--format", "json"]);
+            let o = f.run(&args);
+            assert_eq!(o.status.code(), Some(3), "{args:?}: {}", text(&o.stderr));
+            assert_eq!(executed(&o), *want, "{args:?}");
+            // The hosts not named are not even resolved.
+            assert_eq!(f.ssh_log().len(), want.len(), "{args:?}: {:?}", f.ssh_log());
+        }
+        let mut args = vec!["validate", recipe];
+        args.extend_from_slice(selectors);
+        let o = f.run(&args);
+        assert_eq!(o.status.code(), Some(0), "{args:?}: {}", text(&o.stderr));
+    }
+}
+
+#[test]
+fn naming_one_host_leaves_the_others_alone_and_never_runs_locally() {
+    let (f, ports) = project();
+    let marker = f.path("must-not-exist");
+    f.write(
+        "local.yaml",
+        &format!(
+            "version: 1\nresources:\n  - id: a\n    type: directory\n    with: {{ path: {}, state: present }}\n",
+            marker.display()
+        ),
+    );
+    // web02's port is reserved closed, so a connection there would be a different
+    // failure; what counts is that it is not resolved or named at all.
+    let o = f.run(&["apply", "local.yaml", "web01", "--format", "json"]);
+    assert_eq!(executed(&o), ["web01"]);
+    let log = f.ssh_log().join("\n");
+    assert!(!log.contains("web02") && !log.contains("db01"), "{log}");
+    let _ = ports;
+    assert!(!marker.exists());
+    // No failure of the selection falls back to this machine.
+    for wrong in [
+        &["apply", "local.yaml", "nosuch"][..],
+        &["apply", "local.yaml", "web01", "nosuch"],
+        &["apply", "local.yaml", "group:nosuch"],
+        &["apply", "local.yaml", "web"],
+        &["apply", "local.yaml", "host:"],
+        &["apply", "local.yaml", "group:"],
+        &["apply", "local.yaml", ""],
+        &["apply", "local.yaml", "web01", ""],
+        &["apply", "local.yaml", "x:y"],
+    ] {
+        let _ = std::fs::remove_file(f.path("fakebin/ssh.log"));
+        let o = f.run(wrong);
+        assert_eq!(o.status.code(), Some(2), "{wrong:?}: {}", text(&o.stderr));
+        assert!(f.ssh_log().is_empty(), "{wrong:?}");
+        assert!(!marker.exists(), "{wrong:?}");
+    }
+    // Without an inventory the same: an error, not the local target.
+    std::fs::remove_file(f.path("hosts.yaml")).unwrap();
+    let o = f.run(&["apply", "local.yaml", "web01", "web02"]);
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o.stderr));
+    assert!(!marker.exists());
+}
+
+#[test]
+fn prefixes_mean_what_they_say_and_targets_are_never_widened() {
+    let (f, _ports) = project();
+    for (recipe, selectors, says) in [
+        // A group named as a host, and the other way round: pointed out, never matched.
+        (
+            "free.yaml",
+            &["web"][..],
+            "it is a group, write @web or group:web",
+        ),
+        ("free.yaml", &["host:web"], "it is a group"),
+        ("free.yaml", &["group:web01"], "it is a host"),
+        ("free.yaml", &["@web01"], "it is a host"),
+        // Past the recipe's targets.
+        ("web.yaml", &["db01"], "no recipe's targets select"),
+        ("web.yaml", &["group:db"], "no recipe's targets select"),
+        ("web.yaml", &["web01", "db01"], "no recipe's targets select"),
+    ] {
+        for phase in ALL {
+            let mut args = vec![phase, recipe];
+            args.extend_from_slice(selectors);
+            let o = f.run(&args);
+            assert_eq!(o.status.code(), Some(2), "{args:?}");
+            assert!(
+                text(&o.stderr).contains(says),
+                "{args:?}: {}",
+                text(&o.stderr)
+            );
+        }
+    }
+    assert!(f.ssh_log().is_empty(), "{:?}", f.ssh_log());
 }
 
 #[test]
@@ -300,8 +436,12 @@ fn a_wrong_selector_is_exit_2_with_nothing_evaluated_or_contacted() {
         ("free.yaml", "web*"),
         ("free.yaml", "all"),
         ("free.yaml", "@all"),
-        ("free.yaml", "host:web01"),
-        ("free.yaml", "group:web"),
+        ("free.yaml", "host:nosuch"),
+        ("free.yaml", "group:nosuch"),
+        ("free.yaml", "host:"),
+        ("free.yaml", "group:"),
+        ("free.yaml", "group:web*"),
+        ("free.yaml", "x:y"),
         ("free.yaml", "localhost"),
         // targets declared but naming nothing, and a bundle recipe without them.
         ("empty-targets.yaml", "web01"),
@@ -335,7 +475,7 @@ fn a_wrong_selector_is_exit_2_with_nothing_evaluated_or_contacted() {
 }
 
 #[test]
-fn a_selector_excludes_host_and_limit_and_needs_one_argument() {
+fn selectors_exclude_host_and_limit() {
     let (f, _ports) = project();
     let cases: &[&[&str]] = &[
         &["web.yaml", "web01", "--host", "web01"],
@@ -357,8 +497,9 @@ fn a_selector_excludes_host_and_limit_and_needs_one_argument() {
             "--host",
             "x",
         ],
-        // One selector only: a list uses commas.
-        &["web.yaml", "web01", "web02"],
+        // However many selectors there are.
+        &["web.yaml", "web01", "web02", "--limit", "web01"],
+        &["web.yaml", "web01", "group:db", "--host", "x"],
     ];
     for phase in ALL {
         for args in cases {
