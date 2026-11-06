@@ -131,7 +131,8 @@ A path's `directory` comes first, then `backup.directory` of the same file (an i
 not inherit it), then the project file's, then the default store. A store is static, absolute and
 on each target, may not overlap a declared path or contain another store, and is checked as the
 default store is. `plan` lists each path with its store: read it before running someone else's
-recipe.
+recipe. Do not use a directory a service reads as a store: a service that includes every entry of
+a directory can fail on the run directory it finds there.
 
 ## vars
 

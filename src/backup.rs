@@ -232,7 +232,12 @@ pub(crate) fn check_named_store(fs: &mut TargetFs, dir: &str, paths: &[String]) 
     let st = fs.inspect(dir)?;
     match st.kind {
         ObjKind::Absent => Ok(()),
-        ObjKind::Dir => check_existing_store_dir(fs, dir, &st),
+        ObjKind::Dir => {
+            check_existing_store_dir(fs, dir, &st)?;
+            // The walk of the run directory judges the store itself (an ACL, which
+            // the mode does not show): plan says what apply would. It only reads.
+            fs.check_trusted_parents_strict(&format!("{dir}/run"))
+        }
         other => Err(SinterError::apply(format!(
             "backup store path {} is a {}, not a directory",
             dir,
