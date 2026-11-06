@@ -141,7 +141,7 @@ fn without_a_project_file_nothing_is_added() {
 fn the_project_file_of_the_current_directory_is_used_and_shown() {
     let f = Fx::new();
     f.write("work/r.yaml", FREE);
-    let cfg = f.write("work/sinter.project.yaml", "version: 1\n");
+    let cfg = f.write("work/sinter.yaml", "version: 1\n");
     let o = f.run(&["validate", "r.yaml"]);
     code(&o, 0, "text");
     let out = text(&o.stdout);
@@ -164,11 +164,11 @@ fn the_project_file_of_the_current_directory_is_used_and_shown() {
 fn neither_parents_nor_the_recipes_directory_are_searched() {
     let f = Fx::new();
     f.write(
-        "sinter.project.yaml",
+        "sinter.yaml",
         "version: 1\nthis is: not valid for a project\n",
     );
     f.mkdir("elsewhere");
-    f.write("elsewhere/sinter.project.yaml", "not: valid\n");
+    f.write("elsewhere/sinter.yaml", "not: valid\n");
     let r = f.write("elsewhere/r.yaml", FREE);
     let o = f.run(&["validate", &r]);
     code(&o, 0, "a file above or next to the recipe is not looked at");
@@ -208,7 +208,7 @@ fn a_named_file_is_used_from_anywhere_and_its_paths_are_relative_to_it() {
 fn no_config_ignores_a_broken_file_and_excludes_config() {
     let f = Fx::new();
     f.write("work/r.yaml", FREE);
-    f.write("work/sinter.project.yaml", "broken: [");
+    f.write("work/sinter.yaml", "broken: [");
     code(
         &f.run(&["validate", "r.yaml"]),
         2,
@@ -226,7 +226,7 @@ fn no_config_ignores_a_broken_file_and_excludes_config() {
 fn a_detected_file_is_held_to_the_detection_rules() {
     let f = Fx::new();
     f.write("work/r.yaml", FREE);
-    let p = f.write("work/sinter.project.yaml", "version: 1\n");
+    let p = f.write("work/sinter.yaml", "version: 1\n");
     set_mode(Path::new(&p), 0o666);
     let o = f.run(&["validate", "r.yaml"]);
     code(&o, 2, "");
@@ -245,7 +245,7 @@ fn a_detected_file_is_held_to_the_detection_rules() {
         text(&o.stderr)
     );
     set_mode(&f.path("work"), 0o755);
-    f.write("work/sinter.project.toml", "version = 1\n");
+    f.write("work/sinter.toml", "version = 1\n");
     let o = f.run(&["validate", "r.yaml"]);
     code(&o, 2, "");
     assert!(
@@ -253,7 +253,7 @@ fn a_detected_file_is_held_to_the_detection_rules() {
         "{}",
         text(&o.stderr)
     );
-    std::fs::remove_file(f.path("work/sinter.project.toml")).unwrap();
+    std::fs::remove_file(f.path("work/sinter.toml")).unwrap();
     std::fs::remove_file(&p).unwrap();
     f.write("real.yaml", "version: 1\n");
     symlink(f.path("real.yaml"), &p).unwrap();
@@ -274,7 +274,7 @@ fn a_recipe_is_found_once_or_the_run_stops() {
     f.write("shared/s.yaml", FREE);
     f.write("work/recipes/r.yaml", FREE);
     f.write(
-        "work/sinter.project.yaml",
+        "work/sinter.yaml",
         &format!(
             "version: 1\nrecipe_paths: [{}, ./recipes]\n",
             f.path("shared").display()
@@ -315,7 +315,7 @@ fn a_shared_recipe_directory_brings_no_inventory() {
     f.write("shared/r.yaml", WEB);
     f.inventory("shared/hosts.yaml");
     f.write(
-        "work/sinter.project.yaml",
+        "work/sinter.yaml",
         &format!(
             "version: 1\nrecipe_paths: [{}]\n",
             f.path("shared").display()
@@ -342,7 +342,7 @@ fn the_command_line_wins_over_the_project_file() {
     f.inventory("work/project-hosts.yaml");
     let other = f.inventory("other-hosts.yaml");
     f.write(
-        "work/sinter.project.yaml",
+        "work/sinter.yaml",
         "version: 1\ninventory: project-hosts.yaml\nbackup: { directory: /var/backups/p }\n",
     );
     let o = f.run(&[
@@ -379,10 +379,7 @@ fn an_apply_naming_no_host_never_reaches_machines_because_of_a_project_file() {
     let f = Fx::new();
     f.write("work/r.yaml", WEB);
     f.inventory("work/hosts.yaml");
-    f.write(
-        "work/sinter.project.yaml",
-        "version: 1\ninventory: hosts.yaml\n",
-    );
+    f.write("work/sinter.yaml", "version: 1\ninventory: hosts.yaml\n");
     let o = f.run(&["apply", "r.yaml", "--no-ssh-config"]);
     code(&o, 2, "");
     assert!(
@@ -403,7 +400,7 @@ fn an_apply_naming_no_host_never_reaches_machines_because_of_a_project_file() {
     );
     code(&f.run(&["plan", "r.yaml", "--no-ssh-config"]), 3, "");
     f.write(
-        "work/sinter.project.yaml",
+        "work/sinter.yaml",
         "version: 1\ninventory: hosts.yaml\nallow_implicit_apply: true\n",
     );
     code(&f.run(&["apply", "r.yaml", "--no-ssh-config"]), 3, "");
@@ -415,10 +412,7 @@ fn a_name_that_does_not_resolve_never_falls_back_to_the_local_target() {
     f.write("work/free.yaml", FREE);
     f.write("work/web.yaml", WEB);
     f.inventory("work/hosts.yaml");
-    f.write(
-        "work/sinter.project.yaml",
-        "version: 1\ninventory: hosts.yaml\n",
-    );
+    f.write("work/sinter.yaml", "version: 1\ninventory: hosts.yaml\n");
     for phase in PHASES {
         // A selector naming nothing.
         let o = f.run(&[phase, "web.yaml", "ghost", "--no-ssh-config"]);
@@ -449,7 +443,7 @@ fn a_default_target_never_applies_without_being_allowed() {
     f.write("work/r.yaml", WEB);
     f.inventory("work/hosts.yaml");
     f.write(
-        "work/sinter.project.yaml",
+        "work/sinter.yaml",
         "version: 1\ninventory: hosts.yaml\ndefault_target: \"@web\"\n",
     );
     let o = f.run(&["apply", "r.yaml"]);
@@ -478,7 +472,7 @@ fn a_default_target_never_applies_without_being_allowed() {
     code(&o, 3, "");
     // Stated in the file, apply may use it too.
     f.write(
-        "work/sinter.project.yaml",
+        "work/sinter.yaml",
         "version: 1\ninventory: hosts.yaml\ndefault_target: \"@web\"\nallow_implicit_apply: true\n",
     );
     code(&f.run(&["apply", "r.yaml", "--no-ssh-config"]), 3, "");
@@ -494,7 +488,7 @@ fn variables_layer_project_files_then_the_command_line() {
     f.write("work/common.yaml", "version: 1\nvars: { root: /c }\n");
     f.write("work/more.yaml", "version: 1\nvars: { root: /d }\n");
     f.write(
-        "work/sinter.project.yaml",
+        "work/sinter.yaml",
         "version: 1\nvars_files: [common.yaml]\n",
     );
     let o = f.run(&[
@@ -560,16 +554,13 @@ fn unknown_variables_warn_typos_stop_and_values_stay_out() {
         2,
         "",
     );
-    f.write(
-        "work/sinter.project.yaml",
-        "version: 1\nstrict_vars: true\n",
-    );
+    f.write("work/sinter.yaml", "version: 1\nstrict_vars: true\n");
     code(
         &f.run(&["validate", "r.yaml", "--vars-file", &other]),
         2,
         "",
     );
-    std::fs::remove_file(f.path("work/sinter.project.yaml")).unwrap();
+    std::fs::remove_file(f.path("work/sinter.yaml")).unwrap();
     // Swapped letters and a different case or separator cannot be anything else.
     for typo_name in ["app_roto", "APP_ROOT"] {
         let typo = f.write(
@@ -612,6 +603,97 @@ fn unknown_variables_warn_typos_stop_and_values_stay_out() {
 }
 
 #[test]
+fn only_the_current_directory_is_looked_at_and_above_it_only_a_note() {
+    let f = Fx::new();
+    f.mkdir("work/sub");
+    f.write("work/r.yaml", FREE);
+    f.write("work/sub/r.yaml", FREE);
+    // Each name is found, and two are never chosen between.
+    for name in ["sinter.yaml", "sinter.yml"] {
+        f.write(&format!("work/{name}"), "version: 1\n");
+        let o = f.run(&["validate", "r.yaml"]);
+        code(&o, 0, name);
+        assert!(text(&o.stdout).contains(&format!("{name} (auto-detected)")));
+        std::fs::remove_file(f.path(&format!("work/{name}"))).unwrap();
+    }
+    f.write("work/sinter.toml", "version = 1\n");
+    let o = f.run(&["validate", "r.yaml"]);
+    code(&o, 0, "toml");
+    assert!(text(&o.stdout).contains("sinter.toml (auto-detected)"));
+    f.write("work/sinter.yaml", "version: 1\n");
+    let o = f.run(&["validate", "r.yaml"]);
+    code(&o, 2, "two candidates");
+    assert!(text(&o.stderr).contains("several project files"));
+    std::fs::remove_file(f.path("work/sinter.toml")).unwrap();
+    // The name RC2 used means nothing any more.
+    std::fs::remove_file(f.path("work/sinter.yaml")).unwrap();
+    f.write("work/sinter.project.yaml", "not: [valid\n");
+    let o = f.run(&["validate", "r.yaml"]);
+    code(&o, 0, "the old name");
+    assert!(!text(&o.stdout).contains("config:"));
+    std::fs::remove_file(f.path("work/sinter.project.yaml")).unwrap();
+    // A file above is not read, however broken, and is named on stderr only.
+    f.write(
+        "work/sinter.yaml",
+        &format!("inventory: {CANARY}: [invalid\n"),
+    );
+    let o = f.run_in("work/sub", &["validate", "r.yaml"]);
+    code(&o, 0, "above");
+    let err = text(&o.stderr);
+    assert!(
+        err.contains("note:") && err.contains("is not used"),
+        "{err}"
+    );
+    assert!(
+        !err.contains(CANARY) && !text(&o.stdout).contains("config:"),
+        "{err}"
+    );
+    // JSON stays one document on stdout.
+    let o = f.run_in("work/sub", &["validate", "r.yaml", "--format", "json"]);
+    let _ = json(&o);
+    // Told not to look, it says nothing.
+    let o = f.run_in("work/sub", &["validate", "r.yaml", "--no-config"]);
+    code(&o, 0, "no-config");
+    assert!(!text(&o.stderr).contains("note:"));
+    // An explicit file keeps any name, and its paths are relative to it.
+    std::fs::remove_file(f.path("work/sinter.yaml")).unwrap();
+    f.mkdir("conf");
+    f.write(
+        "conf/my-project.yaml",
+        "version: 1\nvars_files: [./v.yaml]\n",
+    );
+    f.write("conf/v.yaml", "version: 1\n");
+    let o = f.run_in(
+        "work/sub",
+        &[
+            "validate",
+            "r.yaml",
+            "--config",
+            &f.path("conf/my-project.yaml").display().to_string(),
+        ],
+    );
+    code(&o, 0, "--config");
+    assert!(text(&o.stdout).contains("v.yaml"));
+}
+
+#[test]
+fn a_recipe_called_sinter_yaml_is_explained_and_can_still_run() {
+    let f = Fx::new();
+    f.write("work/sinter.yaml", FREE);
+    for phase in ["validate", "plan", "audit", "apply"] {
+        let o = f.run(&[phase, "sinter.yaml"]);
+        code(&o, 2, phase);
+        let err = text(&o.stderr);
+        assert!(
+            err.contains("Is this a recipe?") && err.contains("--no-config"),
+            "{err}"
+        );
+    }
+    assert_eq!(f.ssh_calls(), 0);
+    code(&f.run(&["validate", "sinter.yaml", "--no-config"]), 0, "");
+}
+
+#[test]
 fn a_shared_variables_file_works_across_the_recipes_of_a_project() {
     let f = Fx::new();
     // db.yaml uses db_host, web.yaml uses web_host and web_port; a typo of db.yaml's
@@ -634,7 +716,7 @@ fn a_shared_variables_file_works_across_the_recipes_of_a_project() {
         ),
     );
     f.write(
-        "work/sinter.project.yaml",
+        "work/sinter.yaml",
         "version: 1\nrecipe_paths: [./recipes]\n",
     );
     let o = f.run(&["validate", "db.yaml", "--vars-file", &common]);
@@ -676,7 +758,7 @@ fn a_store_path_is_checked_on_every_phase_before_anything_runs() {
         }
     }
     f.write(
-        "work/sinter.project.yaml",
+        "work/sinter.yaml",
         "version: 1\nbackup: { directory: rel }\n",
     );
     code(&f.run(&["validate", "r.yaml"]), 2, "");

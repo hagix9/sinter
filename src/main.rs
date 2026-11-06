@@ -197,7 +197,7 @@ struct ExecOpts {
     /// A variable no recipe of this run declares is an error, not a warning.
     #[arg(long)]
     strict_vars: bool,
-    /// Project file to use [default: sinter.project.yaml, .yml or .toml in the
+    /// Project file to use [default: sinter.yaml, .yml or .toml in the
     /// current directory; parents are never searched].
     #[arg(long, value_name = "PATH", conflicts_with = "no_config")]
     config: Option<PathBuf>,
@@ -269,6 +269,20 @@ impl ExecOpts {
     }
 }
 
+/// Say so when a project file lies above the current directory: it is not used.
+fn note_unused_parent_project() {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if let Some(p) = sinter::project::unused_parent_project(&cwd, home.as_deref()) {
+        eprintln!(
+            "note: {} exists but is not used: run from that directory or use --config",
+            sanitize_line(&p.display().to_string())
+        );
+    }
+}
+
 /// The selector arguments of a command as one list; none means no selector.
 fn selector_of(args: &[String]) -> Option<String> {
     (!args.is_empty()).then(|| args.join(","))
@@ -287,6 +301,9 @@ fn apply_project(
     let mut selector = selector.map(str::to_string);
     let project = load_project(exec.config.as_deref(), exec.no_config)?;
     let Some(project) = project else {
+        if !exec.no_config {
+            note_unused_parent_project();
+        }
         return Ok((recipe.to_path_buf(), selector, exec));
     };
     let (recipe, via) = resolve_recipe(recipe, Some(&project))?;

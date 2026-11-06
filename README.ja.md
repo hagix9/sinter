@@ -194,7 +194,7 @@ sinter apply nginx.yaml --inventory hosts.yaml
   しません。
 - `--limit web01`（`web01,web02`、`group:web`、`'web-*'` も可）は、選択されたホストの
   うち名指ししたものだけで実行し、残りのホストには接続しません。
-- v1.10.0 から：カレントディレクトリの `sinter.project.yaml` または `--config` のプロジェクトファイルで、
+- v1.10.0 から：カレントディレクトリの `sinter.yaml` または `--config` のプロジェクトファイルで、
   `recipe_paths`、`inventory`、`vars_files`、`backup.directory`、`default_target` を設定できます。レシピがどこにあっても
   `sinter apply moge.yaml web01` で実行できます。`--vars-file` は繰り返し指定でき、`--backup-dir` でターゲット上の保存先を指定できます。
   `--skip-recipe` と `--skip-resource` で除外できますが、必ず表示し（`PARTIAL_APPLY`）、依存関係を壊す除外は拒否します。root で実行するときは、

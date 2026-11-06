@@ -11,11 +11,7 @@ use crate::value::Value;
 use std::path::{Component, Path, PathBuf};
 
 /// The names looked for in the current directory.
-pub const PROJECT_NAMES: [&str; 3] = [
-    "sinter.project.yaml",
-    "sinter.project.yml",
-    "sinter.project.toml",
-];
+pub const PROJECT_NAMES: [&str; 3] = ["sinter.yaml", "sinter.yml", "sinter.toml"];
 
 const FIELDS: &[&str] = &[
     "version",
@@ -161,6 +157,31 @@ fn load_detected(cwd: &Path) -> Result<Option<ProjectFile>> {
     parse_project(&bytes, &path, ProjectSource::Detected).map(Some)
 }
 
+/// How far up [`unused_parent_project`] looks.
+const PARENT_NOTE_LEVELS: usize = 8;
+
+/// A project file in a directory above `cwd`, which is not used: a command run from
+/// a subdirectory should not look as if it had its project's settings. The name is
+/// only looked at, never opened, so this cannot change what the command does. Stops
+/// at `home` (not looked at) and at a repository's top.
+pub fn unused_parent_project(cwd: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    for dir in cwd.ancestors().skip(1).take(PARENT_NOTE_LEVELS) {
+        if Some(dir) == home {
+            return None;
+        }
+        for name in PROJECT_NAMES {
+            let candidate = dir.join(name);
+            if std::fs::symlink_metadata(&candidate).is_ok() {
+                return Some(candidate);
+            }
+        }
+        if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
+            return None;
+        }
+    }
+    None
+}
+
 fn absolute(path: &Path) -> Result<PathBuf> {
     if path.is_absolute() {
         return Ok(path.components().collect());
@@ -254,8 +275,9 @@ pub(crate) fn parse_project(
             return Err(bad(
                 path,
                 format!(
-                    "unknown field (not shown; allowed: {}). Is this a recipe? A project file has its own name",
-                    FIELDS.join(", ")
+                    "unknown field (not shown; allowed: {}). Is this a recipe? {} in the current directory is read as the project file: rename it, or run with --no-config",
+                    FIELDS.join(", "),
+                    path.file_name().map_or(String::new(), |n| n.to_string_lossy().to_string())
                 ),
             ));
         }
@@ -457,7 +479,7 @@ mod tests {
     fn parse(body: &str) -> Result<ProjectFile> {
         parse_project(
             body.as_bytes(),
-            Path::new("/p/sinter.project.yaml"),
+            Path::new("/p/sinter.yaml"),
             ProjectSource::Explicit,
         )
     }
@@ -532,7 +554,7 @@ mod tests {
 
     fn project(recipe_paths: Vec<PathBuf>) -> ProjectFile {
         ProjectFile {
-            path: PathBuf::from("/p/sinter.project.yaml"),
+            path: PathBuf::from("/p/sinter.yaml"),
             source: ProjectSource::Explicit,
             recipe_paths,
             inventory: None,
@@ -610,6 +632,27 @@ mod tests {
             resolve_recipe(Path::new("twice.yaml"), Some(&p)).unwrap().0,
             found
         );
+    }
+
+    #[test]
+    fn a_project_file_above_is_noticed_only_within_its_limits() {
+        let top = private_dir();
+        let deep = top.path().join("a/b");
+        std::fs::create_dir_all(&deep).unwrap();
+        assert_eq!(unused_parent_project(&deep, None), None);
+        // Content does not matter: it is never opened.
+        std::fs::write(top.path().join("sinter.yaml"), "not: [valid\n").unwrap();
+        assert_eq!(
+            unused_parent_project(&deep, None).as_deref(),
+            Some(top.path().join("sinter.yaml").as_path())
+        );
+        // The current directory itself is not "above".
+        assert_eq!(unused_parent_project(top.path(), None), None);
+        // Home is not looked at, nor anything above it.
+        assert_eq!(unused_parent_project(&deep, Some(top.path())), None);
+        // A repository's top ends the walk.
+        std::fs::create_dir(top.path().join("a/.git")).unwrap();
+        assert_eq!(unused_parent_project(&deep, None), None);
     }
 
     #[test]

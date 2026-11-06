@@ -731,7 +731,7 @@ command line, so that `sinter apply moge.yaml web01` works from your project dir
 wherever the recipe is.
 
 ```text
-# sinter.project.yaml
+# sinter.yaml
 version: 1
 recipe_paths:              # directories searched for a bare recipe name
   - /opt/sinter/recipes
@@ -750,10 +750,12 @@ strict_vars: false
 Every field but `version` is optional. Relative paths are relative to the file, and `~` and
 environment variables are not expanded.
 
-- **Where it is read from.** `--config PATH`, or `sinter.project.yaml`, `.yml` or `.toml` in the
+- **Where it is read from.** `--config PATH`, or `sinter.yaml`, `.yml` or `.toml` in the
   current directory. Parent directories, the recipe's directory and the home directory are never
   searched. `--no-config` ignores it. `mcp` and `secrets` never read it. Without one, nothing
-  changes.
+  changes. From a subdirectory, a project file above is not read and a note says so. A recipe
+  called `sinter.yaml` in the current directory is read as the project file and refused: rename
+  it, or use `--no-config`.
 - **What is refused.** A file found in the current directory is held to the rules of a detected
   inventory: exactly one, not a symbolic link, file and directory owned by you or root and not
   writable by group or others. So is every file a project file names (a recipe found by search,
