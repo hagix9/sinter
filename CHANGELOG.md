@@ -2,10 +2,7 @@
 
 All notable changes to Sinter are documented in this file.
 
-## [Unreleased]
-
-Not part of v1.9.0. Implemented and tested on a development controller; live
-Linux acceptance has not been run.
+## [1.10.0] - 2026-11-06
 
 ### Added
 
@@ -60,6 +57,31 @@ Linux acceptance has not been run.
 
 - Every command without a selector or a project file: targets, output and exit codes, apart from the unknown-variable change above. The SSH key
   precedence, ssh-agent handling and strict host-key checking.
+
+### Known limitations
+
+- The detection checks do not stop a `hosts.yaml` or a project file from a repository you cloned, which
+  you own: it can point `address` at any host, and only hosts your own `known_hosts` already trusts can
+  be reached. Read the paths shown, run `plan` first, and name `--inventory` in CI and on important
+  systems.
+- A detected inventory or project file is refused when it or its directory is writable by group or
+  others, which is what `umask 002` produces, so a first use on such a system can be refused.
+- A file a project file names is checked just before it is read by path; the rule holds as long as the
+  directories above it are. A recipe's own `include`s are not checked.
+- The backup of a file in another account's directory keeps owner, group, mode, times and ACL as that
+  account reports them. Other extended attributes and SELinux labels are not copied. A file copy is not a
+  database backup.
+- Executions still run one at a time: nothing here adds parallel execution.
+
+### Release validation
+
+- Selectors, inventory detection and short options were run on all eight targets with a build of the
+  earlier source (299 checks each). The project file, several variables files, the backup store, the
+  backup of a file in another account's directory and partial runs were tested with scripted targets
+  on a development controller only, when this candidate was fixed. Real-target results belong to the
+  release's acceptance, not to this entry.
+- A test helper in `tests/cli_selector.rs` now creates fixture directories with mode 755 at every level,
+  so that suite no longer fails under `umask 002`.
 
 ## [1.9.0] - 2026-11-01
 

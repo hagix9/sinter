@@ -85,9 +85,9 @@ embedded scriptingは依然として実装対象に含めません。
 
 ## インストール
 
-Sinter **v1.9.0** は現在のリリースです。対応するすべての Linux x86_64 プラットフォーム
+Sinter **v1.10.0** は、対応するすべての Linux x86_64 プラットフォーム
 ライン（Ubuntu、Rocky Linux、RHEL 9 / 10、AlmaLinux 9 / 10）向けに、
-1つの `sinter-v1.9.0-linux-x86_64.tar.gz` アーティファクトとして公開しています。
+1つの `sinter-v1.10.0-linux-x86_64.tar.gz` アーティファクトとしてリリースを準備しています。
 
 ```sh
 curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
@@ -194,13 +194,13 @@ sinter apply nginx.yaml --inventory hosts.yaml
   しません。
 - `--limit web01`（`web01,web02`、`group:web`、`'web-*'` も可）は、選択されたホストの
   うち名指ししたものだけで実行し、残りのホストには接続しません。
-- 次のバージョン（v1.9.0 にはありません）：カレントディレクトリの `sinter.project.yaml` または `--config` のプロジェクトファイルで、
+- v1.10.0 から：カレントディレクトリの `sinter.project.yaml` または `--config` のプロジェクトファイルで、
   `recipe_paths`、`inventory`、`vars_files`、`backup.directory`、`default_target` を設定できます。レシピがどこにあっても
   `sinter apply moge.yaml web01` で実行できます。`--vars-file` は繰り返し指定でき、`--backup-dir` でターゲット上の保存先を指定できます。
   `--skip-recipe` と `--skip-resource` で除外できますが、必ず表示し（`PARTIAL_APPLY`）、依存関係を壊す除外は拒否します。root で実行するときは、
   他のアカウントのディレクトリにある通常ファイル（`/var/lib/pgsql/.pgpass` など）をそのアカウントとして読んでバックアップします。
   稼働中のデータディレクトリは対象外で、ファイルのコピーはデータベースのバックアップではありません。
-- 次期版の機能で、v1.9.0 にはありません: `sinter apply nginx.yaml web01`（`@web`、
+- v1.10.0 から: `sinter apply nginx.yaml web01`（`@web`、
   `web01,@db` も可）はホストを直接指定し、カレントディレクトリかレシピのディレクトリに
   ある `hosts.yaml`、`hosts.yml`、`hosts.toml` を見つけます。`targets` のないレシピは、
   指定したホストだけで実行します。この引数がなければ何も検出せず、対象は `--host` か
