@@ -1042,3 +1042,366 @@ fn ssh_sudo_privileged_file_replace_read_verify() {
     assert_eq!(mutation_command_count(&r2), 0, "{:?}", r2.commands);
     target_cleanup_dir(&outdir, true);
 }
+
+// ---------------------------------------------------------------------------
+// SSH stdout loss regression (stdout discarded before stdin EOF).
+//
+// The deterministic forced-timing cases T-2a/b/c are unit tests next to the
+// executor (`executor::ssh_stdout_race_tests`), because they need the
+// test-only seam. These cases exercise the unmodified product path end to end.
+// Exit status 0 alone is never a pass: content, length and SHA-256 are checked.
+// ---------------------------------------------------------------------------
+
+fn sha256_hex(b: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(b)
+        .iter()
+        .map(|x| format!("{:02x}", x))
+        .collect()
+}
+
+/// T-9: a wrong observation behind exit 0 is reported precisely (empty, head
+/// or tail missing, capture truncation, or other mismatch).
+fn assert_exact_stream(label: &str, stream: &str, got: &[u8], truncated: bool, want: &[u8]) {
+    if got == want && !truncated {
+        return;
+    }
+    let kind = if truncated {
+        "TRUNCATED(capture cap)"
+    } else if got.is_empty() {
+        "EMPTY"
+    } else if want.ends_with(got) {
+        "HEAD-MISSING"
+    } else if want.starts_with(got) {
+        "TAIL-MISSING"
+    } else {
+        "MISMATCH"
+    };
+    let first_diff = got
+        .iter()
+        .zip(want.iter())
+        .position(|(a, b)| a != b)
+        .unwrap_or(got.len().min(want.len()));
+    panic!(
+        "{}: exit 0 but wrong {} observation {}: got {} bytes sha256={}, want {} bytes sha256={}, first difference at offset {}",
+        label,
+        stream,
+        kind,
+        got.len(),
+        sha256_hex(got),
+        want.len(),
+        sha256_hex(want),
+        first_diff
+    );
+}
+
+fn sh_request(script: &str, timeout: u64) -> sinter::executor::ExecRequest {
+    let mut req = sinter::executor::ExecRequest::new("/bin/sh");
+    req.args = vec!["-c".into(), script.into()];
+    req.timeout_secs = timeout;
+    req.env.insert(
+        "PATH".to_string(),
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+    );
+    req.env.insert("LC_ALL".to_string(), "C".to_string());
+    req
+}
+
+fn executed(label: &str) {
+    eprintln!("SINTER_SSH_TEST_EXECUTED: {}", label);
+}
+
+/// T-1: short stdout over the product path, repeated on one session.
+#[test]
+fn ssh_stdout_short_exact_repeated() {
+    let _s = require_ssh!();
+    let Some(mut ex) = executor_for(&require_ssh!(), false) else {
+        skip_or_fail("could not connect executor");
+        return;
+    };
+    let mut req = sinter::executor::ExecRequest::new("/bin/echo");
+    req.args = vec!["R-MARK".into()];
+    req.timeout_secs = 10;
+    for i in 0..200 {
+        let out = ex.run(&req).expect("echo must complete");
+        assert_eq!(
+            out.completion,
+            sinter::executor::Completion::Exited(0),
+            "T-1 run {}",
+            i
+        );
+        assert_exact_stream(
+            &format!("T-1 run {}", i),
+            "stdout",
+            &out.stdout,
+            out.stdout_truncated,
+            b"R-MARK\n",
+        );
+    }
+    executed("T-1 x200");
+}
+
+/// T-3: exactly 1 MiB of non-periodic stdout (the capture cap), repeated.
+#[test]
+fn ssh_stdout_1mib_exact_repeated() {
+    let _s = require_ssh!();
+    let Some(mut ex) = executor_for(&require_ssh!(), false) else {
+        skip_or_fail("could not connect executor");
+        return;
+    };
+    let lines = 131072usize;
+    let mut want = Vec::with_capacity(lines * 8);
+    for i in 0..lines {
+        want.extend_from_slice(format!("{:07}\n", i).as_bytes());
+    }
+    assert_eq!(want.len(), 1024 * 1024);
+    let req = sh_request(
+        "awk 'BEGIN { for (i = 0; i < 131072; i++) printf \"%07d\\n\", i }'",
+        20,
+    );
+    for i in 0..20 {
+        let out = ex.run(&req).expect("1 MiB stdout must complete");
+        assert_eq!(
+            out.completion,
+            sinter::executor::Completion::Exited(0),
+            "T-3 run {}",
+            i
+        );
+        assert_exact_stream(
+            &format!("T-3 run {}", i),
+            "stdout",
+            &out.stdout,
+            out.stdout_truncated,
+            &want,
+        );
+    }
+    // One byte over the cap is reported as truncation, not as loss.
+    let over = sh_request(
+        "awk 'BEGIN { for (i = 0; i < 131072; i++) printf \"%07d\\n\", i }'; printf X",
+        20,
+    );
+    let out = ex.run(&over).expect("over-cap stdout must complete");
+    assert_eq!(out.completion, sinter::executor::Completion::Exited(0));
+    assert!(
+        out.stdout_truncated,
+        "T-3 over-cap must set stdout_truncated"
+    );
+    assert_eq!(
+        out.stdout, want,
+        "T-3 over-cap keeps exactly the first 1 MiB"
+    );
+    executed("T-3 x20 + over-cap");
+}
+
+/// T-4: interleaved stdout and stderr are both complete and exact.
+#[test]
+fn ssh_stdout_stderr_interleaved_exact() {
+    let _s = require_ssh!();
+    let Some(mut ex) = executor_for(&require_ssh!(), false) else {
+        skip_or_fail("could not connect executor");
+        return;
+    };
+    let req = sh_request(
+        "i=0; while [ $i -lt 2000 ]; do printf 'o%d\\n' $i; printf 'e%d\\n' $i >&2; i=$((i+1)); done",
+        20,
+    );
+    let mut want_out = Vec::new();
+    let mut want_err = Vec::new();
+    for i in 0..2000 {
+        want_out.extend_from_slice(format!("o{}\n", i).as_bytes());
+        want_err.extend_from_slice(format!("e{}\n", i).as_bytes());
+    }
+    for i in 0..10 {
+        let out = ex.run(&req).expect("interleaved output must complete");
+        assert_eq!(
+            out.completion,
+            sinter::executor::Completion::Exited(0),
+            "T-4 run {}",
+            i
+        );
+        let label = format!("T-4 run {}", i);
+        assert_exact_stream(
+            &label,
+            "stdout",
+            &out.stdout,
+            out.stdout_truncated,
+            &want_out,
+        );
+        assert_exact_stream(
+            &label,
+            "stderr",
+            &out.stderr,
+            out.stderr_truncated,
+            &want_err,
+        );
+    }
+    executed("T-4 x10");
+}
+
+/// T-7: more than 4 MiB of stdin is delivered completely, exactly once and
+/// before EOF: the remote digest is only printed after EOF, and any lost,
+/// duplicated or reordered byte changes it.
+#[test]
+fn ssh_large_stdin_4mib_digest_exact() {
+    let _s = require_ssh!();
+    let Some(mut ex) = executor_for(&require_ssh!(), false) else {
+        skip_or_fail("could not connect executor");
+        return;
+    };
+    let size = 4 * 1024 * 1024 + 12345;
+    let payload: Vec<u8> = (0..size)
+        .map(|i| (i as u32).wrapping_mul(2654435761).to_be_bytes()[0])
+        .collect();
+    let want = format!("{} {}\n", sha256_hex(&payload), size);
+    let mut req = sh_request(
+        "f=$(mktemp) || exit 3; cat >\"$f\"; \
+         if command -v sha256sum >/dev/null 2>&1; then d=$(sha256sum <\"$f\"); else d=$(shasum -a 256 <\"$f\"); fi; \
+         n=$(wc -c <\"$f\"); rm -f \"$f\"; printf '%s %s\\n' \"${d%% *}\" $n",
+        30,
+    );
+    req.env.insert("TMPDIR".to_string(), "/tmp".to_string());
+    req.stdin = Some(payload);
+    for i in 0..3 {
+        let out = ex.run(&req).expect("large stdin must complete");
+        assert_eq!(
+            out.completion,
+            sinter::executor::Completion::Exited(0),
+            "T-7 run {}: stderr={}",
+            i,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // `wc -c` may pad with spaces on some platforms.
+        let got = String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            + "\n";
+        assert_exact_stream(
+            &format!("T-7 run {}", i),
+            "stdout",
+            got.as_bytes(),
+            out.stdout_truncated,
+            want.as_bytes(),
+        );
+    }
+    executed("T-7 4MiB x3");
+}
+
+/// T-8: stdin backpressure against a command that never reads it ends as
+/// Indeterminate (started) within the deadline, and the command is not run
+/// again.
+#[test]
+fn ssh_stdin_backpressure_deadline_indeterminate_once() {
+    let _s = require_ssh!();
+    let Some(mut ex) = executor_for(&require_ssh!(), false) else {
+        skip_or_fail("could not connect executor");
+        return;
+    };
+    let marker = format!(
+        ".sinter-t8-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let mut req = sh_request(&format!("echo run >> {}; exec sleep 30", marker), 3);
+    req.stdin = Some(vec![b'z'; 4 * 1024 * 1024]);
+    let started = std::time::Instant::now();
+    let out = ex.run(&req).expect("backpressure run must return");
+    let elapsed = started.elapsed();
+    match &out.completion {
+        sinter::executor::Completion::Indeterminate { started, reason } => {
+            assert!(*started, "dispatch happened: started must be true");
+            assert!(
+                reason.contains("timed out") || reason.contains("deadline"),
+                "T-8 reason must be a deadline: {}",
+                reason
+            );
+        }
+        other => panic!("T-8 expected Indeterminate, got {:?}", other),
+    }
+    assert!(
+        elapsed <= std::time::Duration::from_secs(5),
+        "T-8 must stay near the 3 s deadline, took {:?}",
+        elapsed
+    );
+    drop(ex);
+    // Count how many times the remote command started (fresh session).
+    let Some(mut check) = executor_for(&require_ssh!(), false) else {
+        skip_or_fail("could not reconnect executor");
+        return;
+    };
+    let read = sh_request(&format!("cat {m}; rm -f {m}", m = marker), 10);
+    let out = check.run(&read).expect("marker read must complete");
+    assert_eq!(out.completion, sinter::executor::Completion::Exited(0));
+    assert_exact_stream(
+        "T-8 run count",
+        "stdout",
+        &out.stdout,
+        out.stdout_truncated,
+        b"run\n",
+    );
+    executed("T-8");
+}
+
+/// T-10 (executor level, runs on any POSIX target): failure classification is
+/// unchanged. A non-zero exit keeps its exact stdout, a signal is reported as
+/// a signal, and a timeout after dispatch is Indeterminate (started) with the
+/// stdout read so far preserved. The engine-level variants above need a Linux
+/// target.
+#[test]
+fn ssh_exec_failure_classification_exact() {
+    let _s = require_ssh!();
+    let Some(mut ex) = executor_for(&require_ssh!(), false) else {
+        skip_or_fail("could not connect executor");
+        return;
+    };
+    let out = ex
+        .run(&sh_request("printf 'partial-out\\n'; exit 7", 10))
+        .expect("exit 7 must complete");
+    assert_eq!(out.completion, sinter::executor::Completion::Exited(7));
+    assert_exact_stream(
+        "T-10 exit 7",
+        "stdout",
+        &out.stdout,
+        out.stdout_truncated,
+        b"partial-out\n",
+    );
+
+    let out = ex
+        .run(&sh_request("kill -TERM $$", 10))
+        .expect("signal must complete");
+    assert!(
+        matches!(
+            out.completion,
+            sinter::executor::Completion::Signaled(_) | sinter::executor::Completion::Exited(143)
+        ),
+        "T-10 signal must not look like success: {:?}",
+        out.completion
+    );
+    assert_ne!(out.completion, sinter::executor::Completion::Exited(0));
+
+    let started = std::time::Instant::now();
+    let out = ex
+        .run(&sh_request("printf 'before-timeout\\n'; exec sleep 30", 1))
+        .expect("timeout must return");
+    let elapsed = started.elapsed();
+    match &out.completion {
+        sinter::executor::Completion::Indeterminate { started, .. } => assert!(*started),
+        other => panic!("T-10 expected Indeterminate, got {:?}", other),
+    }
+    assert!(
+        elapsed <= std::time::Duration::from_secs(3),
+        "took {:?}",
+        elapsed
+    );
+    assert_exact_stream(
+        "T-10 timeout keeps stdout read so far",
+        "stdout",
+        &out.stdout,
+        out.stdout_truncated,
+        b"before-timeout\n",
+    );
+    executed("T-10 executor");
+}

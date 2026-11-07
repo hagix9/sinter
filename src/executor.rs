@@ -1282,6 +1282,8 @@ impl SshExecutor {
                         }
                     }
                 }
+                #[cfg(test)]
+                ssh_seam::before_stderr_pass(stdin_eof_sent, out.len());
                 if !stderr_eof {
                     let mut st = channel.stderr();
                     match drain_stream(
@@ -1328,7 +1330,7 @@ impl SshExecutor {
                                     stdin_off += n;
                                     progressed = true;
                                     if stdin_off >= data.len() {
-                                        flush_and_eof(&mut channel, deadline).map_err(|e| {
+                                        send_stdin_eof(&mut channel, deadline).map_err(|e| {
                                             SinterError::indeterminate(format!(
                                                 "SSH stdin EOF failed after dispatch: {}",
                                                 e
@@ -1352,7 +1354,7 @@ impl SshExecutor {
                             // No stdin payload (or already fully written path
                             // handled above): send EOF so commands like /bin/cat
                             // can terminate, matching local /dev/null semantics.
-                            flush_and_eof(&mut channel, deadline).map_err(|e| {
+                            send_stdin_eof(&mut channel, deadline).map_err(|e| {
                                 SinterError::indeterminate(format!(
                                     "SSH stdin EOF failed after dispatch: {}",
                                     e
@@ -1741,24 +1743,19 @@ fn drain_stream<R: Read>(
     }
 }
 
-/// Flush pending stdin bytes and send EOF under the operation deadline.
-/// EAGAIN retries; other failures are reported, never silently ignored.
-fn flush_and_eof(channel: &mut ssh2::Channel, deadline: Instant) -> std::io::Result<()> {
-    loop {
-        if Instant::now() >= deadline {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "SSH stdin flush deadline exceeded",
-            ));
-        }
-        match channel.flush() {
-            Ok(()) => break,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(e) => return Err(e),
-        }
-    }
+/// Send stdin EOF under the operation deadline. EAGAIN retries; other
+/// failures are reported, never silently ignored.
+///
+/// Never call `Channel::flush()` here or before this call. In ssh2 0.9 it maps
+/// to `libssh2_channel_flush_ex(channel, 0)`, which does not flush outgoing
+/// stdin: it DISCARDS stdout that was already received but not yet read, so a
+/// command could report exit 0 with empty or head-truncated stdout. libssh2
+/// has no channel-level send buffer: a `write()` that returned `Ok(n)` has
+/// already handed its whole packet to the socket, and EOF follows it on the
+/// same ordered stream.
+fn send_stdin_eof(channel: &mut ssh2::Channel, deadline: Instant) -> std::io::Result<()> {
+    #[cfg(test)]
+    ssh_seam::before_stdin_eof(channel.read_window().available);
     loop {
         if Instant::now() >= deadline {
             return Err(std::io::Error::new(
@@ -1777,6 +1774,77 @@ fn flush_and_eof(channel: &mut ssh2::Channel, deadline: Instant) -> std::io::Res
                     e
                 )))
             }
+        }
+    }
+}
+
+/// Test-only SSH timing seam (design option S1).
+///
+/// The whole module, and every call into it, exists only under `cfg(test)`:
+/// a normal or release build contains no pause, no state and no hook call.
+/// A test arms the seam for its own thread with [`ssh_seam::arm`]; the
+/// returned guard disarms it and clears the recorded events on drop, including
+/// when the test panics. Nothing happens unless a test armed it.
+#[cfg(test)]
+pub(crate) mod ssh_seam {
+    use std::cell::{Cell, RefCell};
+    use std::time::Duration;
+
+    /// What the seam observed, in order, while armed.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Event {
+        /// Paused before a stderr pass while stdin EOF was not yet sent.
+        /// `stdout_captured` is the stdout byte count read so far.
+        PausedBeforeStderrPass { stdout_captured: usize },
+        /// About to send stdin EOF. `queued_stdout` is the number of received
+        /// but unread stdout bytes queued in the channel at that moment.
+        BeforeStdinEof { queued_stdout: u32 },
+    }
+
+    thread_local! {
+        static PAUSE: Cell<Option<Duration>> = const { Cell::new(None) };
+        static EVENTS: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Disarms the seam for this thread when dropped.
+    pub(crate) struct Armed(());
+
+    impl Drop for Armed {
+        fn drop(&mut self) {
+            PAUSE.with(|p| p.set(None));
+            EVENTS.with(|e| e.borrow_mut().clear());
+        }
+    }
+
+    /// Arm the seam on the current thread: pause `pause` before each stderr
+    /// pass made while stdin EOF has not been sent, and record events.
+    pub(crate) fn arm(pause: Duration) -> Armed {
+        EVENTS.with(|e| e.borrow_mut().clear());
+        PAUSE.with(|p| p.set(Some(pause)));
+        Armed(())
+    }
+
+    /// Events recorded on this thread since it was armed.
+    pub(crate) fn events() -> Vec<Event> {
+        EVENTS.with(|e| e.borrow().clone())
+    }
+
+    pub(crate) fn before_stderr_pass(stdin_eof_sent: bool, stdout_captured: usize) {
+        if stdin_eof_sent {
+            return;
+        }
+        if let Some(d) = PAUSE.with(|p| p.get()) {
+            EVENTS.with(|e| {
+                e.borrow_mut()
+                    .push(Event::PausedBeforeStderrPass { stdout_captured })
+            });
+            std::thread::sleep(d);
+        }
+    }
+
+    pub(crate) fn before_stdin_eof(queued_stdout: u32) {
+        if PAUSE.with(|p| p.get()).is_some() {
+            EVENTS.with(|e| e.borrow_mut().push(Event::BeforeStdinEof { queued_stdout }));
         }
     }
 }
@@ -5891,5 +5959,231 @@ mod fake_observer_tests {
         assert_eq!(observed.log().len(), plain.log().len());
         assert_eq!(observed.log().len(), 1);
         assert_eq!(observed.log()[0].program, plain.log()[0].program);
+    }
+}
+
+/// Deterministic real-SSH regression tests for the stdout loss caused by
+/// discarding queued, unread stdout before stdin EOF (T-2a/b/c).
+///
+/// They use the test-only seam [`ssh_seam`]: the first stdout pass finds no
+/// data (the remote command sleeps first), the seam pauses before the stderr
+/// pass, the stderr pass then queues the stdout packets that arrived during
+/// the pause, and stdin EOF is sent right after. Each test first proves that
+/// this ordering really happened (events recorded by the seam) and only then
+/// checks the content, length and SHA-256 of stdout. Exit status 0 alone is
+/// never a pass.
+///
+/// They need a disposable SSH target (`SINTER_TEST_SSH_HOST`, `_PORT`,
+/// `_USER`, `_KNOWN_HOSTS`, `_IDENTITY`). Without one they are skipped with a
+/// `SINTER_TEST_SKIPPED` marker, or fail under `SINTER_TEST_STRICT=1`.
+#[cfg(test)]
+mod ssh_stdout_race_tests {
+    use super::ssh_seam::{self, Event};
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    /// Remote delay before the first stdout byte.
+    const REMOTE_DELAY: &str = "0.3";
+    /// Seam pause before the first stderr pass; leaves 0.7 s of margin.
+    const SEAM_PAUSE: Duration = Duration::from_millis(1000);
+    const MARK: &[u8] = b"R-MARK\n";
+    /// 131072 lines of 8 bytes: exactly 1 MiB, non-periodic.
+    const BIG_LINES: usize = 131072;
+
+    fn target() -> Option<SshConfig> {
+        let host = match std::env::var("SINTER_TEST_SSH_HOST") {
+            Ok(h) => h,
+            Err(_) => {
+                if std::env::var("SINTER_TEST_STRICT").ok().as_deref() == Some("1") {
+                    panic!("SINTER_TEST_REQUIRED: SINTER_TEST_SSH_HOST not set");
+                }
+                eprintln!("SINTER_TEST_SKIPPED: SINTER_TEST_SSH_HOST not set");
+                return None;
+            }
+        };
+        let spec = crate::engine::SshSpec {
+            host,
+            port: std::env::var("SINTER_TEST_SSH_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(22),
+            user: std::env::var("SINTER_TEST_SSH_USER")
+                .expect("SINTER_TEST_SSH_USER must be set when SSH tests run"),
+            known_hosts: std::env::var_os("SINTER_TEST_SSH_KNOWN_HOSTS")
+                .map(std::path::PathBuf::from)
+                .expect("SINTER_TEST_SSH_KNOWN_HOSTS must be set when SSH tests run"),
+            identity_files: std::env::var_os("SINTER_TEST_SSH_IDENTITY")
+                .map(|i| vec![std::path::PathBuf::from(i)])
+                .unwrap_or_default(),
+            agent: crate::engine::AgentSource::Disabled,
+            ..Default::default()
+        };
+        Some(SshConfig::from(&spec))
+    }
+
+    fn request(script: String, stdin: Option<Vec<u8>>) -> ExecRequest {
+        let mut req = ExecRequest::new("/bin/sh");
+        req.args = vec!["-c".into(), script];
+        req.timeout_secs = 20;
+        req.stdin = stdin;
+        req.env.insert(
+            "PATH".to_string(),
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+        );
+        req.env.insert("LC_ALL".to_string(), "C".to_string());
+        req
+    }
+
+    fn big_expected() -> Vec<u8> {
+        let mut v = Vec::with_capacity(BIG_LINES * 8);
+        for i in 0..BIG_LINES {
+            v.extend_from_slice(format!("{:07}\n", i).as_bytes());
+        }
+        v
+    }
+
+    fn sha_hex(b: &[u8]) -> String {
+        Sha256::digest(b)
+            .iter()
+            .map(|x| format!("{:02x}", x))
+            .collect()
+    }
+
+    /// T-9: classify a wrong stdout precisely instead of a bare inequality.
+    fn stdout_verdict(got: &[u8], truncated: bool, want: &[u8]) -> Option<String> {
+        if got == want && !truncated {
+            return None;
+        }
+        let kind = if truncated {
+            "TRUNCATED(capture cap)"
+        } else if got.is_empty() {
+            "EMPTY"
+        } else if want.ends_with(got) {
+            "HEAD-MISSING"
+        } else if want.starts_with(got) {
+            "TAIL-MISSING"
+        } else {
+            "MISMATCH"
+        };
+        let first_diff = got
+            .iter()
+            .zip(want.iter())
+            .position(|(a, b)| a != b)
+            .unwrap_or(got.len().min(want.len()));
+        Some(format!(
+            "stdout {}: got {} bytes sha256={}, want {} bytes sha256={}, first difference at offset {}",
+            kind,
+            got.len(),
+            sha_hex(got),
+            want.len(),
+            sha_hex(want),
+            first_diff
+        ))
+    }
+
+    /// Run `req` with the seam armed, prove the race was set up, then check
+    /// stdout exactly.
+    fn run_forced(label: &str, req: ExecRequest, want: &[u8]) {
+        let Some(cfg) = target() else { return };
+        let mut ex = Executor::Ssh(
+            SshExecutor::connect(&cfg, false).expect("connect to the SSH test target"),
+        );
+        let armed = ssh_seam::arm(SEAM_PAUSE);
+        let out = ex.run(&req).expect("remote command must complete");
+        let events = ssh_seam::events();
+        drop(armed);
+        eprintln!("SINTER_SSH_TEST_EXECUTED: {} events={:?}", label, events);
+
+        // Precondition: the forced ordering really happened. Otherwise the
+        // test proves nothing and must not count as a pass.
+        assert_eq!(
+            events.first(),
+            Some(&Event::PausedBeforeStderrPass { stdout_captured: 0 }),
+            "{}: seam did not pause before the first stderr pass with no stdout read yet: {:?}",
+            label,
+            events
+        );
+        let queued = events.iter().find_map(|e| match e {
+            Event::BeforeStdinEof { queued_stdout } => Some(*queued_stdout),
+            _ => None,
+        });
+        assert!(
+            matches!(queued, Some(q) if q > 0),
+            "{}: stdout was not queued unread when stdin EOF was sent (race not set up): {:?}",
+            label,
+            events
+        );
+
+        assert_eq!(
+            out.completion,
+            Completion::Exited(0),
+            "{}: remote command must exit 0",
+            label
+        );
+        if let Some(v) = stdout_verdict(&out.stdout, out.stdout_truncated, want) {
+            panic!("{}: exit 0 but wrong observation: {}", label, v);
+        }
+        assert!(out.stderr.is_empty(), "{}: unexpected stderr", label);
+    }
+
+    #[test]
+    fn t2a_forced_no_stdin_short_stdout_exact() {
+        let req = request(format!("sleep {}; printf 'R-MARK\\n'", REMOTE_DELAY), None);
+        run_forced("T-2a", req, MARK);
+    }
+
+    #[test]
+    fn t2b_forced_with_stdin_short_stdout_exact() {
+        let stdin: Vec<u8> = (0..64u8).map(|i| b'a' + (i % 26)).collect();
+        let req = request(
+            format!("sleep {}; printf 'R-MARK\\n'; cat >/dev/null", REMOTE_DELAY),
+            Some(stdin),
+        );
+        run_forced("T-2b", req, MARK);
+    }
+
+    #[test]
+    fn t2c_forced_no_stdin_1mib_stdout_exact() {
+        let req = request(
+            format!(
+                "sleep {}; awk 'BEGIN {{ for (i = 0; i < {}; i++) printf \"%07d\\n\", i }}'",
+                REMOTE_DELAY, BIG_LINES
+            ),
+            None,
+        );
+        let want = big_expected();
+        assert_eq!(want.len(), MAX_CAPTURE, "1 MiB fixture must equal the cap");
+        run_forced("T-2c", req, &want);
+    }
+
+    /// The seam is inert unless armed, and the guard clears it even on panic.
+    #[test]
+    fn seam_is_disarmed_by_guard_even_on_panic() {
+        assert!(ssh_seam::events().is_empty());
+        let r = std::panic::catch_unwind(|| {
+            let _armed = ssh_seam::arm(Duration::from_millis(1));
+            ssh_seam::before_stderr_pass(false, 0);
+            assert_eq!(ssh_seam::events().len(), 1);
+            panic!("simulated test failure");
+        });
+        assert!(r.is_err());
+        assert!(ssh_seam::events().is_empty(), "events must be cleared");
+        let t = Instant::now();
+        ssh_seam::before_stderr_pass(false, 0);
+        ssh_seam::before_stdin_eof(5);
+        assert!(
+            ssh_seam::events().is_empty(),
+            "disarmed seam must not record"
+        );
+        assert!(
+            t.elapsed() < Duration::from_millis(50),
+            "disarmed seam must not pause"
+        );
+        // Armed, but stdin EOF already sent: no pause.
+        let _armed = ssh_seam::arm(Duration::from_millis(500));
+        let t = Instant::now();
+        ssh_seam::before_stderr_pass(true, 0);
+        assert!(t.elapsed() < Duration::from_millis(50));
+        assert!(ssh_seam::events().is_empty());
     }
 }
