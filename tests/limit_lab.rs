@@ -417,32 +417,88 @@ fn without_a_limit_every_target_is_evaluated_and_contacted_as_before() {
 #[test]
 fn an_unselected_hosts_variable_error_does_not_stop_the_selected_host() {
     let Some(lab) = Lab::start() else { return };
-    let file = lab.p("conf");
-    let r = recipe(&lab, &file);
+    // Both hosts are this machine: the path names the host, so that what each
+    // of them wrote can be told apart.
+    let (web_file, db_file) = (lab.p("conf-web"), lab.p("conf-db"));
+    let r = lab.p("per-host.yaml");
+    std::fs::write(
+        &r,
+        format!(
+            "version: 1\ntargets:\n  groups: [all-linux]\nvars:\n  name: {{ value: none }}\n  body: {{ value: new }}\nresources:\n  - id: f\n    type: file\n    with:\n      path: \"{}/conf-{{{{ vars.name }}}}\"\n      content: \"{{{{ vars.body }}}}\"\n",
+            lab.dir.path().display()
+        ),
+    )
+    .unwrap();
+    let r = r.to_str().unwrap();
     // db01's layer names a variable the recipe does not declare.
     let vars = lab.p("vars.yaml");
     std::fs::write(
         &vars,
-        "version: 1\nhosts:\n  db01: { nosuchvariable: 1 }\n  web01: { body: from-web01 }\n",
+        "version: 1\nhosts:\n  db01: { name: db, nosuchvariable: 1 }\n  web01: { name: web, body: from-web01 }\n",
     )
     .unwrap();
-    lab.reset();
-    let o = lab.run(&["apply", &r, "--vars-file", vars.to_str().unwrap()]);
-    assert_eq!(o.status.code(), Some(2), "without --limit it is an error");
-    lab.assert_untouched("apply without --limit, db01 layer wrong");
-    lab.reset();
-    let o = lab.run(&[
-        "apply",
-        &r,
-        "--vars-file",
-        vars.to_str().unwrap(),
-        "--limit",
-        "web01",
-    ]);
-    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), "from-web01");
-    assert!(!lab.evaluated_ports().contains(&lab.db.port));
-    assert!(!lab.db.connected());
+    let vars = vars.to_str().unwrap();
+    let start = || {
+        for f in [&web_file, &db_file] {
+            let _ = std::fs::remove_file(f);
+        }
+        lab.reset();
+    };
+    let warned = |o: &std::process::Output| text(&o.stderr).contains("nosuchvariable");
+    let targets = |o: &std::process::Output| -> Vec<String> {
+        let mut names: Vec<String> = json(o)["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["target"]["name"].as_str().unwrap().to_string())
+            .collect();
+        names.sort();
+        names
+    };
+
+    // Without `--limit` every layer is checked, and by default an undeclared
+    // name is a warning: both hosts run, with the values of their own layers.
+    start();
+    let o = lab.run(&["apply", r, "--vars-file", vars]);
+    let err = text(&o.stderr);
+    assert_eq!(o.status.code(), Some(0), "{err}");
+    assert!(err.contains("warning:") && warned(&o), "{err}");
+    assert!(err.contains("--strict-vars makes this an error"), "{err}");
+    assert_eq!(targets(&o), ["db01", "web01"]);
+    assert_eq!(std::fs::read_to_string(&web_file).unwrap(), "from-web01");
+    assert_eq!(std::fs::read_to_string(&db_file).unwrap(), "new");
+    assert!(lab.web.authenticated() && lab.db.authenticated());
+
+    // `--strict-vars`: the same input stops before anything is contacted.
+    start();
+    let o = lab.run(&["apply", r, "--vars-file", vars, "--strict-vars"]);
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o.stderr));
+    assert!(warned(&o), "the refusal names the variable");
+    lab.assert_untouched("apply --strict-vars, db01 layer wrong");
+    assert!(
+        !web_file.exists() && !db_file.exists(),
+        "nothing was written"
+    );
+
+    // `--limit web01`: db01's layer is out of scope, so it neither warns nor
+    // stops the run, strict or not, and db01 is neither evaluated nor contacted.
+    for strict in [&[][..], &["--strict-vars"][..]] {
+        start();
+        let mut args = vec!["apply", r, "--vars-file", vars, "--limit", "web01"];
+        args.extend_from_slice(strict);
+        let o = lab.run(&args);
+        let err = text(&o.stderr);
+        assert_eq!(o.status.code(), Some(0), "{strict:?}: {err}");
+        assert!(!warned(&o), "{strict:?}: {err}");
+        assert_eq!(targets(&o), ["web01"], "{strict:?}");
+        assert_eq!(std::fs::read_to_string(&web_file).unwrap(), "from-web01");
+        assert!(!db_file.exists(), "{strict:?}: db01's file was written");
+        let ports = lab.evaluated_ports();
+        assert!(ports.contains(&lab.web.port), "{strict:?}: {ports:?}");
+        assert!(!ports.contains(&lab.db.port), "{strict:?}: {ports:?}");
+        assert!(lab.web.authenticated(), "{strict:?}: web01 not reached");
+        assert!(!lab.db.connected(), "{strict:?}: db01 was contacted");
+    }
 }
 
 #[test]
