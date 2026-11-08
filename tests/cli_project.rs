@@ -403,6 +403,87 @@ fn an_apply_naming_no_host_never_reaches_machines_because_of_a_project_file() {
     code(&f.run(&["apply", "r.yaml", "--no-ssh-config"]), 3, "");
 }
 
+/// H-1: the inventory a project file names may say no more than a detected one
+/// (DESIGN §39.3, §40.1). A `known_hosts` of its own would let a cloned
+/// repository satisfy strict host key verification for a host of its choosing.
+#[test]
+fn a_project_inventory_may_not_bring_its_own_known_hosts_or_relative_keys() {
+    let f = Fx::new();
+    f.write("work/r.yaml", WEB);
+    f.write("work/kh", "");
+    f.write("work/v.yaml", "{}\n");
+    let ports = common::ClosedPorts::reserve(1);
+    let with = |extra: &str| {
+        f.write(
+            "work/hosts.yaml",
+            &format!(
+                "hosts:\n  web01: {{ address: 127.0.0.1, port: {}, user: u{extra} }}\ngroups:\n  web:\n    hosts: [web01]\n",
+                ports.port(0)
+            ),
+        )
+    };
+    let refused = |o: &Output, what: &str, ctx: &str| {
+        code(o, 2, ctx);
+        let e = text(&o.stderr);
+        assert!(
+            e.contains("inventory named by the project file") && e.contains(what),
+            "{ctx}: {e}"
+        );
+    };
+    f.write(
+        "work/sinter.yaml",
+        "version: 1\ninventory: hosts.yaml\nallow_implicit_apply: true\n",
+    );
+    for (extra, what) in [
+        (", known_hosts: ./kh", "sets known_hosts"),
+        (", identity_files: [keys/id]", "relative identity_files"),
+    ] {
+        with(extra);
+        // Every way a run reads the project's inventory: a selector, --limit,
+        // all the recipes' targets, and the variables gate.
+        for args in [
+            &["validate", "r.yaml", "web01"][..],
+            &["plan", "r.yaml", "web01", "--no-ssh-config"],
+            &["audit", "r.yaml", "--limit", "web01", "--no-ssh-config"],
+            &["plan", "r.yaml", "--no-ssh-config"],
+            &["apply", "r.yaml", "--no-ssh-config"],
+            &["validate", "r.yaml", "--vars-file", "v.yaml"],
+        ] {
+            refused(&f.run(args), what, &format!("{extra} {args:?}"));
+        }
+        // A project file named with --config is held to the same rule.
+        let cfg = f.write(
+            "elsewhere.yaml",
+            &format!(
+                "version: 1\ninventory: {}\n",
+                f.path("work/hosts.yaml").display()
+            ),
+        );
+        refused(
+            &f.run(&["validate", "--config", &cfg, "r.yaml", "web01"]),
+            what,
+            &format!("{extra} --config"),
+        );
+        // Named on the command line, the same file is the user's choice.
+        code(
+            &f.run(&[
+                "validate",
+                "--no-config",
+                "--inventory",
+                "hosts.yaml",
+                "r.yaml",
+                "web01",
+            ]),
+            0,
+            &format!("{extra} --inventory"),
+        );
+    }
+    // Without those fields the project inventory works as before.
+    with("");
+    code(&f.run(&["validate", "r.yaml", "web01"]), 0, "plain");
+    assert_eq!(f.ssh_calls(), 0, "nothing was contacted");
+}
+
 #[test]
 fn a_name_that_does_not_resolve_never_falls_back_to_the_local_target() {
     let f = Fx::new();

@@ -279,17 +279,36 @@ fn read_trusted_as(
     Ok((bytes, path))
 }
 
+const PROJECT_INVENTORY: Who = Who {
+    label: "inventory named by the project file",
+    ask: ASK,
+};
+
+/// The inventory a project file names was not named on the command line, so it
+/// may say no more than a detected one (DESIGN §39.3, §40.1): a `known_hosts` of
+/// its own would let the file satisfy strict host key verification for a host of
+/// its choosing.
+pub fn check_project_inventory_fields(inv: &Inventory) -> Result<()> {
+    check_fields_as(PROJECT_INVENTORY, inv)
+}
+
 /// What only an explicit `--inventory` may say.
 fn check_detected_fields(inv: &Inventory) -> Result<()> {
+    check_fields_as(INVENTORY, inv)
+}
+
+fn check_fields_as(who: Who, inv: &Inventory) -> Result<()> {
     for (name, h) in &inv.hosts {
         if h.known_hosts.is_some() {
-            return Err(refuse(
+            return Err(refuse_as(
+                who,
                 &inv.path,
                 format!("host {name} sets known_hosts, which only an explicit --inventory may do"),
             ));
         }
         if h.identity_files.iter().any(|p| !p.is_absolute()) {
-            return Err(refuse(
+            return Err(refuse_as(
+                who,
                 &inv.path,
                 format!(
                     "host {name} has a relative identity_files entry, whose meaning depends on the current directory (write an absolute path or ~/...)"

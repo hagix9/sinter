@@ -759,8 +759,9 @@ environment variables are not expanded.
 - **What is refused.** A file found in the current directory is held to the rules of a detected
   inventory: exactly one, not a symbolic link, file and directory owned by you or root and not
   writable by group or others. So is every file a project file names (a recipe found by search,
-  `inventory`, `vars_files`), however the project file was found. A bad project file is exit 2, it
-  never means "no project".
+  `inventory`, `vars_files`), however the project file was found. The inventory it names may not
+  set `known_hosts` or a relative `identity_files`, as a detected one may not: name those with
+  `--known-hosts` or `--inventory`. A bad project file is exit 2, it never means "no project".
 - **Which recipe.** Anything with a `/` is a path, used as given. A bare name is looked for in
   `recipe_paths` and the current directory. Two different files are exit 2, and `./name` or a full
   path settles it; none is exit 2. No other recipe is tried and no extension is added. A bundle's

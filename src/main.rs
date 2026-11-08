@@ -1460,6 +1460,18 @@ struct LimitGate {
     limited: Limited,
 }
 
+/// The inventory `exec.inventory` names, read for a run. One the project file
+/// named, rather than `--inventory`, is held to the rules of a detected one
+/// (DESIGN §39.3, §40.1): no `known_hosts`, no relative `identity_files`. Every
+/// read of `exec.inventory` for a run goes through here.
+fn load_exec_inventory(path: &Path, exec: &ExecOpts) -> Result<Inventory, SinterError> {
+    let inv = load_inventory(path)?;
+    if exec.resolved.inventory_from_project {
+        sinter::inventory_detect::check_project_inventory_fields(&inv)?;
+    }
+    Ok(inv)
+}
+
 /// The inventory of a run with a selector (DESIGN §39.3): `--inventory`, which
 /// never falls back to anything, else the detected one. It is shown before the
 /// hosts are evaluated, so a wrong file can be noticed whatever happens next:
@@ -1471,7 +1483,7 @@ fn selector_inventory(
 ) -> Result<Inventory, SinterError> {
     let (inventory, how) = match &exec.inventory {
         Some(path) if exec.resolved.inventory_from_project => {
-            (load_inventory(path)?, "project file")
+            (load_exec_inventory(path, exec)?, "project file")
         }
         Some(path) => (load_inventory(path)?, "--inventory"),
         None if exec.resolved.recipe_via == RecipeVia::RecipePaths => {
@@ -1526,7 +1538,7 @@ fn limit_source(
             .inventory
             .as_ref()
             .ok_or_else(|| model_mismatch("--limit without an inventory"))?;
-        load_inventory(inv_path)?
+        load_exec_inventory(inv_path, exec)?
     };
     let resolutions = limit_resolutions(&inventory, &prepared, limit)?;
     let limited = limited::limit(&inventory, resolutions, limit)?;
@@ -1579,7 +1591,7 @@ fn vars_gate(
     let prepared = prepare_source_with_plugins(recipe, &plugin_ctx(exec))?;
     let inventory = match &exec.inventory {
         _ if limit.is_selector() => Some(selector_inventory(recipe, exec, format)?),
-        Some(p) => Some(load_inventory(p)?),
+        Some(p) => Some(load_exec_inventory(p, exec)?),
         None => None,
     };
     // Every file is read and checked, so all their problems are reported at once.
@@ -1999,7 +2011,7 @@ fn inventory_plan(
     limit: &ParsedLimit,
     session: &ProgressSession,
 ) -> Result<ExecutionPlan, SinterError> {
-    let inv = load_inventory(inv_path)?;
+    let inv = load_exec_inventory(inv_path, &a.exec)?;
     let resolutions = resolve_targets(
         &inv,
         source

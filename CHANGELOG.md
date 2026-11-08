@@ -27,7 +27,8 @@ All notable changes to Sinter are documented in this file.
   `--config`, sets `recipe_paths`, `inventory`, `vars_files`, `backup.directory`, `default_target`
   and `strict_vars`; `--no-config` ignores it. A recipe already called `sinter.yaml` needs renaming or
   `--no-config`. From a subdirectory a project file above is not read, and a note says so. Parents are never searched, a found file must pass
-  the rules of a detected inventory, and what is in effect is shown first and in `resolved` in JSON.
+  the rules of a detected inventory, the inventory it names may not set `known_hosts` or a relative
+  `identity_files` (as a detected one may not), and what is in effect is shown first and in `resolved` in JSON.
   A bare recipe name is searched for only with `recipe_paths`; two files are refused, and no other
   recipe is tried. No failure falls back to the local target, and `apply` refuses `default_target`
   or through a project `inventory` for an `apply` naming no host, unless the file sets `allow_implicit_apply: true`.
