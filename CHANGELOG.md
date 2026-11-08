@@ -2,7 +2,7 @@
 
 All notable changes to Sinter are documented in this file.
 
-## [1.10.0] - 2026-11-06
+## [1.10.0] - 2026-11-08
 
 ### Added
 
@@ -58,9 +58,27 @@ All notable changes to Sinter are documented in this file.
   (swapped letters, a different case) is an error, and one or two edits away is a warning, since
   `db_port` and `db_host` are that close and real.
 
+### Fixed
+
+- **Output of a remote command over SSH could be lost.** Before sending the end of input, Sinter
+  called a libssh2 function that discards output already received but not yet read, so a command
+  could report exit 0 with empty or truncated stdout, most likely when its stderr was read first.
+  The call is removed; end of input is sent as before, within the same deadline. Present since
+  v0.1.0. New regression tests compare remote stdout and stderr exactly (content, length and
+  SHA-256), including large and interleaved output.
+
+### Security
+
+- **An inventory named by a project file may not set `known_hosts` or a relative `identity_files`.**
+  It is held to the rules of a detected inventory, whichever way the project file was found, and is
+  refused with exit 2 otherwise. Earlier candidates of this release accepted those fields, so a
+  project file in a cloned repository could bring its own host keys for strict verification.
+  `--inventory` and `--known-hosts` on the command line are unchanged. The project file is new in
+  this release; no earlier release is affected.
+
 ### Unchanged
 
-- Every command without a selector or a project file: targets, output and exit codes, apart from the unknown-variable change above. The SSH key
+- Every command without a selector or a project file: targets, output and exit codes, apart from the unknown-variable change above and the SSH output fix. The SSH key
   precedence, ssh-agent handling and strict host-key checking.
 
 ### Known limitations
