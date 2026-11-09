@@ -1,9 +1,9 @@
 ---
 title: Resource Reference
-description: All built-in Sinter resource types implemented in v1.9.0.
+description: All built-in Sinter resource types implemented in v1.10.0.
 ---
 
-Sinter v1.9.0 implements ten built-in resource types (`postgresql_role` is new in v1.5.1); [Resource Plugins](/en/reference/resource-plugins/) can add more. Parameters below are the
+Sinter v1.10.0 implements ten built-in resource types (`postgresql_role` is new in v1.5.1); [Resource Plugins](/en/reference/resource-plugins/) can add more. Parameters below are the
 complete supported set — unknown `with` fields are schema errors.
 
 | Type | Purpose | Key parameters |

@@ -22,7 +22,7 @@ Oracle LinuxはRHEL系platformとして認識され、SinterのDNF backendを
 使用します。対応するRHEL系実装と互換性があると見込まれますが、現在
 Sinterの実ホスト受入マトリクスには含まれていません。
 
-**パッケージ削除（`state: absent`、v1.8.0 から）**の検証には 2 つの段階があります。v1.9.0 の
+**パッケージ削除（`state: absent`、v1.8.0 から）**の検証には 2 つの段階があります。v1.10.0 の
 リリース受入では、8 ラベルすべてで 1 つのパッケージ（Ubuntu は `sl`、RHEL 系は `tree`）を削除し、
 ネイティブのパッケージツールで確認しました。より広いケース（依存による拒否、ロック競合、
 スクリプト失敗、中断）を実機で試したのは Ubuntu 24.04、Rocky Linux 9.8、Rocky Linux 10.2 だけです。
@@ -37,7 +37,7 @@ RHEL系ターゲットでは、標準的に構成されたDNFリポジトリが�
 
 ## 統一 Linux x86_64 配布
 
-Sinter v1.9.0では、対応するすべてのx86_64向けバージョンラインに
+Sinter v1.10.0では、対応するすべてのx86_64向けバージョンラインに
 `sinter-v<VERSION>-linux-x86_64.tar.gz` を1つ配布します。
 実行ファイルは共通ですが、実行時の検出により Ubuntu は APT、RHEL系は
 DNF を使います。任意の Linux や他のアーキテクチャへの対応を意味しません。
@@ -46,8 +46,8 @@ v1.0.0 以降の各リリースは、公開前にリリース成果物そのも�
 ターゲットで受入検証し、受入manifest、raw log、チェックサムをリリース
 アセットとして公開します（[受入証跡](https://github.com/hagix9/sinter/blob/main/release/ACCEPTANCE_EVIDENCE.md)参照）。
 
-現行リリースの Sinter v1.9.0 は、Linux x86_64 検証ゲートを通過した後、
-リリース成果物そのもの（`sinter-v1.9.0-linux-x86_64.tar.gz`）を8台の
+現行リリースの Sinter v1.10.0 は、Linux x86_64 検証ゲートを通過した後、
+リリース成果物そのもの（`sinter-v1.10.0-linux-x86_64.tar.gz`）を8台の
 実x86_64 Linuxホストで受入検証しました。検証したpoint releaseは
 Ubuntu 24.04、Ubuntu 26.04、Rocky Linux 9.8、Rocky Linux 10.2、
 RHEL 9.8、RHEL 10.2、AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64）です。
@@ -56,9 +56,10 @@ RHEL 9.8、RHEL 10.2、AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64）です
 SSHコマンド実行、`package` のinstall/removeとネイティブ検証・冪等性、パッケージの進捗出力、`file`、
 `service`、`command` のguard、変更前失敗、機密の秘匿、`audit`（strict と default の audit policy を含む）、残留物なしの確認）
 を実行しました。
-**結果: 312チェックが通過、失敗0（ターゲットあたり39）。**
-（[v1.9.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.9.0)と[manifest](https://github.com/hagix9/sinter/blob/main/release/evidence/v1.9.0/acceptance-manifest.json)参照）
-この結果は、上記のpoint releaseでのこのシナリオについてのものです。ほかのpoint releaseやすべての環境での動作を保証するものではありません。また、このシナリオは [Resource Plugins](/ja/reference/resource-plugins/) を実行しません。
+**結果: 312チェックが通過、失敗0、スキップ0（ターゲットあたり39）。**
+（[v1.10.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.10.0)と[manifest](https://github.com/hagix9/sinter/blob/main/release/evidence/v1.10.0/acceptance-manifest.json)参照）
+この結果は、上記のpoint releaseでのこのシナリオについてのものです。ほかのpoint releaseやすべての環境での動作を保証するものではありません。また、このシナリオは [Resource Plugins](/ja/reference/resource-plugins/) と v1.10.0 で追加された機能（selector、inventory の自動検出、project file、複数の variables file、backup store、partial run）を実行しません。
+Sinter v1.9.0 も以前の同じ8台での受入検証（312チェック、失敗0。[v1.9.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.9.0)と[manifest](https://github.com/hagix9/sinter/blob/main/release/evidence/v1.9.0/acceptance-manifest.json)）を通過しています。
 Sinter v1.8.0 も以前の同じ8台での受入検証（264チェック、失敗0。[v1.8.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.8.0)）を通過しています。
 Sinter v1.7.0 も以前の同じ8台での受入検証（264チェック、失敗0。[v1.7.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.7.0)）を通過しています。
 Sinter v1.5.2 も以前の同じ8台での受入検証（264チェック、失敗0。[v1.5.2 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.5.2)）を通過しています。

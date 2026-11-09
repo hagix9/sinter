@@ -19,7 +19,7 @@ See [Core MCP](/en/reference/mcp/) for the `mcp` subcommand and `--targets-file`
 and [sinter secrets](/en/reference/secrets/) for the `secrets`
 subcommand.
 
-`sinter --version` prints the version (e.g. `sinter 1.9.0`).
+`sinter --version` prints the version (e.g. `sinter 1.10.0`).
 
 ## validate
 
@@ -27,7 +27,7 @@ subcommand.
 sinter validate <RECIPE|BUNDLE> [SELECTOR] [--format text|json] [target options]
 ```
 
-*Next version, not in v1.9.0.* With a [selector](#selecting-hosts-on-the-command-line),
+*From v1.10.0.* With a [selector](#selecting-hosts-on-the-command-line),
 `validate` reads the inventory and evaluates the selection the way `plan` does.
 It still contacts nothing and runs no `ssh`.
 
@@ -167,7 +167,7 @@ except `--vars-file`, `--limit`, `--plugin-root` and the `--inventory` and `--ho
 | `--verbose` | off | Verbose output. |
 | `--format` | `text` | `text` or `json`. |
 
-The short forms `-H`, `-p`, `-u` and `-i` are in the next version, not in v1.9.0.
+The short forms `-H`, `-p`, `-u` and `-i` are available from v1.10.0.
 The long options stay. `--inventory`, `--limit`, `--sudo` and `--format` have no
 short form.
 
@@ -263,7 +263,7 @@ executions: 2 (1 recipe(s), 3 host(s))
 Fail-closed rules (all exit 2, before anything connects):
 
 - a recipe without `targets` used with `--inventory` (a
-  [selector](#selecting-hosts-on-the-command-line), next version, is the one
+  [selector](#selecting-hosts-on-the-command-line) (from v1.10.0) is the one
   exception);
 - a target host or group the inventory does not define;
 - targets that select no host;
@@ -284,7 +284,7 @@ file (available from v1.6.0): see
 
 ### Selecting hosts on the command line
 
-*Next version, not in v1.9.0.*
+*From v1.10.0.*
 
 An optional second argument names inventory hosts and groups:
 
@@ -610,7 +610,7 @@ listen_port = 8081
 
 **Several files**
 
-*Next version, not in v1.9.0.* `--vars-file` may be repeated, and a
+*From v1.10.0.* `--vars-file` may be repeated, and a
 [project file](#project-file) can list `vars_files`. The project's come first, then the command
 line's, in order, and a later file wins. Each layer (`vars`, `groups.<g>`, `hosts.<h>`) is merged by
 variable name, then the precedence below applies, so a host value of an earlier file still beats a
@@ -726,7 +726,7 @@ output is empty.
 
 ## Project file
 
-*Next version, not in v1.9.0.* A project file holds what you would otherwise repeat on every
+*From v1.10.0.* A project file holds what you would otherwise repeat on every
 command line, so that `sinter apply moge.yaml web01` works from your project directory
 wherever the recipe is.
 
@@ -782,7 +782,7 @@ stderr with `--format json`, whose document has a `resolved` object.
 
 ## Partial runs
 
-*Next version, not in v1.9.0.* `--skip-recipe NAME` and `--skip-resource ID` may be repeated, on
+*From v1.10.0.* `--skip-recipe NAME` and `--skip-resource ID` may be repeated, on
 `validate`, `plan`, `apply` and `audit`, with one meaning: what is excluded is not observed, changed
 or reported as passed. `ID` is a resource id, a loop's base id or one instance (`id[2]`), or
 `recipe/id` in a bundle.
@@ -843,12 +843,12 @@ resources:
   mode, ACLs, ownership and timestamps preserved; other extended attributes
   and SELinux labels are best effort. A path that does not exist is recorded
   as `absent`.
-- *Next version, not in v1.9.0.* A path's `directory`, else the recipe's `backup.directory`, else
+- *From v1.10.0.* A path's `directory`, else the recipe's `backup.directory`, else
   the project file's, names another store: see [`backup`](/en/reference/recipe-format/#backup). It
   is a path **on each target**, and `plan` lists each path with its store. Only that directory is created (mode 0700); its parent must exist. It is checked like
   the default store: no symbolic link, no directory another account owns or others can write, not
   directly in `/tmp`, and it may not overlap a declared path. `plan` reports the same refusals.
-- *Next version, not in v1.9.0.* As root, a **regular file in another account's directory**, such
+- *From v1.10.0.* As root, a **regular file in another account's directory**, such
   as `/var/lib/pgsql/.pgpass` (owner `postgres`, mode 0600, directory mode 0700), is read as that
   account and written by root into the private run directory, keeping owner, group, mode, times and
   ACL. Refused: a directory there, a symbolic link, a file owned by anyone else, a file with several
@@ -1454,7 +1454,7 @@ exits as described in [Framing and errors](#framing-and-errors).
 `recipe`, `path`, `resources`, `handlers`, `vars`, `targets`) to its document;
 `resources`, `handlers` and `vars` are then totals.
 
-A [selector](#selecting-hosts-on-the-command-line) (next version, not in v1.9.0)
+A [selector](#selecting-hosts-on-the-command-line) (from v1.10.0)
 always gives this aggregate document, with `selector` (the items) instead of
 `limit`, `inventory_source` (`detected` or `explicit`), `targets_declared` on each
 `resolution` entry and `excluded_by: "selector"`. A `validate` document gains
@@ -1463,7 +1463,7 @@ always gives this aggregate document, with `selector` (the items) instead of
 
 ### Project file and partial runs
 
-*Next version, not in v1.9.0.* Present only when in effect, so other documents are unchanged:
+*From v1.10.0.* Present only when in effect, so other documents are unchanged:
 
 - `resolved`: `config` (`path`, `source`: `explicit` or `detected`), `recipe` (`path`, `via`: `given` or
   `recipe_paths`), `inventory` (`path`, `source`: `explicit` or `project`), `default_target`, `vars_files`,

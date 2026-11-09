@@ -116,7 +116,7 @@ changes anything; a failed backup stops the apply before any resource runs.
 files but must be unique; `/` is rejected. See
 [Backups before apply](/en/reference/cli/#backups-before-apply).
 
-*Next version, not in v1.9.0.* A recipe may say where the copies go:
+*From v1.10.0.* A recipe may say where the copies go:
 
 ```yaml
 backup:
@@ -148,7 +148,7 @@ vars:
 
 - `value` is a literal — variables may not interpolate other variables, so
   forward references and cycles cannot exist.
-- `required: true` (*next version, not in v1.9.0*) means a variables file must give it a value;
+- `required: true` (*from v1.10.0*) means a variables file must give it a value;
   `value` still gives the type. It cannot be combined with `sensitive: true`.
 - `sensitive: true` redacts the value — and everything derived from it — in
   all output and diagnostics.
