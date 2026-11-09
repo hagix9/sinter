@@ -1,0 +1,97 @@
+format = 1
+id = "firewalld"
+version = "0.2.0"
+catalog = { id = "firewalld", version = "0.2.0" }
+
+# A service in a zone, present or absent, runtime and permanent. Removing the
+# ssh service is refused: it could cut the connection Sinter itself uses.
+[[type]]
+name = "firewalld.service"
+fields = { zone = { kind = "ident" }, service = { kind = "ident" }, state = { kind = "enum", values = ["present", "absent"] } }
+precheck = [
+  { op = "state", expect = "running" },
+  { op = "zone_defined", expect = "defined" },
+  { op = "service_defined", expect = "defined" },
+]
+deny = [{ service = "ssh", state = "absent" }]
+
+[[type.facet]]
+name = "runtime"
+observe = "query_service_runtime"
+want = "field:state"
+ensure = { present = "add_service_runtime", absent = "remove_service_runtime" }
+
+[[type.facet]]
+name = "permanent"
+observe = "query_service_permanent"
+want = "field:state"
+ensure = { present = "add_service_permanent", absent = "remove_service_permanent" }
+
+# One port with its protocol (`80/tcp`) in a zone, present or absent.
+# Removing 22/tcp is refused (the SSH port). Ranges are firewalld.port_range.
+[[type]]
+name = "firewalld.port"
+fields = { zone = { kind = "ident" }, port = { kind = "port_single" }, state = { kind = "enum", values = ["present", "absent"] } }
+precheck = [
+  { op = "state", expect = "running" },
+  { op = "zone_defined", expect = "defined" },
+]
+deny = [{ port = "22/tcp", state = "absent" }]
+
+[[type.facet]]
+name = "runtime"
+observe = "query_port_runtime"
+want = "field:state"
+ensure = { present = "add_port_runtime", absent = "remove_port_runtime" }
+
+[[type.facet]]
+name = "permanent"
+observe = "query_port_permanent"
+want = "field:state"
+ensure = { present = "add_port_permanent", absent = "remove_port_permanent" }
+
+# A port range with its protocol (`8000-8099/udp`) in a zone, present only.
+# There is no absent: firewalld answers a query for a range that is only
+# partly allowed with "no", so "absent" could not mean "no port of the range
+# is allowed". Close the ports of a range with firewalld.port, one by one.
+[[type]]
+name = "firewalld.port_range"
+fields = { zone = { kind = "ident" }, port = { kind = "port_spec" }, state = { kind = "enum", values = ["present"] } }
+precheck = [
+  { op = "state", expect = "running" },
+  { op = "zone_defined", expect = "defined" },
+]
+
+[[type.facet]]
+name = "runtime"
+observe = "query_port_runtime"
+want = "field:state"
+ensure = { present = "add_port_runtime" }
+
+[[type.facet]]
+name = "permanent"
+observe = "query_port_permanent"
+want = "field:state"
+ensure = { present = "add_port_permanent" }
+
+# An IP protocol (`gre`, `icmp`, `ipv6-icmp`, ...) allowed in a zone, present
+# or absent.
+[[type]]
+name = "firewalld.protocol"
+fields = { zone = { kind = "ident" }, protocol = { kind = "ident" }, state = { kind = "enum", values = ["present", "absent"] } }
+precheck = [
+  { op = "state", expect = "running" },
+  { op = "zone_defined", expect = "defined" },
+]
+
+[[type.facet]]
+name = "runtime"
+observe = "query_protocol_runtime"
+want = "field:state"
+ensure = { present = "add_protocol_runtime", absent = "remove_protocol_runtime" }
+
+[[type.facet]]
+name = "permanent"
+observe = "query_protocol_permanent"
+want = "field:state"
+ensure = { present = "add_protocol_permanent", absent = "remove_protocol_permanent" }

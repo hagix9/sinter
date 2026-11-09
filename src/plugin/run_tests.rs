@@ -357,13 +357,42 @@ const ATTESTED_PLUGIN_SHA256: &str =
     "47f33f171d239103cbb97450d17b57c857ce22436620ddf809fdd2be94948544";
 
 #[test]
-fn the_registry_lists_exactly_the_attested_firewalld_catalog() {
-    // One entry, and it is the repository file measured on real hosts.
-    assert_eq!(FIRST_PARTY_CATALOGS.len(), 1);
-    let f = FIRST_PARTY_CATALOGS[0];
+fn the_registry_lists_exactly_the_attested_firewalld_catalogs() {
+    // Exactly two entries, each the digest of a repository file measured on
+    // real hosts: firewalld 0.1.0 (2026-11-01) and 0.2.0 (2026-11-09).
+    const CATALOG_020: &str =
+        include_str!("../../plugins/first-party/catalogs/firewalld-0.2.0.catalog.toml");
+    let entries: Vec<(&str, &str, &str)> = FIRST_PARTY_CATALOGS
+        .iter()
+        .map(|f| (f.id, f.version, f.sha256))
+        .collect();
     assert_eq!(
-        (f.id, f.version, f.sha256),
-        ("firewalld", "0.1.0", ATTESTED_CATALOG_SHA256)
+        entries,
+        [
+            ("firewalld", "0.1.0", ATTESTED_CATALOG_SHA256),
+            (
+                "firewalld",
+                "0.2.0",
+                "d32ac3947279ec2581a7049f9fa931d29c904c91ea2484cafaa6759fe09c3641"
+            ),
+        ]
+    );
+    assert_eq!(sha256_hex(CATALOG_020.as_bytes()), entries[1].2);
+    // Every catalog file in the repository is listed, and nothing else.
+    let mut files: Vec<String> = std::fs::read_dir(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/plugins/first-party/catalogs"
+    ))
+    .unwrap()
+    .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+    .collect();
+    files.sort();
+    assert_eq!(
+        files,
+        [
+            "firewalld-0.1.0.catalog.toml",
+            "firewalld-0.2.0.catalog.toml"
+        ]
     );
     assert_eq!(sha256_hex(CATALOG.as_bytes()), ATTESTED_CATALOG_SHA256);
     assert_eq!(sha256_hex(PLUGIN_FW.as_bytes()), ATTESTED_PLUGIN_SHA256);

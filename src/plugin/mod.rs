@@ -10,9 +10,9 @@
 //! the engine runs plugin resource types through the two channels of
 //! `TargetFs` (observe, and mutate with the mutation permit), and audit
 //! observes only. A catalog is usable only when this release's first-party
-//! registry lists its exact bytes. Step 5 lists one catalog, firewalld 0.1.0,
-//! whose exit codes were measured on real hosts; its files are kept in the
-//! repository under `plugins/first-party/`.
+//! registry lists its exact bytes. The registry lists firewalld 0.1.0 and
+//! firewalld 0.2.0, whose exit codes were measured on real hosts; their
+//! files are kept in the repository under `plugins/first-party/`.
 
 pub mod exec;
 pub mod format;
@@ -21,14 +21,17 @@ pub(crate) mod run;
 pub mod verify;
 
 #[cfg(all(test, unix))]
+mod firewalld_020_tests;
+#[cfg(all(test, unix))]
 mod run_tests;
 #[cfg(all(test, unix))]
 mod tests;
 
 pub use format::CatalogRef;
 pub use verify::{
-    operand_ok, ArgToken, Facet, FieldKind, OpClass, ResourceType, VerifiedCatalog, VerifiedOp,
-    VerifiedPlugin, Want, BUILTIN_RESOURCE_TYPES,
+    operand_ok, operand_ok_for, port_single_ok, port_spec_ok, ArgToken, Facet, FieldKind, OpClass,
+    ResourceType, SlotClass, VerifiedCatalog, VerifiedOp, VerifiedPlugin, Want,
+    BUILTIN_RESOURCE_TYPES,
 };
 
 use crate::error::{Result, SinterError};
@@ -43,7 +46,7 @@ use std::path::{Path, PathBuf};
 pub const EXECUTION_AVAILABLE: bool = true;
 
 /// Whether any plugin can run in this build: only when the release lists at
-/// least one reviewed first-party catalog (firewalld 0.1.0 since step 5).
+/// least one reviewed first-party catalog (firewalld 0.1.0 and 0.2.0).
 /// It says what the build can do, not that a release is approved.
 pub fn production_enabled() -> bool {
     !FIRST_PARTY_CATALOGS.is_empty()
@@ -66,13 +69,26 @@ pub struct FirstPartyCatalog {
 ///
 /// firewalld 0.1.0: the seven operations of the firewalld design, with the
 /// exit codes measured directly on Rocky Linux 9.8 (firewalld 1.3.4), Rocky
-/// Linux 10.2 (2.4.3) and Ubuntu 24.04 (2.1.1) on 2026-11-01. Other versions
-/// are not verified.
-pub const FIRST_PARTY_CATALOGS: &[FirstPartyCatalog] = &[FirstPartyCatalog {
-    id: "firewalld",
-    version: "0.1.0",
-    sha256: "27741bcc6b72dfbf69d918282fb454c324e7229b764873334a5c6c0af04707ff",
-}];
+/// Linux 10.2 (2.4.3) and Ubuntu 24.04 (2.1.1) on 2026-11-01.
+///
+/// firewalld 0.2.0: those seven operations unchanged plus 14 (service
+/// removal, ports and protocols, runtime and permanent), measured directly on
+/// Rocky Linux 9.8 (firewalld 1.3.4), Rocky Linux 10.2 (2.4.3) and Ubuntu
+/// 24.04.5 (2.1.1) on 2026-11-09, with identical results.
+///
+/// Other OS and firewalld versions are not verified.
+pub const FIRST_PARTY_CATALOGS: &[FirstPartyCatalog] = &[
+    FirstPartyCatalog {
+        id: "firewalld",
+        version: "0.1.0",
+        sha256: "27741bcc6b72dfbf69d918282fb454c324e7229b764873334a5c6c0af04707ff",
+    },
+    FirstPartyCatalog {
+        id: "firewalld",
+        version: "0.2.0",
+        sha256: "d32ac3947279ec2581a7049f9fa931d29c904c91ea2484cafaa6759fe09c3641",
+    },
+];
 
 /// A plugin a recipe enables (`plugins: [{ id, version }]`, DESIGN §38.7).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,10 +276,15 @@ pub(crate) fn check_declaration(
         )));
     };
     t.check_field_names(with.keys().map(String::as_str), ctx)?;
+    let mut literals = BTreeMap::new();
+    let mut all_literal = true;
     for (k, v) in with {
         match v {
-            Value::Str(s) if crate::expressions::has_interpolation(s) => {}
-            Value::Str(s) => t.check_field(k, s, ctx)?,
+            Value::Str(s) if crate::expressions::has_interpolation(s) => all_literal = false,
+            Value::Str(s) => {
+                t.check_field(k, s, ctx)?;
+                literals.insert(k.clone(), s.clone());
+            }
             _ => {
                 return Err(SinterError::schema(format!(
                     "{}: with.{} must be a string",
@@ -271,6 +292,11 @@ pub(crate) fn check_declaration(
                 )))
             }
         }
+    }
+    // A refused combination is caught here when every value is a literal,
+    // and otherwise when the values are evaluated, before anything runs.
+    if all_literal {
+        t.check_deny(&literals, ctx)?;
     }
     Ok(())
 }

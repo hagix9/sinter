@@ -1,0 +1,199 @@
+# Candidate capability catalog firewalld 0.2.0 (NOT registered, NOT released).
+# Operations 1-7 are those of firewalld 0.1.0, unchanged. Operations 8-21 are
+# new: service removal, ports and protocols, runtime and permanent. Their exit
+# codes follow firewall-cmd's documented convention (a query answers 0 yes,
+# 1 no; a change answers 0) and firewalld's error codes, and are NOT measured
+# on real hosts. Codes not listed are errors by the Core rules. Operations
+# require root. This file must be measured on real hosts (F0) before a
+# first-party registry entry can be made (DESIGN §38.4).
+format = 1
+id = "firewalld"
+version = "0.2.0"
+
+[[op]]
+id = "state"
+class = "observe"
+program = "/usr/bin/firewall-cmd"
+argv = ["--state"]
+timeout_secs = 30
+exit = { "0" = "running", "252" = "not_running" }
+
+[[op]]
+id = "zone_defined"
+class = "observe"
+program = "/usr/bin/firewall-cmd"
+argv = ["--permanent", "--info-zone={zone}"]
+timeout_secs = 30
+slots = { zone = { class = "ident", max_len = 17 } }
+exit = { "0" = "defined", "112" = "undefined" }
+
+[[op]]
+id = "service_defined"
+class = "observe"
+program = "/usr/bin/firewall-cmd"
+argv = ["--permanent", "--info-service={service}"]
+timeout_secs = 30
+slots = { service = { class = "ident", max_len = 64 } }
+exit = { "0" = "defined", "101" = "undefined" }
+
+[[op]]
+id = "query_service_runtime"
+class = "observe"
+program = "/usr/bin/firewall-cmd"
+argv = ["--zone={zone}", "--query-service={service}"]
+timeout_secs = 30
+slots = { zone = { class = "ident", max_len = 17 }, service = { class = "ident", max_len = 64 } }
+exit = { "0" = "present", "1" = "absent" }
+
+[[op]]
+id = "query_service_permanent"
+class = "observe"
+program = "/usr/bin/firewall-cmd"
+argv = ["--permanent", "--zone={zone}", "--query-service={service}"]
+timeout_secs = 30
+slots = { zone = { class = "ident", max_len = 17 }, service = { class = "ident", max_len = 64 } }
+exit = { "0" = "present", "1" = "absent" }
+
+[[op]]
+id = "add_service_runtime"
+class = "mutate"
+program = "/usr/bin/firewall-cmd"
+argv = ["--zone={zone}", "--add-service={service}"]
+timeout_secs = 60
+slots = { zone = { class = "ident", max_len = 17 }, service = { class = "ident", max_len = 64 } }
+exit = { "0" = "ok" }
+
+[[op]]
+id = "add_service_permanent"
+class = "mutate"
+program = "/usr/bin/firewall-cmd"
+argv = ["--permanent", "--zone={zone}", "--add-service={service}"]
+timeout_secs = 60
+slots = { zone = { class = "ident", max_len = 17 }, service = { class = "ident", max_len = 64 } }
+exit = { "0" = "ok" }
+
+[[op]]
+id = "remove_service_runtime"
+class = "mutate"
+program = "/usr/bin/firewall-cmd"
+argv = ["--zone={zone}", "--remove-service={service}"]
+timeout_secs = 60
+slots = { zone = { class = "ident", max_len = 17 }, service = { class = "ident", max_len = 64 } }
+exit = { "0" = "ok" }
+
+[[op]]
+id = "remove_service_permanent"
+class = "mutate"
+program = "/usr/bin/firewall-cmd"
+argv = ["--permanent", "--zone={zone}", "--remove-service={service}"]
+timeout_secs = 60
+slots = { zone = { class = "ident", max_len = 17 }, service = { class = "ident", max_len = 64 } }
+exit = { "0" = "ok" }
+
+[[op]]
+id = "query_port_runtime"
+class = "observe"
+program = "/usr/bin/firewall-cmd"
+argv = ["--zone={zone}", "--query-port={port}"]
+timeout_secs = 30
+slots = { zone = { class = "ident", max_len = 17 }, port = { class = "port_spec", max_len = 16 } }
+exit = { "0" = "present", "1" = "absent" }
+
+[[op]]
+id = "query_port_permanent"
+class = "observe"
+program = "/usr/bin/firewall-cmd"
+argv = ["--permanent", "--zone={zone}", "--query-port={port}"]
+timeout_secs = 30
+slots = { zone = { class = "ident", max_len = 17 }, port = { class = "port_spec", max_len = 16 } }
+exit = { "0" = "present", "1" = "absent" }
+
+[[op]]
+id = "add_port_runtime"
+class = "mutate"
+program = "/usr/bin/firewall-cmd"
+argv = ["--zone={zone}", "--add-port={port}"]
+timeout_secs = 60
+slots = { zone = { class = "ident", max_len = 17 }, port = { class = "port_spec", max_len = 16 } }
+exit = { "0" = "ok" }
+
+[[op]]
+id = "add_port_permanent"
+class = "mutate"
+program = "/usr/bin/firewall-cmd"
+argv = ["--permanent", "--zone={zone}", "--add-port={port}"]
+timeout_secs = 60
+slots = { zone = { class = "ident", max_len = 17 }, port = { class = "port_spec", max_len = 16 } }
+exit = { "0" = "ok" }
+
+[[op]]
+id = "remove_port_runtime"
+class = "mutate"
+program = "/usr/bin/firewall-cmd"
+argv = ["--zone={zone}", "--remove-port={port}"]
+timeout_secs = 60
+slots = { zone = { class = "ident", max_len = 17 }, port = { class = "port_spec", max_len = 16 } }
+exit = { "0" = "ok" }
+
+[[op]]
+id = "remove_port_permanent"
+class = "mutate"
+program = "/usr/bin/firewall-cmd"
+argv = ["--permanent", "--zone={zone}", "--remove-port={port}"]
+timeout_secs = 60
+slots = { zone = { class = "ident", max_len = 17 }, port = { class = "port_spec", max_len = 16 } }
+exit = { "0" = "ok" }
+
+[[op]]
+id = "query_protocol_runtime"
+class = "observe"
+program = "/usr/bin/firewall-cmd"
+argv = ["--zone={zone}", "--query-protocol={protocol}"]
+timeout_secs = 30
+slots = { zone = { class = "ident", max_len = 17 }, protocol = { class = "ident", max_len = 32 } }
+exit = { "0" = "present", "1" = "absent" }
+
+[[op]]
+id = "query_protocol_permanent"
+class = "observe"
+program = "/usr/bin/firewall-cmd"
+argv = ["--permanent", "--zone={zone}", "--query-protocol={protocol}"]
+timeout_secs = 30
+slots = { zone = { class = "ident", max_len = 17 }, protocol = { class = "ident", max_len = 32 } }
+exit = { "0" = "present", "1" = "absent" }
+
+[[op]]
+id = "add_protocol_runtime"
+class = "mutate"
+program = "/usr/bin/firewall-cmd"
+argv = ["--zone={zone}", "--add-protocol={protocol}"]
+timeout_secs = 60
+slots = { zone = { class = "ident", max_len = 17 }, protocol = { class = "ident", max_len = 32 } }
+exit = { "0" = "ok" }
+
+[[op]]
+id = "add_protocol_permanent"
+class = "mutate"
+program = "/usr/bin/firewall-cmd"
+argv = ["--permanent", "--zone={zone}", "--add-protocol={protocol}"]
+timeout_secs = 60
+slots = { zone = { class = "ident", max_len = 17 }, protocol = { class = "ident", max_len = 32 } }
+exit = { "0" = "ok" }
+
+[[op]]
+id = "remove_protocol_runtime"
+class = "mutate"
+program = "/usr/bin/firewall-cmd"
+argv = ["--zone={zone}", "--remove-protocol={protocol}"]
+timeout_secs = 60
+slots = { zone = { class = "ident", max_len = 17 }, protocol = { class = "ident", max_len = 32 } }
+exit = { "0" = "ok" }
+
+[[op]]
+id = "remove_protocol_permanent"
+class = "mutate"
+program = "/usr/bin/firewall-cmd"
+argv = ["--permanent", "--zone={zone}", "--remove-protocol={protocol}"]
+timeout_secs = 60
+slots = { zone = { class = "ident", max_len = 17 }, protocol = { class = "ident", max_len = 32 } }
+exit = { "0" = "ok" }

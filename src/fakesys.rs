@@ -2184,6 +2184,13 @@ pub struct FakeFirewalld {
     pub services: BTreeSet<String>,
     pub runtime: BTreeSet<(String, String)>,
     pub permanent: BTreeSet<(String, String)>,
+    /// (zone, `PORT[-PORT]/PROTO`) entries, stored exactly as added (no
+    /// range merging).
+    pub ports_runtime: BTreeSet<(String, String)>,
+    pub ports_permanent: BTreeSet<(String, String)>,
+    /// (zone, protocol) entries.
+    pub protocols_runtime: BTreeSet<(String, String)>,
+    pub protocols_permanent: BTreeSet<(String, String)>,
     /// Every argv that changed state, in order.
     pub mutations: Vec<Vec<String>>,
     /// Every argv received, in order.
@@ -2279,8 +2286,118 @@ impl FakeFirewalld {
             }
             return fw_out(0, "success\n", "");
         }
+        if let Some(sv) = val("--remove-service=") {
+            if !self.services.contains(&sv) {
+                return fw_out(101, "", "Error: INVALID_SERVICE\n");
+            }
+            let current = self.set_of(Kind::Service, perm).clone();
+            return self.remove_entry(args, perm, (zone, sv), Kind::Service, current);
+        }
+        // Ports: `--query-port=`, `--add-port=`, `--remove-port=`.
+        for (opt, kind) in [("port", Kind::Port), ("protocol", Kind::Protocol)] {
+            let check = |v: &str| match kind {
+                Kind::Port => fake_port_ok(v),
+                _ => FAKE_PROTOCOLS.contains(&v),
+            };
+            let invalid = match kind {
+                Kind::Port => fw_out(102, "", "Error: INVALID_PORT\n"),
+                _ => fw_out(103, "", "Error: INVALID_PROTOCOL\n"),
+            };
+            if let Some(v) = val(&format!("--query-{}=", opt)) {
+                if !check(&v) {
+                    return invalid;
+                }
+                return if self.set_of(kind, perm).contains(&(zone, v)) {
+                    fw_out(0, "yes\n", "")
+                } else {
+                    fw_out(1, "no\n", "")
+                };
+            }
+            if let Some(v) = val(&format!("--add-{}=", opt)) {
+                if !check(&v) {
+                    return invalid;
+                }
+                if !self.add_is_noop {
+                    self.mutations.push(args.to_vec());
+                    self.set_of_mut(kind, perm).insert((zone, v));
+                }
+                return fw_out(0, "success\n", "");
+            }
+            if let Some(v) = val(&format!("--remove-{}=", opt)) {
+                if !check(&v) {
+                    return invalid;
+                }
+                let set = self.set_of(kind, perm).clone();
+                return self.remove_entry(args, perm, (zone, v), kind, set);
+            }
+        }
         fw_out(2, "", "usage\n")
     }
+
+    fn set_of(&self, kind: Kind, perm: bool) -> &BTreeSet<(String, String)> {
+        match (kind, perm) {
+            (Kind::Service, false) => &self.runtime,
+            (Kind::Service, true) => &self.permanent,
+            (Kind::Port, false) => &self.ports_runtime,
+            (Kind::Port, true) => &self.ports_permanent,
+            (Kind::Protocol, false) => &self.protocols_runtime,
+            (Kind::Protocol, true) => &self.protocols_permanent,
+        }
+    }
+
+    fn set_of_mut(&mut self, kind: Kind, perm: bool) -> &mut BTreeSet<(String, String)> {
+        match (kind, perm) {
+            (Kind::Service, false) => &mut self.runtime,
+            (Kind::Service, true) => &mut self.permanent,
+            (Kind::Port, false) => &mut self.ports_runtime,
+            (Kind::Port, true) => &mut self.ports_permanent,
+            (Kind::Protocol, false) => &mut self.protocols_runtime,
+            (Kind::Protocol, true) => &mut self.protocols_permanent,
+        }
+    }
+
+    /// `--remove-…`: removes exactly the entry named; removing one that is
+    /// not enabled is a warning with exit 0, as firewall-cmd does.
+    fn remove_entry(
+        &mut self,
+        args: &[String],
+        perm: bool,
+        entry: (String, String),
+        kind: Kind,
+        current: BTreeSet<(String, String)>,
+    ) -> Output {
+        if !current.contains(&entry) {
+            return fw_out(0, "", "Warning: NOT_ENABLED\n");
+        }
+        if !self.add_is_noop {
+            self.mutations.push(args.to_vec());
+            self.set_of_mut(kind, perm).remove(&entry);
+        }
+        fw_out(0, "success\n", "")
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Kind {
+    Service,
+    Port,
+    Protocol,
+}
+
+/// Protocol names the scripted firewalld knows (a subset of /etc/protocols).
+const FAKE_PROTOCOLS: &[&str] = &["icmp", "ipv6-icmp", "gre", "esp", "ah", "igmp", "vrrp"];
+
+/// `PORT[-PORT]/PROTO` as firewalld accepts it.
+fn fake_port_ok(v: &str) -> bool {
+    let Some((ports, proto)) = v.split_once('/') else {
+        return false;
+    };
+    let num = |s: &str| s.parse::<u32>().is_ok_and(|n| (1..=65535).contains(&n));
+    ["tcp", "udp", "sctp", "dccp"].contains(&proto)
+        && match ports.split_once('-') {
+            None => num(ports),
+            Some((a, b)) => num(a) && num(b),
+        }
 }
 
 fn fw_out(code: i32, stdout: &str, stderr: &str) -> Output {

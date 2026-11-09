@@ -74,7 +74,7 @@ pub struct OpDef {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SlotDef {
-    /// Operand class. `ident` is the only class in format 1.
+    /// Operand class: `ident`, or `port_spec` (`PORT[-PORT]/PROTOCOL`).
     pub class: String,
     pub max_len: usize,
 }
@@ -108,12 +108,17 @@ pub struct TypeDef {
     #[serde(default)]
     pub precheck: Vec<PrecheckDef>,
     pub facet: Vec<FacetDef>,
+    /// Combinations of field values the type refuses (each entry: field ->
+    /// value; a resource matching every pair of one entry is refused). Data
+    /// can only tighten what a type accepts.
+    #[serde(default)]
+    pub deny: Vec<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldDef {
-    /// `ident` or `enum`.
+    /// `ident`, `port_spec`, `port_single` or `enum`.
     pub kind: String,
     #[serde(default)]
     pub values: Vec<String>,

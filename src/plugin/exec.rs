@@ -6,7 +6,7 @@
 //! class that the Owner's trust file enabled, with every operand checked
 //! again just before dispatch.
 
-use super::verify::{operand_ok, ArgToken, OpClass, VerifiedOp};
+use super::verify::{operand_ok_for, ArgToken, OpClass, VerifiedOp};
 use crate::error::{Result, SinterError};
 use crate::executor::{Completion, Output};
 use std::collections::BTreeMap;
@@ -15,13 +15,16 @@ use std::collections::BTreeMap;
 /// slot, never the value.
 fn render(op: &VerifiedOp, values: &BTreeMap<String, String>) -> Result<Vec<String>> {
     let operand = |slot: &str| -> Result<String> {
-        let max = op.slot_max_len(slot).ok_or_else(|| {
-            SinterError::apply(format!(
-                "plugin operation {}: undeclared slot {}",
-                op.id(),
-                slot
-            ))
-        })?;
+        let (class, max) = op
+            .slot_class(slot)
+            .zip(op.slot_max_len(slot))
+            .ok_or_else(|| {
+                SinterError::apply(format!(
+                    "plugin operation {}: undeclared slot {}",
+                    op.id(),
+                    slot
+                ))
+            })?;
         let v = values.get(slot).ok_or_else(|| {
             SinterError::apply(format!(
                 "plugin operation {}: no value for slot {}",
@@ -29,7 +32,7 @@ fn render(op: &VerifiedOp, values: &BTreeMap<String, String>) -> Result<Vec<Stri
                 slot
             ))
         })?;
-        if !operand_ok(v, max) {
+        if !operand_ok_for(class, v, max) {
             return Err(SinterError::apply(format!(
                 "plugin operation {}: the value for slot {} is not a valid operand (not shown)",
                 op.id(),

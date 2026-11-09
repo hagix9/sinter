@@ -28,7 +28,12 @@ const MAX_FIELDS: usize = 8;
 const MAX_ENUM_VALUES: usize = 16;
 const MAX_PRECHECKS: usize = 8;
 const MAX_FACETS: usize = 8;
+const MAX_DENY: usize = 8;
 const MAX_OPERAND: usize = 64;
+/// The longest `port_spec` operand: `65534-65535/sctp`.
+const MAX_PORT_SPEC: usize = 16;
+/// Transport protocols a `port_spec` operand may name.
+const PORT_PROTOCOLS: &[&str] = &["tcp", "udp", "sctp", "dccp"];
 
 /// Directories a catalog program may live in (the basename follows directly).
 const PROGRAM_DIRS: &[&str] = &["/usr/bin/", "/usr/sbin/"];
@@ -188,9 +193,9 @@ fn sha_ok(s: &str) -> bool {
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 
-/// The one operand class of format 1 (`ident`): 1..=max bytes, first an ASCII
-/// letter or digit, then letters, digits, `_`, `.` or `-`. It can therefore
-/// never be an option, a list, a path, an assignment or shell syntax.
+/// The operand class `ident`: 1..=max bytes, first an ASCII letter or digit,
+/// then letters, digits, `_`, `.` or `-`. It can therefore never be an
+/// option, a list, a path, an assignment or shell syntax.
 pub fn operand_ok(v: &str, max: usize) -> bool {
     let b = v.as_bytes();
     !b.is_empty()
@@ -198,6 +203,62 @@ pub fn operand_ok(v: &str, max: usize) -> bool {
         && b[0].is_ascii_alphanumeric()
         && b.iter()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-'))
+}
+
+/// The operand classes a catalog slot may declare (DESIGN §38.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotClass {
+    /// [`operand_ok`].
+    Ident,
+    /// [`port_spec_ok`].
+    PortSpec,
+}
+
+/// One decimal port 1..=65535 in canonical form (no sign, no leading zero).
+fn port_number(s: &str) -> Option<u32> {
+    if s.is_empty() || s.len() > 5 || !s.bytes().all(|c| c.is_ascii_digit()) || s.starts_with('0') {
+        return None;
+    }
+    let n: u32 = s.parse().ok()?;
+    (1..=65535).contains(&n).then_some(n)
+}
+
+/// The operand class `port_spec`: `PORT/PROTOCOL` or `LOW-HIGH/PROTOCOL`,
+/// ports 1..=65535 in canonical decimal with LOW < HIGH, and PROTOCOL one of
+/// tcp, udp, sctp, dccp. Like `ident` it can never be an option (it starts
+/// with a digit), a list, a path (one `/`, between a port and a protocol
+/// word), an assignment or shell syntax.
+pub fn port_spec_ok(v: &str, max: usize) -> bool {
+    if v.is_empty() || v.len() > max.min(MAX_PORT_SPEC) {
+        return false;
+    }
+    let Some((ports, proto)) = v.split_once('/') else {
+        return false;
+    };
+    if !PORT_PROTOCOLS.contains(&proto) {
+        return false;
+    }
+    match ports.split_once('-') {
+        None => port_number(ports).is_some(),
+        Some((lo, hi)) => match (port_number(lo), port_number(hi)) {
+            (Some(l), Some(h)) => l < h,
+            _ => false,
+        },
+    }
+}
+
+/// A `port_spec` operand that names one port, not a range (`80/tcp`). Used
+/// by the field kind `port_single`, which fills `port_spec` slots.
+pub fn port_single_ok(v: &str, max: usize) -> bool {
+    port_spec_ok(v, max) && v.split_once('/').is_some_and(|(p, _)| !p.contains('-'))
+}
+
+/// Whether `v` is a valid operand of `class` for a slot of `max` bytes.
+pub fn operand_ok_for(class: SlotClass, v: &str, max: usize) -> bool {
+    match class {
+        SlotClass::Ident => operand_ok(v, max),
+        SlotClass::PortSpec => port_spec_ok(v, max),
+    }
 }
 
 fn program_ok(p: &str) -> bool {
@@ -297,7 +358,7 @@ pub struct VerifiedOp {
     class: OpClass,
     program: String,
     argv: Vec<ArgToken>,
-    slots: BTreeMap<String, usize>,
+    slots: BTreeMap<String, (SlotClass, usize)>,
     timeout_secs: u64,
     exit: BTreeMap<i32, String>,
     stdout_map: BTreeMap<String, String>,
@@ -319,10 +380,13 @@ impl VerifiedOp {
         &self.argv
     }
     pub fn slot_max_len(&self, slot: &str) -> Option<usize> {
-        self.slots.get(slot).copied()
+        self.slots.get(slot).map(|(_, m)| *m)
+    }
+    pub fn slot_class(&self, slot: &str) -> Option<SlotClass> {
+        self.slots.get(slot).map(|(c, _)| *c)
     }
     pub fn slots(&self) -> impl Iterator<Item = (&str, usize)> {
-        self.slots.iter().map(|(k, v)| (k.as_str(), *v))
+        self.slots.iter().map(|(k, (_, m))| (k.as_str(), *m))
     }
     pub fn timeout_secs(&self) -> u64 {
         self.timeout_secs
@@ -375,6 +439,10 @@ impl VerifiedCatalog {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldKind {
     Ident,
+    /// Fills `port_spec` slots only.
+    PortSpec,
+    /// A single port (no range); fills `port_spec` slots only.
+    PortSingle,
     Enum(Vec<String>),
 }
 
@@ -417,6 +485,9 @@ pub struct ResourceType {
     operand_limit: BTreeMap<String, usize>,
     prechecks: Vec<(String, String)>,
     facets: Vec<Facet>,
+    /// Refused combinations: a resource whose values equal every pair of
+    /// one entry is refused before anything runs.
+    deny: Vec<BTreeMap<String, String>>,
 }
 
 impl ResourceType {
@@ -441,7 +512,29 @@ impl ResourceType {
         for (k, v) in values {
             self.check_field(k, v, &self.name)?;
         }
+        self.check_deny(values, &self.name)
+    }
+
+    /// Refuse a combination the type denies (DESIGN §38.6). Called with
+    /// every evaluated value before anything runs, and at load time when all
+    /// values are literals. The message names the fields, never the values.
+    pub fn check_deny(&self, values: &BTreeMap<String, String>, ctx: &str) -> Result<()> {
+        for rule in &self.deny {
+            if rule.iter().all(|(k, v)| values.get(k) == Some(v)) {
+                let fields: Vec<&str> = rule.keys().map(String::as_str).collect();
+                return Err(refuse(format!(
+                    "{}: this combination of {} is refused by the plugin, because it could cut access to the host (the values are not shown)",
+                    ctx,
+                    fields.join(", ")
+                )));
+            }
+        }
         Ok(())
+    }
+
+    /// The refused combinations, for inspection and tests.
+    pub fn deny_rules(&self) -> &[BTreeMap<String, String>] {
+        &self.deny
     }
 
     /// The given field names must be exactly the type's fields.
@@ -461,15 +554,16 @@ impl ResourceType {
         Ok(())
     }
 
-    /// One field's value: a valid operand for every slot it fills (ident) or
-    /// one of the declared values (enum). The value is never shown.
+    /// One field's value: a valid operand of its class for every slot it
+    /// fills (ident, port_spec) or one of the declared values (enum). The
+    /// value is never shown.
     pub fn check_field(&self, field: &str, value: &str, ctx: &str) -> Result<()> {
+        let limit = *self.operand_limit.get(field).unwrap_or(&MAX_OPERAND);
         let ok = match self.fields.get(field) {
             None => return Err(refuse(format!("{}: unknown field {}", ctx, field))),
-            Some(FieldKind::Ident) => operand_ok(
-                value,
-                *self.operand_limit.get(field).unwrap_or(&MAX_OPERAND),
-            ),
+            Some(FieldKind::Ident) => operand_ok(value, limit),
+            Some(FieldKind::PortSpec) => port_spec_ok(value, limit),
+            Some(FieldKind::PortSingle) => port_single_ok(value, limit),
             Some(FieldKind::Enum(allowed)) => allowed.iter().any(|a| a == value),
         };
         if !ok {
@@ -715,13 +809,17 @@ fn verify_op(d: &OpDef, trusted: &TrustedCatalog) -> Result<VerifiedOp> {
     }
     let mut slots = BTreeMap::new();
     for (k, s) in &d.slots {
-        if s.class != "ident" || s.max_len == 0 || s.max_len > MAX_OPERAND {
-            return Err(refuse(format!(
-                "operation {}: slot {} must be class ident with max_len 1..=64",
-                op, k
-            )));
-        }
-        slots.insert(k.clone(), s.max_len);
+        let class = match (s.class.as_str(), s.max_len) {
+            ("ident", 1..=MAX_OPERAND) => SlotClass::Ident,
+            ("port_spec", 1..=MAX_PORT_SPEC) => SlotClass::PortSpec,
+            _ => {
+                return Err(refuse(format!(
+                    "operation {}: slot {} must be class ident with max_len 1..=64 or class port_spec with max_len 1..=16",
+                    op, k
+                )))
+            }
+        };
+        slots.insert(k.clone(), (class, s.max_len));
     }
     if d.timeout_secs == 0 || d.timeout_secs > MAX_TIMEOUT_SECS {
         return Err(refuse(format!(
@@ -792,8 +890,10 @@ fn verify_op(d: &OpDef, trusted: &TrustedCatalog) -> Result<VerifiedOp> {
                         op
                     )));
                 }
+                let slot_limits: BTreeMap<String, usize> =
+                    slots.iter().map(|(k, (_, m))| (k.clone(), *m)).collect();
                 for (tmpl, state) in &d.stdout_map {
-                    if !template_ok(tmpl, &slots) || !lower_ident(state, 32) {
+                    if !template_ok(tmpl, &slot_limits) || !lower_ident(state, 32) {
                         return Err(refuse(format!(
                             "operation {}: invalid stdout_map entry",
                             op
@@ -1001,6 +1101,8 @@ pub(crate) fn verify_plugin(
             }
             let kind = match (f.kind.as_str(), f.values.is_empty()) {
                 ("ident", true) => FieldKind::Ident,
+                ("port_spec", true) => FieldKind::PortSpec,
+                ("port_single", true) => FieldKind::PortSingle,
                 ("enum", false) => {
                     let set: BTreeSet<&String> = f.values.iter().collect();
                     if f.values.len() > MAX_ENUM_VALUES
@@ -1016,7 +1118,7 @@ pub(crate) fn verify_plugin(
                 }
                 _ => {
                     return Err(refuse(format!(
-                        "{}: field {}: kind is ident (no values) or enum (values)",
+                        "{}: field {}: kind is ident, port_spec or port_single (no values) or enum (values)",
                         ctx, name
                     )))
                 }
@@ -1104,17 +1206,32 @@ pub(crate) fn verify_plugin(
         }
         // Every slot of every referenced operation is filled by the field of
         // the same name; a field's operands must fit the shortest slot.
+        // The field's kind must match the class of every slot it fills: an
+        // ident or enum field fills ident slots, a port_spec or port_single
+        // field fills port_spec slots.
         let mut operand_limit: BTreeMap<String, usize> = BTreeMap::new();
         for op in &referenced {
-            for (slot, max) in op.slots() {
-                if !fields.contains_key(slot) {
+            for (slot, (class, max)) in &op.slots {
+                let Some(kind) = fields.get(slot) else {
                     return Err(refuse(format!(
                         "{}: operation {} slot {} is not filled by a field",
                         ctx, op.id, slot
                     )));
+                };
+                let matches = match class {
+                    SlotClass::Ident => matches!(kind, FieldKind::Ident | FieldKind::Enum(_)),
+                    SlotClass::PortSpec => {
+                        matches!(kind, FieldKind::PortSpec | FieldKind::PortSingle)
+                    }
+                };
+                if !matches {
+                    return Err(refuse(format!(
+                        "{}: field {}: its kind does not match the class of slot {} in operation {}",
+                        ctx, slot, slot, op.id
+                    )));
                 }
-                let e = operand_limit.entry(slot.to_string()).or_insert(max);
-                *e = (*e).min(max);
+                let e = operand_limit.entry(slot.to_string()).or_insert(*max);
+                *e = (*e).min(*max);
             }
         }
         for (name, kind) in &fields {
@@ -1127,13 +1244,31 @@ pub(crate) fn verify_plugin(
                 }
             }
         }
-        let rt = ResourceType {
+        let mut rt = ResourceType {
             name: t.name.clone(),
             fields,
             operand_limit,
             prechecks,
             facets,
+            deny: Vec::new(),
         };
+        // Refused combinations: each names declared fields with values the
+        // type would otherwise accept, so a rule can only tighten.
+        if t.deny.len() > MAX_DENY {
+            return Err(refuse(format!(
+                "{}: more than {} deny entries",
+                ctx, MAX_DENY
+            )));
+        }
+        for rule in &t.deny {
+            if rule.is_empty() {
+                return Err(refuse(format!("{}: a deny entry names no field", ctx)));
+            }
+            for (field, value) in rule {
+                rt.check_field(field, value, &format!("{} deny entry", ctx))?;
+            }
+            rt.deny.push(rule.clone());
+        }
         if types.insert(t.name.clone(), rt).is_some() {
             return Err(refuse(format!("{}: defined twice", ctx)));
         }
