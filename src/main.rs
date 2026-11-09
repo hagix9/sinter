@@ -71,6 +71,58 @@ enum Command {
     Mcp(McpArgs),
     /// Encrypt, decrypt and list secret files (standard age format).
     Secrets(SecretsArgs),
+    /// Show and check the Resource Plugins of this controller (read-only).
+    ///
+    /// `list` shows the first-party plugins this Sinter carries and what the
+    /// plugin root holds; `verify` checks installed plugins against the trust
+    /// file, this Sinter's first-party files and the plugin loader. Neither
+    /// writes a file, reads a recipe or contacts a host; neither trusts or
+    /// enables a plugin.
+    Plugin(PluginArgs),
+}
+
+#[derive(Args, Debug)]
+struct PluginArgs {
+    #[command(subcommand)]
+    command: PluginCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum PluginCommand {
+    /// List the first-party plugins of this Sinter and their state in the
+    /// plugin root. Exit 0, or 2 when the root or its trust file cannot be
+    /// read.
+    List(PluginListArgs),
+    /// Verify installed plugins: the root's protection, the trust file, the
+    /// files' digests against the trust file, the first-party registry and
+    /// this Sinter's embedded files, and loading. Without ID@VERSION every
+    /// plugin the trust file pins is verified. Exit 0 when all pass, else 2.
+    Verify(PluginVerifyArgs),
+}
+
+#[derive(Args, Debug)]
+struct PluginListArgs {
+    /// Resource Plugin root on this controller [default:
+    /// $XDG_CONFIG_HOME/sinter/plugins, else ~/.config/sinter/plugins].
+    #[arg(long, value_name = "DIR")]
+    plugin_root: Option<PathBuf>,
+    /// Print one JSON document on stdout (messages stay on stderr).
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct PluginVerifyArgs {
+    /// Plugins to verify, as ID@VERSION (for example firewalld@0.2.0).
+    #[arg(value_name = "ID@VERSION")]
+    plugins: Vec<String>,
+    /// Resource Plugin root on this controller [default:
+    /// $XDG_CONFIG_HOME/sinter/plugins, else ~/.config/sinter/plugins].
+    #[arg(long, value_name = "DIR")]
+    plugin_root: Option<PathBuf>,
+    /// Print one JSON document on stdout (messages stay on stderr).
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -618,6 +670,7 @@ fn run(cli: Cli) -> Result<u8, SinterError> {
             run_phase(Phase::Audit, &a.target)
         }
         Command::Secrets(a) => secrets_command(a),
+        Command::Plugin(a) => plugin_command(a),
         Command::Mcp(a) => {
             // Load once, fail closed: a missing/unreadable/malformed targets
             // file aborts startup; the registry is immutable while serving.
@@ -629,6 +682,157 @@ fn run(cli: Cli) -> Result<u8, SinterError> {
             Ok(0)
         }
     }
+}
+
+/// `sinter plugin list|verify` (DESIGN §38.15): read-only reports.
+fn plugin_command(a: PluginArgs) -> Result<u8, SinterError> {
+    use sinter::plugin::manage;
+    let (json, text, messages, code) = match a.command {
+        PluginCommand::List(a) => {
+            let source = manage::Source::controller(a.plugin_root.as_deref());
+            let r = manage::list(&source);
+            let text = plugin_list_text(&r);
+            let json = a.json.then(|| serde_json::to_string_pretty(&r));
+            (json, text, r.messages.clone(), r.exit_code())
+        }
+        PluginCommand::Verify(a) => {
+            let mut targets = Vec::new();
+            for t in &a.plugins {
+                targets.push(
+                    manage::parse_target(t)
+                        .map_err(|m| SinterError::schema(format!("plugin verify: {}", m)))?,
+                );
+            }
+            let source = manage::Source::controller(a.plugin_root.as_deref());
+            let r = manage::verify(&source, &targets);
+            let text = plugin_verify_text(&r);
+            let json = a.json.then(|| serde_json::to_string_pretty(&r));
+            (json, text, r.messages.clone(), r.exit_code())
+        }
+    };
+    for m in &messages {
+        eprintln!(
+            "{} {}",
+            style::status("sinter:", style::stderr_color()),
+            sanitize_line(&m.0)
+        );
+    }
+    match json {
+        Some(j) => {
+            let j = j.map_err(|e| SinterError::schema(format!("plugin: JSON: {}", e)))?;
+            println!("{}", j);
+        }
+        None => print!("{}", text),
+    }
+    Ok(code)
+}
+
+fn plugin_count(on: Option<usize>, total: Option<usize>) -> String {
+    match (on, total) {
+        (Some(a), Some(b)) => format!("{}/{}", a, b),
+        (None, Some(b)) => format!("?/{}", b),
+        _ => "-".to_string(),
+    }
+}
+
+fn plugin_root_line(root: Option<&str>, state: &str, trust: &str) -> String {
+    format!(
+        "Plugin root: {} ({}, trust file {})\n",
+        sanitize_line(root.unwrap_or("-")),
+        state,
+        trust
+    )
+}
+
+fn plugin_list_text(r: &sinter::plugin::manage::ListReport) -> String {
+    let mut out = plugin_root_line(r.plugin_root.as_deref(), r.root, r.trust);
+    let rows: Vec<[String; 7]> = r
+        .plugins
+        .iter()
+        .map(|p| {
+            [
+                sanitize_line(&p.id),
+                sanitize_line(&p.version),
+                if p.available { "yes" } else { "no" }.to_string(),
+                match p.installed {
+                    Some(true) => "yes",
+                    Some(false) => "no",
+                    None => "?",
+                }
+                .to_string(),
+                p.status.to_string(),
+                plugin_count(p.observe_attested, p.observe_total),
+                plugin_count(p.mutate_allowed, p.mutate_total),
+            ]
+        })
+        .collect();
+    let head = [
+        "ID",
+        "VERSION",
+        "AVAILABLE",
+        "INSTALLED",
+        "STATUS",
+        "OBSERVE",
+        "MUTATE",
+    ];
+    let mut w: Vec<usize> = head.iter().map(|h| h.len()).collect();
+    for row in &rows {
+        for (i, c) in row.iter().enumerate() {
+            w[i] = w[i].max(c.len());
+        }
+    }
+    let line = |cells: Vec<&str>| -> String {
+        let mut s = String::new();
+        for (i, c) in cells.iter().enumerate() {
+            if i + 1 == cells.len() {
+                s.push_str(c);
+            } else {
+                s.push_str(&format!("{:<width$}  ", c, width = w[i]));
+            }
+        }
+        s.push('\n');
+        s
+    };
+    out.push_str(&line(head.to_vec()));
+    for row in &rows {
+        out.push_str(&line(row.iter().map(String::as_str).collect()));
+    }
+    out
+}
+
+fn plugin_verify_text(r: &sinter::plugin::manage::VerifyReport) -> String {
+    let mut out = plugin_root_line(r.plugin_root.as_deref(), r.root, r.trust);
+    if r.plugins.is_empty() {
+        out.push_str("No plugin to verify.\n");
+    }
+    for p in &r.plugins {
+        out.push_str(&format!(
+            "{}@{}: {}\n",
+            sanitize_line(&p.id),
+            sanitize_line(&p.version),
+            p.status
+        ));
+        for c in &p.checks {
+            out.push_str(&format!("  {:<4} {}\n", c.result, c.name));
+        }
+        out.push_str(&format!(
+            "  observe attested {}, mutate allowed {}\n",
+            plugin_count(p.observe_attested, p.observe_total),
+            plugin_count(p.mutate_allowed, p.mutate_total)
+        ));
+        if !p.required_not_enabled.is_empty() {
+            out.push_str(&format!(
+                "  not enabled in the trust file (the loader refuses the plugin): {}\n",
+                p.required_not_enabled.join(", ")
+            ));
+        }
+    }
+    out.push_str(if r.ok {
+        "Result: OK\n"
+    } else {
+        "Result: FAILED\n"
+    });
+    out
 }
 
 fn secrets_command(a: SecretsArgs) -> Result<u8, SinterError> {

@@ -247,3 +247,191 @@ fn the_release_binary_refuses_the_attested_files_with_one_byte_changed() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// `sinter plugin list` and `sinter plugin verify` (DESIGN §38.15): read-only
+// reports. No host is contacted and no recipe is read.
+// ---------------------------------------------------------------------------
+
+fn json_of(o: &Output) -> serde_json::Value {
+    serde_json::from_slice(&o.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout is not one JSON document ({}): {}",
+            e,
+            String::from_utf8_lossy(&o.stdout)
+        )
+    })
+}
+
+#[test]
+fn plugin_list_without_a_root_shows_the_embedded_plugins_as_json() {
+    let d = tempfile::tempdir().unwrap();
+    let missing = d.path().join("no-such-root");
+    let o = sinter(
+        &[
+            "plugin",
+            "list",
+            "--json",
+            "--plugin-root",
+            missing.to_str().unwrap(),
+        ],
+        d.path(),
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(o.stderr.is_empty(), "{}", text(&o));
+    let j = json_of(&o);
+    assert_eq!(j["root"], "absent");
+    let plugins = j["plugins"].as_array().unwrap();
+    let names: Vec<String> = plugins
+        .iter()
+        .map(|p| {
+            format!(
+                "{}@{}",
+                p["id"].as_str().unwrap(),
+                p["version"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(names, ["firewalld@0.1.0", "firewalld@0.2.0"]);
+    assert!(plugins
+        .iter()
+        .all(|p| p["available"] == true && p["installed"] == false && p["status"] == "available"));
+    assert!(!missing.exists());
+}
+
+#[test]
+fn plugin_list_uses_the_default_root_and_prints_a_table() {
+    let d = tempfile::tempdir().unwrap();
+    let o = sinter(&["plugin", "list"], d.path());
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(out.contains(".config/sinter/plugins"), "{}", out);
+    assert!(out.contains("ID"), "{}", out);
+    assert!(out.contains("STATUS"), "{}", out);
+    assert!(out.contains("firewalld"), "{}", out);
+    assert!(!d.path().join(".config").exists());
+}
+
+#[test]
+fn plugin_verify_with_nothing_installed_is_an_empty_success() {
+    let d = tempfile::tempdir().unwrap();
+    let missing = d.path().join("no-such-root");
+    let o = sinter(
+        &[
+            "plugin",
+            "verify",
+            "--json",
+            "--plugin-root",
+            missing.to_str().unwrap(),
+        ],
+        d.path(),
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let j = json_of(&o);
+    assert_eq!(j["ok"], true);
+    assert_eq!(j["plugins"], serde_json::json!([]));
+    // A named plugin that is not installed fails, and stdout stays JSON.
+    let o = sinter(
+        &[
+            "plugin",
+            "verify",
+            "firewalld@0.2.0",
+            "--json",
+            "--plugin-root",
+            missing.to_str().unwrap(),
+        ],
+        d.path(),
+    );
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+    assert_eq!(json_of(&o)["plugins"][0]["status"], "not-installed");
+}
+
+#[test]
+fn plugin_verify_keeps_errors_on_stderr_and_json_on_stdout() {
+    let d = tempfile::tempdir().unwrap();
+    let root = first_party_root(d.path());
+    std::fs::write(
+        root.join("trust.toml"),
+        "format = 1\n[[plugin]]\nid = \"x\"\n",
+    )
+    .unwrap();
+    let o = sinter(
+        &[
+            "plugin",
+            "verify",
+            "--json",
+            "--plugin-root",
+            root.to_str().unwrap(),
+        ],
+        d.path(),
+    );
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+    let j = json_of(&o);
+    assert_eq!(j["ok"], false);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("plugin:"), "{}", err);
+    assert!(!String::from_utf8_lossy(&o.stdout).contains("sinter:"));
+    if ancestors_trusted(&root) {
+        assert_eq!(j["trust"], "invalid");
+    } else {
+        assert_eq!(j["root"], "refused");
+    }
+}
+
+#[test]
+fn plugin_list_and_verify_accept_the_installed_first_party_files() {
+    let d = tempfile::tempdir().unwrap();
+    let root = first_party_root(d.path());
+    let r = root.to_str().unwrap();
+    let l = sinter(&["plugin", "list", "--json", "--plugin-root", r], d.path());
+    let v = sinter(
+        &["plugin", "verify", "--json", "--plugin-root", r],
+        d.path(),
+    );
+    let vt = sinter(
+        &["plugin", "verify", "firewalld@0.1.0", "--plugin-root", r],
+        d.path(),
+    );
+    if !ancestors_trusted(&root) {
+        assert_eq!(l.status.code(), Some(2), "{}", text(&l));
+        eprintln!(
+            "temporary directory ancestors are not trusted here: {}",
+            text(&l)
+        );
+        return;
+    }
+    assert_eq!(l.status.code(), Some(0), "{}", text(&l));
+    let lj = json_of(&l);
+    assert_eq!(lj["plugins"][0]["status"], "installed");
+    assert_eq!(lj["plugins"][0]["mutate_allowed"], 2);
+    assert_eq!(lj["plugins"][1]["status"], "available");
+    assert_eq!(v.status.code(), Some(0), "{}", text(&v));
+    let vj = json_of(&v);
+    assert_eq!(vj["ok"], true);
+    assert_eq!(vj["plugins"].as_array().unwrap().len(), 1);
+    assert_eq!(vj["plugins"][0]["status"], "ok");
+    assert_eq!(vt.status.code(), Some(0), "{}", text(&vt));
+    let out = String::from_utf8_lossy(&vt.stdout);
+    assert!(out.contains("firewalld@0.1.0: ok"), "{}", out);
+    assert!(out.contains("Result: OK"), "{}", out);
+}
+
+#[test]
+fn plugin_verify_refuses_a_malformed_plugin_name() {
+    let d = tempfile::tempdir().unwrap();
+    let o = sinter(&["plugin", "verify", "firewalld", "--json"], d.path());
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+    assert!(o.stdout.is_empty(), "{}", text(&o));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("ID@VERSION"));
+}
+
+#[test]
+fn plugin_management_is_not_an_mcp_tool() {
+    assert!(
+        sinter::mcp::tool_names()
+            .iter()
+            .all(|n| !n.contains("plugin")),
+        "{:?}",
+        sinter::mcp::tool_names()
+    );
+}
