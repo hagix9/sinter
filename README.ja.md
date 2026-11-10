@@ -85,9 +85,9 @@ embedded scriptingは依然として実装対象に含めません。
 
 ## インストール
 
-Sinter **v1.10.0** は現在のリリースです。対応するすべての Linux x86_64 プラットフォーム
+Sinter **v1.11.0** は、対応するすべての Linux x86_64 プラットフォーム
 ライン（Ubuntu、Rocky Linux、RHEL 9 / 10、AlmaLinux 9 / 10）向けに、
-1つの `sinter-v1.10.0-linux-x86_64.tar.gz` アーティファクトとして公開しています。
+1つの `sinter-v1.11.0-linux-x86_64.tar.gz` アーティファクトとしてリリースを準備しています。
 
 ```sh
 curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
@@ -210,7 +210,7 @@ sinter apply nginx.yaml --inventory hosts.yaml
   パスを確認して先に `plan` を実行し、CI や重要な環境では `--inventory` を指定してください。
 - バンドル（`version: 1` + `recipes: [common.yaml, nginx.yaml]`）は複数の
   レシピを実行し、各レシピはそれぞれ自身の `targets` で解決されます。
-- 次のバージョンから（未リリース）: レシピ、バンドル、インベントリを名前で指定できます。
+- v1.11.0 から: レシピ、バンドル、インベントリを名前で指定できます。
 
   ```sh
   sinter plan nginx.yaml web01           # 単一レシピ: 必ず拡張子付きで書きます
@@ -226,7 +226,7 @@ sinter apply nginx.yaml --inventory hosts.yaml
   探します（最大 6 階層、20,000 エントリーまで）。`security/ssh.yaml` や `common/02_moge` はパスの末尾と照合します。
   2 つ以上見つかったときは両方を表示してエラーにし、どちらかを選ぶことはしません。使うファイルは、実行の前に
   表示します。存在するパスを書いた場合は、これまでどおりそのまま使います。
-- 次のバージョンから（未リリース）: セレクタがあるとき、インベントリは `--inventory`、次にプロジェクトファイルの
+- v1.11.0 から: セレクタがあるとき、インベントリは `--inventory`、次にプロジェクトファイルの
   `inventory`、次にカレントディレクトリかレシピのディレクトリで見つかったファイルです。対象の名前は
   `hosts.yaml`、`hosts.yml`、`hosts.toml`、`inventory.yaml`、`inventory.yml`、`inventory.toml` の 6 つで、
   見つかるのは 1 つでなければなりません。`inventory.yaml` を使うために `sinter.yaml` は必要ありません。

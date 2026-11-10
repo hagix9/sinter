@@ -84,8 +84,8 @@ inventory (hosts, flat groups, explicit per-recipe `targets`) — see
 
 ## Install
 
-Sinter **v1.10.0** is the current release, published as one
-`sinter-v1.10.0-linux-x86_64.tar.gz` artifact covering every supported Linux
+Sinter **v1.11.0** is prepared for release as one
+`sinter-v1.11.0-linux-x86_64.tar.gz` artifact covering every supported Linux
 x86_64 platform line: Ubuntu, Rocky Linux, RHEL 9 / 10, and AlmaLinux 9 / 10.
 
 ```sh
@@ -213,7 +213,7 @@ sinter apply nginx.yaml --inventory hosts.yaml
   name `--inventory` in CI and on important systems.
 - A bundle (`version: 1` + `recipes: [common.yaml, nginx.yaml]`) runs several
   recipes; each is resolved against its own `targets`.
-- Next version (not released): names for recipes, bundles and inventories.
+- Since v1.11.0: names for recipes, bundles and inventories.
 
   ```sh
   sinter plan nginx.yaml web01           # a single recipe: always with its extension
@@ -230,7 +230,7 @@ sinter apply nginx.yaml --inventory hosts.yaml
   20,000 entries), and `security/ssh.yaml` or `common/02_moge` matches the end of a
   path. Two matches are an error listing both, never a choice, and the file used is
   shown before anything runs. A path that exists is used as given, as before.
-- Next version (not released): with a selector, the inventory is `--inventory`, else
+- Since v1.11.0: with a selector, the inventory is `--inventory`, else
   the project file's `inventory`, else the one file found in the current or the
   recipe's directory among `hosts.yaml`, `hosts.yml`, `hosts.toml`,
   `inventory.yaml`, `inventory.yml` and `inventory.toml`. No `sinter.yaml` is
