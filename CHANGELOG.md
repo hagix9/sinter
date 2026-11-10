@@ -2,6 +2,34 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Bundles by directory name.** `sinter plan 02_moge web01` runs the bundle in the
+  directory `02_moge`, which holds exactly one `bundle.yaml`, `bundle.yml` or
+  `bundle.toml` with top-level `recipes`. In the current directory this works without
+  a project file. `02_moge.yaml` is never an alias for the directory; the bundle file
+  can still be given as a path.
+- **Recipe search below `recipe_paths`.** When the exact name of v1.10.0 finds nothing,
+  the project's `recipe_paths` are searched below (at most 6 levels and 20,000 entries,
+  no symbolic link followed): `ssh.yaml` finds `security/ssh.yaml`, and `security/ssh.yaml`
+  or `common/02_moge` match the end of a path. A single recipe is still named with its
+  extension and none is added. Two matches are exit 2 listing all; a deeper tree, too many
+  entries or an unreadable directory stops the search. What is found, and every member of
+  a bundle found by name, must be owned by you or root and not writable by group or others.
+  The resolved file is shown (`recipe: ...`, JSON `resolved.recipe.match` and `query`).
+- **`inventory.yaml`, `inventory.yml` and `inventory.toml`** are detected for a selector,
+  besides `hosts.yaml`, `hosts.yml` and `hosts.toml`.
+
+### Changed
+
+- A `hosts.*` and an `inventory.*` file in the places detection looks at are now exit 2
+  as ambiguous (until now only the `hosts.*` names were looked for). Name the inventory
+  with `--inventory` or in `sinter.yaml`.
+- With `recipe_paths`, an argument `dir/name` that does not exist is searched for instead
+  of failing to load; a path that exists is used as given, as before.
+
 ## [1.10.0] - 2026-11-08
 
 ### Added

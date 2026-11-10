@@ -213,6 +213,30 @@ sinter apply nginx.yaml --inventory hosts.yaml
   name `--inventory` in CI and on important systems.
 - A bundle (`version: 1` + `recipes: [common.yaml, nginx.yaml]`) runs several
   recipes; each is resolved against its own `targets`.
+- Next version (not released): names for recipes, bundles and inventories.
+
+  ```sh
+  sinter plan nginx.yaml web01           # a single recipe: always with its extension
+  sinter plan security/ssh.yaml web01    # more of its path, when one name is not enough
+  sinter plan 02_moge web01              # a bundle: the name of its directory
+  ```
+
+  A single recipe is named with its extension (`.yaml`, `.yml` or `.toml`);
+  `nginx` never means `nginx.yaml`. A bundle may be named by its directory, which
+  holds one `bundle.yaml`, `bundle.yml` or `bundle.toml`; `02_moge.yaml` is not
+  another name for it (the bundle file can still be given as a path). Without a
+  project file a bundle directory is looked for in the current directory only; with
+  `recipe_paths` those directories are also searched below (at most 6 levels and
+  20,000 entries), and `security/ssh.yaml` or `common/02_moge` matches the end of a
+  path. Two matches are an error listing both, never a choice, and the file used is
+  shown before anything runs. A path that exists is used as given, as before.
+- Next version (not released): with a selector, the inventory is `--inventory`, else
+  the project file's `inventory`, else the one file found in the current or the
+  recipe's directory among `hosts.yaml`, `hosts.yml`, `hosts.toml`,
+  `inventory.yaml`, `inventory.yml` and `inventory.toml`. No `sinter.yaml` is
+  needed for an `inventory.yaml`. Two of them in those places (a `hosts.yaml` next
+  to an `inventory.yaml` too, or an Ansible `inventory.yml`) are an error: name the
+  one to use with `--inventory` or in `sinter.yaml`.
 - `apply` stops at the first execution that exits non-zero (for any reason)
   and reports the rest `not_run`; `plan`/`audit` visit every selected host;
   a partial failure never exits 0.

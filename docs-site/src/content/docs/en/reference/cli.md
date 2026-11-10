@@ -319,8 +319,12 @@ without `@` or a host written with it, an empty selection, and a selector with
 recipe without `targets`.
 
 **Finding the inventory.** `--inventory <PATH>` comes first and never falls back
-to anything. Otherwise Sinter looks for `hosts.yaml`, `hosts.yml` and `hosts.toml`
-in the current directory and the recipe's directory. Parent directories and the
+to anything, then the project file's `inventory`. Otherwise Sinter looks for
+`hosts.yaml`, `hosts.yml`, `hosts.toml` and, in the next version (not released),
+`inventory.yaml`, `inventory.yml` and `inventory.toml` in the current directory and
+the recipe's directory. Exactly one may be found: two, such as a `hosts.yaml` next
+to an `inventory.yaml`, are exit 2 listing both, and `--inventory` or the project
+file's `inventory` settles it. Parent directories and the
 home directory are not searched. Without a selector nothing is detected, so
 `sinter apply nginx.yaml` stays a local run even next to a `hosts.yaml`.
 
@@ -762,12 +766,21 @@ environment variables are not expanded.
   `inventory`, `vars_files`), however the project file was found. The inventory it names may not
   set `known_hosts` or a relative `identity_files`, as a detected one may not: name those with
   `--known-hosts` or `--inventory`. A bad project file is exit 2, it never means "no project".
-- **Which recipe.** Anything with a `/` is a path, used as given. A bare name is looked for in
-  `recipe_paths` and the current directory. Two different files are exit 2, and `./name` or a full
-  path settles it; none is exit 2. No other recipe is tried and no extension is added. A bundle's
-  `recipes` stay relative to the bundle.
+- **Which recipe.** A single recipe is named with its extension (`nginx.yaml`), and no extension is
+  ever added to it. A path that exists is used as given. A bare name is looked for in
+  `recipe_paths` and the current directory; two different files are exit 2, and `./name` or a full
+  path settles it. In the next version (not released), when that finds nothing: a bundle can be
+  named by its directory (`sinter plan 02_moge web01`, holding one `bundle.yaml`, `bundle.yml` or
+  `bundle.toml`; `02_moge.yaml` is never an alias for it), in the current directory also without a
+  project file; and `recipe_paths` is searched below, at most 6 levels and 20,000 entries, where
+  `security/ssh.yaml` or `common/02_moge` matches the end of a path. Every match is a candidate: two
+  are exit 2 listing all, none is exit 2, and a tree beyond the limits or a directory that cannot be
+  read stops the search. No other recipe is tried. The file used is shown first (`recipe: ...`), and
+  JSON adds `match` and `query` to `resolved.recipe`. A bundle's `recipes` stay relative to the
+  bundle.
 - **Which inventory.** `--inventory`, else the project's `inventory`, else, for a selector, the
-  detected one; a recipe found through `recipe_paths` adds no place to look.
+  detected one; a recipe found by name (through `recipe_paths`, or a bundle directory) adds no place
+  to look.
 - **Which hosts**, strongest first: `--host`; a selector; `--inventory` or the project's `inventory`
   with the recipes' `targets` (and `--limit`); `default_target`; the local target, only when the
   project names no inventory and no default target. `--host` turns the project's hosts off for that

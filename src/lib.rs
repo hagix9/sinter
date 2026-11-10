@@ -32,6 +32,7 @@ pub mod progress_plain;
 pub mod progress_session;
 pub mod progress_tty;
 pub mod project;
+pub mod recipe_search;
 pub mod resources;
 pub mod result;
 pub mod secret_source;

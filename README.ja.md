@@ -210,6 +210,28 @@ sinter apply nginx.yaml --inventory hosts.yaml
   パスを確認して先に `plan` を実行し、CI や重要な環境では `--inventory` を指定してください。
 - バンドル（`version: 1` + `recipes: [common.yaml, nginx.yaml]`）は複数の
   レシピを実行し、各レシピはそれぞれ自身の `targets` で解決されます。
+- 次のバージョンから（未リリース）: レシピ、バンドル、インベントリを名前で指定できます。
+
+  ```sh
+  sinter plan nginx.yaml web01           # 単一レシピ: 必ず拡張子付きで書きます
+  sinter plan security/ssh.yaml web01    # 名前だけで決まらないときは、パスの一部も書きます
+  sinter plan 02_moge web01              # バンドル: ディレクトリの名前で書きます
+  ```
+
+  単一レシピは拡張子（`.yaml`、`.yml`、`.toml`）付きで指定します。`nginx` が
+  `nginx.yaml` を指すことはありません。バンドルはディレクトリの名前で指定できます。そのディレクトリには
+  `bundle.yaml`、`bundle.yml`、`bundle.toml` のどれか 1 つを置きます。`02_moge.yaml` はその別名には
+  なりません（バンドルファイルをパスで指定することはできます）。プロジェクトファイルがなければ、
+  カレントディレクトリにあるバンドルディレクトリだけを探します。`recipe_paths` があれば、そのディレクトリの下も
+  探します（最大 6 階層、20,000 エントリーまで）。`security/ssh.yaml` や `common/02_moge` はパスの末尾と照合します。
+  2 つ以上見つかったときは両方を表示してエラーにし、どちらかを選ぶことはしません。使うファイルは、実行の前に
+  表示します。存在するパスを書いた場合は、これまでどおりそのまま使います。
+- 次のバージョンから（未リリース）: セレクタがあるとき、インベントリは `--inventory`、次にプロジェクトファイルの
+  `inventory`、次にカレントディレクトリかレシピのディレクトリで見つかったファイルです。対象の名前は
+  `hosts.yaml`、`hosts.yml`、`hosts.toml`、`inventory.yaml`、`inventory.yml`、`inventory.toml` の 6 つで、
+  見つかるのは 1 つでなければなりません。`inventory.yaml` を使うために `sinter.yaml` は必要ありません。
+  これらの場所に 2 つ以上あるとき（`hosts.yaml` と `inventory.yaml` が並んでいる場合や、Ansible の
+  `inventory.yml` がある場合も）はエラーになります。使うファイルを `--inventory` か `sinter.yaml` で指定してください。
 - `apply` は（理由を問わず）終了コードが 0 でない最初の実行で止まり残りを
   `not_run` とし、`plan`/`audit` は選択された全ホストを
   回ります。一部が失敗して終了コード 0 になることはありません。
