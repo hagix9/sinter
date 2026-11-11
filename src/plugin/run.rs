@@ -207,6 +207,19 @@ impl Engine {
         res: &FrozenResource,
         item: Option<&EvalVal>,
     ) -> Result<ResourceResult> {
+        // C1: the run-level gate refused this already; checked again here,
+        // before anything about this resource is observed or changed.
+        if let Some(set) = self.model.plugins.clone() {
+            let missing = unallowed_mutations(&set, res);
+            if !missing.is_empty() {
+                return Err(SinterError::schema(format!(
+                    "{}: resource type {} could need mutate operations the trust file does not allow: {}",
+                    res.id,
+                    res.type_,
+                    missing.join(", ")
+                )));
+            }
+        }
         let mut obs = self.plugin_observe_resource(res, item)?;
         let sensitive = obs.sensitive;
         let pending: Vec<FacetState> = obs
@@ -411,6 +424,77 @@ fn result(
         handler_notifications: Vec::new(),
         loop_index: res.loop_index,
     }
+}
+
+/// The mutate operations a plugin resource could need that the trust file
+/// does not allow (C1, DESIGN §38.4), sorted and without repetition. Static:
+/// for each facet, the ensure operation of every state the resource may want.
+/// A wanted state that is a literal enum value names one operation; a value
+/// with `{{ }}`, or a missing one, counts as every value of the field. A type
+/// no enabled plugin provides needs nothing here (it is refused elsewhere).
+pub(crate) fn unallowed_mutations(set: &PluginSet, res: &FrozenResource) -> Vec<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let Ok((_, catalog, rtype)) = resolve(set, res) else {
+        return Vec::new();
+    };
+    for f in rtype.facets() {
+        let wanted: Vec<String> = match f.want() {
+            Want::State(s) => vec![s.clone()],
+            Want::Field(field) => match res.with.get(field) {
+                Some(crate::value::Value::Str(v)) if !crate::expressions::has_interpolation(v) => {
+                    vec![v.clone()]
+                }
+                _ => match rtype.fields().get(field) {
+                    Some(super::verify::FieldKind::Enum(values)) => values.clone(),
+                    _ => Vec::new(),
+                },
+            },
+        };
+        for state in &wanted {
+            // Verification guarantees an ensure operation for every value a
+            // facet can want; one that is somehow missing counts as needed and
+            // not allowed, so the resource is refused rather than run.
+            match f.ensure_op(state) {
+                Some(id) => {
+                    if !catalog.op(id).is_some_and(|o| o.is_enabled()) {
+                        out.insert(id.to_string());
+                    }
+                }
+                None => {
+                    // Names the facet, never the value (DESIGN §38.9).
+                    out.insert(format!("(no operation for a state of facet {})", f.name()));
+                }
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Refuse, before any target is contacted, a model that plan or apply could
+/// not finish because a plugin resource could need a mutate operation the
+/// trust file does not allow (C1, DESIGN §38.4, §38.11). Every resource is
+/// checked, whatever it will observe, so a run never stops part-way with
+/// some changes made for want of a permission. Exit 2. audit does not call
+/// this: it never runs a mutate operation.
+pub fn require_allowed_mutations(model: &crate::model::Model) -> Result<()> {
+    let Some(set) = model.plugins.as_deref() else {
+        return Ok(());
+    };
+    for res in &model.resources {
+        if !is_plugin_type(&res.type_) {
+            continue;
+        }
+        let missing = unallowed_mutations(set, res);
+        if !missing.is_empty() {
+            return Err(SinterError::schema(format!(
+                "{}: resource type {} could need mutate operations the trust file does not allow: {}; plan and apply refuse it before contacting any target (allow them under allowed_mutate, or use audit, which runs observe operations only)",
+                res.id,
+                res.type_,
+                missing.join(", ")
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Whether a frozen type name is a plugin type (`<plugin>.<name>`). Built-in

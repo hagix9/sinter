@@ -452,18 +452,32 @@ fn unregistered_capabilities_are_refused() {
         "{}",
         m
     );
-    // a mutate operation the plugin uses is not allowed
+    // a mutate operation the plugin uses is not allowed: since C1 the plugin
+    // still loads for observation, and that operation stays disabled (plan
+    // and apply refuse a resource that could need it; see run_tests)
     let trust = trust_text(
         &sha256_hex(CATALOG.as_bytes()),
         &sha256_hex(PLUGIN.as_bytes()),
         OBSERVE,
         r#"["add_service_runtime"]"#,
     );
+    let set = load_root(&Root::with_trust(CATALOG, PLUGIN, Some(trust)), CATALOG)
+        .expect("a missing mutate permission no longer refuses the plugin");
+    let catalog = &set.catalogs[&("firewalld".to_string(), "0.1.0".to_string())];
+    assert!(catalog.op("add_service_runtime").unwrap().is_enabled());
+    assert!(!catalog.op("add_service_permanent").unwrap().is_enabled());
+    // an operation named under the other class is still an error
+    let trust = trust_text(
+        &sha256_hex(CATALOG.as_bytes()),
+        &sha256_hex(PLUGIN.as_bytes()),
+        r#"["state", "zone_defined", "query_service_runtime", "query_service_permanent", "add_service_runtime"]"#,
+        "[]",
+    );
     let m = err(load_root(
         &Root::with_trust(CATALOG, PLUGIN, Some(trust)),
         CATALOG,
     ));
-    assert!(m.contains("add_service_permanent is not allowed"), "{}", m);
+    assert!(!m.is_empty());
     // the trust file names an operation the catalog does not define
     let trust = trust_text(
         &sha256_hex(CATALOG.as_bytes()),

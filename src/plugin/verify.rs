@@ -1008,7 +1008,32 @@ pub(crate) fn verify_catalog(
 // plugins
 // ---------------------------------------------------------------------------
 
+/// An operation the catalog defines with this class and the trust file
+/// enables (attested observe or allowed mutate).
 fn usable<'a>(
+    catalog: &'a VerifiedCatalog,
+    id: &str,
+    class: OpClass,
+    ctx: &str,
+) -> Result<&'a VerifiedOp> {
+    let op = defined(catalog, id, class, ctx)?;
+    if !op.enabled {
+        return Err(refuse(format!(
+            "{}: operation {} is not {} in the trust file",
+            ctx,
+            id,
+            if class == OpClass::Observe {
+                "attested"
+            } else {
+                "allowed"
+            }
+        )));
+    }
+    Ok(op)
+}
+
+/// An operation the catalog defines with this class, enabled or not.
+fn defined<'a>(
     catalog: &'a VerifiedCatalog,
     id: &str,
     class: OpClass,
@@ -1034,18 +1059,6 @@ fn usable<'a>(
                 "an observe"
             } else {
                 "a mutate"
-            }
-        )));
-    }
-    if !op.enabled {
-        return Err(refuse(format!(
-            "{}: operation {} is not {} in the trust file",
-            ctx,
-            id,
-            if class == OpClass::Observe {
-                "attested"
-            } else {
-                "allowed"
             }
         )));
     }
@@ -1193,7 +1206,14 @@ pub(crate) fn verify_plugin(
                         fctx
                     )));
                 }
-                let op = usable(catalog, op_id, OpClass::Mutate, &fctx)?;
+                // A mutate operation the trust file does not allow keeps the
+                // type loadable for observation (C1, DESIGN §38.4): it must
+                // still be a mutate operation of the catalog and is verified
+                // like any other, but it stays disabled. plan and apply refuse
+                // a resource that could need it before anything is contacted
+                // (`run::require_allowed_mutations`), and the mutate channel
+                // refuses it again (`MutateCall::new`).
+                let op = defined(catalog, op_id, OpClass::Mutate, &fctx)?;
                 referenced.push(op);
                 ensure.insert(state.clone(), op_id.clone());
             }

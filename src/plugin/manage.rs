@@ -77,8 +77,8 @@ pub struct ListEntry {
     /// when the root or the trust file could not be read.
     pub installed: Option<bool>,
     /// `available`, `installed`, `trust-incomplete` (installed, but the
-    /// trust file leaves out an operation the plugin's types use, so the
-    /// loader refuses the plugin), `missing-file`, `digest-mismatch`,
+    /// trust file leaves out an observe operation the plugin's types use, so
+    /// the loader refuses the plugin), `missing-file`, `digest-mismatch`,
     /// `not-trusted`, `refused`, `unsupported-by-this-sinter` or `unknown`.
     pub status: &'static str,
     pub observe_attested: Option<usize>,
@@ -119,10 +119,14 @@ pub struct VerifyEntry {
     pub observe_total: Option<usize>,
     pub mutate_allowed: Option<usize>,
     pub mutate_total: Option<usize>,
-    /// Operations the plugin's types use that the trust file does not
-    /// attest or allow. The loader refuses the whole plugin while any is
-    /// listed (DESIGN §38.6).
+    /// Observe operations the plugin's types use that the trust file does
+    /// not attest. The loader refuses the whole plugin while any is listed
+    /// (DESIGN §38.6).
     pub required_not_enabled: Vec<String>,
+    /// Mutate operations the plugin's types use that the trust file does not
+    /// allow. The plugin still loads; plan and apply refuse a resource that
+    /// could need one, and audit is unaffected (C1, DESIGN §38.4).
+    pub mutate_not_allowed: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -352,10 +356,13 @@ struct Permissions {
     mutate_allowed: usize,
     mutate_total: usize,
     required_not_enabled: Vec<String>,
+    mutate_not_allowed: Vec<String>,
 }
 
 /// Count the catalog's operations by class, those the trust entry enables,
-/// and the operations the plugin's types use that it does not enable.
+/// and the operations the plugin's types use that it does not enable: observe
+/// operations (the loader refuses the plugin) and mutate operations (the
+/// plugin loads; plan and apply refuse resources that could need them).
 /// Parses only embedded bytes, whose digests were checked.
 fn permissions(e: &EmbeddedPlugin, tc: Option<&TrustedCatalog>) -> Option<Permissions> {
     let catalog: CatalogFile = toml::from_str(std::str::from_utf8(e.catalog).ok()?).ok()?;
@@ -395,7 +402,16 @@ fn permissions(e: &EmbeddedPlugin, tc: Option<&TrustedCatalog>) -> Option<Permis
         observe_total: count("observe"),
         mutate_allowed: on("mutate"),
         mutate_total: count("mutate"),
-        required_not_enabled: used.into_iter().filter(|op| !enabled(op)).collect(),
+        required_not_enabled: used
+            .iter()
+            .filter(|op| class.get(op.as_str()) != Some(&"mutate") && !enabled(op))
+            .cloned()
+            .collect(),
+        mutate_not_allowed: used
+            .iter()
+            .filter(|op| class.get(op.as_str()) == Some(&"mutate") && !enabled(op))
+            .cloned()
+            .collect(),
     })
 }
 
@@ -726,6 +742,7 @@ fn verify_one(
         mutate_allowed: None,
         mutate_total: None,
         required_not_enabled: Vec::new(),
+        mutate_not_allowed: Vec::new(),
     };
     let mut c = Checks(Vec::new());
     let finish = |mut entry: VerifyEntry, mut c: Checks, status: &'static str| {
@@ -766,6 +783,7 @@ fn verify_one(
         entry.mutate_allowed = Some(p.mutate_allowed);
         entry.mutate_total = Some(p.mutate_total);
         entry.required_not_enabled = p.required_not_enabled;
+        entry.mutate_not_allowed = p.mutate_not_allowed;
     }
     let pf = plugin_file(o, id, version, m);
     let cf = catalog_file(o, e.catalog_id, e.catalog_version, m);

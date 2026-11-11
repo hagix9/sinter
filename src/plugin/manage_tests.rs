@@ -448,8 +448,31 @@ fn list_distinguishes_missing_damaged_untrusted_and_unsupported() {
 
 #[test]
 fn list_and_verify_show_an_incomplete_trust_entry_without_widening_it() {
-    // The loader refuses the whole plugin while a mutate operation it uses
-    // is not allowed (DESIGN §38.6). The reports say so; nothing is allowed.
+    // The loader refuses the whole plugin while an observe operation it uses
+    // is not attested (DESIGN §38.6). The reports say so; nothing is allowed.
+    let f = fx();
+    f.files(e("0.2.0"));
+    let skipped = ["query_port_runtime"];
+    f.trust(&trust_of(&[trust_entry(e("0.2.0"), &skipped)]));
+    let before = std::fs::read(f.root.join("trust.toml")).unwrap();
+    let l = f.list();
+    let p = entry(&l, "0.2.0");
+    assert_eq!(p.status, "trust-incomplete");
+    assert_eq!((p.observe_attested, p.observe_total), (Some(8), Some(9)));
+    let v = f.verify(&["firewalld@0.2.0"]);
+    let q = ventry(&v, "0.2.0");
+    assert_eq!(q.status, "load-refused");
+    assert_eq!(check(q, "load"), "fail");
+    assert_eq!(q.required_not_enabled, vec!["query_port_runtime"]);
+    assert!(q.mutate_not_allowed.is_empty());
+    assert_eq!(v.exit_code(), 2);
+    assert_eq!(std::fs::read(f.root.join("trust.toml")).unwrap(), before);
+}
+
+#[test]
+fn list_and_verify_accept_partial_mutate_permission_without_widening_it() {
+    // C1: a mutate operation that is not allowed no longer refuses the
+    // plugin; the reports name it, and nothing is allowed by reading.
     let f = fx();
     f.files(e("0.2.0"));
     let skipped = ["remove_port_runtime", "remove_port_permanent"];
@@ -457,18 +480,40 @@ fn list_and_verify_show_an_incomplete_trust_entry_without_widening_it() {
     let before = std::fs::read(f.root.join("trust.toml")).unwrap();
     let l = f.list();
     let p = entry(&l, "0.2.0");
-    assert_eq!(p.status, "trust-incomplete");
+    assert_eq!(p.status, "installed");
     assert_eq!((p.mutate_allowed, p.mutate_total), (Some(10), Some(12)));
     let v = f.verify(&["firewalld@0.2.0"]);
     let q = ventry(&v, "0.2.0");
-    assert_eq!(q.status, "load-refused");
-    assert_eq!(check(q, "load"), "fail");
+    assert_eq!(q.status, "ok");
+    assert_eq!(check(q, "load"), "pass");
+    assert!(q.required_not_enabled.is_empty());
     assert_eq!(
-        q.required_not_enabled,
+        q.mutate_not_allowed,
         vec!["remove_port_permanent", "remove_port_runtime"]
     );
-    assert_eq!(v.exit_code(), 2);
+    assert_eq!(v.exit_code(), 0);
     assert_eq!(std::fs::read(f.root.join("trust.toml")).unwrap(), before);
+
+    // Observe only: every mutate operation left out.
+    let all_mutate: Vec<String> = {
+        let c: CatalogFile =
+            toml::from_str(std::str::from_utf8(e("0.2.0").catalog).unwrap()).unwrap();
+        c.op.iter()
+            .filter(|o| o.class == "mutate")
+            .map(|o| o.id.clone())
+            .collect()
+    };
+    let skip: Vec<&str> = all_mutate.iter().map(String::as_str).collect();
+    f.trust(&trust_of(&[trust_entry(e("0.2.0"), &skip)]));
+    let l = f.list();
+    let p = entry(&l, "0.2.0");
+    assert_eq!(p.status, "installed");
+    assert_eq!((p.mutate_allowed, p.mutate_total), (Some(0), Some(12)));
+    let v = f.verify(&["firewalld@0.2.0"]);
+    let q = ventry(&v, "0.2.0");
+    assert_eq!((q.status, v.exit_code()), ("ok", 0));
+    assert_eq!(q.mutate_not_allowed.len(), 12);
+    assert!(q.required_not_enabled.is_empty());
 }
 
 #[test]

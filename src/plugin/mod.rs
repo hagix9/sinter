@@ -27,6 +27,8 @@ pub(crate) mod run;
 pub mod verify;
 
 #[cfg(all(test, unix))]
+mod c1_tests;
+#[cfg(all(test, unix))]
 mod firewalld_020_tests;
 #[cfg(all(test, unix))]
 mod manage_tests;
@@ -36,6 +38,7 @@ mod run_tests;
 mod tests;
 
 pub use format::CatalogRef;
+pub use run::require_allowed_mutations;
 pub use verify::{
     operand_ok, operand_ok_for, port_single_ok, port_spec_ok, ArgToken, Facet, FieldKind, OpClass,
     ResourceType, SlotClass, VerifiedCatalog, VerifiedOp, VerifiedPlugin, Want,

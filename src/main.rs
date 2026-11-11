@@ -612,6 +612,46 @@ fn skip_gate(
         .map_err(|_| model_mismatch("the exclusions were checked twice"))
 }
 
+/// C1 (DESIGN §38.4, §38.11): before `ssh -G` or any contact with a host,
+/// `plan` and `apply` refuse the whole run (exit 2) when any model it will
+/// execute has a plugin resource that could need a mutate operation the
+/// trust file does not allow. Every execution is checked here, so a run of
+/// several recipes or hosts never stops part-way with some changes made for
+/// want of a permission. The models are those the run executes: the frozen
+/// per-host models of a variables file, the recipes' own models otherwise,
+/// with the exclusions of `--skip-recipe` / `--skip-resource` applied (called
+/// after `skip_gate`). `audit` runs observe operations only and is not gated.
+fn mutation_gate(
+    phase: Phase,
+    exec: &ExecOpts,
+    source: &Source,
+    frozen: Option<&[FrozenExecution]>,
+) -> Result<(), SinterError> {
+    if phase == Phase::Audit {
+        return Ok(());
+    }
+    for (i, u) in source.units().iter().enumerate() {
+        if u.unfrozen || !exec.unit_runs(i) {
+            continue;
+        }
+        let models: Vec<&Model> = match frozen {
+            Some(all) => all
+                .iter()
+                .filter(|f| f.unit == i)
+                .map(|f| &f.model)
+                .collect(),
+            None => vec![&u.model],
+        };
+        for m in models {
+            match exec.skips() {
+                Some(s) => sinter::plugin::require_allowed_mutations(&s.filter(i, m.clone()))?,
+                None => sinter::plugin::require_allowed_mutations(m)?,
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The controller's plugin context for these options (DESIGN §38.7).
 fn plugin_ctx(exec: &ExecOpts) -> sinter::plugin::PluginContext {
     sinter::plugin::PluginContext::controller(exec.plugin_root.as_deref())
@@ -884,8 +924,14 @@ fn plugin_verify_text(r: &sinter::plugin::manage::VerifyReport) -> String {
         ));
         if !p.required_not_enabled.is_empty() {
             out.push_str(&format!(
-                "  not enabled in the trust file (the loader refuses the plugin): {}\n",
+                "  not attested in the trust file (the loader refuses the plugin): {}\n",
                 p.required_not_enabled.join(", ")
+            ));
+        }
+        if !p.mutate_not_allowed.is_empty() {
+            out.push_str(&format!(
+                "  mutate not allowed (audit works; plan and apply refuse resources that could need them): {}\n",
+                p.mutate_not_allowed.join(", ")
             ));
         }
     }
@@ -1582,6 +1628,7 @@ fn run_phase_with(
             limited,
         } = limit_source(&a.recipe, &a.exec, &limit, format)?;
         skip_gate(phase.name(), a.audit_strict, &a.exec, &source, None, format)?;
+        mutation_gate(phase, &a.exec, &source, None)?;
         let session = progress.begin(source_info(phase, &source));
         let planned = inventory_targets(&inventory, limited, a, &session);
         session.end(scope_outcome(&planned));
@@ -1589,6 +1636,7 @@ fn run_phase_with(
     }
     let source = load_source_with_plugins(&a.recipe, &plugin_ctx(&a.exec))?;
     skip_gate(phase.name(), a.audit_strict, &a.exec, &source, None, format)?;
+    mutation_gate(phase, &a.exec, &source, None)?;
     if let Some(inv) = &a.exec.inventory {
         // Several executions follow, so target resolution is a progress scope
         // of its own; each execution then gets its own.
@@ -2005,6 +2053,7 @@ fn run_phase_vars(
         Some(&frozen),
         ro.format,
     )?;
+    mutation_gate(phase, &a.exec, &source, Some(&frozen))?;
     let Some(inv) = inventory else {
         return run_one_target(phase, &source, Some(frozen), a, ro, progress);
     };

@@ -218,10 +218,15 @@ sha256 = "e5819cfe0e2c017648f628a27d0ed6e4a18ed402f3ff6de072e61a724f0aa99a"
 ```
 
 For firewalld 0.1.0, pin `27741bcc…` (catalog) and `47f33f17…` (plugin) with
-the five observe and two mutate operations of its table. Every operation a
-resource type uses must be listed: a trust file that leaves out the removal
-operations makes the 0.2.0 plugin fail to load as a whole (use 0.1.0 if
-removal must stay impossible).
+the five observe and two mutate operations of its table. Every observe
+operation a resource type uses must be attested, or the plugin fails to load
+as a whole. Mutate operations are separate (not yet in a published release:
+Sinter v1.9.0 to v1.11.0 refuse the whole plugin instead): leave out the ones
+you do not want run, for example the removal operations, or all of them for
+audit only. The plugin still loads, `audit` works, and `plan` and `apply`
+refuse, before contacting any host, every run with a resource that could need
+an operation that is not allowed (a computed `state` counts as every value).
+Allowing some operations never allows the others.
 
 A recipe enables the plugin explicitly:
 
@@ -265,8 +270,11 @@ installed (pinned in the trust file, file present), a status (`available`,
 and mutate operations the trust file enables. `verify` checks the root's
 protection, the trust file, each file against its pin, the first-party
 registry and the embedded file, and loads the plugin with the loader; it
-lists the operations the plugin uses that the trust file leaves out (while
-any is listed the loader refuses the whole plugin). Exit 0 when at least one
+lists the observe operations the plugin uses that the trust file does not
+attest (`required_not_enabled`; while any is listed the loader refuses the
+whole plugin) and the mutate operations it uses that the trust file does not
+allow (`mutate_not_allowed`; the plugin loads, plan and apply refuse the
+resources that could need them). Exit 0 when at least one
 plugin was verified and everything passes, otherwise 2: nothing to verify (no
 plugin root, an absent root, no `trust.toml`, nothing pinned) is exit 2, with
 the reason in `nothing_verified` and on standard error. `list` with nothing

@@ -419,6 +419,12 @@ impl Engine {
     }
 
     pub fn run(mut self) -> Result<RunReport> {
+        // plan and apply: a plugin resource that could need a mutate operation
+        // the trust file does not allow is refused before any backup,
+        // observation or change (C1, DESIGN §38.4). The CLI checks every
+        // execution of the run before contacting a target; this keeps every
+        // other caller of `run` equally safe. audit does not come here.
+        crate::plugin::require_allowed_mutations(&self.model)?;
         let order = execution_order(&self.model)?;
         // Cloned so the stage trackers borrow this handle, not `self`, which
         // the traversal needs mutably. Observation only: nothing below reads

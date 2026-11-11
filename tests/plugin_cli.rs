@@ -439,3 +439,319 @@ fn plugin_management_is_not_an_mcp_tool() {
         sinter::mcp::tool_names()
     );
 }
+
+/// [`first_party_root`] with a trust file that attests every observe
+/// operation of firewalld 0.1.0 and allows only `mutate`.
+fn first_party_root_allowing(d: &Path, mutate: &str) -> std::path::PathBuf {
+    let root = first_party_root(d);
+    let trust = std::fs::read_to_string(root.join("trust.toml")).unwrap();
+    let trust = trust.replace(
+        "allowed_mutate = [\"add_service_runtime\", \"add_service_permanent\"]",
+        &format!("allowed_mutate = {}", mutate),
+    );
+    assert!(trust.contains(&format!("allowed_mutate = {}", mutate)));
+    std::fs::write(root.join("trust.toml"), trust).unwrap();
+    root
+}
+
+const C1_GATE: &str = "plan and apply refuse it before contacting any target";
+
+#[test]
+fn plan_and_apply_refuse_an_observe_only_plugin_before_contacting_a_target() {
+    // C1: the trust file allows no mutate operation. The plugin loads
+    // (validate succeeds), plan and apply are refused with exit 2 before any
+    // connection (the host name cannot resolve, so reaching it would be a
+    // connection error, exit 3), and audit is not refused by the gate.
+    let d = tempfile::tempdir().unwrap();
+    let root = first_party_root_allowing(d.path(), "[]");
+    if !ancestors_trusted(&root) {
+        eprintln!("temporary directory ancestors are not trusted here; skipped");
+        return;
+    }
+    let r = d.path().join("r.yml");
+    std::fs::write(&r, PLUGIN_RECIPE).unwrap();
+    let rs = r.to_str().unwrap();
+    let rootp = root.to_str().unwrap();
+    let o = sinter(&["validate", rs, "--plugin-root", rootp], d.path());
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    for phase in ["plan", "apply"] {
+        let o = sinter(
+            &[
+                phase,
+                rs,
+                "--plugin-root",
+                rootp,
+                "--host",
+                "c1-gate-check.invalid",
+                "--no-ssh-config",
+            ],
+            d.path(),
+        );
+        assert_eq!(o.status.code(), Some(2), "{}: {}", phase, text(&o));
+        assert!(text(&o).contains(C1_GATE), "{}: {}", phase, text(&o));
+        assert!(
+            text(&o).contains("add_service_permanent, add_service_runtime"),
+            "{}",
+            text(&o)
+        );
+    }
+    let o = sinter(
+        &[
+            "audit",
+            rs,
+            "--plugin-root",
+            rootp,
+            "--host",
+            "c1-gate-check.invalid",
+            "--no-ssh-config",
+        ],
+        d.path(),
+    );
+    assert!(!text(&o).contains(C1_GATE), "{}", text(&o));
+    assert_ne!(o.status.code(), Some(2), "{}", text(&o));
+}
+
+#[test]
+fn a_bundle_is_refused_as_a_whole_before_its_first_recipe_runs() {
+    // The first recipe needs no plugin; the second could need a mutate
+    // operation that is not allowed. The whole run is refused before the
+    // first recipe connects (exit 2, not a connection error).
+    let d = tempfile::tempdir().unwrap();
+    let root = first_party_root_allowing(d.path(), "[\"add_service_runtime\"]");
+    if !ancestors_trusted(&root) {
+        eprintln!("temporary directory ancestors are not trusted here; skipped");
+        return;
+    }
+    std::fs::write(d.path().join("plain.yml"), PLAIN_RECIPE).unwrap();
+    std::fs::write(d.path().join("fw.yml"), PLUGIN_RECIPE).unwrap();
+    let b = d.path().join("b.yml");
+    std::fs::write(&b, "version: 1\nrecipes: [plain.yml, fw.yml]\n").unwrap();
+    let o = sinter(
+        &[
+            "apply",
+            b.to_str().unwrap(),
+            "--plugin-root",
+            root.to_str().unwrap(),
+            "--host",
+            "c1-gate-check.invalid",
+            "--no-ssh-config",
+        ],
+        d.path(),
+    );
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+    assert!(text(&o).contains(C1_GATE), "{}", text(&o));
+    assert!(text(&o).contains("add_service_permanent"), "{}", text(&o));
+    assert!(!text(&o).contains("add_service_runtime,"), "{}", text(&o));
+    assert!(!Path::new("/tmp/sinter-plugin-cli-never-written").exists());
+}
+
+/// A loopback listener that only counts connections: a host pointed at it
+/// shows whether anything contacted it.
+struct CountingListener(std::net::TcpListener);
+
+impl CountingListener {
+    fn new() -> Self {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.set_nonblocking(true).unwrap();
+        CountingListener(l)
+    }
+    fn port(&self) -> u16 {
+        self.0.local_addr().unwrap().port()
+    }
+    fn accepted(&self) -> usize {
+        let mut n = 0;
+        while self.0.accept().is_ok() {
+            n += 1;
+        }
+        n
+    }
+}
+
+/// `sinter` with a scripted `ssh` first on PATH that records every call
+/// (`ssh -G` resolution) and resolves nothing.
+fn sinter_recording_ssh(args: &[&str], d: &Path) -> (Output, usize) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = d.join("fakebin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = d.join("ssh.log");
+    let ssh = bin.join("ssh");
+    std::fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf 'hostname 127.0.0.1\\n'\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_sinter"))
+        .args(args)
+        .current_dir(d)
+        .env("HOME", d)
+        .env_remove("XDG_CONFIG_HOME")
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .output()
+        .unwrap();
+    let calls = std::fs::read_to_string(&log)
+        .map(|s| s.lines().count())
+        .unwrap_or(0);
+    (o, calls)
+}
+
+fn two_host_inventory(d: &Path, port: u16) -> String {
+    let kh = d.join("known_hosts");
+    std::fs::write(&kh, "").unwrap();
+    let p = d.join("hosts.yaml");
+    std::fs::write(
+        &p,
+        format!(
+            "hosts:\n  web01:\n    address: 127.0.0.1\n    port: {port}\n    user: u\n    known_hosts: {kh}\n  web02:\n    address: 127.0.0.1\n    port: {port}\n    user: u\n    known_hosts: {kh}\ngroups:\n  web:\n    hosts: [web01, web02]\n",
+            kh = kh.display()
+        ),
+    )
+    .unwrap();
+    p.display().to_string()
+}
+
+#[test]
+fn an_inventory_run_is_refused_before_resolving_or_contacting_any_host() {
+    // Two hosts, observe-only trust: plan and apply stop with exit 2 before
+    // `ssh -G` runs for any host and before anything connects.
+    let d = tempfile::tempdir().unwrap();
+    let root = first_party_root_allowing(d.path(), "[]");
+    if !ancestors_trusted(&root) {
+        eprintln!("temporary directory ancestors are not trusted here; skipped");
+        return;
+    }
+    let listener = CountingListener::new();
+    let inv = two_host_inventory(d.path(), listener.port());
+    let r = d.path().join("r.yml");
+    std::fs::write(
+        &r,
+        "version: 1\ntargets:\n  groups: [web]\nplugins:\n  - { id: firewalld, version: 0.1.0 }\nresources:\n  - id: a\n    type: firewalld.service\n    with: { zone: public, service: http, state: present }\n",
+    )
+    .unwrap();
+    for phase in ["plan", "apply"] {
+        let (o, calls) = sinter_recording_ssh(
+            &[
+                phase,
+                r.to_str().unwrap(),
+                "--inventory",
+                &inv,
+                "--plugin-root",
+                root.to_str().unwrap(),
+            ],
+            d.path(),
+        );
+        assert_eq!(o.status.code(), Some(2), "{}: {}", phase, text(&o));
+        assert!(text(&o).contains(C1_GATE), "{}: {}", phase, text(&o));
+        assert_eq!(calls, 0, "{}: ssh -G ran", phase);
+        assert_eq!(listener.accepted(), 0, "{}: a host was contacted", phase);
+    }
+}
+
+#[test]
+fn a_variables_file_run_checks_every_host_model_before_contacting_any() {
+    // The wanted state comes from a variable, so every value of the field
+    // counts: with only the add operations allowed, the run is refused for
+    // both hosts before anything is resolved or contacted.
+    let d = tempfile::tempdir().unwrap();
+    let root = first_party_root_allowing(d.path(), "[\"add_service_runtime\"]");
+    if !ancestors_trusted(&root) {
+        eprintln!("temporary directory ancestors are not trusted here; skipped");
+        return;
+    }
+    let listener = CountingListener::new();
+    let inv = two_host_inventory(d.path(), listener.port());
+    let r = d.path().join("r.yml");
+    std::fs::write(
+        &r,
+        "version: 1\ntargets:\n  groups: [web]\nvars:\n  svc: { value: http }\nplugins:\n  - { id: firewalld, version: 0.1.0 }\nresources:\n  - id: a\n    type: firewalld.service\n    with: { zone: public, service: \"{{ vars.svc }}\", state: present }\n",
+    )
+    .unwrap();
+    let v = d.path().join("v.yaml");
+    std::fs::write(
+        &v,
+        "version: 1\nhosts:\n  web01: { svc: http }\n  web02: { svc: https }\n",
+    )
+    .unwrap();
+    for phase in ["plan", "apply"] {
+        let (o, calls) = sinter_recording_ssh(
+            &[
+                phase,
+                r.to_str().unwrap(),
+                "--inventory",
+                &inv,
+                "--vars-file",
+                v.to_str().unwrap(),
+                "--plugin-root",
+                root.to_str().unwrap(),
+            ],
+            d.path(),
+        );
+        assert_eq!(o.status.code(), Some(2), "{}: {}", phase, text(&o));
+        assert!(text(&o).contains(C1_GATE), "{}: {}", phase, text(&o));
+        assert!(text(&o).contains("add_service_permanent"), "{}", text(&o));
+        assert_eq!(calls, 0, "{}: ssh -G ran", phase);
+        assert_eq!(listener.accepted(), 0, "{}: a host was contacted", phase);
+    }
+}
+
+#[test]
+fn a_limited_or_selected_run_is_refused_before_resolving_or_contacting_any_host() {
+    // `--limit` and a selector argument take their own static path
+    // (`limit_source`); the gate stops plan and apply there too, before
+    // `ssh -G` and before anything connects.
+    let d = tempfile::tempdir().unwrap();
+    let root = first_party_root_allowing(d.path(), "[]");
+    if !ancestors_trusted(&root) {
+        eprintln!("temporary directory ancestors are not trusted here; skipped");
+        return;
+    }
+    let listener = CountingListener::new();
+    let inv = two_host_inventory(d.path(), listener.port());
+    let r = d.path().join("r.yml");
+    std::fs::write(
+        &r,
+        "version: 1\ntargets:\n  groups: [web]\nplugins:\n  - { id: firewalld, version: 0.1.0 }\nresources:\n  - id: a\n    type: firewalld.service\n    with: { zone: public, service: http, state: present }\n",
+    )
+    .unwrap();
+    let rs = r.to_str().unwrap();
+    let rootp = root.to_str().unwrap();
+    for phase in ["plan", "apply"] {
+        for args in [
+            vec![
+                phase,
+                rs,
+                "--inventory",
+                &inv,
+                "--limit",
+                "web01",
+                "--plugin-root",
+                rootp,
+            ],
+            vec![
+                phase,
+                rs,
+                "web01,web02",
+                "--inventory",
+                &inv,
+                "--plugin-root",
+                rootp,
+            ],
+        ] {
+            let (o, calls) = sinter_recording_ssh(&args, d.path());
+            assert_eq!(o.status.code(), Some(2), "{:?}: {}", args, text(&o));
+            assert!(text(&o).contains(C1_GATE), "{:?}: {}", args, text(&o));
+            assert_eq!(calls, 0, "{:?}: ssh -G ran", args);
+            assert_eq!(listener.accepted(), 0, "{:?}: a host was contacted", args);
+        }
+    }
+}
