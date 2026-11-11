@@ -189,8 +189,10 @@ On each of them:
 
 ## Using it
 
-Copy the files of the version you use into a plugin root on the controller
-and pin them in the root's `trust.toml` (DESIGN §38.5). The root and
+With a Sinter that has `sinter plugin install` (not yet in a published
+release; see "Installing and removing" below), install the version you use.
+Otherwise, copy its files into a plugin root on the controller and pin them in
+the root's `trust.toml` (DESIGN §38.5). The root and
 everything in it must be owned by you or by root and not writable by others,
 and so must every directory above it.
 
@@ -279,8 +281,33 @@ plugin was verified and everything passes, otherwise 2: nothing to verify (no
 plugin root, an absent root, no `trust.toml`, nothing pinned) is exit 2, with
 the reason in `nothing_verified` and on standard error. `list` with nothing
 installed is exit 0. With `--json` stdout is one JSON document and messages
-go to standard error. Neither command installs or trusts anything: copy the
-files and write `trust.toml` as above.
+go to standard error. Neither command installs or trusts anything.
+
+## Installing and removing
+
+Not yet in a published release: `sinter plugin install` and `sinter plugin
+remove` are in the source tree only; Sinter v1.9.0 to v1.11.0 do not have
+them (DESIGN §38.16).
+
+```text
+sinter plugin install firewalld@0.2.0 --dry-run              # show the plan
+sinter plugin install firewalld@0.2.0                        # audit only
+sinter plugin install firewalld@0.2.0 --allow-mutate-for firewalld.service
+sinter plugin remove firewalld@0.2.0
+```
+
+install writes this Sinter's embedded files (never another file, never over
+an existing one) and appends the trust entries to `trust.toml` (existing lines
+are not changed). It shows every observe operation of the catalog and the
+residual risk above; confirming (typing `yes`, or `--yes` without a terminal)
+attests that they are read-only. `--yes` never allows a mutate operation:
+only `--allow-mutate OP` and `--allow-mutate-for TYPE` do, and without them
+the plugin is for audit only. remove rewrites `trust.toml` without the
+plugin's entries (the previous file is kept as `trust.toml.prev`; comments are
+not kept) and removes its files only when they are exactly the first-party
+bytes; a catalog another plugin uses is kept. Neither command enables a
+plugin: a recipe does. Exit 0 done or nothing to do (or `--dry-run`), 2
+refused with nothing changed, 5 a failure after a change began.
 
 Sinter cannot prove that an observe operation is read-only on the host; the
 classification above rests on the measurements listed here (DESIGN §38.13).

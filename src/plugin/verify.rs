@@ -303,7 +303,7 @@ fn without_values(msg: &str) -> String {
     out.lines().next().unwrap_or("").to_string()
 }
 
-fn parse<T: DeserializeOwned>(bytes: &[u8], shown: &str) -> Result<T> {
+pub(crate) fn parse<T: DeserializeOwned>(bytes: &[u8], shown: &str) -> Result<T> {
     let text =
         std::str::from_utf8(bytes).map_err(|_| refuse(format!("{}: not valid UTF-8", shown)))?;
     let fail = |e: toml::de::Error| {

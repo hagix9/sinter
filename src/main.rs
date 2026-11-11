@@ -74,13 +74,15 @@ enum Command {
     Mcp(McpArgs),
     /// Encrypt, decrypt and list secret files (standard age format).
     Secrets(SecretsArgs),
-    /// Show and check the Resource Plugins of this controller (read-only).
+    /// Show, check, install and remove the Resource Plugins of this controller.
     ///
     /// `list` shows the first-party plugins this Sinter carries and what the
     /// plugin root holds; `verify` checks installed plugins against the trust
-    /// file, this Sinter's first-party files and the plugin loader. Neither
-    /// writes a file, reads a recipe or contacts a host; neither trusts or
-    /// enables a plugin.
+    /// file, this Sinter's first-party files and the plugin loader (both only
+    /// read). `install` writes one of this Sinter's first-party plugins and
+    /// its trust entries into the plugin root after the Owner's confirmation;
+    /// `remove` takes them out again. None of them reads a recipe, contacts a
+    /// host or enables a plugin (a recipe does, with `plugins:`).
     Plugin(PluginArgs),
 }
 
@@ -101,6 +103,71 @@ enum PluginCommand {
     /// this Sinter's embedded files, and loading. Without ID@VERSION every
     /// plugin the trust file pins is verified. Exit 0 when all pass, else 2.
     Verify(PluginVerifyArgs),
+    /// Install a first-party plugin of this Sinter into the plugin root.
+    ///
+    /// Writes the embedded plugin and catalog files and appends their entries
+    /// to trust.toml (existing bytes are never changed, an existing file is
+    /// never replaced). The confirmation attests that the catalog's observe
+    /// operations are read-only; mutate operations are allowed only by
+    /// --allow-mutate / --allow-mutate-for (by default none: audit only).
+    /// Exit 0 installed, nothing to do or dry run; 2 refused, nothing
+    /// changed; 5 a failure after a change began.
+    Install(PluginInstallArgs),
+    /// Remove an installed first-party plugin from the plugin root.
+    ///
+    /// Rewrites trust.toml without its entries (the previous content is kept
+    /// in trust.toml.prev; comments are not kept) and removes its files only
+    /// when they are exactly the first-party bytes. A catalog another plugin
+    /// uses is kept. Exit codes as for install.
+    Remove(PluginRemoveArgs),
+}
+
+#[derive(Args, Debug)]
+struct PluginInstallArgs {
+    /// The first-party plugin, as ID@VERSION (see `sinter plugin list`).
+    #[arg(value_name = "ID@VERSION")]
+    plugin: String,
+    /// Resource Plugin root on this controller [default:
+    /// $XDG_CONFIG_HOME/sinter/plugins, else ~/.config/sinter/plugins].
+    #[arg(long, value_name = "DIR")]
+    plugin_root: Option<PathBuf>,
+    /// Allow this mutate operation (repeat, or separate with commas).
+    #[arg(long, value_name = "OP", value_delimiter = ',')]
+    allow_mutate: Vec<String>,
+    /// Allow every operation that changes resources of this type (repeat, or
+    /// separate with commas); the operations are listed before confirmation.
+    #[arg(long, value_name = "TYPE", value_delimiter = ',')]
+    allow_mutate_for: Vec<String>,
+    /// Confirm without a prompt (needed without a terminal). It attests the
+    /// observe operations shown; it never allows a mutate operation.
+    #[arg(long)]
+    yes: bool,
+    /// Show what would be done and change nothing.
+    #[arg(long)]
+    dry_run: bool,
+    /// Print one JSON document on stdout (the plan and messages go to stderr).
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct PluginRemoveArgs {
+    /// The installed first-party plugin, as ID@VERSION.
+    #[arg(value_name = "ID@VERSION")]
+    plugin: String,
+    /// Resource Plugin root on this controller [default:
+    /// $XDG_CONFIG_HOME/sinter/plugins, else ~/.config/sinter/plugins].
+    #[arg(long, value_name = "DIR")]
+    plugin_root: Option<PathBuf>,
+    /// Confirm without a prompt (needed without a terminal).
+    #[arg(long)]
+    yes: bool,
+    /// Show what would be done and change nothing.
+    #[arg(long)]
+    dry_run: bool,
+    /// Print one JSON document on stdout (the plan and messages go to stderr).
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -786,10 +853,13 @@ fn run(cli: Cli) -> Result<u8, SinterError> {
     }
 }
 
-/// `sinter plugin list|verify` (DESIGN §38.15): read-only reports.
+/// `sinter plugin list|verify` (DESIGN §38.15): read-only reports;
+/// `sinter plugin install|remove` (DESIGN §38.16).
 fn plugin_command(a: PluginArgs) -> Result<u8, SinterError> {
     use sinter::plugin::manage;
     let (json, text, messages, code) = match a.command {
+        PluginCommand::Install(a) => return plugin_install(a),
+        PluginCommand::Remove(a) => return plugin_remove(a),
         PluginCommand::List(a) => {
             let source = manage::Source::controller(a.plugin_root.as_deref());
             let r = manage::list(&source);
@@ -827,6 +897,283 @@ fn plugin_command(a: PluginArgs) -> Result<u8, SinterError> {
         None => print!("{}", text),
     }
     Ok(code)
+}
+
+#[cfg(not(unix))]
+fn plugin_install(_a: PluginInstallArgs) -> Result<u8, SinterError> {
+    Err(SinterError::schema(
+        "plugin install: Resource Plugins require a Unix controller",
+    ))
+}
+
+#[cfg(not(unix))]
+fn plugin_remove(_a: PluginRemoveArgs) -> Result<u8, SinterError> {
+    Err(SinterError::schema(
+        "plugin remove: Resource Plugins require a Unix controller",
+    ))
+}
+
+/// Ask the Owner to confirm `what` (DESIGN §38.16): `--yes`, or `yes` typed on
+/// a terminal. Without a terminal and without `--yes` nothing is confirmed.
+#[cfg(unix)]
+fn plugin_confirm(yes: bool, what: &str) -> Result<(), String> {
+    use std::io::{BufRead, IsTerminal, Write};
+    if yes {
+        return Ok(());
+    }
+    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        return Err(
+            "confirmation needed: run this on a terminal, or pass --yes (it confirms what is shown above; it never allows a mutate operation); nothing was changed"
+                .into(),
+        );
+    }
+    eprint!("Type yes to {}: ", what);
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| format!("cannot read the confirmation: {}", e.kind()))?;
+    if line.trim() == "yes" {
+        Ok(())
+    } else {
+        Err("not confirmed; nothing was changed".into())
+    }
+}
+
+/// Show a plan: on stdout, or on stderr when stdout carries JSON.
+#[cfg(unix)]
+fn plugin_show_plan(text: &str, json: bool) {
+    if json {
+        eprint!("{}", text);
+    } else {
+        print!("{}", text);
+    }
+}
+
+#[cfg(unix)]
+fn plugin_install_plan_text(p: &sinter::plugin::install::InstallPlan) -> String {
+    use sinter::plugin::install::FileNow;
+    let mut out = format!(
+        "Plugin install: {}@{} into {}\n",
+        p.target.id, p.target.version, p.plugin_root
+    );
+    if p.nothing_to_do {
+        out.push_str("  already installed with these permissions; nothing to do\n");
+        return out;
+    }
+    for d in &p.dirs_to_create {
+        out.push_str(&format!("  create directory (0700): {}\n", d));
+    }
+    for (name, state) in [
+        (format!("catalogs/{}", p.catalog_file_name), &p.catalog_file),
+        (format!("plugins/{}", p.plugin_file_name), &p.plugin_file),
+    ] {
+        match state {
+            FileNow::Absent => out.push_str(&format!("  write file (0600): {}\n", name)),
+            FileNow::Same => out.push_str(&format!("  keep file (same bytes): {}\n", name)),
+        }
+    }
+    let mut entries = Vec::new();
+    if p.add_catalog_entry {
+        entries.push("[[catalog]]");
+    }
+    if p.add_plugin_entry {
+        entries.push("[[plugin]]");
+    }
+    match (&p.new_trust, p.trust_before_sha.is_some()) {
+        (None, _) => out.push_str("  trust.toml: unchanged\n"),
+        (Some(_), false) => out.push_str(&format!(
+            "  trust.toml: create with {}\n",
+            entries.join(" and ")
+        )),
+        (Some(_), true) => out.push_str(&format!(
+            "  trust.toml: append {} (existing content is not changed)\n",
+            entries.join(" and ")
+        )),
+    }
+    out.push_str(
+        "Observe operations to attest (the read-only checks plan, apply and audit run):\n",
+    );
+    out.push_str(&format!("  {}\n", p.attested_observe.join(", ")));
+    out.push_str("Residual risk (DESIGN §38.13): Sinter enforces which operations run, but it cannot prove that an attested observe operation is read-only on the host; a misclassified operation would change the host during audit. Confirming attests, as the owner of this plugin root, that these observe operations are read-only.\n");
+    if p.allowed_mutate.is_empty() {
+        out.push_str("Mutate operations allowed: none (audit only: plan and apply refuse every resource that could need a mutate operation)\n");
+    } else {
+        out.push_str(&format!(
+            "Mutate operations allowed: {}\n",
+            p.allowed_mutate.join(", ")
+        ));
+        for (t, ops) in &p.expanded {
+            out.push_str(&format!(
+                "  from --allow-mutate-for {}: {}\n",
+                t,
+                ops.join(", ")
+            ));
+        }
+    }
+    if !p.mutate_not_allowed.is_empty() {
+        out.push_str(&format!(
+            "Mutate operations not allowed: {}\n",
+            p.mutate_not_allowed.join(", ")
+        ));
+    }
+    out.push_str("Nothing is enabled: a recipe enables the plugin with `plugins:`.\n");
+    out
+}
+
+#[cfg(unix)]
+fn plugin_remove_plan_text(p: &sinter::plugin::install::RemovePlan) -> String {
+    let mut out = format!(
+        "Plugin remove: {}@{} from {}\n",
+        p.target.id, p.target.version, p.plugin_root
+    );
+    if p.nothing_to_do {
+        out.push_str("  not installed; nothing to do\n");
+        return out;
+    }
+    let mut entries = vec!["[[plugin]]"];
+    if p.remove_catalog_entry {
+        entries.push("[[catalog]]");
+    }
+    out.push_str(&format!(
+        "  trust.toml: rewrite without its {} (previous content kept in trust.toml.prev)\n",
+        entries.join(" and ")
+    ));
+    if p.formatting_lost {
+        out.push_str(
+            "  note: the rewrite does not keep the comments and formatting of trust.toml\n",
+        );
+    }
+    if p.delete_plugin_file {
+        out.push_str(&format!("  remove file: plugins/{}\n", p.plugin_file_name));
+    }
+    if p.delete_catalog_file {
+        out.push_str(&format!(
+            "  remove file: catalogs/{}\n",
+            p.catalog_file_name
+        ));
+    }
+    match p.catalog_kept {
+        Some("used-by-another-plugin") => {
+            out.push_str("  keep the catalog: another plugin in the trust file uses it\n")
+        }
+        Some(_) => {
+            out.push_str("  keep the catalog: whether another plugin uses it cannot be told\n")
+        }
+        None => {}
+    }
+    out.push_str("Recipes that enable this plugin are refused until it is installed again.\n");
+    out
+}
+
+#[cfg(unix)]
+fn plugin_finish(r: sinter::plugin::install::ChangeReport, json: bool) -> Result<u8, SinterError> {
+    for m in &r.messages {
+        eprintln!(
+            "{} {}",
+            style::status("sinter:", style::stderr_color()),
+            sanitize_line(&m.0)
+        );
+    }
+    if json {
+        let j = serde_json::to_string_pretty(&r)
+            .map_err(|e| SinterError::schema(format!("plugin: JSON: {}", e)))?;
+        println!("{}", j);
+    } else {
+        for d in &r.directories_created {
+            println!("created directory: {}", d);
+        }
+        for f in &r.files_written {
+            println!("wrote: {}", f);
+        }
+        for f in &r.files_removed {
+            println!("removed: {}", f);
+        }
+        if r.trust != "unchanged" {
+            println!("trust.toml: {}", r.trust);
+        }
+        match r.verify {
+            Some(v) => println!("Result: {} (verify: {})", r.result, v),
+            None => println!("Result: {}", r.result),
+        }
+    }
+    Ok(r.exit_code())
+}
+
+/// `sinter plugin install` (DESIGN §38.16).
+#[cfg(unix)]
+fn plugin_install(a: PluginInstallArgs) -> Result<u8, SinterError> {
+    use sinter::plugin::install;
+    use sinter::plugin::manage::{self, Message};
+    let target = manage::parse_target(&a.plugin)
+        .map_err(|m| SinterError::schema(format!("plugin install: {}", m)))?;
+    let Some(spec) = install::RootSpec::controller(a.plugin_root.as_deref()) else {
+        return Err(SinterError::schema(
+            "plugin install: no plugin root: pass --plugin-root (HOME is not set)",
+        ));
+    };
+    let req = install::InstallRequest {
+        target: Some(target.clone()),
+        allow_mutate: a.allow_mutate.clone(),
+        allow_mutate_for: a.allow_mutate_for.clone(),
+    };
+    let shown = Some(spec.path.to_string_lossy().escape_debug().to_string());
+    let report = match install::plan_install(&spec, &req) {
+        Err(e) => install::refused_report("install", &target, shown, a.dry_run, e),
+        Ok(plan) => {
+            plugin_show_plan(&plugin_install_plan_text(&plan), a.json);
+            if plan.nothing_to_do || a.dry_run {
+                install::plan_report("install", &plan, a.dry_run)
+            } else {
+                match plugin_confirm(a.yes, "attest the observe operations above and install") {
+                    Ok(()) => install::execute_install(&spec, &req, &plan),
+                    Err(m) => {
+                        let mut r = install::plan_report("install", &plan, false);
+                        r.result = "refused";
+                        r.messages.push(Message(m));
+                        r
+                    }
+                }
+            }
+        }
+    };
+    plugin_finish(report, a.json)
+}
+
+/// `sinter plugin remove` (DESIGN §38.16).
+#[cfg(unix)]
+fn plugin_remove(a: PluginRemoveArgs) -> Result<u8, SinterError> {
+    use sinter::plugin::install;
+    use sinter::plugin::manage::{self, Message};
+    let target = manage::parse_target(&a.plugin)
+        .map_err(|m| SinterError::schema(format!("plugin remove: {}", m)))?;
+    let Some(spec) = install::RootSpec::controller(a.plugin_root.as_deref()) else {
+        return Err(SinterError::schema(
+            "plugin remove: no plugin root: pass --plugin-root (HOME is not set)",
+        ));
+    };
+    let shown = Some(spec.path.to_string_lossy().escape_debug().to_string());
+    let report = match install::plan_remove(&spec, &target) {
+        Err(e) => install::refused_report("remove", &target, shown, a.dry_run, e),
+        Ok(plan) => {
+            plugin_show_plan(&plugin_remove_plan_text(&plan), a.json);
+            if plan.nothing_to_do || a.dry_run {
+                install::remove_report(&plan, a.dry_run)
+            } else {
+                match plugin_confirm(a.yes, "remove this plugin") {
+                    Ok(()) => install::execute_remove(&spec, &plan),
+                    Err(m) => {
+                        let mut r = install::remove_report(&plan, false);
+                        r.result = "refused";
+                        r.messages.push(Message(m));
+                        r
+                    }
+                }
+            }
+        }
+    };
+    plugin_finish(report, a.json)
 }
 
 fn plugin_count(on: Option<usize>, total: Option<usize>) -> String {

@@ -755,3 +755,240 @@ fn a_limited_or_selected_run_is_refused_before_resolving_or_contacting_any_host(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// PM-3: `sinter plugin install` and `sinter plugin remove` (DESIGN §38.16)
+// ---------------------------------------------------------------------------
+
+/// `sinter` with HOME at `home`, stdin closed (no terminal), optionally under
+/// a shell `umask`.
+fn sinter_home(args: &[&str], home: &Path, umask: Option<&str>) -> Output {
+    let mut c = match umask {
+        Some(u) => {
+            let mut c = Command::new("/bin/sh");
+            c.arg("-c")
+                .arg(format!("umask {} && exec \"$0\" \"$@\"", u))
+                .arg(env!("CARGO_BIN_EXE_sinter"));
+            c
+        }
+        None => Command::new(env!("CARGO_BIN_EXE_sinter")),
+    };
+    c.args(args)
+        .env("HOME", home)
+        .env_remove("XDG_CONFIG_HOME")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap()
+}
+
+fn mode_of(p: &Path) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(p).unwrap().mode() & 0o7777
+}
+
+/// A HOME whose ancestors pass the plugin root checks, or `None` (the test
+/// then says why and checks nothing; it is not counted as verified).
+fn trusted_home() -> Option<tempfile::TempDir> {
+    let d = tempfile::tempdir().unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    if !ancestors_trusted(d.path()) {
+        eprintln!("temporary directory ancestors are not trusted here; skipped");
+        return None;
+    }
+    Some(d)
+}
+
+#[test]
+fn install_and_remove_through_the_cli() {
+    let Some(d) = trusted_home() else { return };
+    let home = d.path();
+    let root = home.join(".config/sinter/plugins");
+
+    // dry run: nothing is created
+    let o = sinter_home(
+        &["plugin", "install", "firewalld@0.2.0", "--dry-run"],
+        home,
+        None,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(
+        text(&o).contains("Residual risk (DESIGN §38.13)"),
+        "{}",
+        text(&o)
+    );
+    assert!(
+        text(&o).contains("Mutate operations allowed: none"),
+        "{}",
+        text(&o)
+    );
+    assert!(!home.join(".config").exists());
+
+    // no terminal, no --yes: refused, nothing created
+    let o = sinter_home(&["plugin", "install", "firewalld@0.2.0"], home, None);
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+    assert!(text(&o).contains("confirmation needed"), "{}", text(&o));
+    assert!(!home.join(".config").exists());
+
+    // --yes under umask 000: exact private modes, JSON report
+    let o = sinter_home(
+        &["plugin", "install", "firewalld@0.2.0", "--yes", "--json"],
+        home,
+        Some("000"),
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let j = json_of(&o);
+    assert_eq!(j["result"], "installed");
+    assert_eq!(j["verify"], "ok");
+    assert_eq!(j["allowed_mutate"], serde_json::json!([]));
+    for p in [
+        home.join(".config"),
+        home.join(".config/sinter"),
+        root.clone(),
+        root.join("catalogs"),
+        root.join("plugins"),
+    ] {
+        assert_eq!(mode_of(&p), 0o700, "{}", p.display());
+    }
+    for p in [
+        root.join("trust.toml"),
+        root.join(".lock"),
+        root.join("catalogs/firewalld-0.2.0.catalog.toml"),
+        root.join("plugins/firewalld-0.2.0.plugin.toml"),
+    ] {
+        assert_eq!(mode_of(&p), 0o600, "{}", p.display());
+    }
+
+    // list and verify read it back
+    let o = sinter_home(
+        &["plugin", "verify", "firewalld@0.2.0", "--json"],
+        home,
+        None,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert_eq!(json_of(&o)["plugins"][0]["status"], "ok");
+
+    // --yes never allows a mutate operation; explicit names do
+    let o = sinter_home(
+        &[
+            "plugin",
+            "install",
+            "firewalld@0.1.0",
+            "--yes",
+            "--allow-mutate",
+            "add_service_runtime,add_service_permanent",
+            "--json",
+        ],
+        home,
+        None,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert_eq!(
+        json_of(&o)["allowed_mutate"],
+        serde_json::json!(["add_service_runtime", "add_service_permanent"])
+    );
+
+    // again: nothing to do
+    let o = sinter_home(
+        &["plugin", "install", "firewalld@0.2.0", "--yes"],
+        home,
+        None,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(text(&o).contains("Result: nothing-to-do"), "{}", text(&o));
+
+    // remove without --yes: refused; with --yes: removed, 0.1.0 untouched
+    let o = sinter_home(&["plugin", "remove", "firewalld@0.2.0"], home, None);
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
+    assert!(root.join("plugins/firewalld-0.2.0.plugin.toml").exists());
+    let o = sinter_home(
+        &["plugin", "remove", "firewalld@0.2.0", "--yes", "--json"],
+        home,
+        None,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let j = json_of(&o);
+    assert_eq!(
+        (j["result"].as_str(), j["trust"].as_str()),
+        (Some("removed"), Some("rewritten"))
+    );
+    assert!(!root.join("plugins/firewalld-0.2.0.plugin.toml").exists());
+    assert!(root.join("trust.toml.prev").exists());
+    let o = sinter_home(&["plugin", "verify", "firewalld@0.1.0"], home, None);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+}
+
+#[test]
+fn install_and_remove_refuse_bad_names_and_unknown_plugins_with_exit_2() {
+    let d = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["plugin", "install", "../etc@1.0.0", "--yes"],
+        vec!["plugin", "install", "firewalld", "--yes"],
+        vec!["plugin", "install", "firewalld@9.9.9", "--yes"],
+        vec!["plugin", "remove", "firewalld@9.9.9", "--yes"],
+        vec![
+            "plugin",
+            "install",
+            "firewalld@0.2.0",
+            "--yes",
+            "--allow-mutate",
+            "query_port_runtime",
+        ],
+        vec![
+            "plugin",
+            "install",
+            "firewalld@0.2.0",
+            "--yes",
+            "--allow-mutate-for",
+            "firewalld.zone",
+        ],
+    ] {
+        let o = sinter_home(&args, d.path(), None);
+        assert_eq!(o.status.code(), Some(2), "{:?}: {}", args, text(&o));
+        assert!(!d.path().join(".config").exists(), "{:?}", args);
+    }
+}
+
+#[test]
+fn install_and_remove_are_not_mcp_tools() {
+    for n in sinter::mcp::tool_names() {
+        assert!(
+            !n.contains("install") && !n.contains("remove") && !n.contains("plugin"),
+            "{}",
+            n
+        );
+    }
+}
+
+/// Linux: a default ACL on the parent that would give new files group and
+/// other write access. install sets the modes on the new descriptors, so the
+/// ACL mask follows them and the loader accepts the result (DESIGN §38.5).
+#[cfg(target_os = "linux")]
+#[test]
+fn install_under_a_default_acl_still_gives_private_modes() {
+    let Some(d) = trusted_home() else { return };
+    let home = d.path();
+    let ok = Command::new("setfacl")
+        .args(["-d", "-m", "g::rwx,o::rwx,m::rwx"])
+        .arg(home)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("setfacl is not available here; skipped");
+        return;
+    }
+    let o = sinter_home(
+        &["plugin", "install", "firewalld@0.2.0", "--yes"],
+        home,
+        None,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let root = home.join(".config/sinter/plugins");
+    assert_eq!(mode_of(&root) & 0o077, 0);
+    assert_eq!(mode_of(&root.join("trust.toml")) & 0o077, 0);
+    let o = sinter_home(&["plugin", "verify", "firewalld@0.2.0"], home, None);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+}

@@ -21,6 +21,8 @@
 pub mod bundle;
 pub mod exec;
 pub mod format;
+#[cfg(unix)]
+pub mod install;
 pub mod manage;
 mod protect;
 pub(crate) mod run;
@@ -30,6 +32,8 @@ pub mod verify;
 mod c1_tests;
 #[cfg(all(test, unix))]
 mod firewalld_020_tests;
+#[cfg(all(test, unix))]
+mod install_tests;
 #[cfg(all(test, unix))]
 mod manage_tests;
 #[cfg(all(test, unix))]
@@ -415,7 +419,7 @@ pub(crate) fn load_with(
 }
 
 /// The catalog a pinned plugin file names (its full verification follows).
-fn catalog_ref_of(bytes: &[u8], shown: &str) -> Result<CatalogRef> {
+pub(crate) fn catalog_ref_of(bytes: &[u8], shown: &str) -> Result<CatalogRef> {
     #[derive(serde::Deserialize)]
     struct OnlyCatalog {
         catalog: CatalogRef,
