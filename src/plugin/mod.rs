@@ -13,15 +13,23 @@
 //! registry lists its exact bytes. The registry lists firewalld 0.1.0 and
 //! firewalld 0.2.0, whose exit codes were measured on real hosts; their
 //! files are kept in the repository under `plugins/first-party/`.
+//!
+//! `bundle` embeds those first-party files in this Sinter and `manage` reads
+//! a plugin root for `sinter plugin list` and `sinter plugin verify`
+//! (DESIGN §38.15). Neither grants trust nor changes what the loader accepts.
 
+pub mod bundle;
 pub mod exec;
 pub mod format;
+pub mod manage;
 mod protect;
 pub(crate) mod run;
 pub mod verify;
 
 #[cfg(all(test, unix))]
 mod firewalld_020_tests;
+#[cfg(all(test, unix))]
+mod manage_tests;
 #[cfg(all(test, unix))]
 mod run_tests;
 #[cfg(all(test, unix))]

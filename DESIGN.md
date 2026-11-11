@@ -2572,6 +2572,8 @@ IMPLEMENTED, NOT RELEASED (firewalld 0.2.0, 2026-11-09): the operand class `port
 
 NOT VERIFIED: other OS or firewalld versions (Sinter does not check the version); the release acceptance with this registry on its other five target labels; a mutation whose outcome is unknown because Sinter's own timeout expired, on a real host (covered by tests only: with the daemon stopped, `firewall-cmd` gave up by itself and the result was a failure that may have changed something); POSIX ACLs on a macOS controller (§38.5).
 
+IMPLEMENTED, NOT RELEASED (PM-2, 2026-11-10): the first-party files embedded in Sinter and the read-only commands `sinter plugin list` and `sinter plugin verify` (§38.15).
+
 UNCHANGED LIMIT: no code runs from a plugin; third-party catalogs are not supported; plugin types are not offered through MCP (§38.12); Command Audit expectations cannot use plugin types in v1.9.0.
 
 38.2 Layers
@@ -2687,6 +2689,22 @@ Sinter enforces which operations can run: only operations of reviewed first-part
 2026-11-09 (firewalld expansion, not released): operand class and field kind `port_spec` and per-type `deny` rules added to §38.3, §38.6 and §38.9; candidate firewalld 0.2.0 kept under `plugins/candidates/`, not in the release registry until its new operations are measured on real hosts (§38.1).
 
 2026-11-09 (firewalld 0.2.0 registration, not released): the field kind `port_single` added (§38.3, §38.6, §38.9); firewalld 0.2.0 measured on three real hosts, its plugin split into a single-port `firewalld.port` and a present-only `firewalld.port_range`, and both files moved to `plugins/first-party/` with a second release registry entry (§38.1, §38.4).
+
+2026-11-10 (PM-2, not released): §38.15 added: the first-party plugin files embedded in Sinter, and the read-only commands `sinter plugin list` and `sinter plugin verify`; the loader and the trust contract unchanged.
+
+38.15 Plugin management (read-only)
+
+Status: IMPLEMENTED, NOT RELEASED (PM-2, 2026-11-10). `install` and `remove` are not implemented; the trust contract of §38.4–§38.6 is unchanged.
+
+Embedded first-party files. Sinter carries the exact bytes of every first-party plugin definition and of the catalog it names (`src/plugin/bundle.rs`, from `plugins/first-party/`), each with its SHA-256. The catalog digests are those of the registry (§38.4); the plugin digests are listed beside them. Before either command reports, the bundle is checked: every entry hashes to its digests, every embedded catalog is in the registry with the same digest, and every registry entry is embedded; otherwise the command refuses (exit 2). A test checks that the registry, the bundle, its bytes and the repository files agree. Embedding grants nothing: the loader never reads these bytes, and a plugin is used only from the plugin root, pinned by the trust file, with its operations attested or allowed there, and enabled by a recipe (§38.7).
+
+`sinter plugin list [--plugin-root DIR] [--json]` shows every embedded plugin and every plugin the trust file pins, ordered by id and numeric version, with: `available` (embedded in this Sinter), `installed` (pinned by the trust file and its file present) and one status: `available` (not installed), `installed`, `trust-incomplete` (installed, but the trust file leaves out an operation the plugin's types use, so the loader refuses it, §38.6), `missing-file`, `digest-mismatch` (a file differs from its pin or from the embedded file), `not-trusted` (files present, or the catalog not pinned), `refused` (a file or directory fails the checks of §38.5), `unsupported-by-this-sinter` (pinned but not embedded) or `unknown` (the root or trust file could not be read); and the attested observe and allowed mutate operations against the catalog's totals. A missing root is nothing installed (exit 0); an unsafe root or an invalid trust file is exit 2.
+
+`sinter plugin verify [ID@VERSION...] [--plugin-root DIR] [--json]` verifies the named plugins, or every plugin the trust file pins, with these checks in order: `embedded`, `trust_plugin`, `trust_catalog`, `plugin_file`, `plugin_digest_trust`, `plugin_digest_embedded`, `catalog_file`, `catalog_digest_trust`, `catalog_registry`, `catalog_digest_embedded` and `load` (the loader itself, `load_with`, with the release registry). Each check is `pass`, `fail` or `skip`. The status is `ok`, `not-installed`, `not-trusted`, `missing-file`, `digest-mismatch`, `refused`, `unsupported-by-this-sinter`, `load-refused` or `unknown`; the operations the plugin's types use but the trust file does not enable are listed. Exit 0 when the root and trust file are sound and every verified plugin is `ok` (an empty verification is a success), otherwise 2. A malformed ID@VERSION is exit 2 with nothing on stdout.
+
+Common rules. The plugin root is resolved as in §38.7. Both commands only read: the root, its directories and files are opened by the protected reader of §38.5 and the trust file is parsed by the loader's parser; whether a path exists is asked once without following a final symbolic link only to tell "missing" from "refused", and nothing compared or parsed comes from outside the protected reader. Neither command creates, changes or removes a file or directory, trusts, enables or installs a plugin, reads a recipe or contacts a target. With `--json` stdout carries one JSON document (`format` 1) with states only; messages, which may name paths, go to standard error. The commands are CLI only: MCP has no plugin tool (§38.12).
+
+UNCHANGED LIMIT: the loader still refuses a whole plugin when its trust entry leaves out an operation one of its types uses; the reports show this but do not change it. Partial mutate permission (for example audit-only use) needs its own contract change before `install` (PM-3).
 
 39. CLI usability: selector, inventory detection, short options
 

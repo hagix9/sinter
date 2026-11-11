@@ -23,8 +23,10 @@ be pinned in the same trust file; a recipe enables one of them (each plugin
 id at most once per run). firewalld 0.1.0 is registered in the source tree for
 v1.9.0 and available from that release (published 2026-11-04). firewalld
 0.2.0 is registered in the source tree and not yet in a published release.
-These files stay in the source repository and are not part of the release
-archive.
+These files are kept in the source repository. Their exact bytes are also
+embedded in the `sinter` executable, which `sinter plugin list` and
+`sinter plugin verify` compare with a plugin root; they are not separate
+files in the release archive. Embedding trusts or enables nothing.
 
 ## firewalld 0.2.0
 
@@ -241,6 +243,30 @@ resources:
     type: firewalld.protocol
     with: { zone: public, protocol: gre, state: present }
 ```
+
+## Checking a plugin root
+
+Both commands only read: they change no file, read no recipe and contact no
+host. `--plugin-root` and the default root are as for `plan`.
+
+```text
+sinter plugin list            # embedded plugins and what the root holds
+sinter plugin verify          # every plugin the trust file pins
+sinter plugin verify firewalld@0.2.0 --json
+```
+
+`list` shows, per plugin, whether this Sinter carries it, whether it is
+installed (pinned in the trust file, file present), a status (`available`,
+`installed`, `trust-incomplete`, `missing-file`, `digest-mismatch`,
+`not-trusted`, `refused`, `unsupported-by-this-sinter`) and how many observe
+and mutate operations the trust file enables. `verify` checks the root's
+protection, the trust file, each file against its pin, the first-party
+registry and the embedded file, and loads the plugin with the loader; it
+lists the operations the plugin uses that the trust file leaves out (while
+any is listed the loader refuses the whole plugin). Exit 0 when everything
+passes, otherwise 2. With `--json` stdout is one JSON document and messages
+go to standard error. Neither command installs or trusts anything: copy the
+files and write `trust.toml` as above.
 
 Sinter cannot prove that an observe operation is read-only on the host; the
 classification above rests on the measurements listed here (DESIGN §38.13).
