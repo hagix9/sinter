@@ -95,9 +95,22 @@ mod imp {
         let c = CString::new(name.as_bytes())
             .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         let base = dir.map(|d| d.as_raw_fd()).unwrap_or(libc::AT_FDCWD);
+        // The mode argument is always passed: `openat` reads it whenever
+        // `O_CREAT` is set (lock files and temporary files), and leaving the
+        // variadic argument out made the mode undefined (on Linux, files were
+        // created with mode 000). Without `O_CREAT` it is ignored. A file this
+        // creates is private (0600, less the umask); callers that need an
+        // exact mode set it on the descriptor afterwards.
         // SAFETY: `c` is a valid NUL-terminated string and `base` is either
         // AT_FDCWD or a descriptor this function's caller owns.
-        let fd = unsafe { libc::openat(base, c.as_ptr(), flags | libc::O_CLOEXEC) };
+        let fd = unsafe {
+            libc::openat(
+                base,
+                c.as_ptr(),
+                flags | libc::O_CLOEXEC,
+                0o600 as libc::c_uint,
+            )
+        };
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -541,21 +554,56 @@ mod imp {
         /// Take the exclusive lock `name` of this directory (a private
         /// regular file, created when missing, never through a link) without
         /// waiting: another holder is a refusal.
+        ///
+        /// The lock file is this user's private file, mode 0600. A lock file of
+        /// this user that an earlier build left with another mode (000 on
+        /// Linux, which this user cannot open) is set back to 0600 on that very
+        /// file, never through a link (`fchmodat` with `AT_SYMLINK_NOFOLLOW`).
         pub(crate) fn lock(&self, name: &str) -> Result<DirLock> {
             let shown = format!("{}/{}", self.shown, name);
-            cname(name, &shown)?;
-            let fd = openat(
-                Some(&self.fd),
-                std::ffi::OsStr::new(name),
-                libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_NONBLOCK,
-            )
-            .map_err(|e| {
+            let c = cname(name, &shown)?;
+            let open = || {
+                openat(
+                    Some(&self.fd),
+                    std::ffi::OsStr::new(name),
+                    libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+                )
+            };
+            let refused = |e: std::io::Error| {
                 if e.raw_os_error() == Some(libc::ELOOP) {
                     refuse(format!("{}: refusing a symbolic link", shown))
                 } else {
                     refuse(format!("{}: cannot open: {}", shown, e.kind()))
                 }
-            })?;
+            };
+            let fd = match open() {
+                Ok(fd) => fd,
+                Err(e)
+                    if e.raw_os_error() == Some(libc::EACCES) && self.own_regular_file(name)? =>
+                {
+                    // SAFETY: valid name relative to the owned descriptor; the
+                    // flag makes the call act on the name itself, never on the
+                    // target of a link.
+                    let rc = unsafe {
+                        libc::fchmodat(
+                            self.fd.as_raw_fd(),
+                            c.as_ptr(),
+                            0o600,
+                            libc::AT_SYMLINK_NOFOLLOW,
+                        )
+                    };
+                    if rc != 0 {
+                        let e = std::io::Error::last_os_error();
+                        return Err(refuse(format!(
+                            "{}: cannot open, and cannot set it back to mode 0600: {}",
+                            shown,
+                            e.kind()
+                        )));
+                    }
+                    open().map_err(refused)?
+                }
+                Err(e) => return Err(refused(e)),
+            };
             let md = fstat(&fd).map_err(|e| refuse(format!("{}: {}", shown, e.kind())))?;
             if !md.file_type().is_file() || !owner_ok(&md) {
                 return Err(refuse(format!(
@@ -563,15 +611,19 @@ mod imp {
                     shown
                 )));
             }
-            if md.mode() & 0o077 != 0 {
-                if md.uid() != euid() {
-                    return Err(refuse(format!(
-                        "{}: writable or readable by others (mode {:o})",
-                        shown,
-                        md.mode() & 0o7777
-                    )));
+            if md.uid() == euid() {
+                // This user's lock file is always exactly 0600 (also when the
+                // umask removed bits from a new one, or an earlier build left
+                // another mode).
+                if md.mode() & 0o7777 != 0o600 {
+                    fchmod(&fd, 0o600, &shown)?;
                 }
-                fchmod(&fd, 0o600, &shown)?;
+            } else if md.mode() & 0o077 != 0 {
+                return Err(refuse(format!(
+                    "{}: writable or readable by others (mode {:o})",
+                    shown,
+                    md.mode() & 0o7777
+                )));
             }
             // SAFETY: the descriptor is owned and open.
             if unsafe { libc::flock(fd.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
@@ -646,6 +698,29 @@ mod imp {
     #[inline(always)]
     fn hook(_point: &str) -> Result<()> {
         Ok(())
+    }
+
+    impl TrustedDir {
+        /// Whether `name` is a regular file (not a link) owned by this user.
+        fn own_regular_file(&self, name: &str) -> Result<bool> {
+            let shown = format!("{}/{}", self.shown, name);
+            let c = cname(name, &shown)?;
+            // SAFETY: an all-zero `stat` is a valid value to be overwritten.
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            // SAFETY: valid name, out pointer and owned descriptor.
+            let rc = unsafe {
+                libc::fstatat(
+                    self.fd.as_raw_fd(),
+                    c.as_ptr(),
+                    &mut st,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if rc != 0 {
+                return Ok(false);
+            }
+            Ok(st.st_mode & libc::S_IFMT == libc::S_IFREG && st.st_uid == euid())
+        }
     }
 
     /// What a name of a directory is (without following a final link).

@@ -1264,3 +1264,76 @@ fn r1_injection_points_are_off_unless_armed_on_this_thread() {
     let f = fx();
     assert_eq!(f.install(&req("0.2.0", &[], &[])).result, "installed");
 }
+
+// ---------------------------------------------------------------------------
+// The lock file's mode (Linux combined acceptance, 2026-11-11): `openat` was
+// called without its mode argument, so `.lock` was created with an undefined
+// mode (000 on Linux) and every later install or remove was refused.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_lock_file_is_private_and_a_wrong_mode_is_set_back() {
+    let f = fx();
+    f.install(&req(
+        "0.1.0",
+        &["add_service_runtime", "add_service_permanent"],
+        &[],
+    ));
+    let lock = f.root.join(".lock");
+    assert_eq!(mode_of(&lock), 0o600, "a new lock file is exactly 0600");
+    // A lock file an earlier build left with mode 000 (which this user cannot
+    // open), or with any other mode, is set back to 0600 and works.
+    for (m, v) in [
+        (0o000, "0.2.0"),
+        (0o400, "0.2.0"),
+        (0o644, "0.2.0"),
+        (0o200, "0.2.0"),
+    ] {
+        if f.plugin_path(v).exists() {
+            assert_eq!(f.remove(v).result, "removed");
+        }
+        mode(&lock, m);
+        let r = f.install(&req(v, &[], &[]));
+        assert_eq!(
+            (r.result, r.exit_code()),
+            ("installed", 0),
+            "mode {:o}: {:?}",
+            m,
+            r.messages
+        );
+        assert_eq!(mode_of(&lock), 0o600, "mode {:o} set back", m);
+        mode(&lock, m);
+        let r = f.remove(v);
+        assert_eq!(r.result, "removed", "mode {:o}: {:?}", m, r.messages);
+        assert_eq!(mode_of(&lock), 0o600);
+    }
+    assert_eq!(f.verify("0.1.0").exit_code(), 0);
+}
+
+#[test]
+fn a_lock_file_link_is_still_refused_and_never_followed() {
+    let f = fx();
+    f.install(&req(
+        "0.1.0",
+        &["add_service_runtime", "add_service_permanent"],
+        &[],
+    ));
+    let lock = f.root.join(".lock");
+    std::fs::remove_file(&lock).unwrap();
+    let target = f.boundary.join("lock-target");
+    std::fs::write(&target, b"").unwrap();
+    mode(&target, 0o000);
+    std::os::unix::fs::symlink(&target, &lock).unwrap();
+    let r = f.install(&req("0.2.0", &[], &[]));
+    assert_eq!(
+        (r.result, r.exit_code()),
+        ("refused", 2),
+        "{:?}",
+        r.messages
+    );
+    assert_eq!(mode_of(&target), 0o000, "the link's target is untouched");
+    assert!(std::fs::symlink_metadata(&lock)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
