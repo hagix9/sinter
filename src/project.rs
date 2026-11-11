@@ -75,7 +75,7 @@ pub struct ProjectFile {
     pub strict_vars: bool,
 }
 
-/// How the recipe argument was resolved.
+/// Where the recipe argument was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RecipeVia {
     /// As given on the command line.
@@ -83,6 +83,8 @@ pub enum RecipeVia {
     Given,
     /// Found through `recipe_paths`.
     RecipePaths,
+    /// A bundle directory directly in the current directory.
+    CurrentDirectory,
 }
 
 impl RecipeVia {
@@ -90,8 +92,40 @@ impl RecipeVia {
         match self {
             RecipeVia::Given => "given",
             RecipeVia::RecipePaths => "recipe_paths",
+            RecipeVia::CurrentDirectory => "current_directory",
         }
     }
+}
+
+/// How the name matched (DESIGN §40.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecipeMatch {
+    /// The argument as given, or the exact name of v1.10.0.
+    #[default]
+    Exact,
+    /// A single recipe found below a `recipe_paths` directory, or by a name of
+    /// several components.
+    Search,
+    /// The name of a bundle directory.
+    BundleDirectory,
+}
+
+impl RecipeMatch {
+    pub fn key(self) -> &'static str {
+        match self {
+            RecipeMatch::Exact => "exact",
+            RecipeMatch::Search => "search",
+            RecipeMatch::BundleDirectory => "bundle_directory",
+        }
+    }
+}
+
+/// The file a recipe argument means, and how it was found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRecipe {
+    pub path: PathBuf,
+    pub via: RecipeVia,
+    pub how: RecipeMatch,
 }
 
 fn bad(path: &Path, what: impl std::fmt::Display) -> SinterError {
@@ -398,6 +432,27 @@ pub fn check_named_file(path: &Path) -> Result<()> {
     read_named_trusted(NAMED, path).map(|_| ())
 }
 
+const FOUND: Who = Who {
+    label: "recipe file found by name",
+    ask: "fix its owner or mode, or name it by its path",
+};
+
+/// A recipe or bundle file found by the search of DESIGN §40.2 (also a member
+/// of a bundle found that way): the same rules as [`check_named_file`].
+pub fn check_found_file(path: &Path) -> Result<()> {
+    read_named_trusted(FOUND, path).map(|_| ())
+}
+
+/// The check of a file the run reads because of how the argument was resolved:
+/// none for a path given on the command line, as before.
+pub fn check_resolved_file(via: RecipeVia, path: &Path) -> Result<()> {
+    match via {
+        RecipeVia::Given => Ok(()),
+        RecipeVia::RecipePaths => check_named_file(path),
+        RecipeVia::CurrentDirectory => check_found_file(path),
+    }
+}
+
 type Candidate = (PathBuf, Option<(u64, u64)>, bool);
 
 fn is_search_name(arg: &Path) -> bool {
@@ -408,15 +463,71 @@ fn is_search_name(arg: &Path) -> bool {
     ) && !arg.to_string_lossy().contains('/')
 }
 
-/// Which file the recipe argument means (DESIGN §40.2).
+/// Which file the recipe argument means (DESIGN §40.2), without how it matched.
 pub fn resolve_recipe(arg: &Path, project: Option<&ProjectFile>) -> Result<(PathBuf, RecipeVia)> {
-    let given = || Ok((arg.to_path_buf(), RecipeVia::Given));
-    let Some(project) = project else {
+    resolve(arg, project).map(|r| (r.path, r.via))
+}
+
+/// Which file the recipe argument means (DESIGN §40.2).
+///
+/// First the rule of v1.10.0: an argument with a `/` is a path, and a bare name
+/// is looked for exactly in the current directory and directly in every
+/// `recipe_paths` directory. Only when that finds nothing (a directory is not a
+/// recipe, so it is not counted) does the search of [`crate::recipe_search`]
+/// run, and then only for a name: a path that does not exist stays a path
+/// unless it is a name of several components and the project has
+/// `recipe_paths`.
+pub fn resolve(arg: &Path, project: Option<&ProjectFile>) -> Result<ResolvedRecipe> {
+    let given = || {
+        Ok(ResolvedRecipe {
+            path: arg.to_path_buf(),
+            via: RecipeVia::Given,
+            how: RecipeMatch::Exact,
+        })
+    };
+    let roots: &[PathBuf] = project.map_or(&[], |p| p.recipe_paths.as_slice());
+    let query = crate::recipe_search::Query::parse(arg);
+    if !roots.is_empty() && is_search_name(arg) {
+        if let Some(found) = exact(arg, roots)? {
+            return Ok(found);
+        }
+        if query.is_none() {
+            // Not a name the search takes: the answer of v1.10.0.
+            let places: Vec<String> = std::iter::once("the current directory".to_string())
+                .chain(roots.iter().map(|d| d.display().to_string()))
+                .collect();
+            return Err(SinterError::schema(format!(
+                "recipe {} was not found in {} (no other recipe is tried and no extension is added)",
+                arg.display(),
+                places.join(", ")
+            )));
+        }
+    } else {
+        // What the command line names, unless it is a directory, is used as
+        // given, as before; a directory never was a recipe.
+        match std::fs::symlink_metadata(arg) {
+            Ok(m) if !m.is_dir() => return given(),
+            _ => {}
+        }
+    }
+    let Some(query) = query else {
         return given();
     };
-    if project.recipe_paths.is_empty() || !is_search_name(arg) {
+    if roots.is_empty() && !(query.is_bare() && query.is_bundle()) {
+        // Without recipe_paths only a bundle directory in the current directory
+        // is new; everything else is what it was.
         return given();
     }
+    let outcome = crate::recipe_search::search(&query, true, roots)?;
+    if roots.is_empty() && outcome.candidates.is_empty() {
+        // No bundle directory here: the argument means what it meant before.
+        return given();
+    }
+    pick(arg, &query, roots, outcome)
+}
+
+/// The rule of v1.10.0 for a bare name with `recipe_paths`. `None`: nothing found.
+fn exact(arg: &Path, roots: &[PathBuf]) -> Result<Option<ResolvedRecipe>> {
     // (path, device and inode when it can be followed, in the current directory)
     let mut hits: Vec<Candidate> = Vec::new();
     let identity = |p: &Path| {
@@ -425,8 +536,9 @@ pub fn resolve_recipe(arg: &Path, project: Option<&ProjectFile>) -> Result<(Path
     };
     let mut note = |p: PathBuf, here: bool| {
         // Anything at the name counts, a link too: it is judged later, never
-        // passed over for another candidate.
-        if std::fs::symlink_metadata(&p).is_ok() {
+        // passed over for another candidate. A directory is not a recipe; it may
+        // be a bundle directory, which the search finds.
+        if std::fs::symlink_metadata(&p).is_ok_and(|m| !m.is_dir()) {
             let id = identity(&p);
             if !hits.iter().any(|(_, seen, _)| id.is_some() && *seen == id) {
                 hits.push((p, id, here));
@@ -434,27 +546,26 @@ pub fn resolve_recipe(arg: &Path, project: Option<&ProjectFile>) -> Result<(Path
         }
     };
     note(arg.to_path_buf(), true);
-    for dir in &project.recipe_paths {
+    for dir in roots {
         note(dir.join(arg), false);
     }
     match hits.len() {
-        0 => {
-            let places: Vec<String> = std::iter::once("the current directory".to_string())
-                .chain(project.recipe_paths.iter().map(|d| d.display().to_string()))
-                .collect();
-            Err(SinterError::schema(format!(
-                "recipe {} was not found in {} (no other recipe is tried and no extension is added)",
-                arg.display(),
-                places.join(", ")
-            )))
-        }
+        0 => Ok(None),
         1 => {
             let (p, _, here) = hits.remove(0);
             if here {
-                return given();
+                return Ok(Some(ResolvedRecipe {
+                    path: arg.to_path_buf(),
+                    via: RecipeVia::Given,
+                    how: RecipeMatch::Exact,
+                }));
             }
             check_named_file(&p)?;
-            Ok((p, RecipeVia::RecipePaths))
+            Ok(Some(ResolvedRecipe {
+                path: p,
+                via: RecipeVia::RecipePaths,
+                how: RecipeMatch::Exact,
+            }))
         }
         _ => {
             let list: Vec<String> = hits
@@ -463,6 +574,108 @@ pub fn resolve_recipe(arg: &Path, project: Option<&ProjectFile>) -> Result<(Path
                 .collect();
             Err(SinterError::schema(format!(
                 "recipe {} is ambiguous: {}; Sinter never picks one, write ./{} or a full path",
+                arg.display(),
+                list.join(", "),
+                arg.display()
+            )))
+        }
+    }
+}
+
+/// Judge what the search found: exactly one usable candidate, or exit 2.
+fn pick(
+    arg: &Path,
+    query: &crate::recipe_search::Query,
+    roots: &[PathBuf],
+    mut outcome: crate::recipe_search::Outcome,
+) -> Result<ResolvedRecipe> {
+    use crate::recipe_search::{bundle_file, Kind, MAX_DEPTH};
+    let what = if query.is_bundle() {
+        "bundle directory"
+    } else {
+        "recipe"
+    };
+    match outcome.candidates.len() {
+        0 => {
+            let mut places = Vec::new();
+            if query.is_bare() && query.is_bundle() {
+                places.push("the current directory".to_string());
+            }
+            places.extend(roots.iter().map(|d| {
+                if outcome.missing.contains(d) {
+                    format!("{} (does not exist)", d.display())
+                } else {
+                    format!("{} ({MAX_DEPTH} levels)", d.display())
+                }
+            }));
+            let rule = if query.is_bundle() {
+                "a bundle is named by its directory, which holds one bundle.yaml, bundle.yml or bundle.toml, and a single recipe by its file name with the extension, which is never added"
+            } else {
+                "a single recipe is named with its extension; a bundle directory is named without one (never as <name>.yaml)"
+            };
+            let hints = if outcome.hints.is_empty() {
+                String::new()
+            } else {
+                let list: Vec<String> = outcome
+                    .hints
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect();
+                format!("; not used, since the name differs: {}", list.join(", "))
+            };
+            Err(SinterError::schema(format!(
+                "{what} {} was not found in {} ({rule}; no other recipe is tried){hints}",
+                arg.display(),
+                places.join(", ")
+            )))
+        }
+        1 => {
+            let c = outcome.candidates.remove(0);
+            let via = if c.here {
+                RecipeVia::CurrentDirectory
+            } else {
+                RecipeVia::RecipePaths
+            };
+            match c.kind {
+                Kind::File => {
+                    check_resolved_file(via, &c.path)?;
+                    Ok(ResolvedRecipe {
+                        path: c.path,
+                        via,
+                        how: RecipeMatch::Search,
+                    })
+                }
+                Kind::BundleDirectory => {
+                    let file = bundle_file(&c.path)?;
+                    check_resolved_file(via, &file)?;
+                    let value = crate::document::parse_file_value(&file)?;
+                    if !crate::bundle::is_bundle_value(&value) {
+                        return Err(SinterError::schema(format!(
+                            "{} is in the place of a bundle file but has no top-level recipes; a bundle directory holds a bundle",
+                            file.display()
+                        )));
+                    }
+                    Ok(ResolvedRecipe {
+                        path: file,
+                        via,
+                        how: RecipeMatch::BundleDirectory,
+                    })
+                }
+                Kind::NotADirectory => Err(SinterError::schema(format!(
+                    "{} is not a directory, so it is not the bundle directory {}; name a recipe file with its extension, or by its path",
+                    c.path.display(),
+                    arg.display()
+                ))),
+            }
+        }
+        _ => {
+            let list: Vec<String> = outcome
+                .candidates
+                .iter()
+                .map(|c| c.path.display().to_string())
+                .collect();
+            Err(SinterError::schema(format!(
+                "{what} {} is ambiguous: {}; Sinter never picks one, write more of its path (dir/{}) or the path itself",
                 arg.display(),
                 list.join(", "),
                 arg.display()
@@ -587,7 +800,18 @@ mod tests {
         let (got, via) = resolve_recipe(Path::new("./r.yaml"), Some(&p)).unwrap();
         assert_eq!(got, Path::new("./r.yaml"));
         assert_eq!(via, RecipeVia::Given);
-        let (got, _) = resolve_recipe(Path::new("sub/r.yaml"), Some(&p)).unwrap();
+        // A path that exists is used as given, however it is spelt
+        // (src/lib.rs exists in the crate directory the tests run in).
+        let (got, via) = resolve_recipe(Path::new("src/lib.rs"), Some(&p)).unwrap();
+        assert_eq!(got, Path::new("src/lib.rs"));
+        assert_eq!(via, RecipeVia::Given);
+        // Changed in SR-2 (DESIGN §40.2): a missing `dir/name` with recipe_paths
+        // is a name of several components and is searched for; until v1.10.0 it
+        // was used as given and failed to load. Either way nothing else runs.
+        let e = resolve_recipe(Path::new("sub/r.yaml"), Some(&p)).unwrap_err();
+        assert!(e.message.contains("was not found"), "{}", e.message);
+        // Without recipe_paths it is still used as given.
+        let (got, _) = resolve_recipe(Path::new("sub/r.yaml"), None).unwrap();
         assert_eq!(got, Path::new("sub/r.yaml"));
     }
 
@@ -620,6 +844,31 @@ mod tests {
         assert!(e.message.contains(&a.path().display().to_string()));
         // No extension is added.
         assert!(resolve_recipe(Path::new("search-one"), Some(&p)).is_err());
+    }
+
+    #[test]
+    fn a_directory_is_not_a_recipe_but_may_be_a_bundle_directory() {
+        // Directly in a recipe_paths directory: the exact rule of v1.10.0
+        // counted the directory and failed; now it is left to the search.
+        let d = private_dir();
+        let b = d.path().join("sr2-bundle-dir");
+        std::fs::create_dir(&b).unwrap();
+        std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(b.join("bundle.yaml"), "version: 1\nrecipes: [a.yaml]\n").unwrap();
+        std::fs::set_permissions(
+            b.join("bundle.yaml"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let p = project(vec![d.path().to_path_buf()]);
+        let r = resolve(Path::new("sr2-bundle-dir"), Some(&p)).unwrap();
+        assert_eq!(r.path, b.join("bundle.yaml"));
+        assert_eq!(r.via, RecipeVia::RecipePaths);
+        assert_eq!(r.how, RecipeMatch::BundleDirectory);
+        // An exact file still wins first and is reported as before.
+        write(d.path(), "sr2-exact.yaml");
+        let r = resolve(Path::new("sr2-exact.yaml"), Some(&p)).unwrap();
+        assert_eq!((r.via, r.how), (RecipeVia::RecipePaths, RecipeMatch::Exact));
     }
 
     #[test]

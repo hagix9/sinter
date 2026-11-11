@@ -27,7 +27,10 @@ use sinter::progress_session::{
     SessionInfo,
 };
 use sinter::progress_tty::stderr_consumer_factory;
-use sinter::project::{check_named_file, load_project, resolve_recipe, ProjectFile, RecipeVia};
+use sinter::project::{
+    check_named_file, check_resolved_file, load_project, resolve, ProjectFile, RecipeMatch,
+    RecipeVia,
+};
 use sinter::skips::{SkipPlan, SkipRequest, UnitView};
 use sinter::sshconfig::TargetRequest;
 use sinter::style;
@@ -237,6 +240,10 @@ struct ExecOpts {
 struct Resolved {
     project: Option<Arc<ProjectFile>>,
     recipe_via: RecipeVia,
+    /// How the recipe argument matched, and the argument when it was not
+    /// used exactly as written (DESIGN §40.2).
+    recipe_match: RecipeMatch,
+    recipe_query: Option<String>,
     inventory_from_project: bool,
     default_target: bool,
     backup_dir: Option<String>,
@@ -297,10 +304,15 @@ fn apply_project(
         if !exec.no_config {
             note_unused_parent_project();
         }
-        return Ok((recipe.to_path_buf(), selector, exec));
+        // Without a project file only a bundle directory in the current
+        // directory is resolved; anything else is used as given.
+        let found = resolve(recipe, None)?;
+        note_resolution(&mut exec, recipe, found.via, found.how);
+        return Ok((found.path, selector, exec));
     };
-    let (recipe, via) = resolve_recipe(recipe, Some(&project))?;
-    exec.resolved.recipe_via = via;
+    let found = resolve(recipe, Some(&project))?;
+    note_resolution(&mut exec, recipe, found.via, found.how);
+    let recipe = found.path;
     exec.resolved.strict_vars = project.strict_vars;
     exec.resolved.backup_dir = project.backup_directory.clone();
     let cli_inventory = exec.inventory.is_some();
@@ -346,6 +358,29 @@ fn apply_project(
     Ok((recipe, selector, exec))
 }
 
+/// Keep how the recipe argument was resolved, for the output and the checks.
+fn note_resolution(exec: &mut ExecOpts, arg: &Path, via: RecipeVia, how: RecipeMatch) {
+    exec.resolved.recipe_via = via;
+    exec.resolved.recipe_match = how;
+    exec.resolved.recipe_query = (how != RecipeMatch::Exact).then(|| arg.display().to_string());
+}
+
+/// How the recipe line describes the resolution.
+fn recipe_how(r: &Resolved) -> String {
+    let query = r.recipe_query.as_deref().unwrap_or("");
+    match (r.recipe_match, r.recipe_via) {
+        (RecipeMatch::Exact, RecipeVia::RecipePaths) => "found through recipe_paths".to_string(),
+        (RecipeMatch::Exact, _) => "as given".to_string(),
+        (RecipeMatch::Search, _) => format!("{query} found by searching recipe_paths"),
+        (RecipeMatch::BundleDirectory, RecipeVia::CurrentDirectory) => {
+            format!("bundle directory {query} in the current directory")
+        }
+        (RecipeMatch::BundleDirectory, _) => {
+            format!("bundle directory {query} found by searching recipe_paths")
+        }
+    }
+}
+
 /// What the run is about to use, before anything runs. Text goes to stdout; with
 /// JSON, where stdout is one document, to stderr (the document has `resolved`).
 fn print_resolved(recipe: &Path, selector: Option<&str>, exec: &ExecOpts, format: OutputFormat) {
@@ -359,10 +394,7 @@ fn print_resolved(recipe: &Path, selector: Option<&str>, exec: &ExecOpts, format
         lines.push(format!(
             "recipe: {} ({})",
             sanitize_line(&recipe.display().to_string()),
-            match exec.resolved.recipe_via {
-                RecipeVia::Given => "as given",
-                RecipeVia::RecipePaths => "found through recipe_paths",
-            }
+            sanitize_line(&recipe_how(&exec.resolved))
         ));
         // With a selector the inventory is shown when it is loaded.
         match (selector, &exec.inventory) {
@@ -387,6 +419,14 @@ fn print_resolved(recipe: &Path, selector: Option<&str>, exec: &ExecOpts, format
         for f in &exec.vars_file {
             lines.push(format!("vars: {}", sanitize_line(&f.display().to_string())));
         }
+    } else if exec.resolved.recipe_match != RecipeMatch::Exact {
+        // No project file, and the argument was not used as written: say
+        // which file it means before anything runs.
+        lines.push(format!(
+            "recipe: {} ({})",
+            sanitize_line(&recipe.display().to_string()),
+            sanitize_line(&recipe_how(&exec.resolved))
+        ));
     }
     if let Some(dir) = exec.backup_store() {
         lines.push(format!(
@@ -406,7 +446,8 @@ fn print_resolved(recipe: &Path, selector: Option<&str>, exec: &ExecOpts, format
 /// backup store is in effect, so other documents are unchanged.
 fn resolved_json(recipe: &Path, exec: &ExecOpts) -> Option<serde_json::Value> {
     let r = &exec.resolved;
-    if r.project.is_none() && exec.backup_store().is_none() {
+    if r.project.is_none() && exec.backup_store().is_none() && r.recipe_match == RecipeMatch::Exact
+    {
         return None;
     }
     let inventory_source = if r.inventory_from_project {
@@ -419,10 +460,7 @@ fn resolved_json(recipe: &Path, exec: &ExecOpts) -> Option<serde_json::Value> {
             "path": p.path.display().to_string(),
             "source": p.source.key(),
         })),
-        "recipe": {
-            "path": recipe.display().to_string(),
-            "via": r.recipe_via.key(),
-        },
+        "recipe": recipe_json(recipe, r),
         "inventory": exec.inventory.as_ref().map(|p| serde_json::json!({
             "path": p.display().to_string(),
             "source": inventory_source,
@@ -431,6 +469,20 @@ fn resolved_json(recipe: &Path, exec: &ExecOpts) -> Option<serde_json::Value> {
         "vars_files": exec.vars_file.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "backup_directory": exec.backup_store(),
     }))
+}
+
+/// `resolved.recipe`: `path` and `via` as before; `match` and `query` only when
+/// the argument was not used exactly as written (DESIGN §40.2).
+fn recipe_json(recipe: &Path, r: &Resolved) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "path": recipe.display().to_string(),
+        "via": r.recipe_via.key(),
+    });
+    if r.recipe_match != RecipeMatch::Exact {
+        v["match"] = serde_json::json!(r.recipe_match.key());
+        v["query"] = serde_json::json!(r.recipe_query);
+    }
+    v
 }
 
 /// Add what this section's features contribute to a JSON document.
@@ -457,9 +509,9 @@ fn skip_gate(
     frozen: Option<&[FrozenExecution]>,
     format: OutputFormat,
 ) -> Result<(), SinterError> {
-    if exec.resolved.recipe_via == RecipeVia::RecipePaths {
+    if exec.resolved.recipe_via != RecipeVia::Given {
         for u in source.units() {
-            check_named_file(&u.path)?;
+            check_resolved_file(exec.resolved.recipe_via, &u.path)?;
         }
     }
     let request = SkipRequest {
@@ -515,16 +567,21 @@ fn plugin_ctx(exec: &ExecOpts) -> sinter::plugin::PluginContext {
 
 #[derive(Args, Debug)]
 struct ValidateArgs {
-    /// Recipe or bundle file. A bare name is searched for when a project file
-    /// has `recipe_paths`; anything with a `/` is a path.
+    /// Recipe file (with its extension: .yaml, .yml, .toml), bundle file, or
+    /// the name of a bundle directory (holding bundle.yaml, .yml or .toml). A
+    /// name is looked for in the current directory and, with a project file's
+    /// `recipe_paths`, below those directories; `dir/name` narrows it. No
+    /// extension is ever added. A path that exists is used as given.
     recipe: PathBuf,
     /// Inventory hosts to run on: NAME or host:NAME is a host, @NAME or
     /// group:NAME a group. Give several, or a comma-separated list (web01 web02,
     /// web01,group:db). A name that is both a host and a group must say which.
     /// The inventory is
-    /// --inventory, else hosts.yaml, hosts.yml or hosts.toml in the current
-    /// directory or the recipe's directory. It narrows a recipe's `targets`;
-    /// a single recipe without `targets` runs on exactly the hosts named.
+    /// --inventory, else the project file's inventory, else hosts.yaml,
+    /// hosts.yml, hosts.toml, inventory.yaml, inventory.yml or inventory.toml
+    /// in the current directory or the recipe's directory (only one may
+    /// exist). It narrows a recipe's `targets`; a single recipe without
+    /// `targets` runs on exactly the hosts named.
     /// Without a selector nothing is detected and the target stays --host or
     /// localhost. Excludes --host and --limit.
     #[arg(value_name = "SELECTOR")]
@@ -545,16 +602,21 @@ struct ValidateArgs {
 struct TargetArgs {
     #[arg(skip)]
     audit_strict: bool,
-    /// Recipe or bundle file. A bare name is searched for when a project file
-    /// has `recipe_paths`; anything with a `/` is a path.
+    /// Recipe file (with its extension: .yaml, .yml, .toml), bundle file, or
+    /// the name of a bundle directory (holding bundle.yaml, .yml or .toml). A
+    /// name is looked for in the current directory and, with a project file's
+    /// `recipe_paths`, below those directories; `dir/name` narrows it. No
+    /// extension is ever added. A path that exists is used as given.
     recipe: PathBuf,
     /// Inventory hosts to run on: NAME or host:NAME is a host, @NAME or
     /// group:NAME a group. Give several, or a comma-separated list (web01 web02,
     /// web01,group:db). A name that is both a host and a group must say which.
     /// The inventory is
-    /// --inventory, else hosts.yaml, hosts.yml or hosts.toml in the current
-    /// directory or the recipe's directory. It narrows a recipe's `targets`;
-    /// a single recipe without `targets` runs on exactly the hosts named.
+    /// --inventory, else the project file's inventory, else hosts.yaml,
+    /// hosts.yml, hosts.toml, inventory.yaml, inventory.yml or inventory.toml
+    /// in the current directory or the recipe's directory (only one may
+    /// exist). It narrows a recipe's `targets`; a single recipe without
+    /// `targets` runs on exactly the hosts named.
     /// Without a selector nothing is detected and the target stays --host or
     /// localhost. Excludes --host and --limit.
     #[arg(value_name = "SELECTOR")]
@@ -1486,7 +1548,9 @@ fn selector_inventory(
             (load_exec_inventory(path, exec)?, "project file")
         }
         Some(path) => (load_inventory(path)?, "--inventory"),
-        None if exec.resolved.recipe_via == RecipeVia::RecipePaths => {
+        // A recipe found by name, not given as a path, brings no place of its
+        // own: only the current directory is looked at (DESIGN §40.3).
+        None if exec.resolved.recipe_via != RecipeVia::Given => {
             (detect_inventory_here()?, "auto-detected")
         }
         None => (detect_inventory(recipe)?, "auto-detected"),

@@ -2690,7 +2690,7 @@ Sinter enforces which operations can run: only operations of reviewed first-part
 
 39. CLI usability: selector, inventory detection, short options
 
-Status: IMPLEMENTED IN THE NEXT VERSION, NOT RELEASED; live Linux acceptance not yet run. Sinter v1.9.0 does not contain it. The version is undecided. It is not a completion condition of the v2.0 Secure MCP Tunnel and does not change that roadmap. Register entries (local work register): FR-072 selector (§39.2), FR-073 inventory detection (§39.3, §39.4), FR-074 short options (§39.5). Owner decisions D-1 to D-5 of 2026-11-04 settled what were open questions U-1 to U-10 of the earlier proposal.
+Status: IMPLEMENTED; released in Sinter v1.10.0 (the release acceptance did not exercise it; live Linux acceptance of the features not yet run). Sinter v1.9.0 does not contain it. The inventory names `inventory.yaml`, `inventory.yml` and `inventory.toml` of §39.3 are prepared for v1.11.0 and not released. It is not a completion condition of the v2.0 Secure MCP Tunnel and does not change that roadmap. Register entries (local work register): FR-072 selector (§39.2), FR-073 inventory detection (§39.3, §39.4), FR-074 short options (§39.5). Owner decisions D-1 to D-5 of 2026-11-04 settled what were open questions U-1 to U-10 of the earlier proposal.
 
 39.1 What does not change
 
@@ -2730,9 +2730,9 @@ Output, only with a selector. Text: an `inventory: <path> (auto-detected)` or `(
 
 Detection runs only with a selector and without `--inventory`. `--inventory PATH` always wins, keeps every rule it has today (no new check), and a broken or missing named file is an error that never falls through to detection.
 
-The names are `hosts.yaml`, `hosts.yml` and `hosts.toml`, and the places are the current directory and the directory of the recipe or bundle as named on the command line (a symbolic link to a recipe does not move it). Parent directories and the home directory are not searched, and there is no environment variable or per-user default.
+The names are `hosts.yaml`, `hosts.yml`, `hosts.toml`, `inventory.yaml`, `inventory.yml` and `inventory.toml` (the last three since SR-2, Owner decision of 2026-11-10), and the places are the current directory and the directory of the recipe or bundle as named on the command line (a symbolic link to a recipe does not move it). A recipe or bundle found by name rather than given as a path adds no place (§40.3). Parent directories and the home directory are not searched, and there is no environment variable or per-user default.
 
-Exactly one file may be found. Two names in one directory, or files in both places, are exit 2 listing the candidates: Sinter never picks by priority. Two hard links of one file are two candidates, since their format can differ. The same directory reached twice counts once.
+Exactly one file may be found. Two names in one directory (a `hosts.yaml` and an `inventory.yaml` too), or files in both places, are exit 2 listing the candidates and pointing to `--inventory` and the project file's `inventory`: Sinter never picks by priority. A file of another tool under one of these names (an Ansible `inventory.yml`, say) is a candidate like any other: next to a Sinter inventory it makes the detection ambiguous, and alone it is refused as an invalid inventory; name the Sinter inventory with `--inventory` or in the project file. Two hard links of one file are two candidates, since their format can differ. The same directory reached twice counts once.
 
 A candidate that exists and cannot be used is an error, never a miss: nothing falls back to another file, another host or the local host. Refused, with exit 2 before any `ssh -G`:
 
@@ -2776,9 +2776,11 @@ Tests: `tests/cli_selector.rs` and the unit tests of `src/inventory.rs`, `src/in
 
 2026-11-04: implemented under Owner decisions D-1 to D-5 (FR-072 to FR-074), replacing the proposal text and the open questions. §19.2 gained the exception for one plain recipe without `targets`; §19.4 and the value set of `excluded_by` were extended. Nothing released.
 
+2026-11-10 (SR-2, not released): §39.3 gained the names `inventory.yaml`, `inventory.yml` and `inventory.toml` (Owner decision). A directory holding a `hosts.*` and an `inventory.*` file, which used `hosts.*` until then, is now exit 2 as ambiguous; no other rule of the section changed.
+
 40. Project configuration, recipe search, layered variables, backup store, partial runs
 
-Status: IMPLEMENTED, NOT RELEASED; live Linux acceptance not yet run. Without a project file and without the new options, every command behaves as in §39, with one stated exception (§40.5, unknown variables).
+Status: IMPLEMENTED; released in Sinter v1.10.0 (the release acceptance did not exercise it; live Linux acceptance of the features not yet run). The bundle directories and the search of §40.2 (§40.11) are prepared for v1.11.0 and not released. Without a project file and without the new options, every command behaves as in §39, with one stated exception (§40.5, unknown variables).
 
 40.1 The project file
 
@@ -2786,7 +2788,7 @@ A project file holds what an operator would otherwise repeat on every command li
 
 ```yaml
 version: 1
-recipe_paths:              # directories searched for a bare recipe name
+recipe_paths:              # directories searched for a recipe or bundle name
   - /opt/sinter/recipes
   - ./recipes
 inventory: ./hosts.yaml
@@ -2812,17 +2814,35 @@ The project file, the recipe, the inventory, the variables files and the project
 
 40.2 Which recipe
 
-The first positional argument is, in order:
+The first positional argument names a single recipe file, a bundle file, or a bundle directory. A single recipe is always written with its extension (`.yaml`, `.yml`, `.toml`): no extension is ever added to it, so `nginx` never means `nginx.yaml`. A bundle may also be named by its directory: a directory holding exactly one of `bundle.yaml`, `bundle.yml` and `bundle.toml`, whose top level has `recipes` (§19.3). `02_moge.yaml` is never another name for the bundle directory `02_moge`; the bundle file itself can still be given as a path.
 
-1. a path when it contains `/`: used as given, relative to the current directory, never searched for;
-2. with no project file or no `recipe_paths`: used as given (the behaviour before this section);
-3. otherwise a *search name*: `<dir>/<name>` is looked at for every directory of `recipe_paths`, and `./<name>` in the current directory. Exactly one existing file (the same file reached twice counts once) is the recipe. Two different files are exit 2, listing both: Sinter never picks one, and writing `./name` or a full path settles it. None is exit 2, listing the places searched: no other recipe is tried and no extension is added. A file found only in the current directory is the path the command line would have meant and is taken as given; one found through `recipe_paths` is held to the §40.1 file rules.
+A *name* is one component or several separated by `/` (at most 8), each matching `[A-Za-z0-9._-]` and starting with a letter or digit (at most 128 bytes). Anything else is a *path*: absolute, starting with `./` or `../`, with an empty, `.` or `..` component, a trailing `/`, or another character. A name with an extension names a single recipe; a name without one names a bundle directory.
+
+The argument is resolved in two steps. The first is the rule of v1.10.0, unchanged, so every argument that resolved before means the same file:
+
+1. a path, or an argument containing `/` that exists (as anything but a directory) relative to the current directory: used as given, never searched for;
+2. a one-component name with a project file's `recipe_paths`: `./<name>` and `<dir>/<name>` for every directory of `recipe_paths` are looked at. A directory there is not counted (it was never a recipe, and may be a bundle directory). Exactly one existing file (the same file reached twice counts once) is the recipe, and two are exit 2, listing both, as before. A file found only in the current directory is taken as given; one found through `recipe_paths` is held to the §40.1 file rules;
+3. without a project file or `recipe_paths`: used as given, except a one-component bundle name (step two).
+
+Only when the first step finds nothing does the second step search, and only for a name:
+
+- the current directory is looked at directly, for a one-component bundle name only (`./02_moge`), with or without a project file;
+- every directory of `recipe_paths` is searched below, at most 6 levels deep. A single recipe matches a file of that name; a bundle name matches a bundle directory of that name. A name of several components matches the last components of the path (`security/ssh.yaml`, `common/02_moge`);
+- a file or directory inside a bundle directory is matched only by a name that includes that bundle directory (`02_moge/packages.yaml`), so a bundle's members and its `bundle.yaml` are never found by their own name alone;
+- symbolic links are never followed (a linked directory is not entered, so the search never leaves a `recipe_paths` directory) and names starting with `.` are not looked at; a link, or anything else that is not a directory, under the searched name is a candidate and is refused when it is used, never passed over;
+- names compare byte for byte. The first step uses the file system's own lookup, so on a case-insensitive file system (macOS by default) it may match a name that differs only in case; the second step does not.
+
+Exactly one candidate is the recipe. Two or more are exit 2 listing every one: Sinter never picks, and more of the path (`dir/name`) or the path itself settles it. None is exit 2 listing the places searched; a file the argument would have named with another spelling (`nginx.yaml` for `nginx`, a bundle directory for `02_moge.yaml`) is shown and never used. A tree deeper than 6 levels, more than 20,000 directory entries read in one search, or a directory that cannot be read stops the search with exit 2, and nothing it found is used; name the recipe by its path instead.
+
+A bundle directory with more than one bundle file, or whose bundle file has no top-level `recipes`, is exit 2. What the second step finds is held to the §40.1 file rules wherever it was found, the current directory included: the recipe or bundle file, and, before anything is contacted, every member of a bundle (as for a bundle found through `recipe_paths`). These rules are checked on the path immediately before it is read, with the limit §39.3 states; a path given on the command line is taken at its word, as before. A one-component name without a project file that finds no bundle directory is used as given, so its error is the one of v1.10.0.
+
+The file, and how it was found, is shown before anything runs: `recipe: <path> (ssh.yaml found by searching recipe_paths)`, `(bundle directory 02_moge found by searching recipe_paths)` or `(bundle directory 02_moge in the current directory)` in text, also without a project file; in JSON `resolved.recipe` keeps `path` and `via` (`given`, `recipe_paths`, and `current_directory` for a bundle directory found there) and adds `match` (`search` or `bundle_directory`) and `query` (the argument) only when the second step resolved it. An argument resolved by the first step prints and reports exactly what it did before.
 
 A `recipes:` entry of a bundle stays relative to the bundle file (§19.3), and a recipe's `include` to the recipe.
 
 40.3 Which inventory
 
-`--inventory` (never falls back), else the project file's `inventory`, else, for a selector only, detection as in §39.3, except that a recipe found through `recipe_paths` adds no place to look: a shared recipe directory's `hosts.yaml` is not this project's. `--host` turns the project file's `inventory` and `default_target` off for that command.
+`--inventory` (never falls back), else the project file's `inventory`, else, for a selector only, detection as in §39.3, except that a recipe found through `recipe_paths`, or a bundle directory found by name in the current directory, adds no place to look: only the current directory is looked at. A shared recipe directory's `hosts.yaml` is not this project's, and a bundle directory's inventory is not either. `--host` turns the project file's `inventory` and `default_target` off for that command.
 
 40.4 Which hosts
 
@@ -2907,4 +2927,8 @@ Executions run one at a time, recipe-major (§19.3); resources run in dependency
 
 40.10 Verification status
 
-Tests: `tests/cli_project.rs`, `tests/cli_skips.rs`, `tests/backup_store_dir.rs`, `tests/backup_tree.rs`, `tests/backup_tree_script.rs` and unit tests. Scripted targets run the production engine. `tests/backup_tree_script.rs` runs the real script text under `/bin/sh` with stand-in tools, so its logic is tested on any Unix, but the stand-ins are not util-linux or coreutils. `tests/backup_tree_real.rs` runs it for real and needs Linux and root. No real target has run any of §40 yet.
+Tests: `tests/cli_recipe_resolve.rs` (SR-2: names, bundle directories, the search and its limits, the six inventory names), `tests/cli_project.rs`, `tests/cli_skips.rs`, `tests/backup_store_dir.rs`, `tests/backup_tree.rs`, `tests/backup_tree_script.rs` and unit tests. Scripted targets run the production engine. `tests/backup_tree_script.rs` runs the real script text under `/bin/sh` with stand-in tools, so its logic is tested on any Unix, but the stand-ins are not util-linux or coreutils. `tests/backup_tree_real.rs` runs it for real and needs Linux and root. No real target has run any of §40 yet.
+
+40.11 Change history
+
+2026-11-10 (SR-2, not released; Owner decisions of 2026-11-10): §40.2 rewritten around two steps. The rule of v1.10.0 stays the first step, except that a directory found by it is no longer counted. A second step resolves a bundle by its directory and searches below `recipe_paths` for a single recipe by its file name or for a name of several components. No extension is added to a single recipe, and `<name>.yaml` is not an alias of a bundle directory. Behaviour that changed for an argument that was an error before: a `dir/name` that does not exist is searched for when the project has `recipe_paths` (it was used as given and failed to load), and a bundle directory in the current directory is resolved also without a project file. §40.3 and §39.3 were extended to match (the six inventory names, no inventory place for a recipe found by name).

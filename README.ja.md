@@ -10,7 +10,7 @@
 
 [![GitHub Codespaces で開く](https://github.com/codespaces/badge.svg)](https://codespaces.new/hagix9/sinter?quickstart=1)
 
-ブラウザ上の使い捨て Ubuntu コンテナで Sinter v1.10.0 を試せます。ローカルへの
+ブラウザ上の使い捨て Ubuntu コンテナで Sinter v1.11.0 を試せます。ローカルへの
 インストール、SSH、サーバーは不要です。[スタートガイド](examples/start/README.ja.md)を参照してください。
 
 Sinterは、Itamaeに着想を得た軽量なエージェントレス構成管理ツールです。
@@ -85,16 +85,16 @@ embedded scriptingは依然として実装対象に含めません。
 
 ## インストール
 
-Sinter **v1.10.0** は現在のリリースです。対応するすべての Linux x86_64 プラットフォーム
+Sinter **v1.11.0** は現在のリリースです。対応するすべての Linux x86_64 プラットフォーム
 ライン（Ubuntu、Rocky Linux、RHEL 9 / 10、AlmaLinux 9 / 10）向けに、
-1つの `sinter-v1.10.0-linux-x86_64.tar.gz` アーティファクトとして公開しています。
+1つの `sinter-v1.11.0-linux-x86_64.tar.gz` アーティファクトとして公開しています。
 
 ```sh
 curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
 $HOME/.local/bin/sinter --version
 ```
 
-受入検証したpoint release（v1.10.0 リリース成果物）は Ubuntu 24.04、
+受入検証したpoint release（v1.11.0 リリース成果物）は Ubuntu 24.04、
 Ubuntu 26.04、Rocky Linux 9.8、Rocky Linux 10.2、RHEL 9.8、
 RHEL 10.2、AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64）です。
 他の各point releaseを個別に受入検証したという意味ではありません。
@@ -210,6 +210,28 @@ sinter apply nginx.yaml --inventory hosts.yaml
   パスを確認して先に `plan` を実行し、CI や重要な環境では `--inventory` を指定してください。
 - バンドル（`version: 1` + `recipes: [common.yaml, nginx.yaml]`）は複数の
   レシピを実行し、各レシピはそれぞれ自身の `targets` で解決されます。
+- v1.11.0 から: レシピ、バンドル、インベントリを名前で指定できます。
+
+  ```sh
+  sinter plan nginx.yaml web01           # 単一レシピ: 必ず拡張子付きで書きます
+  sinter plan security/ssh.yaml web01    # 名前だけで決まらないときは、パスの一部も書きます
+  sinter plan 02_moge web01              # バンドル: ディレクトリの名前で書きます
+  ```
+
+  単一レシピは拡張子（`.yaml`、`.yml`、`.toml`）付きで指定します。`nginx` が
+  `nginx.yaml` を指すことはありません。バンドルはディレクトリの名前で指定できます。そのディレクトリには
+  `bundle.yaml`、`bundle.yml`、`bundle.toml` のどれか 1 つを置きます。`02_moge.yaml` はその別名には
+  なりません（バンドルファイルをパスで指定することはできます）。プロジェクトファイルがなければ、
+  カレントディレクトリにあるバンドルディレクトリだけを探します。`recipe_paths` があれば、そのディレクトリの下も
+  探します（最大 6 階層、20,000 エントリーまで）。`security/ssh.yaml` や `common/02_moge` はパスの末尾と照合します。
+  2 つ以上見つかったときは両方を表示してエラーにし、どちらかを選ぶことはしません。使うファイルは、実行の前に
+  表示します。存在するパスを書いた場合は、これまでどおりそのまま使います。
+- v1.11.0 から: セレクタがあるとき、インベントリは `--inventory`、次にプロジェクトファイルの
+  `inventory`、次にカレントディレクトリかレシピのディレクトリで見つかったファイルです。対象の名前は
+  `hosts.yaml`、`hosts.yml`、`hosts.toml`、`inventory.yaml`、`inventory.yml`、`inventory.toml` の 6 つで、
+  見つかるのは 1 つでなければなりません。`inventory.yaml` を使うために `sinter.yaml` は必要ありません。
+  これらの場所に 2 つ以上あるとき（`hosts.yaml` と `inventory.yaml` が並んでいる場合や、Ansible の
+  `inventory.yml` がある場合も）はエラーになります。使うファイルを `--inventory` か `sinter.yaml` で指定してください。
 - `apply` は（理由を問わず）終了コードが 0 でない最初の実行で止まり残りを
   `not_run` とし、`plan`/`audit` は選択された全ホストを
   回ります。一部が失敗して終了コード 0 になることはありません。
@@ -365,16 +387,17 @@ Oracle Linux、Rocky Linux 8。dnf ターゲットでは、小さな VM で 1 �
 
 v1.0.0 以降の各リリースは、公開前にリリース成果物そのものを8つの対応
 ターゲットで受入検証し、その受入証跡（manifest、raw log、チェックサム）を
-リリースと一緒に公開します。Sinter v1.10.0 のリリースは、Linux x86_64
+リリースと一緒に公開します。Sinter v1.11.0 のリリースは、Linux x86_64
 検証ゲートを通過した後、リリース成果物そのもの
-（`sinter-v1.10.0-linux-x86_64.tar.gz`）を8台の実x86_64 Linuxホストで
+（`sinter-v1.11.0-linux-x86_64.tar.gz`）を8台の実x86_64 Linuxホストで
 受入検証しました — [インストール](#インストール)に記載のpoint releaseです。
 各ホストでtarballと展開したバイナリがバイト単位で同一（SHA-256）であることを
 確認し、リリースの受入シナリオ（成果物同一性、プラットフォーム検出、SSHコマンド実行、
 `package` のinstall/removeとネイティブ検証・冪等性、パッケージの進捗出力、`file`、`service`、`command` の
 guard、変更前失敗、機密の秘匿、`audit`（strict と default の audit policy を含む）、残留物なしの確認）を実行して、
-**312チェックが通過、失敗0、スキップ0（ターゲットあたり39）** でした（[v1.10.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.10.0)と[manifest](release/evidence/v1.10.0/acceptance-manifest.json)参照）。
-v1.10.0 で追加された機能（selector、inventory の自動検出、project file、複数の variables file、backup store、partial run）はリリース受入では実行していません（[v1.10.0 のリリースノート](https://github.com/hagix9/sinter/releases/tag/v1.10.0)参照）。
+**312チェックが通過、失敗0、スキップ0（ターゲットあたり39）** でした（[v1.11.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.11.0)と[manifest](release/evidence/v1.11.0/acceptance-manifest.json)参照）。
+v1.11.0 で追加された機能（ディレクトリ名による bundle、`recipe_paths` 以下の recipe 検索、`inventory.*` の名前）と v1.10.0 で追加された機能（selector、inventory の自動検出、project file、複数の variables file、backup store、partial run）はリリース受入では実行していません（[v1.11.0 のリリースノート](https://github.com/hagix9/sinter/releases/tag/v1.11.0)参照）。
+Sinter v1.10.0 も以前の同じ8台での受入検証（312チェック、失敗0。[v1.10.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.10.0)と[manifest](release/evidence/v1.10.0/acceptance-manifest.json)）を通過しています。
 Sinter v1.9.0 も以前の同じ8台での受入検証（312チェック、失敗0。[v1.9.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.9.0)と[manifest](release/evidence/v1.9.0/acceptance-manifest.json)）を通過しています。
 Sinter v1.8.0 も以前の同じ8台での受入検証（264チェック、失敗0。[v1.8.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.8.0)）を通過しています。
 Sinter v1.7.0 も以前の同じ8台での受入検証（264チェック、失敗0。[v1.7.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.7.0)）を通過しています。

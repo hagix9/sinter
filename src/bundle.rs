@@ -72,7 +72,7 @@ fn stem(p: &Path) -> String {
         .unwrap_or_else(|| p.display().to_string())
 }
 
-fn is_bundle_value(v: &Value) -> bool {
+pub(crate) fn is_bundle_value(v: &Value) -> bool {
     v.as_map().is_some_and(|m| m.contains_key("recipes"))
 }
 

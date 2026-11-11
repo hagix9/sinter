@@ -10,7 +10,7 @@
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/hagix9/sinter?quickstart=1)
 
-Try Sinter v1.10.0 in a disposable Ubuntu container in your browser — nothing to
+Try Sinter v1.11.0 in a disposable Ubuntu container in your browser — nothing to
 install locally, no SSH, no servers. See the [start guide](examples/start/README.md).
 
 Sinter is a lightweight, agentless configuration-management tool inspired by Itamae.
@@ -84,8 +84,8 @@ inventory (hosts, flat groups, explicit per-recipe `targets`) — see
 
 ## Install
 
-Sinter **v1.10.0** is the current release, published as one
-`sinter-v1.10.0-linux-x86_64.tar.gz` artifact covering every supported Linux
+Sinter **v1.11.0** is the current release, published as one
+`sinter-v1.11.0-linux-x86_64.tar.gz` artifact covering every supported Linux
 x86_64 platform line: Ubuntu, Rocky Linux, RHEL 9 / 10, and AlmaLinux 9 / 10.
 
 ```sh
@@ -93,7 +93,7 @@ curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
 $HOME/.local/bin/sinter --version
 ```
 
-Acceptance-tested point releases (v1.10.0 release artifact): Ubuntu 24.04,
+Acceptance-tested point releases (v1.11.0 release artifact): Ubuntu 24.04,
 Ubuntu 26.04, Rocky Linux 9.8, Rocky Linux 10.2, RHEL 9.8, RHEL 10.2,
 AlmaLinux 9.8 and AlmaLinux 10.2, all x86_64. Other point releases have not
 each been independently accepted.
@@ -213,6 +213,30 @@ sinter apply nginx.yaml --inventory hosts.yaml
   name `--inventory` in CI and on important systems.
 - A bundle (`version: 1` + `recipes: [common.yaml, nginx.yaml]`) runs several
   recipes; each is resolved against its own `targets`.
+- Since v1.11.0: names for recipes, bundles and inventories.
+
+  ```sh
+  sinter plan nginx.yaml web01           # a single recipe: always with its extension
+  sinter plan security/ssh.yaml web01    # more of its path, when one name is not enough
+  sinter plan 02_moge web01              # a bundle: the name of its directory
+  ```
+
+  A single recipe is named with its extension (`.yaml`, `.yml` or `.toml`);
+  `nginx` never means `nginx.yaml`. A bundle may be named by its directory, which
+  holds one `bundle.yaml`, `bundle.yml` or `bundle.toml`; `02_moge.yaml` is not
+  another name for it (the bundle file can still be given as a path). Without a
+  project file a bundle directory is looked for in the current directory only; with
+  `recipe_paths` those directories are also searched below (at most 6 levels and
+  20,000 entries), and `security/ssh.yaml` or `common/02_moge` matches the end of a
+  path. Two matches are an error listing both, never a choice, and the file used is
+  shown before anything runs. A path that exists is used as given, as before.
+- Since v1.11.0: with a selector, the inventory is `--inventory`, else
+  the project file's `inventory`, else the one file found in the current or the
+  recipe's directory among `hosts.yaml`, `hosts.yml`, `hosts.toml`,
+  `inventory.yaml`, `inventory.yml` and `inventory.toml`. No `sinter.yaml` is
+  needed for an `inventory.yaml`. Two of them in those places (a `hosts.yaml` next
+  to an `inventory.yaml` too, or an Ansible `inventory.yml`) are an error: name the
+  one to use with `--inventory` or in `sinter.yaml`.
 - `apply` stops at the first execution that exits non-zero (for any reason)
   and reports the rest `not_run`; `plan`/`audit` visit every selected host;
   a partial failure never exits 0.
@@ -369,9 +393,9 @@ VMs. Details, failure modes and the dpkg `deinstall ok installed` caveat:
 Each release from v1.0.0 on is acceptance-tested as its exact release
 artifact on the eight supported targets before it is published, and its
 acceptance evidence (manifest, raw logs, checksums) is published with the
-release. The v1.10.0 release passed the Linux x86_64 validation gate and was
+release. The v1.11.0 release passed the Linux x86_64 validation gate and was
 then acceptance-tested as its exact release artifact
-(`sinter-v1.10.0-linux-x86_64.tar.gz`) on eight real x86_64 Linux hosts — the
+(`sinter-v1.11.0-linux-x86_64.tar.gz`) on eight real x86_64 Linux hosts — the
 exact point releases listed under [Install](#install). On every host the
 tarball and the extracted binary were verified byte-identical (SHA-256) and
 ran the release acceptance scenario: artifact identity, platform detection,
@@ -380,11 +404,16 @@ verification and idempotency, package progress output, `file`, `service`,
 `command` guards, a pre-mutation failure, secret redaction, `audit` (including
 the strict and default audit policies), and a no-residue check:
 **312 checks passed, 0 failed, 0 skipped (39 per target)** (see the
-[v1.10.0 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.10.0)
-and its [manifest](release/evidence/v1.10.0/acceptance-manifest.json)).
-The release acceptance does not exercise the features new in v1.10.0 (selectors,
-inventory detection, the project file, several variables files, the backup store,
-partial runs); see the [v1.10.0 release notes](https://github.com/hagix9/sinter/releases/tag/v1.10.0).
+[v1.11.0 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.11.0)
+and its [manifest](release/evidence/v1.11.0/acceptance-manifest.json)).
+The release acceptance does not exercise the features new in v1.11.0 (bundles by
+directory name, the recipe search below `recipe_paths`, the `inventory.*` names) or
+in v1.10.0 (selectors, inventory detection, the project file, several variables
+files, the backup store, partial runs); see the
+[v1.11.0 release notes](https://github.com/hagix9/sinter/releases/tag/v1.11.0).
+Sinter v1.10.0 passed the earlier eight-host acceptance (312 checks, 0 failed;
+[v1.10.0 evidence](https://github.com/hagix9/sinter/releases/tag/v1.10.0) and its
+[manifest](release/evidence/v1.10.0/acceptance-manifest.json)).
 Sinter v1.9.0 passed the earlier eight-host acceptance (312 checks, 0 failed;
 [v1.9.0 evidence](https://github.com/hagix9/sinter/releases/tag/v1.9.0) and its
 [manifest](release/evidence/v1.9.0/acceptance-manifest.json)).

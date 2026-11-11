@@ -37,8 +37,16 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
-/// The file names detection looks for.
-pub const DETECTED_NAMES: [&str; 3] = ["hosts.yaml", "hosts.yml", "hosts.toml"];
+/// The file names detection looks for (DESIGN §39.3). Every one present is a
+/// candidate: two of them in the places searched are an error, never a choice.
+pub const DETECTED_NAMES: [&str; 6] = [
+    "hosts.yaml",
+    "hosts.yml",
+    "hosts.toml",
+    "inventory.yaml",
+    "inventory.yml",
+    "inventory.toml",
+];
 /// Largest detected inventory read.
 pub const MAX_DETECTED_BYTES: u64 = 1024 * 1024;
 
@@ -424,7 +432,7 @@ fn detect_from(cwd: &Path, recipe: &Path, after_check: &mut dyn FnMut()) -> Resu
     if found.len() > 1 {
         let list: Vec<String> = found.iter().map(|f| f.path.display().to_string()).collect();
         return Err(SinterError::schema(format!(
-            "several inventories were found ({}); Sinter never picks one, {ASK}",
+            "several inventories were found ({}); Sinter never picks one, name the one to use with --inventory or with inventory in the project file (sinter.yaml)",
             list.join(", ")
         )));
     }
@@ -572,6 +580,49 @@ mod tests {
         p.write("hosts.yaml", GOOD);
         std::fs::hard_link(p.path("hosts.yaml"), p.path("hosts.toml")).unwrap();
         refused(p.detect(".", "r.yaml"), "several inventories");
+    }
+
+    #[test]
+    fn the_inventory_names_are_found_alone_and_refused_together() {
+        for name in ["inventory.yaml", "inventory.yml"] {
+            let p = Project::new();
+            p.write(name, GOOD);
+            assert_eq!(p.detect(".", "r.yaml").unwrap().path, p.path(name));
+            let p = Project::new();
+            p.write(&format!("recipes/{name}"), GOOD);
+            let inv = p.detect(".", "recipes/r.yaml").unwrap();
+            assert!(inv.path.ends_with(format!("recipes/{name}")));
+        }
+        let p = Project::new();
+        p.write(
+            "inventory.toml",
+            "[hosts.web01]\naddress = \"192.0.2.11\"\n",
+        );
+        assert!(p.detect(".", "r.yaml").is_ok());
+        // Every pair of a hosts name and an inventory name is refused.
+        for (a, b) in [
+            ("hosts.yaml", "inventory.yaml"),
+            ("hosts.toml", "inventory.yml"),
+            ("inventory.yaml", "inventory.toml"),
+        ] {
+            let p = Project::new();
+            p.write(a, GOOD);
+            p.write(b, GOOD);
+            let e = p.detect(".", "r.yaml").unwrap_err();
+            assert!(e.message.contains("several inventories"), "{}", e.message);
+            assert!(
+                e.message.contains(a) && e.message.contains(b),
+                "{}",
+                e.message
+            );
+            assert!(e.message.contains("sinter.yaml"), "{}", e.message);
+        }
+        // Nothing found lists all six names.
+        let p = Project::new();
+        let e = p.detect(".", "r.yaml").unwrap_err();
+        for name in DETECTED_NAMES {
+            assert!(e.message.contains(name), "{}", e.message);
+        }
     }
 
     #[test]
