@@ -1,6 +1,6 @@
 ---
 title: Resource Plugins
-description: Data-only Resource Plugins, the plugin root, and the first-party firewalld plugin in v1.9.0.
+description: Data-only Resource Plugins, the plugin root, and the first-party firewalld plugin (v1.9.0 to v1.11.0).
 ---
 
 *Available from v1.9.0.*
@@ -10,8 +10,10 @@ from a plugin runs in Sinter. Every program a plugin can run comes from a
 capability catalog that lists fixed programs, argument templates with checked
 operands, and the meaning of each exit status.
 
-v1.9.0 provides one plugin: **`firewalld` 0.1.0**, with the resource type
-`firewalld.service`. Catalogs from anyone else are not supported: a catalog is
+Every release from v1.9.0 to v1.11.0 provides one plugin: **`firewalld` 0.1.0**,
+with the resource type `firewalld.service`; its files are the same in all of them.
+A later firewalld version kept in the source repository is not part of any
+release yet, and a released Sinter refuses it like any other catalog. Catalogs from anyone else are not supported: a catalog is
 used only when it is one of the reviewed first-party catalogs compiled into this
 Sinter, and any other catalog is refused, even when it is pinned.
 
@@ -20,8 +22,9 @@ A recipe without `plugins:` behaves as before, and the plugin root is not read.
 ## Set up a plugin root
 
 The plugin files are kept in the source repository, in
-[`plugins/first-party/` at v1.9.0](https://github.com/hagix9/sinter/tree/v1.9.0/plugins/first-party).
-They are not part of the release archive. Copy them to the controller without
+[`plugins/first-party/` at v1.11.0](https://github.com/hagix9/sinter/tree/v1.11.0/plugins/first-party)
+(the plugin and catalog files are the same bytes as at v1.9.0). They are not part of the release archive, and no
+release has a command that lists, checks or installs them. Copy them to the controller without
 editing them: one changed byte changes the digest, and Sinter refuses the file.
 
 ```text

@@ -2712,7 +2712,7 @@ UNCHANGED LIMIT: the loader still refuses a whole plugin when its trust entry le
 
 39. CLI usability: selector, inventory detection, short options
 
-Status: IMPLEMENTED; released in Sinter v1.10.0 (the release acceptance did not exercise it; live Linux acceptance of the features not yet run). Sinter v1.9.0 does not contain it. The inventory names `inventory.yaml`, `inventory.yml` and `inventory.toml` of §39.3 are prepared for v1.11.0 and not released. It is not a completion condition of the v2.0 Secure MCP Tunnel and does not change that roadmap. Register entries (local work register): FR-072 selector (§39.2), FR-073 inventory detection (§39.3, §39.4), FR-074 short options (§39.5). Owner decisions D-1 to D-5 of 2026-11-04 settled what were open questions U-1 to U-10 of the earlier proposal.
+Status: IMPLEMENTED; released in Sinter v1.10.0 (the release acceptance did not exercise it; live Linux acceptance of the features not yet run). Sinter v1.9.0 does not contain it. The inventory names `inventory.yaml`, `inventory.yml` and `inventory.toml` of §39.3 are released in Sinter v1.11.0 (the release acceptance did not exercise them). It is not a completion condition of the v2.0 Secure MCP Tunnel and does not change that roadmap. Register entries (local work register): FR-072 selector (§39.2), FR-073 inventory detection (§39.3, §39.4), FR-074 short options (§39.5). Owner decisions D-1 to D-5 of 2026-11-04 settled what were open questions U-1 to U-10 of the earlier proposal.
 
 39.1 What does not change
 
@@ -2800,9 +2800,11 @@ Tests: `tests/cli_selector.rs` and the unit tests of `src/inventory.rs`, `src/in
 
 2026-11-10 (SR-2, not released): §39.3 gained the names `inventory.yaml`, `inventory.yml` and `inventory.toml` (Owner decision). A directory holding a `hosts.*` and an `inventory.*` file, which used `hosts.*` until then, is now exit 2 as ambiguous; no other rule of the section changed.
 
+2026-11-11: status updated after the v1.11.0 publication; the SR-2 inventory names are released in v1.11.0. No contract changed.
+
 40. Project configuration, recipe search, layered variables, backup store, partial runs
 
-Status: IMPLEMENTED; released in Sinter v1.10.0 (the release acceptance did not exercise it; live Linux acceptance of the features not yet run). The bundle directories and the search of §40.2 (§40.11) are prepared for v1.11.0 and not released. Without a project file and without the new options, every command behaves as in §39, with one stated exception (§40.5, unknown variables).
+Status: IMPLEMENTED; released in Sinter v1.10.0 (the release acceptance did not exercise it; live Linux acceptance of the features not yet run). The bundle directories and the search of §40.2 (§40.11) are released in Sinter v1.11.0 (the release acceptance did not exercise them). Without a project file and without the new options, every command behaves as in §39, with one stated exception (§40.5, unknown variables).
 
 40.1 The project file
 
@@ -2954,3 +2956,5 @@ Tests: `tests/cli_recipe_resolve.rs` (SR-2: names, bundle directories, the searc
 40.11 Change history
 
 2026-11-10 (SR-2, not released; Owner decisions of 2026-11-10): §40.2 rewritten around two steps. The rule of v1.10.0 stays the first step, except that a directory found by it is no longer counted. A second step resolves a bundle by its directory and searches below `recipe_paths` for a single recipe by its file name or for a name of several components. No extension is added to a single recipe, and `<name>.yaml` is not an alias of a bundle directory. Behaviour that changed for an argument that was an error before: a `dir/name` that does not exist is searched for when the project has `recipe_paths` (it was used as given and failed to load), and a bundle directory in the current directory is resolved also without a project file. §40.3 and §39.3 were extended to match (the six inventory names, no inventory place for a recipe found by name).
+
+2026-11-11: status updated after the v1.11.0 publication; the bundle directories and the search of §40.2 are released in v1.11.0. No contract changed.

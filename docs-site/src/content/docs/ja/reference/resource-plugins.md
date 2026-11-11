@@ -1,6 +1,6 @@
 ---
 title: Resource Plugins
-description: データのみの Resource Plugins、プラグインルート、v1.9.0 の公式 firewalld プラグイン。
+description: データのみの Resource Plugins、プラグインルート、公式 firewalld プラグイン（v1.9.0〜v1.11.0）。
 ---
 
 *v1.9.0 から利用できます。*
@@ -10,8 +10,10 @@ Resource Plugin は、`<plugin>.<name>` という名前のリソースタイプ�
 すべて capability catalog から来ます。catalog には、固定のプログラム、オペランドを検査する
 引数テンプレート、各終了ステータスの意味が記載されています。
 
-v1.9.0 が提供するプラグインは **`firewalld` 0.1.0** の 1 つだけで、リソースタイプは
-`firewalld.service` です。他者の catalog には対応していません。catalog は、この Sinter に
+v1.9.0 から v1.11.0 までのどのリリースでも、提供するプラグインは **`firewalld` 0.1.0** の
+1 つだけで、リソースタイプは `firewalld.service` です（ファイルはすべての版で同じです）。
+ソースリポジトリにある新しい版の firewalld は、まだどのリリースにも含まれておらず、
+リリース版の Sinter はほかの catalog と同じように拒否します。他者の catalog には対応していません。catalog は、この Sinter に
 組み込まれたレビュー済みの公式 catalog である場合にだけ使われ、それ以外は pin してあっても
 拒否されます。
 
@@ -20,8 +22,9 @@ v1.9.0 が提供するプラグインは **`firewalld` 0.1.0** の 1 つだけ�
 ## プラグインルートを用意する
 
 プラグインのファイルはソースリポジトリの
-[v1.9.0 の `plugins/first-party/`](https://github.com/hagix9/sinter/tree/v1.9.0/plugins/first-party)
-にあります。リリースアーカイブには含まれません。編集せずにコントローラーへコピーしてください。
+[v1.11.0 の `plugins/first-party/`](https://github.com/hagix9/sinter/tree/v1.11.0/plugins/first-party)
+にあります（plugin と catalog のファイルは v1.9.0 と同じバイト列です）。リリースアーカイブには含まれず、これらを一覧・検査・
+インストールするコマンドもリリースにはありません。編集せずにコントローラーへコピーしてください。
 1 バイトでも変わると digest が変わり、Sinter はそのファイルを拒否します。
 
 ```text
