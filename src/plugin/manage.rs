@@ -95,6 +95,12 @@ pub struct VerifyReport {
     pub root: &'static str,
     pub trust: &'static str,
     pub ok: bool,
+    /// Why nothing was verified, when nothing was: `root-unset`,
+    /// `root-absent`, `trust-absent` or `nothing-pinned`. `null` when at least
+    /// one plugin was verified, or when the root or trust file could not be
+    /// read (`root` / `trust` already say so). Nothing verified is not a
+    /// success (exit 2).
+    pub nothing_verified: Option<&'static str>,
     pub plugins: Vec<VerifyEntry>,
     #[serde(skip)]
     pub messages: Vec<Message>,
@@ -138,8 +144,9 @@ impl ListReport {
 }
 
 impl VerifyReport {
-    /// 0 when every verified plugin is usable and the root and trust file
-    /// are sound, otherwise 2.
+    /// 0 when at least one plugin was verified, every verified plugin is
+    /// usable and the root and trust file are sound, otherwise 2. Nothing
+    /// verified (an unset or absent root, no trust file, nothing pinned) is 2.
     pub fn exit_code(&self) -> u8 {
         if self.ok {
             0
@@ -210,9 +217,11 @@ fn open_root(source: &Source, messages: &mut Vec<Message>) -> RootView {
     };
     let shown = Some(super::protect::shown(path));
     // A missing root (or a missing directory above it) is "nothing
-    // installed", not an error. The check follows links as the loader's
-    // own resolution does.
-    if matches!(std::fs::metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+    // installed", not an error. The check does not follow a final symbolic
+    // link (DESIGN §38.15): a dangling link is not "absent"; opening it below
+    // fails and the root is "refused". A link to an existing directory is
+    // still opened as the loader opens it (§38.5).
+    if absent(path) {
         return RootView {
             shown,
             root: "absent",
@@ -593,6 +602,7 @@ pub(crate) fn verify_with(
             root: "refused",
             trust: "not-read",
             ok: false,
+            nothing_verified: None,
             plugins: Vec::new(),
             messages,
         };
@@ -620,7 +630,31 @@ pub(crate) fn verify_with(
         );
         plugins.push(entry);
     }
-    let ok = !unreadable && plugins.iter().all(|p| p.status == "ok");
+    // Nothing verified is not a success: an unset or absent root, a root
+    // without a trust file, or a trust file that pins nothing (DESIGN §38.15).
+    let nothing_verified = if unreadable || !plugins.is_empty() {
+        None
+    } else {
+        Some(match (view.root, view.trust) {
+            ("unset", _) => "root-unset",
+            ("absent", _) => "root-absent",
+            (_, "absent") => "trust-absent",
+            _ => "nothing-pinned",
+        })
+    };
+    if let Some(why) = nothing_verified {
+        messages.push(Message(format!(
+            "no plugin verified ({}): {}",
+            why,
+            match why {
+                "root-unset" => "there is no plugin root",
+                "root-absent" => "the plugin root does not exist",
+                "trust-absent" => "the plugin root has no trust.toml",
+                _ => "the trust file pins no plugin; name plugins as ID@VERSION",
+            }
+        )));
+    }
+    let ok = !unreadable && nothing_verified.is_none() && plugins.iter().all(|p| p.status == "ok");
     VerifyReport {
         format: REPORT_FORMAT,
         command: "verify",
@@ -628,6 +662,7 @@ pub(crate) fn verify_with(
         root: view.root,
         trust: view.trust,
         ok,
+        nothing_verified,
         plugins,
         messages,
     }

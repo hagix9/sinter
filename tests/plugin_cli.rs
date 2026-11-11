@@ -313,7 +313,7 @@ fn plugin_list_uses_the_default_root_and_prints_a_table() {
 }
 
 #[test]
-fn plugin_verify_with_nothing_installed_is_an_empty_success() {
+fn plugin_verify_with_nothing_installed_is_not_a_success() {
     let d = tempfile::tempdir().unwrap();
     let missing = d.path().join("no-such-root");
     let o = sinter(
@@ -326,10 +326,14 @@ fn plugin_verify_with_nothing_installed_is_an_empty_success() {
         ],
         d.path(),
     );
-    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    // Nothing verified is exit 2 (DESIGN §38.15); stdout stays one JSON
+    // document and the reason goes to standard error.
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o));
     let j = json_of(&o);
-    assert_eq!(j["ok"], true);
+    assert_eq!(j["ok"], false);
+    assert_eq!(j["nothing_verified"], "root-absent");
     assert_eq!(j["plugins"], serde_json::json!([]));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("no plugin verified (root-absent)"));
     // A named plugin that is not installed fails, and stdout stays JSON.
     let o = sinter(
         &[

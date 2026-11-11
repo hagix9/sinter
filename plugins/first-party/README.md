@@ -246,6 +246,9 @@ resources:
 
 ## Checking a plugin root
 
+Not yet in a published release: `sinter plugin list` and `sinter plugin verify`
+are in the source tree only; Sinter v1.9.0 to v1.11.0 do not have them.
+
 Both commands only read: they change no file, read no recipe and contact no
 host. `--plugin-root` and the default root are as for `plan`.
 
@@ -263,8 +266,11 @@ and mutate operations the trust file enables. `verify` checks the root's
 protection, the trust file, each file against its pin, the first-party
 registry and the embedded file, and loads the plugin with the loader; it
 lists the operations the plugin uses that the trust file leaves out (while
-any is listed the loader refuses the whole plugin). Exit 0 when everything
-passes, otherwise 2. With `--json` stdout is one JSON document and messages
+any is listed the loader refuses the whole plugin). Exit 0 when at least one
+plugin was verified and everything passes, otherwise 2: nothing to verify (no
+plugin root, an absent root, no `trust.toml`, nothing pinned) is exit 2, with
+the reason in `nothing_verified` and on standard error. `list` with nothing
+installed is exit 0. With `--json` stdout is one JSON document and messages
 go to standard error. Neither command installs or trusts anything: copy the
 files and write `trust.toml` as above.
 

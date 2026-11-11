@@ -596,11 +596,13 @@ fn verify_passes_every_check_for_both_installed_versions() {
 
 #[test]
 fn verify_tells_not_installed_from_damaged() {
-    // Nothing installed and no root: an empty verification passes; a named
-    // plugin is not installed.
+    // Nothing installed and no root: nothing is verified, which is not a
+    // success (DESIGN §38.15); a named plugin is not installed.
     let f = fx_absent();
     let r = f.verify(&[]);
-    assert!(r.ok && r.plugins.is_empty());
+    assert!(!r.ok && r.plugins.is_empty());
+    assert_eq!(r.nothing_verified, Some("root-absent"));
+    assert_eq!(r.exit_code(), 2);
     let r = f.verify(&["firewalld@0.2.0"]);
     assert_eq!(ventry(&r, "0.2.0").status, "not-installed");
     assert_eq!(r.exit_code(), 2);
@@ -720,7 +722,8 @@ fn reports_serialize_to_json_with_states_only() {
     assert!(l.get("messages").is_none());
     let v = serde_json::to_value(f.verify(&[])).unwrap();
     assert_eq!(v["plugins"], serde_json::json!([]));
-    assert_eq!(v["ok"], true);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["nothing_verified"], "root-absent");
 
     // Messages (which may contain paths) stay out of the JSON.
     let f = fx_both();
@@ -776,4 +779,107 @@ fn the_management_module_has_no_path_to_a_write_a_process_or_a_target() {
     ] {
         assert!(!src.contains(word), "manage.rs uses {}", word);
     }
+}
+
+#[test]
+fn verify_with_nothing_to_verify_is_not_a_success() {
+    // Unset root (HOME not set, no --plugin-root).
+    let r = manage::verify_with(
+        &Source::Unset,
+        &[],
+        FIRST_PARTY_BUNDLE,
+        FIRST_PARTY_CATALOGS,
+    );
+    assert_eq!(
+        (r.root, r.ok, r.nothing_verified),
+        ("unset", false, Some("root-unset"))
+    );
+    assert_eq!(r.exit_code(), 2);
+    assert!(r
+        .messages
+        .iter()
+        .any(|m| m.0.contains("no plugin verified (root-unset)")));
+    // Absent root.
+    let r = fx_absent().verify(&[]);
+    assert_eq!(
+        (r.root, r.nothing_verified),
+        ("absent", Some("root-absent"))
+    );
+    assert_eq!(r.exit_code(), 2);
+    // A root without a trust file.
+    let r = fx().verify(&[]);
+    assert_eq!(
+        (r.root, r.trust, r.nothing_verified),
+        ("ok", "absent", Some("trust-absent"))
+    );
+    assert_eq!(r.exit_code(), 2);
+    // A trust file that pins nothing, with untrusted files present.
+    let f = fx();
+    f.files(e("0.2.0"));
+    f.trust("format = 1\n");
+    let r = f.verify(&[]);
+    assert_eq!(
+        (r.trust, r.nothing_verified),
+        ("ok", Some("nothing-pinned"))
+    );
+    assert!(r.plugins.is_empty());
+    assert_eq!(r.exit_code(), 2);
+    // list is unchanged: an absent or unset root is nothing installed (exit 0).
+    assert_eq!(fx_absent().list().exit_code(), 0);
+    let l = manage::list_with(&Source::Unset, FIRST_PARTY_BUNDLE, FIRST_PARTY_CATALOGS);
+    assert_eq!(l.exit_code(), 0);
+}
+
+#[test]
+fn verify_with_something_verified_reports_no_reason() {
+    let f = fx_both();
+    let r = f.verify(&[]);
+    assert!(!r.plugins.is_empty());
+    assert_eq!(r.nothing_verified, None);
+    // A named plugin that is not installed fails for its own status, not as
+    // "nothing verified".
+    let r = fx_absent().verify(&["firewalld@0.2.0"]);
+    assert_eq!(r.nothing_verified, None);
+    assert_eq!(r.exit_code(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dangling_root_link_is_refused_not_absent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let boundary = tmp.path().to_path_buf();
+    let root = boundary.join("root");
+    std::os::unix::fs::symlink(boundary.join("nowhere"), &root).unwrap();
+    let f = Fx {
+        _tmp: tmp,
+        boundary,
+        root,
+    };
+    let l = f.list();
+    assert_eq!(l.root, "refused");
+    assert_eq!(l.exit_code(), 2);
+    let v = f.verify(&[]);
+    assert_eq!((v.root, v.nothing_verified), ("refused", None));
+    assert_eq!(v.exit_code(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_root_link_to_an_existing_directory_still_opens() {
+    let f = fx_both();
+    let link = f.boundary.join("root-link");
+    std::os::unix::fs::symlink(&f.root, &link).unwrap();
+    let boundary = f.boundary.clone();
+    let open = move |p: &Path| PluginRoot::open_below(p, &boundary);
+    let r = manage::verify_with(
+        &Source::Root {
+            path: link.clone(),
+            open: &open,
+        },
+        &[],
+        FIRST_PARTY_BUNDLE,
+        FIRST_PARTY_CATALOGS,
+    );
+    assert_eq!(r.root, "ok", "{:?}", r.messages);
+    assert_eq!(r.nothing_verified, None);
 }
