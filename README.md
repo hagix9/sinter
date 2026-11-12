@@ -84,8 +84,8 @@ inventory (hosts, flat groups, explicit per-recipe `targets`) — see
 
 ## Install
 
-Sinter **v1.11.0** is the current release, published as one
-`sinter-v1.11.0-linux-x86_64.tar.gz` artifact covering every supported Linux
+Sinter **v1.12.0** is prepared for release as one
+`sinter-v1.12.0-linux-x86_64.tar.gz` artifact covering every supported Linux
 x86_64 platform line: Ubuntu, Rocky Linux, RHEL 9 / 10, and AlmaLinux 9 / 10.
 
 ```sh
@@ -237,7 +237,7 @@ sinter apply nginx.yaml --inventory hosts.yaml
   needed for an `inventory.yaml`. Two of them in those places (a `hosts.yaml` next
   to an `inventory.yaml` too, or an Ansible `inventory.yml`) are an error: name the
   one to use with `--inventory` or in `sinter.yaml`.
-- Next version (not released): `recipe_vars` in the project file gives each recipe
+- Since v1.12.0: `recipe_vars` in the project file gives each recipe
   its own variables files, so a recipe gets only the values written for it and a run
   no longer warns about variables of other recipes.
 
@@ -253,7 +253,7 @@ sinter apply nginx.yaml --inventory hosts.yaml
   A key is a recipe's file name without the extension. A recipe that is not listed
   keeps its defaults. `recipe_vars` is refused together with `vars_files` or
   `--vars-file`. Without `recipe_vars` nothing changes.
-- Next version (not released): `sinter plugin list`, `verify`, `install` and `remove`
+- Since v1.12.0: `sinter plugin list`, `verify`, `install` and `remove`
   manage the first-party Resource Plugins this Sinter carries (firewalld 0.1.0 and
   0.2.0) in the plugin root, without downloading anything. Installing allows no
   mutate operation unless you name it (`--allow-mutate`, `--allow-mutate-for`), and

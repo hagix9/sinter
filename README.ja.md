@@ -85,9 +85,9 @@ embedded scriptingは依然として実装対象に含めません。
 
 ## インストール
 
-Sinter **v1.11.0** は現在のリリースです。対応するすべての Linux x86_64 プラットフォーム
+Sinter **v1.12.0** は、対応するすべての Linux x86_64 プラットフォーム
 ライン（Ubuntu、Rocky Linux、RHEL 9 / 10、AlmaLinux 9 / 10）向けに、
-1つの `sinter-v1.11.0-linux-x86_64.tar.gz` アーティファクトとして公開しています。
+1つの `sinter-v1.12.0-linux-x86_64.tar.gz` アーティファクトとしてリリースを準備しています。
 
 ```sh
 curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
@@ -232,7 +232,7 @@ sinter apply nginx.yaml --inventory hosts.yaml
   見つかるのは 1 つでなければなりません。`inventory.yaml` を使うために `sinter.yaml` は必要ありません。
   これらの場所に 2 つ以上あるとき（`hosts.yaml` と `inventory.yaml` が並んでいる場合や、Ansible の
   `inventory.yml` がある場合も）はエラーになります。使うファイルを `--inventory` か `sinter.yaml` で指定してください。
-- 次のバージョン（未リリース）: プロジェクトファイルの `recipe_vars` で、各レシピにそれぞれの変数ファイルを
+- v1.12.0 から: プロジェクトファイルの `recipe_vars` で、各レシピにそれぞれの変数ファイルを
   与えられます。レシピは自分向けの値だけを受け取り、ほかのレシピの変数について警告されることもなくなります。
 
   ```yaml
@@ -246,7 +246,7 @@ sinter apply nginx.yaml --inventory hosts.yaml
 
   キーは拡張子を除いたレシピのファイル名です。記載のないレシピは既定値のままです。`vars_files` や
   `--vars-file` との併用は拒否します。`recipe_vars` がなければ何も変わりません。
-- 次のバージョン（未リリース）: `sinter plugin list`、`verify`、`install`、`remove` で、この Sinter が持つ公式の
+- v1.12.0 から: `sinter plugin list`、`verify`、`install`、`remove` で、この Sinter が持つ公式の
   Resource Plugins（firewalld 0.1.0 と 0.2.0）をプラグインルートで管理できます。何もダウンロードしません。
   インストールは、名前を指定しない限り mutate 操作を許可しません（`--allow-mutate`、`--allow-mutate-for`）。
   observe だけの trust エントリでは、`plan` と `apply` はターゲットに接続する前に拒否され、`audit` は使えます。
