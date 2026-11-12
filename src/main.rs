@@ -367,6 +367,12 @@ struct Resolved {
     default_target: bool,
     backup_dir: Option<String>,
     strict_vars: bool,
+    /// The project file's `recipe_vars` (DESIGN §40.5): each recipe's own
+    /// variables files. Set only when the project file has the field.
+    recipe_vars: Option<std::collections::BTreeMap<String, Vec<PathBuf>>>,
+    /// Which files each recipe of this run was given, in run order, once the
+    /// variables gate has matched `recipe_vars` to the recipes.
+    recipe_vars_used: OnceLock<Vec<(String, Vec<PathBuf>)>>,
     /// Warnings of the variables gate, for JSON output.
     vars_warnings: OnceLock<Vec<String>>,
     /// The checked exclusions, set once before anything is resolved.
@@ -385,6 +391,12 @@ impl ExecOpts {
     /// Whether anything of recipe `unit` runs.
     fn unit_runs(&self, unit: usize) -> bool {
         self.skips().is_none_or(|s| s.runs(unit))
+    }
+
+    /// Whether the run goes through the variables gate: a variables file, or
+    /// the project file's `recipe_vars`.
+    fn has_vars(&self) -> bool {
+        !self.vars_file.is_empty() || self.resolved.recipe_vars.is_some()
     }
 }
 
@@ -466,6 +478,19 @@ fn apply_project(
             }
         }
     }
+    if let Some(rv) = &project.recipe_vars {
+        // Which of the command line's files would belong to which recipe is
+        // not something to guess (DESIGN §40.5).
+        if !exec.vars_file.is_empty() {
+            return Err(SinterError::schema(format!(
+                "--vars-file cannot be used with the recipe_vars of project file {}: list the file under its recipes in recipe_vars, or run with --no-config",
+                project.path.display()
+            )));
+        }
+        // The files are checked and read by the variables gate, and only
+        // those of the recipes this run has.
+        exec.resolved.recipe_vars = Some(rv.clone());
+    }
     let mut files = Vec::with_capacity(project.vars_files.len() + exec.vars_file.len());
     for path in &project.vars_files {
         check_named_file(path)?;
@@ -538,6 +563,11 @@ fn print_resolved(recipe: &Path, selector: Option<&str>, exec: &ExecOpts, format
         for f in &exec.vars_file {
             lines.push(format!("vars: {}", sanitize_line(&f.display().to_string())));
         }
+        if exec.resolved.recipe_vars.is_some() {
+            lines.push(
+                "vars: recipe_vars of the project file (each recipe's own files)".to_string(),
+            );
+        }
     } else if exec.resolved.recipe_match != RecipeMatch::Exact {
         // No project file, and the argument was not used as written: say
         // which file it means before anything runs.
@@ -588,6 +618,25 @@ fn resolved_json(recipe: &Path, exec: &ExecOpts) -> Option<serde_json::Value> {
         "vars_files": exec.vars_file.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "backup_directory": exec.backup_store(),
     }))
+    .map(|mut v| {
+        // Only with `recipe_vars`, so other documents are unchanged.
+        if r.recipe_vars.is_some() {
+            v["recipe_vars"] = match r.recipe_vars_used.get() {
+                Some(used) => serde_json::Value::Array(
+                    used.iter()
+                        .map(|(label, files)| {
+                            serde_json::json!({
+                                "recipe": label,
+                                "files": files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                            })
+                        })
+                        .collect(),
+                ),
+                None => serde_json::Value::Null,
+            };
+        }
+        v
+    })
 }
 
 /// `resolved.recipe`: `path` and `via` as before; `match` and `query` only when
@@ -1435,7 +1484,7 @@ fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
     let selector = selector_of(&a.selector);
     let selector = selector.as_deref();
     print_resolved(&a.recipe, selector, &a.exec, format);
-    if a.exec.vars_file.is_empty() {
+    if !a.exec.has_vars() {
         if a.exec.limit.is_none() && selector.is_none() {
             let source = load_source_with_plugins(&a.recipe, &plugin_ctx(&a.exec))?;
             skip_gate("validate", false, &a.exec, &source, None, format)?;
@@ -1480,12 +1529,7 @@ fn validate(a: &ValidateArgs) -> Result<u8, SinterError> {
         .as_ref()
         .and_then(|l| LimitReport::of(l, &limit, gate.inventory.as_ref(), &a.exec));
     let report = VarsReport {
-        files: a
-            .exec
-            .vars_file
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect(),
+        files: vars_files_in_effect(&a.exec),
         executions: gate.frozen.len(),
         warnings,
     };
@@ -1701,7 +1745,13 @@ fn print_validate(
         }
     }
     if format == OutputFormat::Text {
-        if let Some(v) = vars {
+        if let Some(v) = vars.filter(|v| v.files.is_empty()) {
+            println!(
+                "{}: no variables file applies to the recipes of this run (recipe_vars): {} execution(s)",
+                style::status("ok", color),
+                v.executions
+            );
+        } else if let Some(v) = vars {
             println!(
                 "{}: variables file{} {} checked: {} execution(s)",
                 style::status("ok", color),
@@ -1965,7 +2015,7 @@ fn run_phase_with(
         format,
         color: format == OutputFormat::Text && style::stdout_color(),
     };
-    if !a.exec.vars_file.is_empty() {
+    if a.exec.has_vars() {
         return run_phase_vars(phase, a, &a.exec.vars_file, &limit, &ro, progress);
     }
     if limit.given() {
@@ -2240,6 +2290,112 @@ fn unrun_units(limited: Option<&Limited>, units: usize) -> Vec<bool> {
     }
 }
 
+/// The files of a run, lowest precedence first: `--vars-file` and `vars_files`,
+/// or with `recipe_vars` every file some recipe of the run was given, once.
+fn vars_files_in_effect(exec: &ExecOpts) -> Vec<String> {
+    match exec.resolved.recipe_vars_used.get() {
+        Some(used) => {
+            let mut out: Vec<String> = Vec::new();
+            for f in used.iter().flat_map(|(_, files)| files) {
+                let s = f.display().to_string();
+                if !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+            out
+        }
+        None => exec
+            .vars_file
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect(),
+    }
+}
+
+/// Match the project file's `recipe_vars` to the recipes of this run (DESIGN
+/// §40.5): a recipe by its label, as `--skip-recipe` names it, and two recipes
+/// of one label that `recipe_vars` names are refused rather than guessed at.
+/// Only the files of the recipes this run has are checked and read, each once;
+/// a recipe that is not listed gets none. Every problem of every file is
+/// reported at once, and no message carries a value.
+fn recipe_vars_files(
+    rv: &std::collections::BTreeMap<String, Vec<PathBuf>>,
+    units: &[sinter::bundle::Loaded<sinter::model::Prepared>],
+    exec: &ExecOpts,
+    format: OutputFormat,
+) -> Result<Vec<sinter::varsfile::VarsFile>, SinterError> {
+    use sinter::varsfile::{load_vars_file, merge_vars_files, Problems, VarsFile};
+    for label in rv.keys() {
+        let n = units.iter().filter(|u| &u.label == label).count();
+        if n > 1 {
+            return Err(SinterError::schema(format!(
+                "recipe_vars: {n} recipes of this run are named {label}; rename a file to tell them apart"
+            )));
+        }
+    }
+    let mut loaded: Vec<(PathBuf, VarsFile)> = Vec::new();
+    let mut problems = Vec::new();
+    for files in units.iter().filter_map(|u| rv.get(&u.label)) {
+        for path in files {
+            if loaded.iter().any(|(p, _)| p == path) {
+                continue;
+            }
+            if let Err(e) = check_named_file(path) {
+                problems.push(e.message);
+                continue;
+            }
+            match load_vars_file(path) {
+                Ok(f) => loaded.push((path.clone(), f)),
+                Err(Problems(p)) => problems.extend(p),
+            }
+        }
+    }
+    if !problems.is_empty() {
+        return Err(static_failure(Problems(problems)));
+    }
+    let mut used = Vec::with_capacity(units.len());
+    let mut out = Vec::with_capacity(units.len());
+    for u in units {
+        let files = rv.get(&u.label).cloned().unwrap_or_default();
+        let parts: Vec<VarsFile> = files
+            .iter()
+            .filter_map(|p| loaded.iter().find(|(q, _)| q == p).map(|(_, f)| f.clone()))
+            .collect();
+        if parts.len() != files.len() {
+            return Err(model_mismatch("a recipe's variables file was not read"));
+        }
+        out.push(merge_vars_files(parts).unwrap_or_else(VarsFile::empty));
+        let line = if files.is_empty() {
+            format!(
+                "vars: none for recipe {} ({})",
+                u.label,
+                if rv.contains_key(&u.label) {
+                    "recipe_vars lists no file"
+                } else {
+                    "not listed in recipe_vars"
+                }
+            )
+        } else {
+            format!(
+                "vars: recipe {}: {}",
+                u.label,
+                files
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        match format {
+            OutputFormat::Text => println!("{}", sanitize_line(&line)),
+            OutputFormat::Json => eprintln!("{}", sanitize_line(&line)),
+        }
+        used.push((u.label.clone(), files));
+    }
+    let _ = exec.resolved.recipe_vars_used.set(used);
+    Ok(out)
+}
+
 fn vars_gate(
     recipe: &Path,
     exec: &ExecOpts,
@@ -2248,8 +2404,8 @@ fn vars_gate(
     format: OutputFormat,
 ) -> Result<VarsGate, SinterError> {
     use sinter::varsfile::{
-        freeze_executions_with, load_vars_file, merge_vars_files, Mode as VarsMode, Problems,
-        Scope, UnknownVars,
+        freeze_executions_per_recipe, freeze_executions_with, load_vars_file, merge_vars_files,
+        Mode as VarsMode, Problems, Scope, UnknownVars,
     };
     let prepared = prepare_source_with_plugins(recipe, &plugin_ctx(exec))?;
     let inventory = match &exec.inventory {
@@ -2257,20 +2413,32 @@ fn vars_gate(
         Some(p) => Some(load_exec_inventory(p, exec)?),
         None => None,
     };
-    // Every file is read and checked, so all their problems are reported at once.
-    let mut files = Vec::with_capacity(vars_paths.len());
-    let mut unreadable = Vec::new();
-    for path in vars_paths {
-        match load_vars_file(path) {
-            Ok(f) => files.push(f),
-            Err(Problems(p)) => unreadable.extend(p),
+    let per_recipe = match &exec.resolved.recipe_vars {
+        Some(rv) => Some(recipe_vars_files(rv, &prepared.units, exec, format)?),
+        None => None,
+    };
+    let vars = match &per_recipe {
+        Some(_) => None,
+        None => {
+            // Every file is read and checked, so all their problems are
+            // reported at once.
+            let mut files = Vec::with_capacity(vars_paths.len());
+            let mut unreadable = Vec::new();
+            for path in vars_paths {
+                match load_vars_file(path) {
+                    Ok(f) => files.push(f),
+                    Err(Problems(p)) => unreadable.extend(p),
+                }
+            }
+            if !unreadable.is_empty() {
+                return Err(static_failure(Problems(unreadable)));
+            }
+            Some(
+                merge_vars_files(files)
+                    .ok_or_else(|| model_mismatch("a variables gate without a variables file"))?,
+            )
         }
-    }
-    if !unreadable.is_empty() {
-        return Err(static_failure(Problems(unreadable)));
-    }
-    let vars = merge_vars_files(files)
-        .ok_or_else(|| model_mismatch("a variables gate without a variables file"))?;
+    };
     let (limited, pairs): (Option<Limited>, Vec<(usize, String)>) = match &inventory {
         Some(inv) => {
             let resolutions = limit_resolutions(inv, &prepared, limit)?;
@@ -2312,19 +2480,34 @@ fn vars_gate(
     };
     let mut warnings = Vec::new();
     let elsewhere = match (&unknown, exec.resolved.project.as_deref()) {
+        // With `recipe_vars` each file belongs to its recipe: no name in it is
+        // another recipe's.
+        (UnknownVars::Warn, Some(_)) if per_recipe.is_some() => Default::default(),
         (UnknownVars::Warn, Some(project)) => sinter::project::declared_elsewhere(project),
         _ => Default::default(),
     };
-    let models = freeze_executions_with(
-        &prepared.units,
-        &vars,
-        &mode,
-        &pairs,
-        scope,
-        unknown,
-        &elsewhere,
-        &mut warnings,
-    )
+    let models = match (&vars, &per_recipe) {
+        (Some(vars), _) => freeze_executions_with(
+            &prepared.units,
+            vars,
+            &mode,
+            &pairs,
+            scope,
+            unknown,
+            &elsewhere,
+            &mut warnings,
+        ),
+        (None, Some(files)) => freeze_executions_per_recipe(
+            &prepared.units,
+            files,
+            &mode,
+            &pairs,
+            scope,
+            unknown,
+            &mut warnings,
+        ),
+        (None, None) => return Err(model_mismatch("a variables gate without its files")),
+    }
     .map_err(static_failure)?;
     for w in &warnings {
         eprintln!(

@@ -414,6 +414,18 @@ pub enum Scope {
 }
 
 impl VarsFile {
+    /// No file: no value for any variable (a recipe without files of its own
+    /// in `recipe_vars`).
+    pub fn empty() -> VarsFile {
+        VarsFile {
+            path: PathBuf::new(),
+            common: BTreeMap::new(),
+            groups: BTreeMap::new(),
+            hosts: BTreeMap::new(),
+            origins: BTreeMap::new(),
+        }
+    }
+
     /// Every (layer, label, name, value) of the file, in a fixed order.
     fn entries(&self) -> Vec<(Layer<'_>, String, &String, &Value)> {
         let mut out: Vec<(Layer<'_>, String, &String, &Value)> = self
@@ -534,6 +546,103 @@ pub fn freeze_executions_with(
     elsewhere: &BTreeSet<String>,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<Model>, Problems> {
+    freeze_for(
+        units,
+        vf,
+        mode,
+        pairs,
+        scope,
+        unknown,
+        elsewhere,
+        warnings,
+        "any recipe of this run",
+    )
+}
+
+/// The static gate with a variables file of its own for each recipe (the
+/// project file's `recipe_vars`, DESIGN §40.5): `files[i]` holds the files of
+/// recipe `i`, already merged, and nothing in it reaches another recipe. Each
+/// recipe is checked and frozen against its own files exactly as a run of that
+/// recipe alone with those files would be, except that a name its files hold
+/// and it does not declare is never excused as another recipe's: the files
+/// were named for this recipe. Returns one model per pair, in the order of
+/// `pairs`, or every problem of every recipe.
+pub fn freeze_executions_per_recipe(
+    units: &[Loaded<Prepared>],
+    files: &[VarsFile],
+    mode: &Mode,
+    pairs: &[(usize, String)],
+    scope: Scope,
+    unknown: UnknownVars,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<Model>, Problems> {
+    if files.len() != units.len() {
+        return Err(Problems(vec![
+            "internal error: the variables files do not match the recipes of this run".to_string(),
+        ]));
+    }
+    let none = BTreeSet::new();
+    let mut models: Vec<std::collections::VecDeque<Model>> = Vec::with_capacity(units.len());
+    let mut problems: Vec<String> = Vec::new();
+    for (i, unit) in units.iter().enumerate() {
+        let own: Vec<(usize, String)> = pairs
+            .iter()
+            .filter(|(u, _)| *u == i)
+            .map(|(_, h)| (0, h.clone()))
+            .collect();
+        let who = format!("recipe {}", unit.label);
+        match freeze_for(
+            std::slice::from_ref(unit),
+            &files[i],
+            mode,
+            &own,
+            scope,
+            unknown,
+            &none,
+            warnings,
+            &who,
+        ) {
+            Ok(m) => models.push(m.into()),
+            Err(Problems(p)) => {
+                models.push(Default::default());
+                for line in p {
+                    if !problems.contains(&line) {
+                        problems.push(line);
+                    }
+                }
+            }
+        }
+    }
+    if !problems.is_empty() {
+        return Err(Problems(capped(problems)));
+    }
+    let mut out = Vec::with_capacity(pairs.len());
+    for (u, _) in pairs {
+        let m = models
+            .get_mut(*u)
+            .and_then(|q| q.pop_front())
+            .ok_or_else(|| {
+                Problems(vec![
+                    "internal error: a recipe's models do not match its executions".to_string(),
+                ])
+            })?;
+        out.push(m);
+    }
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn freeze_for(
+    units: &[Loaded<Prepared>],
+    vf: &VarsFile,
+    mode: &Mode,
+    pairs: &[(usize, String)],
+    scope: Scope,
+    unknown: UnknownVars,
+    elsewhere: &BTreeSet<String>,
+    warnings: &mut Vec<String>,
+    who: &str,
+) -> Result<Vec<Model>, Problems> {
     // The layers that apply to the executions of `pairs`.
     let applicable: Option<(BTreeSet<&str>, BTreeSet<String>)> = match scope {
         Scope::All => None,
@@ -596,17 +705,17 @@ pub fn freeze_executions_with(
             };
             if unknown == UnknownVars::Error {
                 problems.push(format!(
-                    "{label}: variable {name}{from} is not declared by any recipe of this run{hint}"
+                    "{label}: variable {name}{from} is not declared by {who}{hint}"
                 ));
             } else if elsewhere.contains(name.as_str()) {
                 // Another recipe's variable, in a file shared between recipes.
             } else if matches!(typo, Some(Typo::Certain(_))) {
                 problems.push(format!(
-                    "{label}: variable {name}{from} is not declared by any recipe of this run{hint}"
+                    "{label}: variable {name}{from} is not declared by {who}{hint}"
                 ));
             } else {
                 let line = format!(
-                    "{label}: variable {name}{from} is not declared by any recipe of this run{hint}; ignored (--strict-vars makes this an error)"
+                    "{label}: variable {name}{from} is not declared by {who}{hint}; ignored (--strict-vars makes this an error)"
                 );
                 if !warnings.contains(&line) {
                     warnings.push(line);
@@ -1694,5 +1803,134 @@ mod tests {
                 "a map"
             ]
         );
+    }
+
+    // -----------------------------------------------------------------
+    // recipe_vars: each recipe with its own files (DESIGN §40.5).
+    // -----------------------------------------------------------------
+
+    const RV_A: &str = "version: 1\nvars:\n  port: { value: 80 }\n  root: { value: /a }\nresources:\n  - id: a\n    type: file\n    with: { path: \"{{ vars.root }}/a\", content: \"{{ vars.port }}\" }\n";
+    const RV_B: &str = "version: 1\nvars:\n  port: { value: 9000 }\nresources:\n  - id: b\n    type: file\n    with: { path: /etc/b, content: \"{{ vars.port }}\" }\n";
+    const RV_C: &str = "version: 1\nvars:\n  other: { value: 1 }\nresources: []\n";
+
+    fn per_recipe(
+        units: &[Loaded<Prepared>],
+        files: &[VarsFile],
+        p: &[(usize, String)],
+        unknown: UnknownVars,
+    ) -> (Result<Vec<Model>, Problems>, Vec<String>) {
+        let mut w = Vec::new();
+        let r = freeze_executions_per_recipe(
+            units,
+            files,
+            &Mode::Single,
+            p,
+            Scope::All,
+            unknown,
+            &mut w,
+        );
+        (r, w)
+    }
+
+    #[test]
+    fn recipe_vars_give_each_recipe_only_its_own_files() {
+        let d = tempfile::tempdir().unwrap();
+        let units = vec![
+            recipe(&d, "05_a.yaml", RV_A),
+            recipe(&d, "10_b.yaml", RV_B),
+            recipe(&d, "20_c.yaml", RV_C),
+        ];
+        // b's file also names `root`, which a declares: it must not reach a.
+        let a = vars("version: 1\nvars: { port: 1 }\n");
+        let b = vars(&format!(
+            "version: 1\nvars: {{ port: 2, root: /{CANARY} }}\n"
+        ));
+        let files = vec![a, b, VarsFile::empty()];
+        // Interleaved on purpose: the models come back in the order of `pairs`.
+        let p = pairs(&[(1, "h1"), (0, "h1"), (2, "h1"), (0, "h2")]);
+        let (r, w) = per_recipe(&units, &files, &p, UnknownVars::Warn);
+        let m = r.unwrap();
+        assert_eq!(var(&m[0], "port"), Value::Int(2));
+        assert_eq!(var(&m[1], "port"), Value::Int(1));
+        assert_eq!(var(&m[1], "root"), s("/a"), "b's root never reaches a");
+        assert_eq!(m[1].resources[0].path.as_deref(), Some("/a/a"));
+        assert_eq!(var(&m[2], "other"), Value::Int(1));
+        assert_eq!(var(&m[3], "port"), Value::Int(1));
+        // The name b does not declare is b's problem, said of recipe b only.
+        assert_eq!(
+            w,
+            vec!["vars: variable root is not declared by recipe 10_b; did you mean port?; ignored (--strict-vars makes this an error)".to_string()]
+        );
+        assert!(!w.concat().contains(CANARY));
+        // Strict: an error, of recipe b.
+        let (r, _) = per_recipe(&units, &files, &p, UnknownVars::Error);
+        assert_eq!(
+            r.unwrap_err().0,
+            vec![
+                "vars: variable root is not declared by recipe 10_b; did you mean port?"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn recipe_vars_layer_a_recipes_files_in_order() {
+        let d = tempfile::tempdir().unwrap();
+        let units = vec![recipe(&d, "web.yaml", RV_A)];
+        let common =
+            vars("version: 1\nvars: { port: 1, root: /common }\nhosts: { h1: { port: 7 } }\n");
+        let mut web = vars("version: 1\nvars: { port: 2 }\n");
+        web.path = PathBuf::from("web.yaml");
+        let merged = merge_vars_files(vec![common, web]).unwrap();
+        let p = pairs(&[(0, "h1"), (0, "h2")]);
+        let m = per_recipe(&units, &[merged], &p, UnknownVars::Error)
+            .0
+            .unwrap();
+        // The host layer of the earlier file beats the common layer of the later.
+        assert_eq!(var(&m[0], "port"), Value::Int(7));
+        // A later file wins inside a layer; what it does not name stays.
+        assert_eq!(var(&m[1], "port"), Value::Int(2));
+        assert_eq!(var(&m[1], "root"), s("/common"));
+    }
+
+    #[test]
+    fn recipe_vars_keep_every_check_of_a_recipes_own_files() {
+        let d = tempfile::tempdir().unwrap();
+        let units = vec![
+            recipe(&d, "a.yaml", RV_A),
+            recipe(
+                &d,
+                "t.yaml",
+                "version: 1\nvars:\n  tok: { value: x, sensitive: true }\n  app_root: { value: /r }\nresources: []\n",
+            ),
+        ];
+        let p = pairs(&[(0, "h1"), (1, "h1")]);
+        // A wrong type, a sensitive override and a certain typo, in two recipes.
+        let files = vec![
+            vars(&format!("version: 1\nvars: {{ port: \"{CANARY}\" }}\n")),
+            vars(&format!(
+                "version: 1\nvars: {{ tok: \"{CANARY}\", app_roto: \"{CANARY}\" }}\n"
+            )),
+        ];
+        let (r, _) = per_recipe(&units, &files, &p, UnknownVars::Warn);
+        let e = r.unwrap_err().0;
+        assert_eq!(
+            e,
+            vec![
+                "vars: variable port: recipe a declares an integer, the variables file gives a string".to_string(),
+                "vars: variable app_roto is not declared by recipe t; did you mean app_root?".to_string(),
+                "vars: variable tok is declared sensitive by recipe t; a variables file cannot override a sensitive variable".to_string(),
+            ]
+        );
+        assert!(!e.concat().contains(CANARY));
+        // A recipe without files is frozen with its defaults, as without a file.
+        let files = vec![VarsFile::empty(), VarsFile::empty()];
+        let m = per_recipe(&units, &files, &p, UnknownVars::Error)
+            .0
+            .unwrap();
+        assert_eq!(var(&m[0], "port"), Value::Int(80));
+        // The files must match the recipes one to one.
+        let (r, _) = per_recipe(&units, &files[..1], &p, UnknownVars::Error);
+        assert!(r.unwrap_err().0[0].starts_with("internal error"));
     }
 }
