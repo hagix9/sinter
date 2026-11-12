@@ -189,7 +189,7 @@ Ubuntu 24.04, Rocky Linux 9.8 and Rocky Linux 10.2 were exercised on real
 hosts with throw-away packages (removal, dependency refusal, lock contention,
 script failure, cancellation). Ubuntu 26.04, RHEL 9/10 and AlmaLinux 9/10 use
 the same tools and are expected to behave the same, but those cases have **not**
-been verified on them. The v1.11.0 release acceptance did remove one package (`sl`
+been verified on them. The v1.12.0 release acceptance did remove one package (`sl`
 on Ubuntu, `tree` on the Red Hat family) on all eight labels, confirmed with the
 native package tool. Removal has not been verified on Rocky Linux 8 or Oracle
 Linux. Fedora is not a supported target.

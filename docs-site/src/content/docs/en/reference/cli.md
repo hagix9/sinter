@@ -21,7 +21,7 @@ See [Core MCP](/en/reference/mcp/) for the `mcp` subcommand and `--targets-file`
 subcommand, and [Resource Plugins](/en/reference/resource-plugins/#install-a-plugin) for
 `sinter plugin list`, `verify`, `install` and `remove` (from v1.12.0).
 
-`sinter --version` prints the version (e.g. `sinter 1.11.0`).
+`sinter --version` prints the version (e.g. `sinter 1.12.0`).
 
 ## validate
 

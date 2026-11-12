@@ -21,7 +21,7 @@ Commands:
 `sinter plugin list`、`verify`、`install`、`remove`（v1.12.0 から）については
 [Resource Plugins](/ja/reference/resource-plugins/#プラグインをインストールする)を参照してください。
 
-`sinter --version` はバージョンを表示します（例: `sinter 1.11.0`）。
+`sinter --version` はバージョンを表示します（例: `sinter 1.12.0`）。
 
 ## validate
 

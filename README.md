@@ -10,7 +10,7 @@
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/hagix9/sinter?quickstart=1)
 
-Try Sinter v1.11.0 in a disposable Ubuntu container in your browser — nothing to
+Try Sinter v1.12.0 in a disposable Ubuntu container in your browser — nothing to
 install locally, no SSH, no servers. See the [start guide](examples/start/README.md).
 
 Sinter is a lightweight, agentless configuration-management tool inspired by Itamae.
@@ -84,7 +84,7 @@ inventory (hosts, flat groups, explicit per-recipe `targets`) — see
 
 ## Install
 
-Sinter **v1.12.0** is prepared for release as one
+Sinter **v1.12.0** is the current release, published as one
 `sinter-v1.12.0-linux-x86_64.tar.gz` artifact covering every supported Linux
 x86_64 platform line: Ubuntu, Rocky Linux, RHEL 9 / 10, and AlmaLinux 9 / 10.
 
@@ -93,7 +93,7 @@ curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
 $HOME/.local/bin/sinter --version
 ```
 
-Acceptance-tested point releases (v1.11.0 release artifact): Ubuntu 24.04,
+Acceptance-tested point releases (v1.12.0 release artifact): Ubuntu 24.04,
 Ubuntu 26.04, Rocky Linux 9.8, Rocky Linux 10.2, RHEL 9.8, RHEL 10.2,
 AlmaLinux 9.8 and AlmaLinux 10.2, all x86_64. Other point releases have not
 each been independently accepted.
@@ -416,24 +416,31 @@ VMs. Details, failure modes and the dpkg `deinstall ok installed` caveat:
 Each release from v1.0.0 on is acceptance-tested as its exact release
 artifact on the eight supported targets before it is published, and its
 acceptance evidence (manifest, raw logs, checksums) is published with the
-release. The v1.11.0 release passed the Linux x86_64 validation gate and was
+release. The v1.12.0 release passed the Linux x86_64 validation gate and was
 then acceptance-tested as its exact release artifact
-(`sinter-v1.11.0-linux-x86_64.tar.gz`) on eight real x86_64 Linux hosts — the
+(`sinter-v1.12.0-linux-x86_64.tar.gz`) on eight real x86_64 Linux hosts — the
 exact point releases listed under [Install](#install). On every host the
 tarball and the extracted binary were verified byte-identical (SHA-256) and
 ran the release acceptance scenario: artifact identity, platform detection,
 SSH command execution, `package` install and remove with independent native
 verification and idempotency, package progress output, `file`, `service`,
 `command` guards, a pre-mutation failure, secret redaction, `audit` (including
-the strict and default audit policies), and a no-residue check:
-**312 checks passed, 0 failed, 0 skipped (39 per target)** (see the
-[v1.11.0 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.11.0)
-and its [manifest](release/evidence/v1.11.0/acceptance-manifest.json)).
-The release acceptance does not exercise the features new in v1.11.0 (bundles by
-directory name, the recipe search below `recipe_paths`, the `inventory.*` names) or
-in v1.10.0 (selectors, inventory detection, the project file, several variables
-files, the backup store, partial runs); see the
-[v1.11.0 release notes](https://github.com/hagix9/sinter/releases/tag/v1.11.0).
+the strict and default audit policies), the plugin commands (`list`, `verify`,
+`install`, `remove`, their refusals and the partial mutate gate), `recipe_vars`,
+and a no-residue check:
+**480 checks passed, 0 failed, 0 skipped (60 per target)** (see the
+[v1.12.0 acceptance evidence](https://github.com/hagix9/sinter/releases/tag/v1.12.0)
+and its [manifest](release/evidence/v1.12.0/acceptance-manifest.json)).
+The release acceptance installs, verifies and removes the firewalld 0.2.0 plugin
+but does not apply firewalld rules on a real firewalld, and it does not exercise
+the features new in v1.11.0 (bundles by directory name, the recipe search below
+`recipe_paths`, the `inventory.*` names) or in v1.10.0 (selectors, inventory
+detection, the project file, several variables files, the backup store, partial
+runs); see the
+[v1.12.0 release notes](https://github.com/hagix9/sinter/releases/tag/v1.12.0).
+Sinter v1.11.0 passed the earlier eight-host acceptance (312 checks, 0 failed;
+[v1.11.0 evidence](https://github.com/hagix9/sinter/releases/tag/v1.11.0) and its
+[manifest](release/evidence/v1.11.0/acceptance-manifest.json)).
 Sinter v1.10.0 passed the earlier eight-host acceptance (312 checks, 0 failed;
 [v1.10.0 evidence](https://github.com/hagix9/sinter/releases/tag/v1.10.0) and its
 [manifest](release/evidence/v1.10.0/acceptance-manifest.json)).
