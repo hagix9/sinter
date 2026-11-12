@@ -186,7 +186,9 @@ class V190Checks(unittest.TestCase):
         self.assertEqual(ids, derived)
         self.assertTrue(set(ORIGINAL_33) <= set(ids))
         self.assertEqual(len(ORIGINAL_33), 33)
-        self.assertEqual(set(ids) - set(ORIGINAL_33), set(NEW["progress"] + NEW["strict"]))
+        # Later releases add their own checks (test_acceptance_v1120_checks.py
+        # owns the full set); the v1.9.0 checks must all still be there.
+        self.assertTrue(set(NEW["progress"] + NEW["strict"]) <= set(ids) - set(ORIGINAL_33))
         for new_id in NEW["progress"] + NEW["strict"]:
             self.assertEqual(len(re.findall(r"check %s ok" % re.escape(new_id), text)), 1, new_id)
             self.assertEqual(len(re.findall(r"check %s FAIL" % re.escape(new_id), text)), 1, new_id)

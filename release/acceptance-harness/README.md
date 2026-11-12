@@ -60,5 +60,20 @@ masks the project, the zone and the instance names from `SINTER_SPECS` as
 literals, plus generic hosts, users, paths and addresses, and writes nothing
 if any of the run's identifiers would remain.
 
+## Checks
+
+`acceptance-target.sh` defines the checks; `derive-expected-checks.sh`
+writes their ids to `expected-check-ids.txt` (60 from v1.12.0). Each prints one
+`== check <id> ok|FAIL` line. From v1.12.0 two sections cover the plugin
+commands (`plugin-checks`: list, verify, install, remove and the partial mutate
+permission, against a plugin root inside the run's private directory, never the
+default root, and without running `firewall-cmd`) and `recipe_vars`
+(`recipe-vars-checks`: a project in the run's directory writing files under the
+acceptance state directory, removed again). Applying firewalld rules on a real
+firewalld is not part of this matrix.
+
 Tests: `python3 -m unittest discover -s release/tests`
-(`test_acceptance_harness.py` drives these scripts against a fake `gcloud`).
+(`test_acceptance_harness.py` drives these scripts against a fake `gcloud`;
+`test_acceptance_v190_checks.py` and `test_acceptance_v1120_checks.py` run the
+check sections against a fake `sinter` with one defect at a time, and the
+plugin section against a built binary when `SINTER_ACCEPTANCE_REAL_BIN` is set).

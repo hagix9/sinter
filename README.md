@@ -237,6 +237,29 @@ sinter apply nginx.yaml --inventory hosts.yaml
   needed for an `inventory.yaml`. Two of them in those places (a `hosts.yaml` next
   to an `inventory.yaml` too, or an Ansible `inventory.yml`) are an error: name the
   one to use with `--inventory` or in `sinter.yaml`.
+- Next version (not released): `recipe_vars` in the project file gives each recipe
+  its own variables files, so a recipe gets only the values written for it and a run
+  no longer warns about variables of other recipes.
+
+  ```yaml
+  # sinter.yaml
+  version: 1
+  recipe_paths: [./recipes]
+  recipe_vars:
+    10_firewall: [vars/firewall.yaml]
+    20_web: [vars/common.yaml, vars/web.yaml]   # merged in order
+  ```
+
+  A key is a recipe's file name without the extension. A recipe that is not listed
+  keeps its defaults. `recipe_vars` is refused together with `vars_files` or
+  `--vars-file`. Without `recipe_vars` nothing changes.
+- Next version (not released): `sinter plugin list`, `verify`, `install` and `remove`
+  manage the first-party Resource Plugins this Sinter carries (firewalld 0.1.0 and
+  0.2.0) in the plugin root, without downloading anything. Installing allows no
+  mutate operation unless you name it (`--allow-mutate`, `--allow-mutate-for`), and
+  with an observe-only trust entry `plan` and `apply` are refused before any target
+  is contacted while `audit` works. See
+  [Resource Plugins](docs-site/src/content/docs/en/reference/resource-plugins.md).
 - `apply` stops at the first execution that exits non-zero (for any reason)
   and reports the rest `not_run`; `plan`/`audit` visit every selected host;
   a partial failure never exits 0.

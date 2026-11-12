@@ -13,11 +13,13 @@ Commands:
   audit     Audit whether a target already satisfies a recipe. Read-only.
   mcp       Serve a read-only MCP (Model Context Protocol) endpoint on stdio
   secrets   Encrypt, decrypt and list secret files (standard age format).
+  plugin    Show, check, install and remove the Resource Plugins of this controller
 ```
 
 See [Core MCP](/en/reference/mcp/) for the `mcp` subcommand and `--targets-file`,
-and [sinter secrets](/en/reference/secrets/) for the `secrets`
-subcommand.
+[sinter secrets](/en/reference/secrets/) for the `secrets`
+subcommand, and [Resource Plugins](/en/reference/resource-plugins/#install-a-plugin) for
+`sinter plugin list`, `verify`, `install` and `remove` (from v1.12.0).
 
 `sinter --version` prints the version (e.g. `sinter 1.11.0`).
 
@@ -320,7 +322,7 @@ recipe without `targets`.
 
 **Finding the inventory.** `--inventory <PATH>` comes first and never falls back
 to anything, then the project file's `inventory`. Otherwise Sinter looks for
-`hosts.yaml`, `hosts.yml`, `hosts.toml` and, in the next version (not released),
+`hosts.yaml`, `hosts.yml`, `hosts.toml` and, from v1.11.0,
 `inventory.yaml`, `inventory.yml` and `inventory.toml` in the current directory and
 the recipe's directory. Exactly one may be found: two, such as a `hosts.yaml` next
 to an `inventory.yaml`, are exit 2 listing both, and `--inventory` or the project
@@ -616,7 +618,8 @@ listen_port = 8081
 
 *From v1.10.0.* `--vars-file` may be repeated, and a
 [project file](#project-file) can list `vars_files`. The project's come first, then the command
-line's, in order, and a later file wins. Each layer (`vars`, `groups.<g>`, `hosts.<h>`) is merged by
+line's, in order, and a later file wins. With `recipe_vars` (from v1.12.0) each recipe has its own
+files instead; see [Project file](#project-file). Each layer (`vars`, `groups.<g>`, `hosts.<h>`) is merged by
 variable name, then the precedence below applies, so a host value of an earlier file still beats a
 common value of a later one. A variable's value is replaced whole: a map or list is never merged with
 an earlier one.
@@ -769,7 +772,7 @@ environment variables are not expanded.
 - **Which recipe.** A single recipe is named with its extension (`nginx.yaml`), and no extension is
   ever added to it. A path that exists is used as given. A bare name is looked for in
   `recipe_paths` and the current directory; two different files are exit 2, and `./name` or a full
-  path settles it. In the next version (not released), when that finds nothing: a bundle can be
+  path settles it. From v1.11.0, when that finds nothing: a bundle can be
   named by its directory (`sinter plan 02_moge web01`, holding one `bundle.yaml`, `bundle.yml` or
   `bundle.toml`; `02_moge.yaml` is never an alias for it), in the current directory also without a
   project file; and `recipe_paths` is searched below, at most 6 levels and 20,000 entries, where
@@ -789,6 +792,31 @@ environment variables are not expanded.
 - **`apply` naming no host.** An `apply` with no `--host`, selector, `--limit` or `--inventory` that would
   reach hosts through the project's `inventory` or `default_target` is refused (exit 2) unless the file
   also says `allow_implicit_apply: true`. `plan`, `audit` and `validate` go on. No prompt is added.
+- **Variables files per recipe.** *From v1.12.0.* `recipe_vars` gives each recipe of a run its own
+  variables files, so a recipe gets only the values written for it and a run does not warn about
+  variables that belong to other recipes:
+
+  ```text
+  # sinter.yaml
+  version: 1
+  recipe_paths: [./recipes]
+  recipe_vars:
+    05_ssh:
+      - vars/ssh_key.yaml
+    20_web:
+      - vars/common.yaml     # merged in order: a later file wins
+      - vars/web.yaml
+  ```
+
+  A key is a recipe's label: its file name without the extension, the rule of `--skip-recipe`, for a
+  recipe given alone or as a member of a bundle. Each recipe gets exactly the files under its label,
+  merged in the order listed, and the layer precedence below is unchanged; no file of one recipe
+  reaches another, even when both declare the same variable. A recipe that is not listed runs with
+  its defaults, and a key that names no recipe of the run is ignored and its files are not read. Only
+  the files of the run's recipes are checked (the rules above) and read. `recipe_vars` is refused
+  together with `vars_files` in the same file, and together with `--vars-file` (exit 2); two recipes
+  of a run that share a label a key names are refused too. Each recipe's files are shown first
+  (`vars: recipe 20_web: ...`, `vars: none for recipe 30_c (not listed in recipe_vars)`).
 
 What is in effect is shown first (`config:`, `recipe:`, `inventory:`, `vars:`, `backup store:`), on
 stderr with `--format json`, whose document has a `resolved` object.
@@ -1480,7 +1508,8 @@ always gives this aggregate document, with `selector` (the items) instead of
 
 - `resolved`: `config` (`path`, `source`: `explicit` or `detected`), `recipe` (`path`, `via`: `given` or
   `recipe_paths`), `inventory` (`path`, `source`: `explicit` or `project`), `default_target`, `vars_files`,
-  `backup_directory`.
+  `backup_directory`; from v1.12.0, `recipe_vars` (one entry per recipe of the run: `recipe` and its `files`,
+  empty when it is not listed), only when the project file has `recipe_vars`.
 - `skips`: `partial: true`, `requested` (`recipes`, `resources`), `included`, `excluded` (`recipe`, `resource`,
   null for a whole recipe, and `reason`: `SKIPPED_BY_USER`) and `blocked`.
 - `vars_warnings`: variables no recipe of the run declares. `inventory_source` can also be `project`.

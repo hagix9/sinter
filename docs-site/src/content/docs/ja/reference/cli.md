@@ -13,11 +13,13 @@ Commands:
   audit     Audit whether a target already satisfies a recipe. Read-only.
   mcp       Serve a read-only MCP (Model Context Protocol) endpoint on stdio
   secrets   Encrypt, decrypt and list secret files (standard age format).
+  plugin    Show, check, install and remove the Resource Plugins of this controller
 ```
 
 `mcp`サブコマンドと`--targets-file`については[Core MCP](/ja/reference/mcp/)を、
-`secrets`サブコマンドについては[sinter secrets](/ja/reference/secrets/)を
-参照してください。
+`secrets`サブコマンドについては[sinter secrets](/ja/reference/secrets/)を、
+`sinter plugin list`、`verify`、`install`、`remove`（v1.12.0 から）については
+[Resource Plugins](/ja/reference/resource-plugins/#プラグインをインストールする)を参照してください。
 
 `sinter --version` はバージョンを表示します（例: `sinter 1.11.0`）。
 
@@ -317,7 +319,7 @@ sinter audit nginx.yaml @web,@db
 
 **インベントリの見つけ方。** `--inventory <PATH>` が最優先で、ほかへフォールバックしません。
 次はプロジェクトファイルの `inventory` です。どちらもなければ、カレントディレクトリとレシピのディレクトリで
-`hosts.yaml`、`hosts.yml`、`hosts.toml` と、次のバージョン（未リリース）からは `inventory.yaml`、`inventory.yml`、
+`hosts.yaml`、`hosts.yml`、`hosts.toml` と、v1.11.0 からは `inventory.yaml`、`inventory.yml`、
 `inventory.toml` を探します。見つかるのは 1 つでなければなりません。`hosts.yaml` と `inventory.yaml` が並んでいるなど
 2 つ以上あれば、両方を表示して exit 2 になります。`--inventory` かプロジェクトファイルの `inventory` で指定してください。親ディレクトリとホームディレクトリは探しません。選択引数がなければ
 何も検出しないので、`hosts.yaml` が隣にあっても `sinter apply nginx.yaml` はローカル実行の
@@ -599,6 +601,7 @@ listen_port = 8081
 
 *v1.10.0 から利用できます。* `--vars-file` は繰り返し指定でき、[プロジェクトファイル](#プロジェクトファイル)
 の `vars_files` にも書けます。プロジェクトのものが先で、次にコマンドラインのものを順に読み、後のファイルが優先です。
+`recipe_vars`（v1.12.0 から）を使うと、代わりに各レシピがそれぞれのファイルを持ちます。[プロジェクトファイル](#プロジェクトファイル)を参照してください。
 各層（`vars`、`groups.<g>`、`hosts.<h>`）を変数名ごとにマージしてから下の優先順位を適用するので、前のファイルの
 ホストの値は、後のファイルの共通の値より優先します。変数の値は丸ごと置き換えます。map や list を前の値とマージすることはありません。
 
@@ -738,7 +741,7 @@ strict_vars: false
   exit 2 で、「プロジェクトなし」にはなりません。
 - **どのレシピか。** 単一レシピは拡張子付きで指定します（`nginx.yaml`）。拡張子を補うことはありません。存在するパスはそのまま使います。
   名前だけなら `recipe_paths` とカレントディレクトリを探し、別のファイルが 2 つ見つかれば exit 2 で、`./name` かフルパスで指定します。
-  次のバージョン（未リリース）からは、それで見つからないとき、バンドルをディレクトリの名前で指定できます（`sinter plan 02_moge web01`。
+  v1.11.0 からは、それで見つからないとき、バンドルをディレクトリの名前で指定できます（`sinter plan 02_moge web01`。
   ディレクトリには `bundle.yaml`、`bundle.yml`、`bundle.toml` のどれか 1 つを置きます。`02_moge.yaml` はその別名になりません）。
   カレントディレクトリのバンドルディレクトリは、プロジェクトファイルがなくても使えます。また `recipe_paths` の下を最大 6 階層、
   20,000 エントリーまで探し、`security/ssh.yaml` や `common/02_moge` はパスの末尾と照合します。見つかったものはすべて候補で、
@@ -753,6 +756,29 @@ strict_vars: false
   `--no-config` を使います。
 - **ホストを指定しない `apply`。** `--host`、セレクタ、`--limit`、`--inventory` のいずれもなく、プロジェクトの `inventory` か `default_target` で
   ホストに届く `apply` は、ファイルに `allow_implicit_apply: true` がなければ拒否します（exit 2）。`plan`、`audit`、`validate` は続行します。確認プロンプトは追加していません。
+- **レシピごとの変数ファイル。** *v1.12.0 から。* `recipe_vars` は、実行する各レシピにそれぞれの変数ファイルを
+  与えます。レシピは自分向けに書かれた値だけを受け取り、ほかのレシピの変数について警告されることもありません。
+
+  ```text
+  # sinter.yaml
+  version: 1
+  recipe_paths: [./recipes]
+  recipe_vars:
+    05_ssh:
+      - vars/ssh_key.yaml
+    20_web:
+      - vars/common.yaml     # 順にマージし、後のファイルが優先
+      - vars/web.yaml
+  ```
+
+  キーはレシピのラベル（拡張子を除いたファイル名。`--skip-recipe` と同じ規則）で、単独で指定したレシピにも
+  バンドルのメンバーにも使えます。各レシピは自分のラベルのファイルだけを、書かれた順にマージして受け取り、
+  下の層の優先順位は変わりません。同じ名前の変数を宣言していても、あるレシピのファイルがほかのレシピに
+  届くことはありません。記載のないレシピは既定値で動き、実行するどのレシピにも当たらないキーは無視して、
+  そのファイルは読みません。検査（上の規則）と読み込みの対象は、実行するレシピのファイルだけです。
+  同じファイルの `vars_files` と、`--vars-file` との併用は拒否します（exit 2）。実行する 2 つのレシピが、
+  キーに書かれた同じラベルを持つ場合も拒否します。各レシピのファイルは最初に表示します
+  （`vars: recipe 20_web: ...`、`vars: none for recipe 30_c (not listed in recipe_vars)`）。
 
 有効な設定は最初に表示します（`config:`、`recipe:`、`inventory:`、`vars:`、`backup store:`）。`--format json` では stderr に出し、
 ドキュメントの `resolved` に入ります。
@@ -1412,7 +1438,8 @@ targets、解決、重複ホスト）ではドキュメントを出力せず、
 
 - `resolved`：`config`（`path`、`source`：`explicit` か `detected`）、`recipe`（`path`、`via`：`given` か
   `recipe_paths`）、`inventory`（`path`、`source`：`explicit` か `project`）、`default_target`、`vars_files`、
-  `backup_directory`。
+  `backup_directory`。v1.12.0 からは、プロジェクトファイルに `recipe_vars` があるときだけ `recipe_vars`（実行する
+  レシピごとに `recipe` とその `files`。記載のないレシピは空）。
 - `skips`：`partial: true`、`requested`（`recipes`、`resources`）、`included`、`excluded`（`recipe`、`resource`（レシピ全体は
   null）、`reason`：`SKIPPED_BY_USER`）、`blocked`。
 - `vars_warnings`：どのレシピも宣言していない変数。`inventory_source` は `project` にもなります。

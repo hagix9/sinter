@@ -548,6 +548,266 @@ print(d.get('status'), d.get('summary'))
 echo "AUDIT_RC=$R status=$AST"
 if [ "$R" -eq 0 ]; then check audit-no-drift ok "$AST"; else check audit-no-drift FAIL "rc=$R status=$AST"; fi
 
+# ------------------------------------------------- plugin management (v1.12.0)
+# BEGIN plugin-checks
+# DESIGN §38.4, §38.5, §38.15, §38.16: `sinter plugin list|verify|install|remove`
+# and the partial mutate permission (C1). Everything runs as the unprivileged
+# acceptance user against a plugin root inside this run's private directory;
+# the default root under HOME is never named and must not appear. No check runs
+# firewall-cmd or changes the host firewall: plan and apply are given a host
+# name that cannot resolve (RFC 6761 .invalid) and must be refused before any
+# contact, and audit there fails at name resolution. Applying firewalld rules on
+# a real firewalld is not part of this matrix (the Ubuntu targets have no
+# firewalld, and starting or changing it on a target can affect the management
+# connection).
+pyq() { # pyq <json file> <python expression over d> -> prints the value or ERR:<type>
+  python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(eval(sys.argv[2]))
+except Exception as e:
+    print("ERR:%s" % type(e).__name__)' "$1" "$2"
+}
+fmode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
+fsha() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
+PB="$WORK/plugin-acc"; PR="$PB/root"; PR2="$PB/root2"
+rm -rf "$PB"; mkdir -m 700 "$PB"
+CAT_SHA=d32ac3947279ec2581a7049f9fa931d29c904c91ea2484cafaa6759fe09c3641   # catalogs/firewalld-0.2.0.catalog.toml
+PLG_SHA=e5819cfe0e2c017648f628a27d0ed6e4a18ed402f3ff6de072e61a724f0aa99a   # plugins/firewalld-0.2.0.plugin.toml
+CATF="$PR/catalogs/firewalld-0.2.0.catalog.toml"; PLGF="$PR/plugins/firewalld-0.2.0.plugin.toml"
+case "${XDG_CONFIG_HOME:-}" in /*) DEFROOT="$XDG_CONFIG_HOME/sinter/plugins" ;; *) DEFROOT="$HOME/.config/sinter/plugins" ;; esac
+[ -e "$DEFROOT" ] && DEF_BEFORE=present || DEF_BEFORE=absent
+STATE_BEFORE=$(ls -1A /opt/sinter-acceptance/state 2>/dev/null | sort | tr '\n' ' ')
+echo "PLUGIN_DEFAULT_ROOT_BEFORE=$DEF_BEFORE"
+
+"$EXE" plugin list --plugin-root "$PR" --json > "$S/pl1.json" 2> "$S/pl1.err"; R=$?
+V=$(pyq "$S/pl1.json" '[(p["version"], p["available"], p["installed"], p["status"]) for p in d["plugins"] if p["id"] == "firewalld"]')
+echo "PLUGIN_LIST_ABSENT_RC=$R $V"
+if [ "$R" -eq 0 ] && [ "$V" = "[('0.1.0', True, False, 'available'), ('0.2.0', True, False, 'available')]" ] && [ ! -e "$PR" ]; then
+  check plugin-list-available ok "firewalld 0.1.0 and 0.2.0 embedded, not installed; nothing created"
+else check plugin-list-available FAIL "rc=$R $V root=$([ -e "$PR" ] && echo created || echo absent)"; fi
+
+"$EXE" plugin verify --plugin-root "$PR" --json > "$S/pv1.json" 2> "$S/pv1.err"; R=$?
+V=$(pyq "$S/pv1.json" '(d["ok"], d["nothing_verified"])')
+echo "PLUGIN_VERIFY_ABSENT_RC=$R $V"
+if [ "$R" -eq 2 ] && [ "$V" = "(False, 'root-absent')" ] && [ ! -e "$PR" ]; then
+  check plugin-verify-nothing-refused ok "nothing to verify is exit 2 (root-absent)"
+else check plugin-verify-nothing-refused FAIL "rc=$R $V"; fi
+
+"$EXE" plugin install firewalld@0.2.0 --dry-run --plugin-root "$PR" --json < /dev/null > "$S/pi0.json" 2> "$S/pi0.err"; R=$?
+V=$(pyq "$S/pi0.json" '(d["result"], d["allowed_mutate"], len(d["mutate_not_allowed"]))')
+echo "PLUGIN_INSTALL_DRYRUN_RC=$R $V"
+if [ "$R" -eq 0 ] && [ "$V" = "('planned', [], 12)" ] && [ ! -e "$PR" ]; then
+  check plugin-install-dry-run ok "dry run planned, no mutate allowed, nothing created"
+else check plugin-install-dry-run FAIL "rc=$R $V root=$([ -e "$PR" ] && echo created || echo absent)"; fi
+
+"$EXE" plugin install firewalld@0.2.0 --plugin-root "$PR" --json < /dev/null > "$S/pi1.json" 2> "$S/pi1.err"; R=$?
+V=$(pyq "$S/pi1.json" 'd["result"]')
+echo "PLUGIN_INSTALL_NO_CONFIRM_RC=$R $V"
+if [ "$R" -eq 2 ] && [ "$V" = refused ] && [ ! -e "$PR" ]; then
+  check plugin-install-needs-confirmation ok "without a terminal and without --yes nothing changes (exit 2)"
+else check plugin-install-needs-confirmation FAIL "rc=$R $V root=$([ -e "$PR" ] && echo created || echo absent)"; fi
+
+"$EXE" plugin install firewalld@0.2.0 --yes --plugin-root "$PR" --json < /dev/null > "$S/pi2.json" 2> "$S/pi2.err"; R=$?
+V=$(pyq "$S/pi2.json" '(d["result"], d["trust"], d["verify"], d["allowed_mutate"])')
+MODES="$(fmode "$PR") $(fmode "$PR/catalogs") $(fmode "$PR/plugins") $(fmode "$PR/trust.toml") $(fmode "$CATF") $(fmode "$PLGF")"
+SHAS_OK=no; [ "$(fsha "$CATF")" = "$CAT_SHA" ] && [ "$(fsha "$PLGF")" = "$PLG_SHA" ] && SHAS_OK=yes
+echo "PLUGIN_INSTALL_RC=$R $V modes=$MODES embedded_bytes=$SHAS_OK"
+if [ "$R" -eq 0 ] && [ "$V" = "('installed', 'created', 'ok', [])" ] && [ "$MODES" = "700 700 700 600 600 600" ] && [ "$SHAS_OK" = yes ]; then
+  check plugin-install ok "installed the embedded bytes; directories 0700, files 0600; no mutate allowed"
+else check plugin-install FAIL "rc=$R $V modes=$MODES embedded_bytes=$SHAS_OK"; fi
+
+"$EXE" plugin verify firewalld@0.2.0 --plugin-root "$PR" --json > "$S/pv2.json" 2> "$S/pv2.err"; R=$?
+V=$(pyq "$S/pv2.json" '(d["ok"], d["plugins"][0]["status"], d["plugins"][0]["required_not_enabled"], len(d["plugins"][0]["mutate_not_allowed"]), sorted(set(c["result"] for c in d["plugins"][0]["checks"])))')
+"$EXE" plugin list --plugin-root "$PR" --json > "$S/pl2.json" 2> "$S/pl2.err"; R2=$?
+V2=$(pyq "$S/pl2.json" '[(p["version"], p["installed"], p["status"]) for p in d["plugins"] if p["id"] == "firewalld"]')
+echo "PLUGIN_VERIFY_INSTALLED_RC=$R $V LIST_RC=$R2 $V2"
+if [ "$R" -eq 0 ] && [ "$V" = "(True, 'ok', [], 12, ['pass'])" ] && [ "$R2" -eq 0 ] && [ "$V2" = "[('0.1.0', False, 'available'), ('0.2.0', True, 'installed')]" ]; then
+  check plugin-verify-installed ok "every verify check passes; 12 mutate operations stay not allowed; list shows installed"
+else check plugin-verify-installed FAIL "rc=$R $V list_rc=$R2 $V2"; fi
+
+T0=$(fsha "$PR/trust.toml")
+"$EXE" plugin install firewalld@0.2.0 --yes --plugin-root "$PR" --json < /dev/null > "$S/pi3.json" 2> "$S/pi3.err"; R=$?
+V=$(pyq "$S/pi3.json" '(d["result"], d["trust"])')
+echo "PLUGIN_INSTALL_AGAIN_RC=$R $V"
+if [ "$R" -eq 0 ] && [ "$V" = "('nothing-to-do', 'unchanged')" ] && [ "$(fsha "$PR/trust.toml")" = "$T0" ]; then
+  check plugin-install-idempotent ok "a second install changes nothing"
+else check plugin-install-idempotent FAIL "rc=$R $V"; fi
+
+# A root-run controller accepts only root-owned plugin files (§38.7); these are
+# the acceptance user's. Read-only: verify never writes.
+sudo -n "$EXE" plugin verify firewalld@0.2.0 --plugin-root "$PR" --json > "$S/pv3.json" 2> "$S/pv3.err"; R=$?
+V=$(pyq "$S/pv3.json" 'd["ok"]')
+echo "PLUGIN_ROOT_RUN_RC=$R ok=$V"; tail -1 "$S/pv3.err" | sed "s|$PB|<PB>|g"
+if [ "$R" -eq 2 ] && [ "$V" = False ] && grep -q 'owned by another user' "$S/pv3.err" && [ "$(fsha "$PR/trust.toml")" = "$T0" ]; then
+  check plugin-root-run-refused ok "run as root, a plugin root of another user is refused (exit 2, owned by another user)"
+else check plugin-root-run-refused FAIL "rc=$R ok=$V"; fi
+
+cat > "$S/fw.yaml" <<'YAML'
+version: 1
+plugins:
+  - { id: firewalld, version: 0.2.0 }
+resources:
+  - id: acc_fw_port
+    type: firewalld.port
+    with: { zone: public, port: 8443/tcp, state: present }
+YAML
+GATE='plan and apply refuse it before contacting any target'
+NOHOST=nohost.invalid   # RFC 6761: never resolves, so reaching it would be a resolution error (exit 3)
+"$EXE" validate "$S/fw.yaml" --plugin-root "$PR" > "$S/fwv.out" 2> "$S/fwv.err"; RV=$?
+"$EXE" plan "$S/fw.yaml" --plugin-root "$PR" --host "$NOHOST" --no-ssh-config > "$S/fwp.out" 2> "$S/fwp.err"; RP=$?
+"$EXE" apply "$S/fw.yaml" --plugin-root "$PR" --host "$NOHOST" --no-ssh-config > "$S/fwa.out" 2> "$S/fwa.err"; RA=$?
+"$EXE" audit "$S/fw.yaml" --plugin-root "$PR" --host "$NOHOST" --no-ssh-config > "$S/fwu.out" 2> "$S/fwu.err"; RU=$?
+GP=$(grep -c "$GATE" "$S/fwp.err"); GA=$(grep -c "$GATE" "$S/fwa.err"); GU=$(cat "$S/fwu.out" "$S/fwu.err" | grep -c "$GATE")
+echo "PLUGIN_C1 validate=$RV plan=$RP/$GP apply=$RA/$GA audit=$RU/$GU"; tail -1 "$S/fwp.err" | sed "s|$PB|<PB>|g"
+if [ "$RV" -eq 0 ] && [ "$RP" -eq 2 ] && [ "$GP" -ge 1 ] && [ "$RA" -eq 2 ] && [ "$GA" -ge 1 ] && [ "$RU" -ne 0 ] && [ "$RU" -ne 2 ] && [ "$GU" -eq 0 ] \
+   && grep -q 'add_port_permanent, add_port_runtime' "$S/fwp.err"; then
+  check plugin-c1-refused-before-contact ok "plan and apply refused before contact; audit not refused by the gate"
+else check plugin-c1-refused-before-contact FAIL "validate=$RV plan=$RP/$GP apply=$RA/$GA audit=$RU/$GU"; fi
+
+"$EXE" plugin install firewalld@0.2.0 --yes --allow-mutate-for firewalld.port --plugin-root "$PR2" --json < /dev/null > "$S/pi4.json" 2> "$S/pi4.err"; R=$?
+V=$(pyq "$S/pi4.json" '(d["result"], sorted(d["allowed_mutate"]))')
+"$EXE" plan "$S/fw.yaml" --plugin-root "$PR2" --host "$NOHOST" --no-ssh-config > "$S/fwp2.out" 2> "$S/fwp2.err"; RP=$?
+GP=$(grep -c "$GATE" "$S/fwp2.err")
+echo "PLUGIN_ALLOW_FOR_RC=$R $V plan=$RP/$GP"
+if [ "$R" -eq 0 ] && [ "$V" = "('installed', ['add_port_permanent', 'add_port_runtime', 'remove_port_permanent', 'remove_port_runtime'])" ] && [ "$RP" -ne 0 ] && [ "$RP" -ne 2 ] && [ "$GP" -eq 0 ]; then
+  check plugin-c1-allowed-by-type ok "--allow-mutate-for allows exactly that type's operations; the gate then lets plan through"
+else check plugin-c1-allowed-by-type FAIL "rc=$R $V plan=$RP/$GP"; fi
+
+T2=$(fsha "$PR2/trust.toml")
+printf '#' >> "$PR2/plugins/firewalld-0.2.0.plugin.toml"
+"$EXE" plugin verify firewalld@0.2.0 --plugin-root "$PR2" --json > "$S/pv4.json" 2> "$S/pv4.err"; R=$?
+V=$(pyq "$S/pv4.json" 'd["plugins"][0]["status"]')
+"$EXE" plugin remove firewalld@0.2.0 --yes --plugin-root "$PR2" --json < /dev/null > "$S/pr1.json" 2> "$S/pr1.err"; R2=$?
+V2=$(pyq "$S/pr1.json" 'd["result"]')
+echo "PLUGIN_TAMPER verify=$R $V remove=$R2 $V2"
+if [ "$R" -eq 2 ] && [ "$V" = digest-mismatch ] && [ "$R2" -eq 2 ] && [ "$V2" = refused ] && [ "$(fsha "$PR2/trust.toml")" = "$T2" ] && [ -f "$PR2/plugins/firewalld-0.2.0.plugin.toml" ]; then
+  check plugin-tamper-refused ok "a changed plugin file is a digest mismatch and remove leaves everything as it was"
+else check plugin-tamper-refused FAIL "verify=$R $V remove=$R2 $V2"; fi
+
+chmod 770 "$PR"
+"$EXE" plugin list --plugin-root "$PR" --json > "$S/pl3.json" 2> "$S/pl3.err"; R=$?
+"$EXE" plugin verify --plugin-root "$PR" --json > "$S/pv5.json" 2> "$S/pv5.err"; R2=$?
+chmod 700 "$PR"
+"$EXE" plugin list --plugin-root "$PR" --json > "$S/pl4.json" 2> "$S/pl4.err"; R3=$?
+echo "PLUGIN_UNSAFE_ROOT list=$R verify=$R2 restored_list=$R3"; tail -1 "$S/pl3.err" | sed "s|$PB|<PB>|g"
+if [ "$R" -eq 2 ] && [ "$R2" -eq 2 ] && [ "$R3" -eq 0 ]; then
+  check plugin-unsafe-root-refused ok "a group-writable root is refused by list and verify"
+else check plugin-unsafe-root-refused FAIL "list=$R verify=$R2 restored_list=$R3"; fi
+
+"$EXE" plugin remove firewalld@0.2.0 --yes --plugin-root "$PR" --json < /dev/null > "$S/pr2.json" 2> "$S/pr2.err"; R=$?
+V=$(pyq "$S/pr2.json" '(d["result"], d["trust"])')
+LEFT="$([ -e "$CATF" ] && echo catalog) $([ -e "$PLGF" ] && echo plugin) $(grep -c '^\[\[' "$PR/trust.toml" 2>/dev/null)"
+"$EXE" plugin verify --plugin-root "$PR" --json > "$S/pv6.json" 2> "$S/pv6.err"; R2=$?
+V2=$(pyq "$S/pv6.json" 'd["nothing_verified"]')
+echo "PLUGIN_REMOVE_RC=$R $V left=$LEFT prev=$(fmode "$PR/trust.toml.prev") verify=$R2 $V2"
+if [ "$R" -eq 0 ] && [ "$V" = "('removed', 'rewritten')" ] && [ "$LEFT" = "  0" ] && [ "$(fmode "$PR/trust.toml.prev")" = 600 ] && [ "$R2" -eq 2 ] && [ "$V2" = nothing-pinned ]; then
+  check plugin-remove ok "files and trust entries removed, trust.toml.prev kept at 0600, nothing left to verify"
+else check plugin-remove FAIL "rc=$R $V left=$LEFT verify=$R2 $V2"; fi
+
+rm -rf "$PB"
+[ -e "$DEFROOT" ] && DEF_AFTER=present || DEF_AFTER=absent
+STATE_AFTER=$(ls -1A /opt/sinter-acceptance/state 2>/dev/null | sort | tr '\n' ' ')
+echo "PLUGIN_DEFAULT_ROOT_AFTER=$DEF_AFTER"
+if [ ! -e "$PB" ] && [ "$DEF_AFTER" = "$DEF_BEFORE" ] && [ "$STATE_AFTER" = "$STATE_BEFORE" ]; then
+  check plugin-no-residue ok "plugin roots removed; default root and managed state untouched"
+else check plugin-no-residue FAIL "pb=$([ -e "$PB" ] && echo left) default=$DEF_BEFORE->$DEF_AFTER state=$STATE_BEFORE->$STATE_AFTER"; fi
+# END plugin-checks
+
+# ------------------------------------------- per-recipe variables (v1.12.0)
+# BEGIN recipe-vars-checks
+# DESIGN §40.5: the project file's `recipe_vars` gives each recipe of a run its
+# own variables files, merged in order; a recipe that is not listed keeps its
+# defaults; `recipe_vars` with --vars-file and an untrusted variables file are
+# refused before anything changes. Without `recipe_vars` the shared
+# `vars_files` behave as before. The values are observed in the files the run
+# writes, not in its messages.
+RVD="$WORK/rv-acc"
+rm -rf "$RVD"; mkdir -m 700 "$RVD" "$RVD/recipes" "$RVD/vars"
+for x in a b c; do
+  case $x in a) n=10_a ;; b) n=20_b ;; c) n=30_c ;; esac
+  cat > "$RVD/recipes/$n.yaml" <<YAML
+version: 1
+vars:
+  msg_$x: { value: $x-default }
+  common: { value: $x-common-default }
+resources:
+  - id: acc_rv_$x
+    type: file
+    with:
+      path: /opt/sinter-acceptance/state/rv-$x.txt
+      state: present
+      content: "{{ vars.msg_$x }}|{{ vars.common }}\n"
+YAML
+done
+printf 'version: 1\nrecipes:\n  - recipes/10_a.yaml\n  - recipes/20_b.yaml\n  - recipes/30_c.yaml\n' > "$RVD/site.yaml"
+printf 'version: 1\nvars: { msg_a: a-one, common: a-common }\n' > "$RVD/vars/a1.yaml"
+printf 'version: 1\nvars: { msg_a: a-two }\n' > "$RVD/vars/a2.yaml"
+printf 'version: 1\nvars: { msg_b: b-one }\n' > "$RVD/vars/b.yaml"
+RV_PROJECT='version: 1\nrecipe_vars:\n  10_a:\n    - vars/a1.yaml\n    - vars/a2.yaml\n  20_b:\n    - vars/b.yaml\n'
+printf "$RV_PROJECT" > "$RVD/sinter.yaml"
+cat > "$RVD/clean.yaml" <<'YAML'
+version: 1
+resources:
+  - { id: rm_a, type: file, with: { path: /opt/sinter-acceptance/state/rv-a.txt, state: absent } }
+  - { id: rm_b, type: file, with: { path: /opt/sinter-acceptance/state/rv-b.txt, state: absent } }
+  - { id: rm_c, type: file, with: { path: /opt/sinter-acceptance/state/rv-c.txt, state: absent } }
+YAML
+chmod 644 "$RVD"/recipes/*.yaml "$RVD"/vars/*.yaml "$RVD/site.yaml" "$RVD/sinter.yaml" "$RVD/clean.yaml"
+chmod 755 "$RVD/recipes" "$RVD/vars"
+rv_body() { sudo cat "/opt/sinter-acceptance/state/rv-$1.txt" 2>/dev/null | tr -d '\n'; }
+rv_bodies() { echo "a=$(rv_body a) b=$(rv_body b) c=$(rv_body c)"; }
+rv_none() { [ ! -e /opt/sinter-acceptance/state/rv-a.txt ] && [ ! -e /opt/sinter-acceptance/state/rv-b.txt ] && [ ! -e /opt/sinter-acceptance/state/rv-c.txt ]; }
+rv_clean() { (cd "$RVD" && "$EXE" apply clean.yaml --sudo --no-config --format json > "$S/rvc.json" 2> "$S/rvc.err"); }
+
+(cd "$RVD" && "$EXE" apply site.yaml --sudo --format json > "$S/rv1.json" 2> "$S/rv1.err"); R=$?
+B=$(rv_bodies)
+echo "RECIPE_VARS_RC=$R $B"; echo "RECIPE_VARS_STDERR<<"; sed "s|$RVD|<RVD>|g" "$S/rv1.err"; echo ">>"
+if [ "$R" -eq 0 ] && [ "$B" = "a=a-two|a-common b=b-one|b-common-default c=c-default|c-common-default" ]; then
+  check recipe-vars-per-recipe ok "each recipe got only its own files, merged in order; the unlisted recipe kept its defaults"
+else check recipe-vars-per-recipe FAIL "rc=$R $B"; fi
+if [ "$R" -eq 0 ] && grep -q '^vars: recipe 10_a: ' "$S/rv1.err" && grep -q '^vars: recipe 20_b: ' "$S/rv1.err" \
+   && grep -q '^vars: none for recipe 30_c (not listed in recipe_vars)' "$S/rv1.err" && ! grep -q 'not declared' "$S/rv1.err"; then
+  check recipe-vars-shown-no-foreign-warning ok "each recipe's files are shown; no warning about another recipe's variables"
+else check recipe-vars-shown-no-foreign-warning FAIL "rc=$R stderr does not show the per-recipe files, or warns about undeclared variables"; fi
+
+rv_clean
+(cd "$RVD" && "$EXE" apply site.yaml --sudo --vars-file vars/a1.yaml --format json > "$S/rv2.json" 2> "$S/rv2.err"); R=$?
+echo "RECIPE_VARS_WITH_VARS_FILE_RC=$R"; tail -1 "$S/rv2.err" | sed "s|$RVD|<RVD>|g"
+if [ "$R" -eq 2 ] && grep -q 'cannot be used with the recipe_vars' "$S/rv2.err" && rv_none; then check recipe-vars-refuse-vars-file ok "recipe_vars with --vars-file is exit 2; nothing written"
+else check recipe-vars-refuse-vars-file FAIL "rc=$R $(rv_bodies)"; fi
+
+chmod 666 "$RVD/vars/b.yaml"
+(cd "$RVD" && "$EXE" apply site.yaml --sudo --format json > "$S/rv3.json" 2> "$S/rv3.err"); R=$?
+chmod 644 "$RVD/vars/b.yaml"
+echo "RECIPE_VARS_UNTRUSTED_RC=$R"; tail -1 "$S/rv3.err" | sed "s|$RVD|<RVD>|g"
+if [ "$R" -eq 2 ] && grep -q 'vars/b.yaml: writable by group or others' "$S/rv3.err" && rv_none; then check recipe-vars-untrusted-file-refused ok "a variables file writable by others is exit 2; nothing written"
+else check recipe-vars-untrusted-file-refused FAIL "rc=$R $(rv_bodies)"; fi
+
+printf 'version: 1\nvars_files: [vars/a1.yaml]\n' > "$RVD/sinter.yaml"
+(cd "$RVD" && "$EXE" apply site.yaml --sudo --format json > "$S/rv4.json" 2> "$S/rv4.err"); R=$?
+B=$(rv_bodies)
+echo "RECIPE_VARS_SHARED_RC=$R $B"
+if [ "$R" -eq 0 ] && [ "$B" = "a=a-one|a-common b=b-default|a-common c=c-default|a-common" ]; then
+  check recipe-vars-absent-shared-files ok "without recipe_vars the shared vars_files reach every recipe that declares the variable, as before"
+else check recipe-vars-absent-shared-files FAIL "rc=$R $B"; fi
+
+rv_clean
+(cd "$RVD" && "$EXE" apply site.yaml --sudo --no-config --format json > "$S/rv5.json" 2> "$S/rv5.err"); R=$?
+B=$(rv_bodies)
+echo "RECIPE_VARS_NO_CONFIG_RC=$R $B"
+if [ "$R" -eq 0 ] && [ "$B" = "a=a-default|a-common-default b=b-default|b-common-default c=c-default|c-common-default" ]; then
+  check recipe-vars-no-config-defaults ok "--no-config: every recipe keeps its defaults"
+else check recipe-vars-no-config-defaults FAIL "rc=$R $B"; fi
+
+rv_clean; R=$?
+rm -rf "$RVD"
+echo "RECIPE_VARS_CLEANUP_RC=$R"
+if [ "$R" -eq 0 ] && rv_none && [ ! -e "$RVD" ]; then check recipe-vars-no-residue ok "files written by these checks removed"
+else check recipe-vars-no-residue FAIL "rc=$R $(rv_bodies)"; fi
+# END recipe-vars-checks
+
 # ------------------------------------------------------- residue cleanup
 cat > "$S/cleanup.yaml" <<'YAML'
 version: 1

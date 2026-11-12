@@ -2,6 +2,52 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Variables files per recipe (`recipe_vars`).** A project file can give each recipe of a run its
+  own variables files: `recipe_vars: { 20_web: [vars/common.yaml, vars/web.yaml] }`. A key is a
+  recipe's label (its file name without the extension, as for `--skip-recipe`), for a recipe given
+  alone or in a bundle. Each recipe gets exactly its files, merged in order, with the layer
+  precedence unchanged; no file of one recipe reaches another, and a run no longer warns about
+  variables that belong to other recipes. A recipe that is not listed keeps its defaults, and a key
+  that names no recipe of the run is ignored and its files are not read. Only the run's recipes'
+  files are checked against the project-file trust rules and read. `recipe_vars` is exit 2 together
+  with `vars_files` or `--vars-file`, and when two recipes of a run share a label a key names. Each
+  recipe's files are shown before anything runs; JSON adds `resolved.recipe_vars` only when it is
+  used. Without `recipe_vars` nothing changes.
+- **`sinter plugin list` and `sinter plugin verify`.** Sinter carries the exact bytes of its
+  first-party plugins and catalogs. `list` shows them and what the plugin root holds; `verify`
+  checks installed plugins against the trust file, the embedded files, the first-party registry and
+  the loader. Both only read. `verify` with nothing to verify is exit 2.
+- **`sinter plugin install` and `sinter plugin remove`.** `install ID@VERSION` writes one embedded
+  first-party plugin and its catalog into the plugin root and appends their trust entries, after a
+  plan and a confirmation (`yes` on a terminal, `--yes` otherwise) that attests the catalog's
+  observe operations as read-only. No mutate operation is allowed unless named with
+  `--allow-mutate` or `--allow-mutate-for TYPE`; `--yes` never allows one. Files are created with
+  mode 0600 and directories with mode 0700, an existing file is never replaced, an existing trust
+  entry is never widened or narrowed, and one writer at a time holds `<root>/.lock`. `remove` takes
+  out only files that still have the pinned bytes and keeps `trust.toml.prev`. Exit 0, 2 (refused,
+  no change left) or 5 (a failure after a change began). Neither command reads a recipe or contacts
+  a target, and MCP has no plugin tool.
+- **firewalld 0.2.0.** The second first-party plugin and catalog: `firewalld.service` (present or
+  absent), `firewalld.port` (one port, present or absent), `firewalld.port_range` (present) and
+  `firewalld.protocol` (present or absent), each in the runtime and the permanent configuration.
+  Removing the `ssh` service or `22/tcp` is refused. Measured on Rocky Linux 9.8 (firewalld 1.3.4),
+  Rocky Linux 10.2 (2.4.3) and Ubuntu 24.04 (2.1.1). firewalld 0.1.0 is unchanged.
+- **Partial mutate permission.** A trust entry may allow only some of a plugin's mutate operations,
+  or none. The plugin then loads and `audit` works; `plan` and `apply` refuse a run with exit 2
+  before contacting any target when a resource could need an operation that is not allowed, and
+  name it. Every observe operation a plugin's types use must still be attested.
+
+### Security
+
+- **Dependencies: rustix 1.1.6** (from 1.1.4, through tempfile) for RUSTSEC-2026-0486. Sinter does
+  not call the affected functions; the update clears the advisory.
+- **Gateway: rusqlite 0.41.1 and libsqlite3-sys 0.39.1** (bundled SQLite 3.54.1, from 3.53.2) for
+  RUSTSEC-2026-0459. The gateway is not part of the release archive.
+
 ## [1.11.0] - 2026-11-10
 
 ### Added
