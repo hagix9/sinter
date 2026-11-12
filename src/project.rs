@@ -18,6 +18,7 @@ const FIELDS: &[&str] = &[
     "recipe_paths",
     "inventory",
     "vars_files",
+    "recipe_vars",
     "backup",
     "default_target",
     "allow_implicit_apply",
@@ -69,6 +70,11 @@ pub struct ProjectFile {
     pub recipe_paths: Vec<PathBuf>,
     pub inventory: Option<PathBuf>,
     pub vars_files: Vec<PathBuf>,
+    /// `recipe_vars`: the variables files of each recipe, by its label (the
+    /// file stem, as `--skip-recipe` names it), lowest precedence first. A
+    /// recipe of the run that is not listed gets no variables file. Never set
+    /// together with `vars_files` (DESIGN §40.5).
+    pub recipe_vars: Option<std::collections::BTreeMap<String, Vec<PathBuf>>>,
     pub backup_directory: Option<String>,
     pub default_target: Option<String>,
     pub allow_implicit_apply: bool,
@@ -369,6 +375,38 @@ pub(crate) fn parse_project(
         "allow_implicit_apply",
         map.get("allow_implicit_apply"),
     )?;
+    let recipe_vars = match map.get("recipe_vars") {
+        None => None,
+        Some(v) => {
+            let m = v.as_map().ok_or_else(|| {
+                bad(
+                    path,
+                    "recipe_vars must be a map of recipe names to lists of paths",
+                )
+            })?;
+            if m.is_empty() {
+                return Err(bad(path, "recipe_vars must not be empty"));
+            }
+            if map.contains_key("vars_files") {
+                return Err(bad(
+                    path,
+                    "recipe_vars and vars_files cannot both be set: list the shared files under each recipe of recipe_vars",
+                ));
+            }
+            let mut out = std::collections::BTreeMap::new();
+            for (name, files) in m {
+                if !crate::document::valid_name(name) {
+                    return Err(bad(
+                        path,
+                        "recipe_vars: a key must be a recipe name (its file name without the extension: [A-Za-z0-9._-], starting alphanumeric, at most 64 characters)",
+                    ));
+                }
+                let field = format!("recipe_vars.{name}");
+                out.insert(name.clone(), path_list(path, base, &field, files)?);
+            }
+            Some(out)
+        }
+    };
     let inventory = map
         .get("inventory")
         .map(|v| path_string(path, "inventory", v).map(|s| joined(base, &s)))
@@ -379,6 +417,7 @@ pub(crate) fn parse_project(
         recipe_paths: list("recipe_paths")?,
         inventory,
         vars_files: list("vars_files")?,
+        recipe_vars,
         backup_directory,
         default_target,
         allow_implicit_apply,
@@ -751,6 +790,42 @@ mod tests {
             ("version: 1\nbackup: {directory: /}\n", "root directory"),
             ("version: 1\ndefault_target: \"\"\n", "default_target"),
             ("version: 1\nstrict_vars: 1\n", "must be true or false"),
+            (
+                "version: 1\nrecipe_vars: [a]\n",
+                "recipe_vars must be a map",
+            ),
+            (
+                "version: 1\nrecipe_vars: {}\n",
+                "recipe_vars must not be empty",
+            ),
+            (
+                "version: 1\nrecipe_vars: {web: v.yaml}\n",
+                "must be a list of paths",
+            ),
+            (
+                "version: 1\nrecipe_vars: {web: [1]}\n",
+                "must be a path string",
+            ),
+            (
+                "version: 1\nrecipe_vars: {web: [a.yaml, ./a.yaml]}\n",
+                "more than once",
+            ),
+            (
+                "version: 1\nrecipe_vars: {\"a/b\": [v.yaml]}\n",
+                "a key must be a recipe name",
+            ),
+            (
+                "version: 1\nrecipe_vars: {_x: [v.yaml]}\n",
+                "a key must be a recipe name",
+            ),
+            (
+                "version: 1\nrecipe_vars: {web: [\"~/v.yaml\"]}\n",
+                "not expanded",
+            ),
+            (
+                "version: 1\nvars_files: [c.yaml]\nrecipe_vars: {web: [v.yaml]}\n",
+                "cannot both be set",
+            ),
             ("a: b: c\n", "YAML"),
         ] {
             let e = parse(body).expect_err(body);
@@ -772,6 +847,7 @@ mod tests {
             recipe_paths,
             inventory: None,
             vars_files: Vec::new(),
+            recipe_vars: None,
             backup_directory: None,
             default_target: None,
             allow_implicit_apply: false,

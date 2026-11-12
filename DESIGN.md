@@ -2868,7 +2868,7 @@ Discovery. `--config PATH` names the file (it must exist; nothing is searched). 
 
 A discovered file arrives without having been named, so it is held to the §39.3 rules: exactly one candidate (Sinter never picks by priority), not a symbolic link, a regular file, at most 1 MiB, file and directory owned by this user or root and not writable by group or others, checked on the open descriptor that is then read. Any failure is exit 2, and nothing falls back to "no project file". A file named with `--config` is what the operator asked for: it must be a regular file of at most 1 MiB, as `--inventory` is taken at its word.
 
-A file a project file names (a recipe found through `recipe_paths`, `inventory`, `vars_files`) is held to the same ownership and mode rules, whichever way the project file was found, since it was not named on the command line. The rule is checked immediately before the file is read by path; it holds as long as the directories above it are, which the same limit of §39.3 states. The inventory a project file names is also held to the field rules of a detected inventory, whichever way the project file was found: no `known_hosts` and no relative `identity_files` on any host (§39.3). Otherwise a cloned repository's project file could bring the host keys that strict verification checks against; `--known-hosts` or `--inventory` on the command line can still name them. A path named on the command line is taken at its word.
+A file a project file names (a recipe found through `recipe_paths`, `inventory`, `vars_files`, `recipe_vars`) is held to the same ownership and mode rules, whichever way the project file was found, since it was not named on the command line. The rule is checked immediately before the file is read by path; it holds as long as the directories above it are, which the same limit of §39.3 states. The inventory a project file names is also held to the field rules of a detected inventory, whichever way the project file was found: no `known_hosts` and no relative `identity_files` on any host (§39.3). Otherwise a cloned repository's project file could bring the host keys that strict verification checks against; `--known-hosts` or `--inventory` on the command line can still name them. A path named on the command line is taken at its word.
 
 The project file, the recipe, the inventory, the variables files and the project's backup store are shown before anything runs (`config:`, `recipe:`, `inventory:`, `vars:`, `backup store:` in text; `resolved` in JSON). A run without a project file prints nothing new.
 
@@ -2919,6 +2919,31 @@ An `apply` that names no host on its command line (no `--host`, selector, `--lim
 40.5 Variables files in layers
 
 `--vars-file` may be repeated. The files in effect are the project's `vars_files`, in order, then the command line's, in order; a later file wins. `--no-config` drops the former.
+
+Per-recipe files (`recipe_vars`, not released). A project file may instead give each recipe its own files, so that a recipe gets only what was written for it:
+
+```yaml
+version: 1
+recipe_paths: [./recipes]
+recipe_vars:              # recipe name: its files, lowest precedence first
+  05_ssh:
+    - vars/ssh_key.yaml
+  10_firewall:
+    - vars/firewall.yaml
+  20_web:
+    - vars/common.yaml
+    - vars/web.yaml
+```
+
+- A key is a recipe's label, the name `--skip-recipe` uses: its file name without the extension (`recipes/05_ssh.yaml` is `05_ssh`), for a recipe given alone or as a member of a bundle. The label is all that is matched, never the recipe's directory: `other/05_ssh.yaml` run alone gets the files of `05_ssh` as well. A recipe cannot be named by its path (Owner decision N-1). A key must be a valid name (`[A-Za-z0-9._-]`, starting alphanumeric, at most 64 characters); an empty map, a value that is not a list of paths and a path listed twice for one recipe are exit 2. The same file may be listed for several recipes; each of them then judges the file's names as its own (below), so a name only another of them declares is a warning, and under `--strict-vars` exit 2. A file meant for several recipes should hold only names they all declare.
+- Paths follow §40.1: relative to the directory holding the project file, no `~` or environment variables.
+- Each recipe of the run gets exactly the files listed under its label, merged as above in the order listed (a later file wins variable by variable inside each layer; the layer precedence of §19.5, recipe default, `vars`, `groups`, `hosts`, applies to the merged layers). No file of one recipe reaches another, even one that declares the same name.
+- A recipe of the run that is not listed, or is listed with `[]`, gets no file: it runs with its defaults, and a `required` variable of it is exit 2. Each recipe's files are shown before anything runs (`vars: recipe 05_ssh: …`, or `vars: none for recipe 10_firewall (not listed in recipe_vars)`), so a key that names no recipe is visible as a recipe without files. A key that names no recipe of this run is not an error and is not warned about, and its files are not read: a project's recipe_vars serves several runs (Owner decision N-2).
+- Only the files of the recipes this run has are checked (§40.1 rules) and read, each once; a key of another run's recipe costs nothing, even if its file is missing or broken. Every file of a recipe of the run is read, also of a recipe `--skip-recipe` leaves out or `--limit` leaves without a host (it is still validated).
+- Two recipes of the run with the label a key names are exit 2 (`rename a file to tell them apart`), never matched to one of them. Two recipes of one label that no key names get no file and are no error.
+- Not with `vars_files` in the same file (exit 2: list the shared files under each recipe), and not with `--vars-file` (exit 2: which recipe a command-line file is for is not guessed). `--no-config` drops `recipe_vars`, and `--vars-file` then works as before. A project file without `recipe_vars` behaves as before.
+- Every check of this section and of §19.5 applies to each recipe against its own files: types, the ban on overriding a sensitive variable, the inventory's groups and hosts, group conflicts, `--limit`. A name in a recipe's files that the recipe does not declare is judged by the rules below, said of that recipe (`is not declared by recipe 10_firewall`), except that rule 2 never excuses it: the file was named for this recipe.
+- JSON: `resolved.recipe_vars` lists, in run order, each recipe with the files it got; `resolved.vars_files` is empty, and `validate` lists every file used, once, in `variables.files` (in `variables.file` when exactly one file was used, as for `--vars-file`). Without `recipe_vars` neither document changes.
 
 Merging is by variable name inside each layer: `vars`, `groups.<g>`, `hosts.<h>` of all files are merged separately, then the precedence of §19.5 (recipe default, `vars`, `groups`, `hosts`) applies to the merged layers. A host value of an earlier file therefore beats a common value of a later one. A variable's value is replaced whole: a map or list value is never merged with an earlier one, so what a file says is what the variable holds. A missing file, invalid YAML or TOML, a wrong type of the final value and an attempt to override a sensitive variable are exit 2 before anything is contacted, in any file, shadowed or not for the last one. Every message names variables and files, never a value.
 
@@ -2994,3 +3019,5 @@ Tests: `tests/cli_recipe_resolve.rs` (SR-2: names, bundle directories, the searc
 2026-11-10 (SR-2, not released; Owner decisions of 2026-11-10): §40.2 rewritten around two steps. The rule of v1.10.0 stays the first step, except that a directory found by it is no longer counted. A second step resolves a bundle by its directory and searches below `recipe_paths` for a single recipe by its file name or for a name of several components. No extension is added to a single recipe, and `<name>.yaml` is not an alias of a bundle directory. Behaviour that changed for an argument that was an error before: a `dir/name` that does not exist is searched for when the project has `recipe_paths` (it was used as given and failed to load), and a bundle directory in the current directory is resolved also without a project file. §40.3 and §39.3 were extended to match (the six inventory names, no inventory place for a recipe found by name).
 
 2026-11-11: status updated after the v1.11.0 publication; the bundle directories and the search of §40.2 are released in v1.11.0. No contract changed.
+
+2026-11-12 (not released): §40.5 gained `recipe_vars`, per-recipe variables files of the project file. Without the field nothing changes; with it `vars_files` and `--vars-file` are refused. Tests: `tests/cli_recipe_vars.rs` and unit tests in `src/varsfile.rs` and `src/project.rs`. Owner decisions of 2026-11-12: N-1, a key is matched by the recipe's label (its file name without the extension, the rule of `--skip-recipe`), two recipes of the run with a label a key names are refused, and no recipe is named by its path; N-2, a key that matches no recipe of the run is not warned about and its files are not read, and a recipe recipe_vars does not list runs with its defaults; no warning for unused keys is added.
