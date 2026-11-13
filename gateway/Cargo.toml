@@ -59,8 +59,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-subscriber = "0.3"
 axum = "0.8.9"
 base64 = "0.22"
-rsa = "0.9"
-pkcs8 = { version = "0.10", features = ["pem"] }
+# Test-only: RS256 test keys and signatures. rsa >= 0.10 fixes
+# RUSTSEC-2023-0071; its default "encoding" feature includes PKCS#8 PEM, and
+# "pkcs1v15" enables PKCS#1 v1.5 signatures. rsa must stay out of the
+# normal/build graph (advisories.yml rsa-graph-guard).
+rsa = { version = "0.10", features = ["pkcs1v15"] }
+# The operating-system CSPRNG (getrandom::SysRng) for test key generation;
+# rsa 0.10 takes a rand_core 0.10 RNG. Renamed because the gateway's normal
+# dependency getrandom is the 0.3 line.
+getrandom-sysrng = { package = "getrandom", version = "0.4", features = ["sys_rng"] }
 # tests/tls_dependency_policy.rs reads the bundled trust store that reqwest's
 # rustls-tls feature uses. This crate is already in the graph; it is declared
 # here only so the test can name it.

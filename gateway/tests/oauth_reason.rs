@@ -8,7 +8,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use rsa::pkcs8::{EncodePrivateKey, LineEnding};
 use rsa::traits::PublicKeyParts;
-use rsa::{RsaPrivateKey, RsaPublicKey};
+use rsa::{PrivateKey as RsaPrivateKey, PublicKey as RsaPublicKey};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sinter_gateway::mcp::PublicAuthError;
@@ -39,14 +39,14 @@ impl JwksSource for FailingJwks {
 fn keys() -> &'static (String, String, Value) {
     static K: OnceLock<(String, String, Value)> = OnceLock::new();
     K.get_or_init(|| {
-        let gen = || RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+        let gen = || RsaPrivateKey::new(&mut getrandom_sysrng::SysRng, 2048).unwrap();
         let (good, other) = (gen(), gen());
         let pem = |k: &RsaPrivateKey| k.to_pkcs8_pem(LineEnding::LF).unwrap().to_string();
         let pubk = RsaPublicKey::from(&good);
         let jwk = json!({"keys": [{
             "kty": "RSA", "use": "sig", "kid": KID,
-            "n": URL_SAFE_NO_PAD.encode(pubk.n().to_bytes_be()),
-            "e": URL_SAFE_NO_PAD.encode(pubk.e().to_bytes_be()),
+            "n": URL_SAFE_NO_PAD.encode(pubk.n_bytes()),
+            "e": URL_SAFE_NO_PAD.encode(pubk.e_bytes()),
         }]});
         (pem(&good), pem(&other), jwk)
     })
@@ -303,12 +303,12 @@ fn nbf_temporal_contract() {
 /// signed directly because the JWT library refuses to sign with such a key.
 #[test]
 fn rsa_keys_below_2048_bits_are_rejected() {
-    let k = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 1024).unwrap();
+    let k = RsaPrivateKey::new(&mut getrandom_sysrng::SysRng, 1024).unwrap();
     let pubk = RsaPublicKey::from(&k);
     let jwks = json!({"keys": [{
         "kty": "RSA", "use": "sig", "kid": KID,
-        "n": URL_SAFE_NO_PAD.encode(pubk.n().to_bytes_be()),
-        "e": URL_SAFE_NO_PAD.encode(pubk.e().to_bytes_be()),
+        "n": URL_SAFE_NO_PAD.encode(pubk.n_bytes()),
+        "e": URL_SAFE_NO_PAD.encode(pubk.e_bytes()),
     }]});
     let v = validator_with(Box::new(StaticJwks(jwks.to_string().into_bytes())));
 
@@ -325,7 +325,12 @@ fn rsa_keys_below_2048_bits_are_rejected() {
         hash_len: Some(32),
         prefix: prefix.into_boxed_slice(),
     };
-    let sig = k.sign(scheme, &Sha256::digest(msg.as_bytes())).unwrap();
+    let digest = Sha256::digest(msg.as_bytes());
+    let sig = k.sign(scheme.clone(), &digest).unwrap();
+    // The key really is 1024-bit and the signature really is valid, so the
+    // rejection below can only come from the key-size floor.
+    assert_eq!(pubk.n_bytes().len(), 128);
+    pubk.verify(scheme, &digest, &sig).unwrap();
     let tok = format!("{msg}.{}", e(&sig));
 
     assert_eq!(

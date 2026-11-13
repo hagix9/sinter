@@ -7,7 +7,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use rsa::pkcs8::{EncodePrivateKey, LineEnding};
 use rsa::traits::PublicKeyParts;
-use rsa::{RsaPrivateKey, RsaPublicKey};
+use rsa::{PrivateKey as RsaPrivateKey, PublicKey as RsaPublicKey};
 use serde_json::json;
 use sinter_gateway::oauth::{JwksSource, OAuthConfig, OAuthValidator};
 use sinter_gateway::PublicAuth;
@@ -44,11 +44,11 @@ impl JwksSource for StaticJwks {
 fn invalid_credential_log_has_reason_class_and_no_secrets() {
     const ISS: &str = "https://as.example.com";
     const AUD: &str = "https://gw.example.com";
-    let key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+    let key = RsaPrivateKey::new(&mut getrandom_sysrng::SysRng, 2048).unwrap();
     let pubk = RsaPublicKey::from(&key);
     let jwks = json!({"keys": [{"kty": "RSA", "kid": "k1",
-        "n": URL_SAFE_NO_PAD.encode(pubk.n().to_bytes_be()),
-        "e": URL_SAFE_NO_PAD.encode(pubk.e().to_bytes_be())}]});
+        "n": URL_SAFE_NO_PAD.encode(pubk.n_bytes()),
+        "e": URL_SAFE_NO_PAD.encode(pubk.e_bytes())}]});
     let cfg = OAuthConfig::new(ISS, AUD, AUD, "https://as.example.com/jwks");
     let v = OAuthValidator::new(cfg, Box::new(StaticJwks(jwks.to_string().into_bytes()))).unwrap();
 

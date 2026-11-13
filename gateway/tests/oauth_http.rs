@@ -11,7 +11,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use rsa::pkcs8::{EncodePrivateKey, LineEnding};
 use rsa::traits::PublicKeyParts;
-use rsa::{RsaPrivateKey, RsaPublicKey};
+use rsa::{PrivateKey as RsaPrivateKey, PublicKey as RsaPublicKey};
 use serde_json::{json, Value};
 use sinter_gateway::edge::PROFILE_TOOL;
 use sinter_gateway::oauth::{trusted_uri, HttpJwksSource, OAuthConfig};
@@ -72,7 +72,7 @@ struct TestAs {
 
 impl TestAs {
     fn start() -> Self {
-        let key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+        let key = RsaPrivateKey::new(&mut getrandom_sysrng::SysRng, 2048).unwrap();
         let pubkey = RsaPublicKey::from(&key);
         let priv_pem = key.to_pkcs8_pem(LineEnding::LF).unwrap().to_string();
         let kid = "k1".to_string();
@@ -187,8 +187,8 @@ fn jwk_for(pubkey: &RsaPublicKey, kid: &str) -> Value {
         "kid": kid,
         "use": "sig",
         "alg": "RS256",
-        "n": URL_SAFE_NO_PAD.encode(pubkey.n().to_bytes_be()),
-        "e": URL_SAFE_NO_PAD.encode(pubkey.e().to_bytes_be()),
+        "n": URL_SAFE_NO_PAD.encode(pubkey.n_bytes()),
+        "e": URL_SAFE_NO_PAD.encode(pubkey.e_bytes()),
     })
 }
 
@@ -577,7 +577,7 @@ async fn oauth_credential_matrix() {
     assert_eq!(s, 401, "{b}");
 
     // bad signature (different key) → invalid
-    let other = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+    let other = RsaPrivateKey::new(&mut getrandom_sysrng::SysRng, 2048).unwrap();
     let other_pem = other.to_pkcs8_pem(LineEnding::LF).unwrap().to_string();
     let bad_sig = as_.mint_with(
         &as_.claims(&aud, "subj", Some("acc_a"), 3600),
@@ -1017,7 +1017,7 @@ async fn oauth_jwks_rotation_and_malformed() {
     assert!(fetches_after_first >= 1);
 
     // Rotate: new keypair under kid k2; the AS now serves only k2.
-    let key2 = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap();
+    let key2 = RsaPrivateKey::new(&mut getrandom_sysrng::SysRng, 2048).unwrap();
     let pub2 = RsaPublicKey::from(&key2);
     let pem2 = key2.to_pkcs8_pem(LineEnding::LF).unwrap().to_string();
     as_.set_doc(json!({"keys":[jwk_for(&pub2, "k2")]}));
