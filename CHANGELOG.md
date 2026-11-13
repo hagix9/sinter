@@ -2,6 +2,29 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **MCP `sinter_plan`: the scripted user of the built-in supplied-facts targets** (`ubuntu2404`,
+  `ubuntu2604`, `rocky9`, `rocky10`) now has the home directory `/var/empty/fake` instead of
+  `/home/fake`. Only planning against these canned snapshots is affected: home-derived paths in
+  `sinter_plan` output (for example the default non-sudo backup store `~/.sinter` in a reason)
+  now read `/var/empty/fake/...`, and a manifest that named the old `/home/fake` tree is planned
+  as an ordinary path outside the scripted user's home. `sinter_plan_host`, the CLI and real
+  targets are unaffected. The release binary no longer contains a `/home/...` literal from these
+  snapshots.
+
+### Security
+
+- **Gateway: rsa 0.10.0** (from 0.9.10, a test-only dependency) for RUSTSEC-2023-0071; the
+  gateway's advisory exception is removed. `rsa` stays out of the gateway's normal and build
+  dependency graph.
+- The advisory exception for RUSTSEC-2026-0387 (crypto-bigint 0.5.5 through `age` 0.12.1, the
+  latest `age` release) is renewed until 2027-01-31 after re-evaluation; it is an accepted risk
+  based on a static review, not a fix. The block-buffer exception (GHSA-qwgh-2vcv-g2f7) was
+  removed: the locked versions are not affected.
+
 ## [1.12.0] - 2026-11-12
 
 ### Added
