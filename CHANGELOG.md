@@ -24,6 +24,10 @@ All notable changes to Sinter are documented in this file.
   latest `age` release) is renewed until 2027-01-31 after re-evaluation; it is an accepted risk
   based on a static review, not a fix. The block-buffer exception (GHSA-qwgh-2vcv-g2f7) was
   removed: the locked versions are not affected.
+- **Gateway: quinn-proto 0.11.19** (from 0.11.18) for RUSTSEC-2026-0523 and RUSTSEC-2026-0524,
+  and **quinn-udp 0.5.16** (from 0.5.15) for RUSTSEC-2026-0538, updated in the gateway lockfile
+  only. quinn is listed there only through reqwest's optional HTTP/3 support, which the gateway
+  does not enable, so it is not compiled into the gateway.
 
 ## [1.12.0] - 2026-11-12
 
