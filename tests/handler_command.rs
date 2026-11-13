@@ -584,7 +584,9 @@ fn the_handler_runs_with_the_privilege_of_the_run_and_never_escalates() {
         .with_fake_fs()
         .with_executable(PROG);
     let fs = t.fs.get_or_insert_with(Default::default);
-    fs.mkdir_node("/home", 0o755, 0, 0);
+    // The ancestors of the scripted home: root-owned, not group/other writable.
+    fs.mkdir_node("/var", 0o755, 0, 0);
+    fs.mkdir_node("/var/empty", 0o755, 0, 0);
     fs.mkdir_node(&home, 0o755, 1000, 1000);
     let rep = run_recipe_fake(&r, Mode::Apply, false, t);
     assert_eq!(

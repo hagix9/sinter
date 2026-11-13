@@ -279,7 +279,9 @@ fn without_root_the_handler_fails_and_nothing_is_escalated() {
         .with_fake_fs()
         .with_executable(DEB_TOOL);
     let fs = t.fs.get_or_insert_with(Default::default);
-    fs.mkdir_node("/home", 0o755, 0, 0);
+    // The ancestors of the scripted home: root-owned, not group/other writable.
+    fs.mkdir_node("/var", 0o755, 0, 0);
+    fs.mkdir_node("/var/empty", 0o755, 0, 0);
     fs.mkdir_node(&home, 0o755, 1000, 1000);
     let rep = run_recipe_fake(&r, Mode::Apply, false, t);
     assert_eq!(

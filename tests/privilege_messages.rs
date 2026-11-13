@@ -23,8 +23,9 @@ fn base() -> FakeTarget {
         ("/etc", 0o755, 0),
         ("/etc/fs0", 0o755, 0),
         ("/root", 0o700, 0),
-        ("/home", 0o755, 0),
-        ("/home/fake", 0o755, 1000),
+        ("/var", 0o755, 0),
+        ("/var/empty", 0o755, 0),
+        ("/var/empty/fake", 0o755, 1000),
     ] {
         fs.mkdir_node(path, mode, uid, uid);
     }
@@ -68,7 +69,7 @@ fn text(r: &RunReport, mode: Mode, verbose: bool, color: bool) -> String {
     String::from_utf8(out).unwrap()
 }
 
-const RECIPE: &str = "resources:\n  - id: f\n    type: file\n    with:\n      path: /etc/fs0/a.conf\n      content: \"a\\n\"\n  - id: pkg\n    type: package\n    with:\n      name: nginx\n      state: present\n  - id: mine\n    type: file\n    with:\n      path: /home/fake/a.conf\n      content: \"a\\n\"\n";
+const RECIPE: &str = "resources:\n  - id: f\n    type: file\n    with:\n      path: /etc/fs0/a.conf\n      content: \"a\\n\"\n  - id: pkg\n    type: package\n    with:\n      name: nginx\n      state: present\n  - id: mine\n    type: file\n    with:\n      path: /var/empty/fake/a.conf\n      content: \"a\\n\"\n";
 
 #[test]
 fn needs_root_is_shown_without_verbose_for_a_user_without_sudo() {
@@ -98,7 +99,7 @@ fn needs_root_is_shown_without_verbose_for_a_user_without_sudo() {
 fn no_privilege_note_for_a_root_login_or_with_sudo() {
     let dir = tempfile::tempdir().unwrap();
     let p = recipe(&dir, RECIPE);
-    let user = |t: FakeTarget| t.with_user("fake", 1000, 1000, "/home/fake", "/bin/bash");
+    let user = |t: FakeTarget| t.with_user("fake", 1000, 1000, "/var/empty/fake", "/bin/bash");
     for (t, sudo) in [
         (user(base().as_root()), false),
         (user(base().as_root()), true),
@@ -126,12 +127,12 @@ fn other_notes_stay_verbose_only() {
     let dir = tempfile::tempdir().unwrap();
     let p = recipe(
         &dir,
-        "resources:\n  - id: f\n    type: file\n    with:\n      path: /home/fake/ro/a.conf\n      content: \"a\\n\"\n",
+        "resources:\n  - id: f\n    type: file\n    with:\n      path: /var/empty/fake/ro/a.conf\n      content: \"a\\n\"\n",
     );
     let mut t = base();
     t.fs.as_mut()
         .unwrap()
-        .mkdir_node("/home/fake/ro", 0o555, 1000, 1000);
+        .mkdir_node("/var/empty/fake/ro", 0o555, 1000, 1000);
     let r = run(&p, Mode::Plan, false, t);
     let notes = &r.resources[0].notes;
     assert!(

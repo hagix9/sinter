@@ -33,8 +33,8 @@ fn base() -> FakeTarget {
         ("/var/lib", 0o755, 0),
         ("/root", 0o700, 0),
         ("/srv", 0o755, 0),
-        ("/home", 0o755, 0),
-        ("/home/fake", 0o755, 1000),
+        ("/var/empty", 0o755, 0),
+        ("/var/empty/fake", 0o755, 1000),
     ] {
         fs.mkdir_node(path, mode, uid, uid);
     }
@@ -538,7 +538,7 @@ fn the_backup_store_follows_the_flag_not_the_user() {
     assert!(store(true, user_target()).starts_with("/var/lib/sinter/backups/"));
     // No flag: the target user's home, root's included (the existing contract).
     assert!(store(false, root_target()).starts_with("/root/.sinter/backups/"));
-    assert!(store(false, user_target()).starts_with("/home/fake/.sinter/backups/"));
+    assert!(store(false, user_target()).starts_with("/var/empty/fake/.sinter/backups/"));
 }
 
 // ---------------------------------------------------------------------------
@@ -599,11 +599,11 @@ fn no_note_for_root_for_sudo_or_for_a_directory_the_user_owns() {
     let dir = tempfile::tempdir().unwrap();
     let p = recipe(
         &dir,
-        "resources:\n  - id: file_in_etc\n    type: file\n    with:\n      path: /etc/fs0/a.conf\n      content: \"a\\n\"\n  - id: pkg\n    type: package\n    with:\n      name: nginx\n      state: present\n  - id: mine\n    type: file\n    with:\n      path: /home/fake/a.conf\n      content: \"a\\n\"\n",
+        "resources:\n  - id: file_in_etc\n    type: file\n    with:\n      path: /etc/fs0/a.conf\n      content: \"a\\n\"\n  - id: pkg\n    type: package\n    with:\n      name: nginx\n      state: present\n  - id: mine\n    type: file\n    with:\n      path: /var/empty/fake/a.conf\n      content: \"a\\n\"\n",
     );
-    // /home/fake belongs to uid 1000, whose account exists: for root (a root
+    // /var/empty/fake belongs to uid 1000, whose account exists: for root (a root
     // login or --sudo) it is a directory inside that account's tree (FS-3).
-    let fake_user = |t: FakeTarget| t.with_user("fake", 1000, 1000, "/home/fake", "/bin/bash");
+    let fake_user = |t: FakeTarget| t.with_user("fake", 1000, 1000, "/var/empty/fake", "/bin/bash");
     for (t, sudo) in [
         (fake_user(root_target()), false),
         (fake_user(root_target()), true),

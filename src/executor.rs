@@ -2609,6 +2609,14 @@ pub fn shell_quote(s: &str) -> String {
 // Scripted fake target (test support only)
 // ---------------------------------------------------------------------------
 
+/// Home directory of the scripted user of every [`FakeTarget`] preset (also
+/// the canned targets of the MCP `sinter_plan` tool). A synthetic path below
+/// `/var/empty` (the conventional empty, root-owned, non-account directory):
+/// it names no real account and does not look like a user home path. Keep it
+/// short: a non-sudo command carries the home twice (working directory and
+/// `HOME`), and tests rely on the sudo wrapper still making a command longer.
+pub const FAKE_HOME: &str = "/var/empty/fake";
+
 /// A scripted in-process target used by tests. Selected through
 /// `RunOptions::fake_target`; the CLI never constructs it.
 ///
@@ -2926,7 +2934,7 @@ impl FakeTarget {
             arch: "x86_64".to_string(),
             uid: 1000,
             gid: 1000,
-            home: "/home/fake".to_string(),
+            home: FAKE_HOME.to_string(),
             executables: [
                 "/usr/bin/dnf",
                 "/usr/bin/rpm",
@@ -2999,7 +3007,7 @@ impl FakeTarget {
             arch: "x86_64".to_string(),
             uid: 1000,
             gid: 1000,
-            home: "/home/fake".to_string(),
+            home: FAKE_HOME.to_string(),
             executables: [
                 "/usr/bin/dnf",
                 "/usr/bin/rpm",
@@ -3070,7 +3078,7 @@ impl FakeTarget {
             arch: "x86_64".to_string(),
             uid: 1000,
             gid: 1000,
-            home: "/home/fake".to_string(),
+            home: FAKE_HOME.to_string(),
             executables: ["/usr/bin/apt-get", "/usr/bin/dpkg-query", "/usr/bin/systemctl"]
                 .iter()
                 .map(|s| s.to_string())
@@ -3133,7 +3141,7 @@ impl FakeTarget {
             arch: "x86_64".to_string(),
             uid: 1000,
             gid: 1000,
-            home: "/home/fake".to_string(),
+            home: FAKE_HOME.to_string(),
             executables: ["/usr/bin/apt-get", "/usr/bin/dpkg-query", "/usr/bin/systemctl"]
                 .iter()
                 .map(|s| s.to_string())
@@ -3193,7 +3201,7 @@ impl FakeTarget {
             arch: "x86_64".to_string(),
             uid: 1000,
             gid: 1000,
-            home: "/home/fake".to_string(),
+            home: FAKE_HOME.to_string(),
             executables: std::collections::BTreeSet::new(),
             packages: std::collections::BTreeSet::new(),
             services: BTreeMap::new(),

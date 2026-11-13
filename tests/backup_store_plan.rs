@@ -36,15 +36,19 @@ fn target_with(store: &[&str]) -> FakeTarget {
         ("/srv", 0o755, 0),
         ("/var", 0o755, 0),
         ("/var/lib", 0o755, 0),
-        ("/home", 0o755, 0),
+        ("/var/empty", 0o755, 0),
         // The connecting (non-sudo) user's home: trusted because it is owned
         // by the connecting uid and not group/other writable.
-        ("/home/fake", 0o755, 1000),
+        ("/var/empty/fake", 0o755, 1000),
     ] {
         fs.mkdir_node(path, mode, uid, uid);
     }
     for d in store {
-        let uid = if d.starts_with("/home/fake") { 1000 } else { 0 };
+        let uid = if d.starts_with("/var/empty/fake") {
+            1000
+        } else {
+            0
+        };
         fs.mkdir_node(d, 0o700, uid, uid);
     }
     t
@@ -153,8 +157,8 @@ fn a_path_below_a_store_directory_apply_creates_is_deferred_not_refused() {
     assert_deferred(
         false,
         &[],
-        "/home/fake/.sinter/backups/README",
-        "/home/fake/.sinter",
+        "/var/empty/fake/.sinter/backups/README",
+        "/var/empty/fake/.sinter",
     );
 }
 
@@ -196,7 +200,7 @@ fn an_existing_store_defers_nothing() {
 #[test]
 fn the_other_privilege_modes_store_and_unrelated_paths_stay_certain() {
     // --sudo creates /var/lib/sinter, not the user's ~/.sinter.
-    assert_certain(true, &[], true, "/home/fake/.sinter/backups/README");
+    assert_certain(true, &[], true, "/var/empty/fake/.sinter/backups/README");
     // Without --sudo the store is below the home, not /var/lib/sinter.
     assert_certain(false, &[], true, "/var/lib/sinter/backups/README");
     // A name-prefix neighbour of the store is not below it.
@@ -216,5 +220,5 @@ fn the_other_privilege_modes_store_and_unrelated_paths_stay_certain() {
 #[test]
 fn without_a_backup_section_nothing_changes() {
     assert_certain(true, &[], false, "/var/lib/sinter/backups/README");
-    assert_certain(false, &[], false, "/home/fake/.sinter/backups/README");
+    assert_certain(false, &[], false, "/var/empty/fake/.sinter/backups/README");
 }

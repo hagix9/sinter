@@ -23,8 +23,8 @@ fn target() -> FakeTarget {
         ("/srv", 0o755, 0),
         ("/var", 0o755, 0),
         ("/var/lib", 0o755, 0),
-        ("/home", 0o755, 0),
-        ("/home/fake", 0o755, 1000),
+        ("/var/empty", 0o755, 0),
+        ("/var/empty/fake", 0o755, 1000),
     ] {
         fs.mkdir_node(path, mode, uid, uid);
     }
@@ -66,7 +66,11 @@ fn mkdirs(r: &RunReport) -> Vec<&CommandRecord> {
 fn store_and_run_directories_are_created_private_in_one_call() {
     for (sudo, store, backups) in [
         (true, "/var/lib/sinter", "/var/lib/sinter/backups"),
-        (false, "/home/fake/.sinter", "/home/fake/.sinter/backups"),
+        (
+            false,
+            "/var/empty/fake/.sinter",
+            "/var/empty/fake/.sinter/backups",
+        ),
     ] {
         let r = apply(sudo, target());
         assert_eq!(r.status, AggregateStatus::Success, "sudo={sudo}");
