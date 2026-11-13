@@ -544,10 +544,12 @@ candidate (return to step 7, or to step 1).
 
 ## Step 13 — Staging and human review
 
-Only after the step-12 checker PASS. Assemble outside the repository:
+Only after the step-12 checker PASS. Assemble outside the repository, under
+`<STAGING_ROOT>`: a directory outside the repository with enough free space for
+the artifacts and evidence, not in the home directory.
 
 ```text
-~/Downloads/Sinter-v${VERSION}-release-staging/
+<STAGING_ROOT>/Sinter-v${VERSION}-release-staging/
   sinter-v${VERSION}-linux-*.tar.gz  # → release assets
   SHA256SUMS                      # → release asset
   RELEASE_NOTES.md                # → GitHub Release body source
@@ -673,7 +675,7 @@ git status --short
 git remote -v
 
 # 2. Recheck staging — the exact reviewed bytes
-cd ~/Downloads/Sinter-v${VERSION}-release-staging
+cd <STAGING_ROOT>/Sinter-v${VERSION}-release-staging
 shasum -a 256 -c SHA256SUMS              # all OK
 shasum -a 256 -c sinter-v${VERSION}-acceptance-SHA256SUMS
 python3 <repo>/release/verify_approval_set.py evidence/approval-set --rc-repo <repo> \

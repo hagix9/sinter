@@ -8,7 +8,8 @@ documentation lookup tools** over [WebMCP](https://webmcp.org/) — a browser
 API that lets AI agents and agent-enabled browsers call tools hosted by a web
 page. These tools are for **documentation only**: they look up reference
 material and never execute Sinter, never connect to targets, and never change
-anything.
+anything. Every tool is registered with the WebMCP annotation
+`readOnlyHint: true`.
 
 ## Availability
 

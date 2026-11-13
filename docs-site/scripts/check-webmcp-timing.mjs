@@ -52,6 +52,10 @@ function assertTools(tag, tools) {
     fail(`${tag}: a registered tool has no execute function`);
     return;
   }
+  if (tools.some((t) => !t.annotations || t.annotations.readOnlyHint !== true)) {
+    fail(`${tag}: a registered tool lacks annotations.readOnlyHint: true`);
+    return;
+  }
   ok(`${tag}: exactly 5 tools registered`);
 }
 

@@ -4,6 +4,8 @@
 // under both `navigator.modelContext` and `document.modelContext`; this
 // script feature-detects both and registers nothing when neither exists.
 // All tools are documentation lookups only — no mutation, no execution.
+// Each tool carries the WebMCP annotation `readOnlyHint: true`; a host that
+// does not know the annotation ignores it.
 //
 // Locale policy (documented for agents):
 //   - Every tool accepts an optional `locale` input: "en" or "ja".
@@ -130,6 +132,7 @@ function register() {
 
   mc.registerTool({
     name: 'sinter_search_docs',
+    annotations: { readOnlyHint: true },
     description:
       'Search the Sinter documentation index. Returns matching documentation pages with title, URL, and summary. Sinter is an agentless configuration-management tool for Linux.',
     inputSchema: {
@@ -191,6 +194,7 @@ function register() {
 
   mc.registerTool({
     name: 'sinter_list_resources',
+    annotations: { readOnlyHint: true },
     description:
       'List all Sinter recipe resource types implemented in the current release, with a one-line summary and documentation URL for each.',
     inputSchema: {
@@ -218,6 +222,7 @@ function register() {
 
   mc.registerTool({
     name: 'sinter_get_resource',
+    annotations: { readOnlyHint: true },
     description:
       'Get the full parameter reference for one Sinter resource type: required/optional parameters, types, defaults, accepted values, and a usage example.',
     inputSchema: {
@@ -269,6 +274,7 @@ function register() {
 
   mc.registerTool({
     name: 'sinter_get_compatibility',
+    annotations: { readOnlyHint: true },
     description:
       'Get the Sinter supported-platform matrix: distributions, architectures, package backends, acceptance reference, and managed-target requirements.',
     inputSchema: {
@@ -292,6 +298,7 @@ function register() {
 
   mc.registerTool({
     name: 'sinter_get_installation',
+    annotations: { readOnlyHint: true },
     description:
       'Get installation instructions for Sinter: the release tarball for a supported platform, checksum verification, or building from source.',
     inputSchema: {

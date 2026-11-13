@@ -22,7 +22,7 @@ The registry has two entries, firewalld 0.1.0 and firewalld 0.2.0. Both can
 be pinned in the same trust file; a recipe enables one of them (each plugin
 id at most once per run). firewalld 0.1.0 is registered in the source tree for
 v1.9.0 and available from that release (published 2026-11-04). firewalld
-0.2.0 is registered in the source tree and not yet in a published release.
+0.2.0 is available from Sinter v1.12.0 (published 2026-11-12).
 These files are kept in the source repository. Their exact bytes are also
 embedded in the `sinter` executable, which `sinter plugin list` and
 `sinter plugin verify` compare with a plugin root; they are not separate
@@ -189,8 +189,8 @@ On each of them:
 
 ## Using it
 
-With a Sinter that has `sinter plugin install` (not yet in a published
-release; see "Installing and removing" below), install the version you use.
+With a Sinter that has `sinter plugin install` (v1.12.0 and later; see
+"Installing and removing" below), install the version you use.
 Otherwise, copy its files into a plugin root on the controller and pin them in
 the root's `trust.toml` (DESIGN §38.5). The root and
 everything in it must be owned by you or by root and not writable by others,
@@ -222,8 +222,8 @@ sha256 = "e5819cfe0e2c017648f628a27d0ed6e4a18ed402f3ff6de072e61a724f0aa99a"
 For firewalld 0.1.0, pin `27741bcc…` (catalog) and `47f33f17…` (plugin) with
 the five observe and two mutate operations of its table. Every observe
 operation a resource type uses must be attested, or the plugin fails to load
-as a whole. Mutate operations are separate (not yet in a published release:
-Sinter v1.9.0 to v1.11.0 refuse the whole plugin instead): leave out the ones
+as a whole. Mutate operations are separate (from Sinter v1.12.0; Sinter
+v1.9.0 to v1.11.0 refuse the whole plugin instead): leave out the ones
 you do not want run, for example the removal operations, or all of them for
 audit only. The plugin still loads, `audit` works, and `plan` and `apply`
 refuse, before contacting any host, every run with a resource that could need
@@ -253,8 +253,8 @@ resources:
 
 ## Checking a plugin root
 
-Not yet in a published release: `sinter plugin list` and `sinter plugin verify`
-are in the source tree only; Sinter v1.9.0 to v1.11.0 do not have them.
+`sinter plugin list` and `sinter plugin verify` are available from Sinter
+v1.12.0; Sinter v1.9.0 to v1.11.0 do not have them.
 
 Both commands only read: they change no file, read no recipe and contact no
 host. `--plugin-root` and the default root are as for `plan`.
@@ -285,9 +285,8 @@ go to standard error. Neither command installs or trusts anything.
 
 ## Installing and removing
 
-Not yet in a published release: `sinter plugin install` and `sinter plugin
-remove` are in the source tree only; Sinter v1.9.0 to v1.11.0 do not have
-them (DESIGN §38.16).
+`sinter plugin install` and `sinter plugin remove` are available from Sinter
+v1.12.0; Sinter v1.9.0 to v1.11.0 do not have them (DESIGN §38.16).
 
 ```text
 sinter plugin install firewalld@0.2.0 --dry-run              # show the plan

@@ -372,7 +372,7 @@ shell as a separate resource
 
 immediate notifications
 
-generic handlers
+generic handlers (typed handlers exist: service, ca_trust and command, since v1.8.0; DESIGN §1.2, §4.3, §18)
 
 notification chaining
 
@@ -450,7 +450,7 @@ do all of this without installing a Sinter-specific runtime on the target
 
 16. Restricted Resource Plugins (Owner decision, 2026-11-01)
 
-Status: adopted for v1.9.0 as design E3-H. Foundation step 1 (reading and verifying plugin data) is implemented; nothing is executed yet. DESIGN §38 is normative.
+Status: adopted for v1.9.0 as design E3-H. Implemented: plugin data is read and verified, and plugin resource types run through the pinned catalog operations in plan, apply and audit (since v1.9.0); `sinter plugin list`, `verify`, `install` and `remove` and partial mutate permission exist since v1.12.0. DESIGN §38 is normative.
 
 Why this changes §2 and §13. Adding every new resource type to the core makes the core, its review and its releases grow with each type. The Owner asked for resource types that can be added later without rebuilding or changing the core. §2 and §13 rejected a plugin SDK and a plugin system meaning code loaded into Sinter; that rejection stands. What is added is narrower: a plugin is data that the core verifies, and it can only use operations from a capability catalog that the Owner pinned.
 

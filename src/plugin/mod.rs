@@ -70,7 +70,7 @@ pub fn production_enabled() -> bool {
 /// A capability catalog reviewed by the Sinter project and shipped as part
 /// of this release (DESIGN §38.4). A catalog whose exact bytes are not listed
 /// here is refused, whatever the trust file says: third-party catalogs are
-/// not supported in v1.9.0.
+/// not supported.
 #[derive(Debug, Clone, Copy)]
 pub struct FirstPartyCatalog {
     pub id: &'static str,
@@ -191,7 +191,8 @@ pub struct Provenance {
     pub catalog_id: String,
     pub catalog_version: String,
     pub catalog_sha256: String,
-    /// Which registry admitted the catalog. Always `first-party` in v1.9.0.
+    /// Which registry admitted the catalog. Always `first-party`: only the
+    /// release's first-party registry admits a catalog.
     pub catalog_registry: &'static str,
     pub types: Vec<String>,
 }
