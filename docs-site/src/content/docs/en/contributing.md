@@ -76,9 +76,10 @@ disposable Linux machine.
 
 Advisory exceptions live in an `osv-scanner.toml` next to the lockfile, each
 with a reason and an expiry date (`ignoreUntil`; the run fails from that date
-on). The only exception today is RUSTSEC-2023-0071 for `rsa`, a test-only
-dependency of the gateway. The workflow fails if `rsa` enters the gateway's
-normal or build dependency graph.
+on). The gateway's lockfile has no exception; the root lockfile lists its
+current exceptions, each with its dependency path, in its `osv-scanner.toml`.
+`rsa` stays a test-only dependency of the gateway: the workflow fails if it
+enters the gateway's normal or build dependency graph.
 
 GitHub disables scheduled workflows in a public repository after 60 days
 without activity. During such a period only Dependabot alerts keep watching.

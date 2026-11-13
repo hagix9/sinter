@@ -75,10 +75,10 @@ push と pull request のたびに、2 つの GitHub Actions ワークフロー�
 ください。
 
 advisory の例外は、lockfile と同じディレクトリの `osv-scanner.toml` に、理由と
-期限（`ignoreUntil`。その日付以降は実行が失敗します）を付けて記録します。現在の
-例外は、gateway のテストだけが使う依存 `rsa` に対する RUSTSEC-2023-0071 の 1 件
-だけです。`rsa` が gateway の normal または build の依存グラフに入ると、
-ワークフローは失敗します。
+期限（`ignoreUntil`。その日付以降は実行が失敗します）を付けて記録します。gateway
+の lockfile には例外がありません。ルートの lockfile の現在の例外は、依存経路とともに
+その `osv-scanner.toml` に記録しています。`rsa` は gateway のテストだけが使う依存の
+ままで、gateway の normal または build の依存グラフに入ると、ワークフローは失敗します。
 
 GitHub は、公開リポジトリで 60 日間活動がないと、スケジュール実行のワークフローを
 無効にします。その間は Dependabot alerts だけが監視を続けます。

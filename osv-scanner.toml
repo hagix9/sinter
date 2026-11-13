@@ -1,5 +1,5 @@
 # osv-scanner configuration for the root Cargo.lock. It does not apply to
-# gateway/Cargo.lock, which has its own osv-scanner.toml (the rsa exception).
+# gateway/Cargo.lock, which has its own osv-scanner.toml.
 # Used by .github/workflows/advisories.yml.
 #
 # RUSTSEC-2026-0374 (basic-toml is unmaintained) is excepted for the root
@@ -11,11 +11,14 @@
 # reviewed and renewed or removed.
 #
 # RUSTSEC-2026-0387 (crypto-bigint < 0.7.6) is excepted for the root lockfile
-# only, until 2026-12-21 (re-evaluated by 2026-12-14). It is an accepted risk,
-# not a fix: age 0.12.1 (the latest age release) requires the elliptic-curve
-# 0.13 / p256 0.13 crates that pull in crypto-bigint 0.5.5, and no patched
-# release exists on that line. Each exception names one id exactly; any other
-# advisory still fails the scan.
+# only, until 2027-01-31 (re-evaluated by 2027-01-24). It is an accepted risk,
+# not a fix. Path: crypto-bigint 0.5.5 <- elliptic-curve 0.13.8 <- primeorder /
+# p256 0.13.2 <- age 0.12.1, and <- hpke 0.12.0 <- age / age-core. Re-evaluated
+# on 2026-11-13: age 0.12.1 (2026-07-14) is still the latest release, and no
+# patched crypto-bigint exists on the 0.5 line. The reachability judgement in
+# the reason below is a static review, not a proof of safety. When the date
+# passes, the scan fails again (fail closed) until the exception is reviewed.
+# Each exception names one id exactly; any other advisory still fails the scan.
 #
 # The former GHSA-qwgh-2vcv-g2f7 exception (block-buffer) was removed on
 # 2026-11-13: the advisory now affects only block-buffer >= 0.11.0, < 0.12.1
@@ -28,5 +31,5 @@ reason = "basic-toml 0.1.10 is unmaintained (RustSec INFO, no patched version). 
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0387"
-ignoreUntil = 2026-12-21
-reason = "crypto-bigint 0.5.5 (fixed only in 0.7.6+; no patched 0.5.x) is pulled in through p256 0.13 / elliptic-curve 0.13 by age 0.12.1 (the latest age release) and its hpke dependency. In age it is used only by the P-256 tag / tagpq recipients (encryption only) and the disabled ssh feature. Sinter uses age only for x25519 recipients and identities, scrypt and armor, and never references age::tag, age::tagpq or plugins, so the timing issues are not expected to be reachable. This is a static review, not a proof of safety. Re-evaluate when a new stable age is released, rage PR #648/#649 is merged, Sinter starts using tag/tagpq/plugins, a new advisory appears, at the 2026-12-14 review, or when this exception expires."
+ignoreUntil = 2027-01-31
+reason = "crypto-bigint 0.5.5 (fixed only in 0.7.6+; no patched 0.5.x) is pulled in through p256 0.13 / elliptic-curve 0.13 by age 0.12.1 (the latest age release) and its hpke dependency. In age it is used only by the P-256 tag / tagpq recipients (encryption only) and the disabled ssh feature. Sinter uses age only for x25519 recipients and identities, scrypt and armor, and never references age::tag, age::tagpq or plugins, so the timing issues are not expected to be reachable. This is a static review, not a proof of safety. Re-evaluate when a new stable age is released, rage PR #648/#649 is merged, a patched crypto-bigint is reachable from age, Sinter starts using tag/tagpq/plugins, a new related advisory appears, at the 2027-01-24 review, or when this exception expires (re-evaluated 2026-11-13: no age release since 0.12.1)."
