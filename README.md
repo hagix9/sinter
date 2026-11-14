@@ -84,8 +84,8 @@ inventory (hosts, flat groups, explicit per-recipe `targets`) — see
 
 ## Install
 
-Sinter **v1.12.0** is the current release, published as one
-`sinter-v1.12.0-linux-x86_64.tar.gz` artifact covering every supported Linux
+Sinter **v1.13.0** is prepared for release as one
+`sinter-v1.13.0-linux-x86_64.tar.gz` artifact covering every supported Linux
 x86_64 platform line: Ubuntu, Rocky Linux, RHEL 9 / 10, and AlmaLinux 9 / 10.
 
 ```sh
