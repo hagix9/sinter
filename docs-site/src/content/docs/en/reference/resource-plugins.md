@@ -11,7 +11,7 @@ from a plugin runs in Sinter. Every program a plugin can run comes from a
 capability catalog that lists fixed programs, argument templates with checked
 operands, and the meaning of each exit status.
 
-Sinter v1.12.0 carries two first-party plugins, each with its catalog:
+Sinter v1.13.0 carries two first-party plugins, each with its catalog:
 
 | Plugin | Resource types | Releases |
 |--------|----------------|----------|
