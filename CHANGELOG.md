@@ -2,6 +2,33 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **`sinter serve`**: connects the read-only `sinter mcp` to ChatGPT through the OpenAI Secure MCP
+  Tunnel by starting the official `tunnel-client` in the foreground until it is stopped (Ctrl+C,
+  `SIGTERM`, `SIGHUP` or `--max-duration`). Before anything starts it checks a TOML configuration
+  file, the runtime key file (its content is never read), the client executable and the targets
+  file (exit 2), and it gives the client a cleared environment with an allowlist, so no OpenAI key
+  reaches the client or `sinter mcp` through the environment. Linux only; it opens no listener and
+  restarts nothing. The MCP tools are unchanged. Under systemd, the documented unit
+  `contrib/systemd/sinter-tunnel.service` runs the official client directly. Not yet verified with
+  the real `tunnel-client` and ChatGPT.
+
+- **`sinter serve init`, `check` and `rotate-key`**: set up an existing tunnel in one step. `init`
+  asks for the tunnel ID and, with echo off, the Restricted key (Tunnels Read + Use), writes the key
+  file and the configuration (both `0600`; nothing existing is replaced; a failure removes what it
+  created) and runs the checks and `tunnel-client doctor`; `--check-online` also asks the official
+  client whether the key can read the tunnel, and `--systemd` prints a filled unit with a
+  root-owned key. `check` diagnoses without writing; `rotate-key` replaces the key file atomically.
+  Creating the tunnel and the key, and adding the app in ChatGPT, stay manual.
+
+### Changed
+
+- The help text of `sinter mcp` reads "Run a read-only MCP … endpoint on stdio" instead of
+  "Serve …", so that "serve" has one meaning.
+
 ## [1.13.0] - 2026-11-14
 
 ### Changed

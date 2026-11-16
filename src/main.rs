@@ -70,8 +70,22 @@ enum Command {
     Apply(TargetArgs),
     /// Audit whether a target already satisfies a recipe. Read-only.
     Audit(AuditArgs),
-    /// Serve a read-only MCP (Model Context Protocol) endpoint on stdio.
+    /// Run a read-only MCP (Model Context Protocol) endpoint on stdio.
     Mcp(McpArgs),
+    /// Connect read-only MCP to ChatGPT via the official Secure MCP Tunnel client
+    ///
+    /// Runs in the foreground until stopped.
+    /// Starts one official `tunnel-client` process, which runs `sinter mcp` as
+    /// its stdio child, after checking the configuration file, the runtime key
+    /// file (never read), the client executable and the targets file. The
+    /// client gets a cleared environment with an allowlist only. Ctrl+C,
+    /// SIGTERM, SIGHUP or --max-duration stop it (SIGKILL after 10 seconds).
+    /// Opens no listener and is not a central server or an agent; it grants a
+    /// connection to the read-only tools, nothing else. Linux only; under
+    /// systemd, use the documented unit instead. Exit: 0 stopped on request or
+    /// at the time limit, 2 configuration invalid, 3 tunnel-client could not
+    /// start or exited by itself.
+    Serve(ServeArgs),
     /// Encrypt, decrypt and list secret files (standard age format).
     Secrets(SecretsArgs),
     /// Show, check, install and remove the Resource Plugins of this controller.
@@ -270,6 +284,97 @@ struct McpArgs {
     /// Omitted: host tools are registered but fail closed as unknown target.
     #[arg(long)]
     targets_file: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+#[command(args_conflicts_with_subcommands = true)]
+struct ServeArgs {
+    #[command(subcommand)]
+    command: Option<ServeCommand>,
+    /// Configuration file (TOML). Default: $XDG_CONFIG_HOME/sinter/serve.toml
+    /// when XDG_CONFIG_HOME is absolute, else ~/.config/sinter/serve.toml.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Stop after this time, e.g. 90s, 30m, 1h, 1h30m (at most 720h).
+    /// Default: no limit.
+    #[arg(long, value_parser = sinter::serve::parse_duration)]
+    max_duration: Option<std::time::Duration>,
+}
+
+#[derive(Subcommand, Debug)]
+enum ServeCommand {
+    /// Set up an EXISTING tunnel: ask for the tunnel ID and the Restricted key
+    ///
+    /// The key (Tunnels Read + Use) is read on the terminal with echo off and
+    /// stored in a 0600 file; the configuration names that file and holds no
+    /// key. Nothing existing is ever replaced, and a failure removes what this
+    /// run created. Then the serve checks and `tunnel-client doctor` run
+    /// (and, with --check-online, `tunnel-client admin tunnels get` with the
+    /// key passed as a file: reference). Creating the tunnel and the key, and
+    /// adding the app in ChatGPT, stay manual. Exit: 0 ready, 2 invalid input
+    /// or nothing written, 3 written but a client check failed.
+    Init(ServeInitArgs),
+    /// Check an existing setup without starting it or writing anything
+    ///
+    /// The serve checks (the key file is never read), then `tunnel-client
+    /// doctor`, and with --online the online lookup. Exit: 0 OK, 2 invalid
+    /// configuration, 3 a client check failed.
+    Check(ServeCheckArgs),
+    /// Replace the key file of an existing setup with a new Restricted key
+    ///
+    /// The current key file must be a regular 0600 file owned by you. The new
+    /// key is read on the terminal with echo off and replaces it atomically;
+    /// the old key is not kept. Revoke the old key in the OpenAI Platform.
+    RotateKey(ServeRotateKeyArgs),
+}
+
+#[derive(Args, Debug)]
+struct ServeInitArgs {
+    /// Configuration file to create. Default: as for `sinter serve`.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Key file to create. Default: runtime-key next to the configuration.
+    #[arg(long)]
+    key_file: Option<PathBuf>,
+    /// Absolute path of the official tunnel-client (asked if omitted).
+    #[arg(long)]
+    client: Option<PathBuf>,
+    /// Targets file for `sinter mcp --targets-file` (optional).
+    #[arg(long)]
+    targets_file: Option<PathBuf>,
+    /// The tunnel ID (asked if omitted). It is an identifier, not a secret.
+    #[arg(long)]
+    tunnel_id: Option<String>,
+    /// Store the key root-owned for systemd's LoadCredential= and print the
+    /// filled unit (run as root; the unit is not installed).
+    #[arg(long)]
+    systemd: bool,
+    /// User in the printed systemd unit.
+    #[arg(long, default_value = "sinter-tunnel")]
+    service_user: String,
+    /// Also check online that this key can read this tunnel (via tunnel-client).
+    #[arg(long)]
+    check_online: bool,
+}
+
+#[derive(Args, Debug)]
+struct ServeCheckArgs {
+    /// Configuration file. Default: as for `sinter serve`.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Also check online that the key can read the tunnel (via tunnel-client).
+    #[arg(long)]
+    online: bool,
+}
+
+#[derive(Args, Debug)]
+struct ServeRotateKeyArgs {
+    /// Configuration file. Default: as for `sinter serve`.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Also check online that the new key can read the tunnel.
+    #[arg(long)]
+    check_online: bool,
 }
 
 /// Execution-target options shared by validate, plan, apply and audit.
@@ -889,6 +994,7 @@ fn run(cli: Cli) -> Result<u8, SinterError> {
         }
         Command::Secrets(a) => secrets_command(a),
         Command::Plugin(a) => plugin_command(a),
+        Command::Serve(a) => serve_command(a),
         Command::Mcp(a) => {
             // Load once, fail closed: a missing/unreadable/malformed targets
             // file aborts startup; the registry is immutable while serving.
@@ -900,6 +1006,73 @@ fn run(cli: Cli) -> Result<u8, SinterError> {
             Ok(0)
         }
     }
+}
+
+fn serve_config_or_default(p: Option<PathBuf>) -> Result<PathBuf, SinterError> {
+    match p {
+        Some(p) => Ok(p),
+        None => sinter::serve::default_config_path(
+            std::env::var_os("XDG_CONFIG_HOME"),
+            std::env::var_os("HOME"),
+        ),
+    }
+}
+
+/// `sinter serve` and its setup subcommands (ADR 0002 §6, §18).
+fn serve_command(a: ServeArgs) -> Result<u8, SinterError> {
+    let Some(cmd) = a.command else {
+        let config = serve_config_or_default(a.config)?;
+        return sinter::serve::serve(&config, a.max_duration);
+    };
+    serve_setup_command(cmd)
+}
+
+#[cfg(unix)]
+fn serve_setup_command(cmd: ServeCommand) -> Result<u8, SinterError> {
+    use sinter::serve_setup;
+    let exe = std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .map_err(|e| {
+            SinterError::schema(format!(
+                "serve: cannot determine the path of this sinter executable: {e}"
+            ))
+        })?;
+    let mut out = std::io::stdout();
+    match cmd {
+        ServeCommand::Init(a) => {
+            let opts = serve_setup::InitOptions {
+                config: serve_config_or_default(a.config)?,
+                key_file: a.key_file,
+                client: a.client,
+                targets_file: a.targets_file,
+                tunnel_id: a.tunnel_id,
+                systemd: a.systemd,
+                service_user: a.service_user,
+                check_online: a.check_online,
+            };
+            serve_setup::init(&opts, &mut sinter::secrets_cli::TtyPrompter, &exe, &mut out)
+        }
+        ServeCommand::Check(a) => serve_setup::check(
+            &serve_config_or_default(a.config)?,
+            &exe,
+            a.online,
+            &mut out,
+        ),
+        ServeCommand::RotateKey(a) => serve_setup::rotate_key(
+            &serve_config_or_default(a.config)?,
+            &mut sinter::secrets_cli::TtyPrompter,
+            &exe,
+            a.check_online,
+            &mut out,
+        ),
+    }
+}
+
+#[cfg(not(unix))]
+fn serve_setup_command(_cmd: ServeCommand) -> Result<u8, SinterError> {
+    Err(SinterError::schema(
+        "serve: the setup commands need a Unix controller",
+    ))
 }
 
 /// `sinter plugin list|verify` (DESIGN §38.15): read-only reports;

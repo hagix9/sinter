@@ -38,6 +38,11 @@ pub mod result;
 pub mod secret_source;
 pub mod secrets;
 pub mod secrets_cli;
+#[cfg(unix)]
+pub mod securefile;
+pub mod serve;
+#[cfg(unix)]
+pub mod serve_setup;
 pub mod skips;
 pub mod sshconfig;
 pub mod style;

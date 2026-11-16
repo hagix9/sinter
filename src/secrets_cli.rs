@@ -517,34 +517,9 @@ impl Drop for TempFile {
     }
 }
 
-/// `fsync`, and on macOS `F_FULLFSYNC` (plain `fsync` there does not force the
-/// drive to flush its cache).
-fn full_sync(f: &File) -> std::io::Result<()> {
-    f.sync_all()?;
-    #[cfg(target_os = "macos")]
-    unsafe {
-        libc::fcntl(f.as_raw_fd(), libc::F_FULLFSYNC);
-    }
-    Ok(())
-}
-
-/// Create `out` exclusively (it must not exist) and write `data` into it. Used
-/// only on filesystems without hard links; the file is visible while it is
-/// being written, so a failure removes it again.
-fn create_exclusive(out: &Path, data: &[u8], mode: u32) -> std::io::Result<()> {
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(mode)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(out)?;
-    let r = f.write_all(data).and_then(|_| full_sync(&f));
-    if r.is_err() {
-        drop(f);
-        let _ = std::fs::remove_file(out);
-    }
-    r
-}
+// `full_sync` and `create_exclusive` (used only on filesystems without hard
+// links) live in `crate::securefile`, shared with `sinter serve init`.
+use crate::securefile::{create_exclusive, full_sync};
 
 /// Write `data` to `out` atomically. An existing file is never replaced unless
 /// `replace` is set, and then only if it is a regular (non-symlink) age file.

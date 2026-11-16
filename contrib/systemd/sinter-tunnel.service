@@ -1,0 +1,55 @@
+# systemd system unit: Sinter read-only MCP over the OpenAI Secure MCP Tunnel.
+#
+# It runs the official `tunnel-client`, which starts `sinter mcp` as its stdio
+# child. Guide: https://sinter.fulltrust.co.jp/en/guides/chatgpt-tunnel/
+#
+# Replace every <PLACEHOLDER> before installing (see the guide for each one):
+#   <SERVICE_USER>   dedicated unprivileged user that runs both processes
+#   <KEY_FILE>       file holding the Restricted API key (Tunnels Read + Use);
+#                    systemd hands it to the service as a credential
+#   <TUNNEL_CLIENT>  absolute path of the official tunnel-client binary
+#   <TUNNEL_ID>      the tunnel ID, in full (it starts with "tunnel_")
+#   <SINTER_BIN>     absolute path of the sinter binary
+#   <TARGETS_FILE>   absolute path of the `sinter mcp --targets-file` file
+#
+# Install (as root):
+#   install -m 0644 sinter-tunnel.service /etc/systemd/system/sinter-tunnel.service
+#   systemctl daemon-reload
+#   systemctl start sinter-tunnel     # start only when you want the connection
+#   systemctl stop sinter-tunnel      # the only reliable way to end it
+#
+# There is deliberately no [Install] section: the unit cannot be enabled, so it
+# is never started at boot. An administrator starts it explicitly.
+#
+# Restart=always restarts the service after any end once it has been started,
+# including a clean exit with status 0 (which is what tunnel-client v0.0.16 did
+# when only the sinter child died; from v0.0.19 the client restarts that child
+# itself by default, not verified on a real host), but not after `systemctl stop`. This trades a
+# stricter connection window for automatic recovery; the guide describes the
+# trade-off and the explicit-start variant (Restart=no, optional
+# RuntimeMaxSec=), which has not been verified on a real host.
+
+[Unit]
+Description=Sinter read-only MCP over OpenAI Secure MCP Tunnel
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=<SERVICE_USER>
+LoadCredential=runtime-key:<KEY_FILE>
+ExecStart=<TUNNEL_CLIENT> run \
+  --control-plane.tunnel-id <TUNNEL_ID> \
+  --control-plane.api-key file:%d/runtime-key \
+  --mcp.command "<SINTER_BIN> mcp --targets-file <TARGETS_FILE>" \
+  --health.listen-addr 127.0.0.1:0 \
+  --health.url-file %t/sinter-tunnel/health-url
+RuntimeDirectory=sinter-tunnel
+Restart=always
+RestartSec=10
+KillMode=control-group
+TimeoutStopSec=15
+NoNewPrivileges=yes
+PrivateTmp=yes

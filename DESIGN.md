@@ -3029,3 +3029,41 @@ Tests: `tests/cli_recipe_resolve.rs` (SR-2: names, bundle directories, the searc
 2026-11-12 (release preparation for v1.12.0, not released): §40.5 states that a certain typo in a file listed for several recipes is exit 2 without `--strict-vars` too, as rule 3 already decides; §40.10 lists `tests/cli_recipe_vars.rs`. No behavior changed.
 
 2026-11-13 (post-release): §40.5 says `recipe_vars` is released in v1.12.0 (2026-11-12). No contract changed.
+
+41. `sinter serve`: ChatGPT through the OpenAI Secure MCP Tunnel (ADR 0002 Option B)
+
+IMPLEMENTED (not released; Owner decision 2026-11-15). Decision record: `docs/adr/0002-chatgpt-secure-mcp-tunnel.md` (r5). User documentation: `guides/chatgpt-tunnel`.
+
+41.1 What it is
+
+`sinter serve [--config <path>] [--max-duration <duration>]` is a foreground launcher for one official OpenAI `tunnel-client` process, which runs the unchanged `sinter mcp [--targets-file <path>]` as its stdio child. It opens no listener, has no HTTP client, implements no part of the tunnel protocol, restarts nothing and is not a central server or an agent (GOALS). Starting it grants a connection to the eight read-only MCP tools, nothing else; it is never an approval of any mutating operation. Under systemd the documented unit `contrib/systemd/sinter-tunnel.service` runs the official client directly (Option A) and `serve` is not used. Linux only: on another system `serve` checks its configuration and exits 3.
+
+41.2 Configuration and checks (fail closed, before anything starts, no network)
+
+A TOML file with `[tunnel] id, api_key_file, client` and optional `[mcp] targets_file`; unknown keys are exit 2; every path is absolute; there is no field for a key value. Default path: `$XDG_CONFIG_HOME/sinter/serve.toml` when `XDG_CONFIG_HOME` is absolute, else `$HOME/.config/sinter/serve.toml`. Messages name keys and line numbers, never values. Checks, each exit 2: the tunnel ID starts with `tunnel_` and has only `[a-z0-9_]` (at most 128 characters; the exact form is the client's); the key file is a regular file (not a symbolic link), 1–4096 bytes, owned by the effective user, without group or other permission bits, and openable (its content is never read); the targets file loads with the `sinter mcp` loader; the client is an executable regular file not writable by group or others; the paths placed into `--mcp.command` (the canonical path of this executable and the targets file) contain only `A-Z a-z 0-9 / . _ - + , @ = :`.
+
+41.3 Starting the client
+
+Arguments: `run --control-plane.tunnel-id <id> --control-plane.api-key file:<key file> --mcp.command "<sinter> mcp [--targets-file <path>]" --health.listen-addr 127.0.0.1:0`. Environment: cleared, then only `PATH HOME USER LOGNAME LANG LC_* TMPDIR SSH_AUTH_SOCK HTTPS_PROXY HTTP_PROXY NO_PROXY https_proxy http_proxy no_proxy CONTROL_PLANE_HTTP_PROXY TUNNEL_CLIENT_HTTP_PROXY CA_BUNDLE CONTROL_PLANE_RESIDENCY`; the client gives this environment to `sinter mcp`. stdin is null; stdout and stderr pass through. The client stays in the process group of `serve`. `PR_SET_PDEATHSIG(SIGTERM)` is set in the child before exec, from the main thread, and the child refuses to start if its parent changed in between.
+
+41.4 Stopping and exit codes
+
+SIGINT, SIGTERM or SIGHUP to `serve`, or the end of `--max-duration` (1 s to 720 h), sends SIGTERM to the client; SIGKILL follows after 10 seconds. Exit 0: stopped on request or at the time limit (a client that ends after a stop request counts as a requested stop); exit 2: configuration invalid, nothing started; exit 3: the client could not be started or ended by itself. One line is printed when the client starts and one when `serve` ends; neither contains the key or a tool payload.
+
+UNCHANGED LIMIT: no guarantee that every process ends after an abnormal end (the death signal has no SIGKILL escalation; `sinter mcp` ends on end-of-file after its current request); no lock per tunnel ID; no per-user authorization; the read-only tool list, the named-target model, the mandatory `known_hosts` and the refusal of secret references are unchanged.
+
+41.5 Verification status
+
+Automated tests with a scripted stand-in for `tunnel-client`: configuration and input checks (every platform), and on Linux (Rocky Linux 10.2, aarch64) the arguments and cleared environment, SIGINT/SIGTERM/SIGHUP, the time limit, SIGKILL after 10 s, the death signal after SIGKILL of `serve`, start failures, a client that exits by itself, and the unchanged eight tools through `--mcp.command`. NOT VERIFIED: the real `tunnel-client` and ChatGPT (live acceptance), Linux x86_64.
+
+41.7 Setup commands (Phase 1A)
+
+IMPLEMENTED (not released): `sinter serve init [--config] [--key-file] [--client] [--targets-file] [--tunnel-id] [--systemd [--service-user]] [--check-online]`, `sinter serve check [--config] [--online]` and `sinter serve rotate-key [--config] [--check-online]`. `init` refuses without a terminal and before asking anything if the configuration or the key file exists; reads the tunnel ID (shown) and the Restricted key (echo off, `TtyPrompter`; printable ASCII without whitespace, 20–1024 bytes); creates a missing parent directory 0700 and refuses a parent that is a symbolic link, owned by another user (root excepted) or writable by group or others; writes the key file and then the configuration (0600) with `securefile::publish_new` (never a replacement) and removes what it created if anything fails; then runs the §41.2 checks, `tunnel-client doctor` with the §41.3 arguments and environment, and with `--check-online` `tunnel-client admin --admin-key file:<key> tunnels get <id>` (only the outcome is shown); on a client failure only the exit status, an HTTP status read only at a status position of the output (after `failed:`, `status`, `HTTP` or `error:`; never a number inside a URL, a tunnel ID or a request ID) and doctor's check names and verdicts are shown, never client text. A missing directory is created only after the key was read. `--systemd` (root) leaves the key root:root 0600 (also under a setgid parent) and prints the shipped unit filled in; it installs nothing. `check` writes nothing. `rotate-key` replaces a key file that passes the §41.2 key check, atomically, keeping no copy. Exit 0 OK, 2 invalid input or configuration, 3 a client check failed. Tunnel creation (needs an admin key; API not published), key creation and the ChatGPT app stay manual. ADR 0002 §18.
+
+41.6 Change history
+
+2026-11-15 (not released): §41 added; `sinter serve` implemented as ADR 0002 r5 describes. The help text of `mcp` says "Run" instead of "Serve".
+
+2026-11-15 (not released): §41.7 added: the setup commands `init`, `check` and `rotate-key` (ADR 0002 r6).
+
+2026-11-16 (not released): §41.7: the HTTP status of a failed client check is read only at a status position. The real-key check of 2026-11-16 (V-4) showed a 401 as "HTTP 490", taken from the tunnel ID in the request URL.
