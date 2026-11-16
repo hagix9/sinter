@@ -2,7 +2,7 @@
 
 All notable changes to Sinter are documented in this file.
 
-## [Unreleased]
+## [1.14.0] - 2026-11-16
 
 ### Added
 
@@ -12,9 +12,15 @@ All notable changes to Sinter are documented in this file.
   file, the runtime key file (its content is never read), the client executable and the targets
   file (exit 2), and it gives the client a cleared environment with an allowlist, so no OpenAI key
   reaches the client or `sinter mcp` through the environment. Linux only; it opens no listener and
-  restarts nothing. The MCP tools are unchanged. Under systemd, the documented unit
-  `contrib/systemd/sinter-tunnel.service` runs the official client directly. Not yet verified with
-  the real `tunnel-client` and ChatGPT.
+  restarts nothing. The MCP tools are unchanged. Verified once with a development build before this
+  release, on one temporary Ubuntu 24.04 x86_64 controller with the official `tunnel-client`
+  v0.0.21: ChatGPT called `sinter_get_version`, `sinter_list_targets`, `sinter_validate_manifest`,
+  `sinter_inspect_manifest`, `sinter_plan_host` and `sinter_audit_host` against one real target,
+  and Ctrl+C stopped it with exit 0 and no remaining process; other controller distributions were
+  not run. Under systemd, the documented unit `contrib/systemd/sinter-tunnel.service` runs the
+  official client directly, without `sinter serve`; that unit configuration was verified on a real
+  host only earlier, with Sinter v1.5.2 and `tunnel-client` v0.0.16, and was not run again with
+  `tunnel-client` v0.0.21 or this release.
 
 - **`sinter serve init`, `check` and `rotate-key`**: set up an existing tunnel in one step. `init`
   asks for the tunnel ID and, with echo off, the Restricted key (Tunnels Read + Use), writes the key
@@ -22,7 +28,14 @@ All notable changes to Sinter are documented in this file.
   created) and runs the checks and `tunnel-client doctor`; `--check-online` also asks the official
   client whether the key can read the tunnel, and `--systemd` prints a filled unit with a
   root-owned key. `check` diagnoses without writing; `rotate-key` replaces the key file atomically.
-  Creating the tunnel and the key, and adding the app in ChatGPT, stay manual.
+  Creating the tunnel and the key, and adding the app in ChatGPT, stay manual. Checked once with a
+  real Restricted key and a development build before this release (Ubuntu 24.04 x86_64,
+  `tunnel-client` v0.0.21): `init --check-online`, `check --online` and `rotate-key --check-online`
+  succeeded, and `check --online` with an unknown tunnel ID exited 3. Known limitations: with an
+  invalid key, `init --check-online` exited 3 without showing key material, but its summary named
+  the wrong HTTP status; that was corrected afterwards, and the correction has not been checked
+  against the live service. `sinter serve` started and stopped with a configuration written by
+  `init`, but no ChatGPT call was made with that configuration.
 
 ### Changed
 
