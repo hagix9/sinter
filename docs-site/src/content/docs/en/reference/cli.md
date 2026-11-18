@@ -883,7 +883,12 @@ resources:
 - Files, directories (recursively) and symlinks (as links) are copied with
   mode, ACLs, ownership and timestamps preserved; other extended attributes
   and SELinux labels are best effort. A path that does not exist is recorded
-  as `absent`.
+  as `absent`. *From v1.14.1* this includes a path whose parent directory, or
+  a directory above it, does not exist yet, so a `directory` resource of the
+  same recipe can create it; up to v1.14.0 such a path stopped `apply` before
+  any resource ran (exit 5). A missing directory is accepted only when every
+  directory above it passes the usual checks: a parent that cannot be read,
+  a symbolic link or a directory others can write still stops the backup.
 - *From v1.10.0.* A path's `directory`, else the recipe's `backup.directory`, else
   the project file's, names another store: see [`backup`](/en/reference/recipe-format/#backup). It
   is a path **on each target**, and `plan` lists each path with its store. Only that directory is created (mode 0700); its parent must exist. It is checked like

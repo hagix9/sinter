@@ -856,13 +856,18 @@ fn recipe_without_backup_has_no_backup_stage() {
 
 #[test]
 fn backup_failure_while_copying_counts_the_failing_path_and_starts_nothing_after() {
-    // The second path's parent directory does not exist, so copying it fails
-    // after the first path was copied.
+    // The second path's parent is a regular file, so copying it fails after
+    // the first path was copied. (Up to v1.14.0 a missing parent was used here;
+    // from v1.14.1 a path below a missing directory is absent, not a failure.)
     let s = Scenario::new(
         "pg-backup-fail-copy",
-        backup_doc(&["/etc/perf/a", "/etc/missing/b"]),
+        backup_doc(&["/etc/perf/a", "/etc/notadir/b"]),
         Some(Mode::Apply),
-        with_store(base().with_fs_file("/etc/perf/a", "old")),
+        with_store(
+            base()
+                .with_fs_file("/etc/perf/a", "old")
+                .with_fs_file("/etc/notadir", "x"),
+        ),
     );
     let o = observe(&s, Via::Recording);
     assert!(o.fingerprint.starts_with("ERR Apply "), "{}", o.fingerprint);
@@ -1052,9 +1057,13 @@ fn matrix() -> Vec<Scenario> {
         ),
         Scenario::new(
             "pg-m-backup-fail",
-            backup_doc(&["/etc/perf/a", "/etc/missing/b"]),
+            backup_doc(&["/etc/perf/a", "/etc/notadir/b"]),
             Some(Mode::Apply),
-            with_store(base().with_fs_file("/etc/perf/a", "old")),
+            with_store(
+                base()
+                    .with_fs_file("/etc/perf/a", "old")
+                    .with_fs_file("/etc/notadir", "x"),
+            ),
         ),
         Scenario::new(
             "pg-m-connect-fail",

@@ -947,6 +947,42 @@ impl TargetFs {
         false
     }
 
+    /// v1.14.1 (BK-PARENT-ABSENT): whether `path` is absent because an
+    /// ancestor of it does not exist, every ancestor above the first missing
+    /// one passing the full trust walk of DESIGN §23 (owner, mode, ACLs and the
+    /// shared-directory rules, the batched walk where it applies). The first
+    /// missing ancestor is found with single `stat`s as the invocation, so a
+    /// parent that cannot be read, a symbolic link or an untrusted ancestor
+    /// answers `false` and the caller keeps its error. Nothing is read below
+    /// the missing ancestor and nothing is created. No tree identity is left
+    /// behind: the next walk starts from the invocation again.
+    pub(crate) fn absent_below_trusted_ancestors(&mut self, path: &str) -> bool {
+        if !self.parent_chain_ends_absent(path) {
+            return false;
+        }
+        let mut first_missing = None;
+        for dir in ancestor_dirs(path) {
+            match self.inspect(&dir) {
+                Ok(st) if st.kind == ObjKind::Absent => {
+                    first_missing = Some(dir);
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
+        let Some(missing) = first_missing else {
+            return false;
+        };
+        // The ancestors of the missing directory are exactly the ancestors of
+        // `path` above it: the same walk as for any path, on them only.
+        let walked = self.check_trusted_parents(&missing).is_ok();
+        self.identity = None;
+        self.shared_parent = false;
+        self.parents_seen.clear();
+        walked
+    }
+
     /// The account file operations currently run as, if not the invocation.
     pub fn tree_identity(&self) -> Option<&TreeIdentity> {
         self.identity.as_ref()

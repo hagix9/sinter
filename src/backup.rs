@@ -581,7 +581,27 @@ fn copy_one(
     // settles that account's identity, and the path is then handled as that
     // account only (DESIGN §40.7). A non-root invocation has no such tree: for it
     // this walk is the strict one.
-    fs.check_trusted_parents(path)?;
+    if let Err(e) = fs.check_trusted_parents(path) {
+        // v1.14.1 (BK-PARENT-ABSENT): a path below a directory that does not
+        // exist yet is absent (DESIGN §4.12, §23): the first ancestor the walk
+        // cannot accept must not exist, and every ancestor above it must pass
+        // the same trust walk (ACLs included). A parent that cannot be read, a
+        // symbolic link or an untrusted ancestor still fails, and so does an
+        // indeterminate observation. Nothing is read or created for an absent
+        // path, and no directory is created for it.
+        if e.kind != crate::error::ErrorKind::Indeterminate
+            && fs.absent_below_trusted_ancestors(path)
+        {
+            return Ok(BackupEntry {
+                path: path.to_string(),
+                status: BackupStatus::Absent,
+                kind: None,
+                destination: None,
+                store: None,
+            });
+        }
+        return Err(e);
+    }
     if let Some(tree) = fs.tree_identity().cloned() {
         return copy_from_tree(fs, permit, &tree, path, run_dir);
     }

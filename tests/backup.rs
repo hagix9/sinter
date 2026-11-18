@@ -412,4 +412,80 @@ mod target {
             serde_json::from_str(&render(&report, Mode::Plan, OutputFormat::Json)).unwrap();
         assert!(json.get("backup").is_none());
     }
+
+    /// v1.14.1 BK-PARENT-ABSENT on a real Linux target: a backup path below
+    /// directories that do not exist yet is recorded as absent and the
+    /// directory resources of the same recipe create them.
+    #[test]
+    fn missing_parent_is_absent_and_directory_resources_run() {
+        let _store = lock_backup_store();
+        let dir = trusted_root("backup-missing-parent");
+        let d1 = dir.join("new");
+        let d2 = d1.join("sub");
+        let f = d2.join("app.conf");
+        let r = write_recipe(
+            &dir,
+            "r.yaml",
+            &format!(
+                "version: 1\nbackup:\n  paths: [{f}]\nresources:\n  - id: d1\n    type: directory\n    with: {{ path: {d1}, mode: \"0700\" }}\n  - id: d2\n    type: directory\n    depends_on: [d1]\n    with: {{ path: {d2}, mode: \"0700\" }}\n  - id: f\n    type: file\n    depends_on: [d2]\n    with: {{ path: {f}, content: \"a=1\\n\" }}\n",
+                f = f.display(),
+                d1 = d1.display(),
+                d2 = d2.display()
+            ),
+        );
+        let id = unique_id("missing-parent");
+        let report = engine(&r, Mode::Apply, &id)
+            .run()
+            .unwrap_or_else(|e| panic!("apply failed: {}", e.message));
+        assert_success(&report);
+        let b = report.backup.as_ref().unwrap();
+        assert_eq!(b.entries.len(), 1);
+        assert_eq!(b.entries[0].status.label(), "absent");
+        assert!(b.entries[0].destination.is_none());
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "a=1\n");
+        // nothing was created in the store for the absent path
+        let in_store = PathBuf::from(format!("{}{}", store_run_dir(&id).display(), d1.display()));
+        assert!(!in_store.exists(), "no store directory for an absent path");
+    }
+
+    /// v1.14.1: a parent that cannot be read (a real EACCES for a non-root
+    /// invocation) is not mistaken for a missing one: the backup still fails
+    /// and no resource runs.
+    #[test]
+    fn unreadable_parent_still_fails_the_backup() {
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: root reads a mode 0000 directory");
+            return;
+        }
+        let _store = lock_backup_store();
+        let dir = trusted_root("backup-unreadable-parent");
+        let locked = dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let target = locked.join("new").join("app.conf");
+        let marker = dir.join("marker");
+        let r = write_recipe(
+            &dir,
+            "r.yaml",
+            &format!(
+                "version: 1\nbackup:\n  paths: [{t}]\nresources:\n  - id: m\n    type: file\n    with: {{ path: {m}, content: \"ran\\n\" }}\n",
+                t = target.display(),
+                m = marker.display()
+            ),
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let id = unique_id("unreadable-parent");
+        let res = engine(&r, Mode::Apply, &id).run();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let e = match res {
+            Ok(rep) => panic!("an unreadable parent must not be absent: {:?}", rep.status),
+            Err(e) => e,
+        };
+        assert_eq!(e.kind, sinter::error::ErrorKind::Apply);
+        assert!(
+            e.message.contains("no resource was executed"),
+            "{}",
+            e.message
+        );
+        assert!(!marker.exists(), "no resource ran");
+    }
 }
