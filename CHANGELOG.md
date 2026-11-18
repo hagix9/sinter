@@ -2,6 +2,27 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [1.14.1] - 2026-11-18
+
+### Fixed
+
+- **A backup path below a directory that does not exist yet no longer stops `apply`.** A
+  `backup.paths` entry whose parent directory, or a directory above it, did not exist made the
+  pre-apply backup fail, so `apply` stopped before any resource ran (exit 5, "backup failed; no
+  resource was executed"), even when a `directory` resource of the same recipe created that
+  directory. Such a path is now recorded as `absent`, as the CLI reference describes, and the
+  resources run. A missing directory is accepted only when every directory above it passes the
+  usual checks: a parent that cannot be read, a symbolic link, an access ACL or a directory others
+  can write still stops the backup before any resource runs. Checked before this release on one
+  temporary Ubuntu 24.04 x86_64 host, locally and over SSH: v1.14.0 stopped with exit 5, the fix
+  recorded the path as absent and created the files, and an unreadable parent was still refused.
+
+### Security
+
+- **libz-sys 1.1.33** (from 1.1.31) for RUSTSEC-2026-0544 (CVE-2026-85091), a heap buffer
+  overflow in `gz_vacate()` of the zlib 1.3.2 that libz-sys bundles. The `sinter` binary links that
+  zlib statically through `libssh2-sys`; it now carries zlib 1.4. No other dependency changes.
+
 ## [1.14.0] - 2026-11-16
 
 ### Added
