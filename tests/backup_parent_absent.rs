@@ -334,3 +334,82 @@ fn a_backup_refusal_still_runs_no_resource() {
     );
     assert!(e.message.contains("/etc/linked/x.conf"), "{}", e.message);
 }
+
+fn exited(code: i32, stdout: &str) -> sinter::executor::Output {
+    sinter::executor::Output {
+        completion: sinter::executor::Completion::Exited(code),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: Vec::new(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+    }
+}
+
+const ACL_ETC: &str = "# file: /etc\nsystem.posix_acl_access=0sAgAAAAEABgD/////\n\n";
+
+#[test]
+fn an_acl_on_an_ancestor_above_the_missing_directory_is_still_refused() {
+    // Sequential walk: every getfattr of /etc reports an access ACL.
+    let mut t = target(true).with_observations_at("getfattr", "/etc", vec![exited(0, ACL_ETC); 8]);
+    t.fs.as_mut().unwrap().mkdir_node("/etc", 0o755, 0, 0);
+    let r = run(Mode::Apply, &recipe(&[D1, D2]), t, true, None);
+    assert_backup_refused(r, "ACL on /etc, sequential", F);
+    // Batched walk: the one getfattr batch over the ancestors of the missing
+    // directory ends with /etc, and reports the ACL there.
+    let mut t = target(false).with_observations_at("getfattr", "/etc", vec![exited(0, ACL_ETC); 8]);
+    t.fs.as_mut().unwrap().mkdir_node("/etc", 0o755, 0, 0);
+    let r = run(Mode::Apply, &recipe(&[D1, D2]), t, true, None);
+    assert_backup_refused(r, "ACL on /etc, batched", F);
+}
+
+#[test]
+fn a_missing_directory_in_a_sticky_shared_directory_is_absent() {
+    for seq in [false, true] {
+        let mut t = target(seq);
+        t.fs.as_mut().unwrap().mkdir_node("/tmp", 0o1777, 0, 0);
+        t.fs.as_mut().unwrap().mkdir_node("/etc", 0o755, 0, 0);
+        t.fs.as_mut()
+            .unwrap()
+            .put_file("/etc/keep.conf", b"keep\n", 0o644, 0, 0);
+        let yaml = "version: 1\nbackup:\n  paths: [/tmp/newdir/x.conf, /etc/keep.conf]\nresources:\n  - id: k\n    type: file\n    with: { path: /etc/keep.conf, content: \"new\\n\" }\n";
+        let rep = run(Mode::Apply, yaml, t, true, None)
+            .unwrap_or_else(|e| panic!("sequential={seq}: {}", e.message));
+        let b = rep.backup.as_ref().unwrap();
+        assert_eq!(b.entries[0].status.label(), "absent", "sequential={seq}");
+        assert_eq!(b.entries[1].status.label(), "backed_up", "sequential={seq}");
+    }
+}
+
+#[test]
+fn a_missing_directory_inside_another_accounts_tree_is_absent_and_leaves_no_identity() {
+    for seq in [false, true] {
+        let mut t = target(seq)
+            .with_group("postgres", 26)
+            .with_user("postgres", 26, 26, "/var/lib/pgsql", "/bin/bash")
+            .as_root();
+        let fs = t.fs.as_mut().unwrap();
+        fs.mkdir_node("/var/lib/pgsql", 0o700, 26, 26);
+        fs.mkdir_node("/root", 0o700, 0, 0);
+        fs.mkdir_node("/etc", 0o755, 0, 0);
+        fs.put_file("/etc/keep.conf", b"keep\n", 0o644, 0, 0);
+        let yaml = "version: 1\nbackup:\n  paths: [/var/lib/pgsql/new/x.conf, /etc/keep.conf]\nresources:\n  - id: k\n    type: file\n    with: { path: /etc/keep.conf, content: \"new\\n\" }\n";
+        let rep = run(Mode::Apply, yaml, t, false, None)
+            .unwrap_or_else(|e| panic!("sequential={seq}: {}", e.message));
+        let b = rep.backup.as_ref().unwrap();
+        assert_eq!(b.entries[0].status.label(), "absent", "sequential={seq}");
+        // The next path is copied as root again (no tree identity left behind).
+        assert_eq!(b.entries[1].status.label(), "backed_up", "sequential={seq}");
+        let fs = rep.fake_fs.as_ref().unwrap();
+        let copy = b.entries[1].destination.clone().unwrap();
+        assert_eq!(
+            fs.file_bytes(&copy).as_deref(),
+            Some(&b"keep\n"[..]),
+            "sequential={seq}"
+        );
+        assert_eq!(
+            fs.nodes.get(&copy).map(|n| n.uid),
+            Some(0),
+            "sequential={seq}: the copy is root's"
+        );
+    }
+}
