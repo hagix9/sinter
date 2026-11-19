@@ -156,6 +156,7 @@ deny = [
   { zone = "internal", state = "absent" },
   { zone = "public", state = "absent" },
   { zone = "trusted", state = "absent" },
+  { zone = "work", state = "absent" },
 ]
 
 [[type.facet]]

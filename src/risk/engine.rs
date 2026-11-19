@@ -303,20 +303,24 @@ impl Engine {
                 f.zones = Some(zones);
             }
         }
-        f.extra_rules = match (
-            self.fw_args(&with(&["--get-active-policies"])).or_else(|| {
-                // `--get-active-policies` has no permanent form: the active
-                // policies are the runtime answer in both views.
-                if permanent {
-                    self.fw(&["--get-active-policies"])
-                } else {
-                    None
-                }
-            }),
-            self.fw_args(&with(&["--direct", "--get-all-rules"])),
-        ) {
+        // Policies: the runtime view asks for the active ones; the
+        // permanent view lists every permanent policy (there is no
+        // permanent "active" query). Only policy names count (the first
+        // word of a line that is not indented); anything unreadable is
+        // unknown.
+        let policies = if permanent {
+            self.fw(&["--permanent", "--get-policies"])
+        } else {
+            self.fw(&["--get-active-policies"])
+        };
+        let direct = self.fw_args(&with(&["--direct", "--get-all-rules"]));
+        f.extra_rules = match (policies, direct) {
             (Some(pol), Some(direct)) => {
-                let extra_policy = pol.split_whitespace().any(|p| p != "allow-host-ipv6");
+                let extra_policy = pol
+                    .lines()
+                    .filter(|l| !l.starts_with(' ') && !l.starts_with('\t'))
+                    .flat_map(|l| l.split_whitespace())
+                    .any(|p| p != "allow-host-ipv6");
                 Some(extra_policy || !direct.trim().is_empty())
             }
             _ => None,
@@ -366,7 +370,13 @@ impl Engine {
             .fs
             .risk_observe("/usr/bin/nmcli", &["-t", "-f", "DEVICE,STATE", "device"])
         {
-            Ok(o) if o.completion == Completion::Exited(127) => Some(BTreeSet::new()),
+            // Not installed: the program is missing (env's "No such file").
+            Ok(o)
+                if o.completion == Completion::Exited(127)
+                    && String::from_utf8_lossy(&o.stderr).contains("No such file") =>
+            {
+                Some(BTreeSet::new())
+            }
             Ok(o) if o.completion == Completion::Exited(0) => stdout(&o).map(|text| {
                 text.lines()
                     .filter_map(|l| l.split_once(':'))
@@ -415,6 +425,7 @@ impl Engine {
         let apply = self.opts.mode == Mode::Apply;
         // The runtime facet's own result (None: no runtime facet pending).
         let mut runtime_dynamic: Option<Dynamic> = None;
+        let mut permanent_dynamic: Option<Dynamic> = None;
         let digest = self.risk_key().map(|k| {
             let v = json!({
                 "id": res.id,
@@ -507,7 +518,7 @@ impl Engine {
                         let change = self.risk_fw_change(k, values, permanent);
                         let d = rules::firewalld(k, &view, &change);
                         if permanent {
-                            runtime_dynamic.get_or_insert(Dynamic::NoChange);
+                            permanent_dynamic = Some(d.clone());
                         } else {
                             runtime_dynamic = Some(d.clone());
                         }
@@ -563,10 +574,12 @@ impl Engine {
             // runtime facet whose own result is known; the permanent facet
             // follows only after the probe (§43.6).
             let recovery = rules::recovery_for(item.rule);
-            let available = matches!(
-                runtime_dynamic,
-                Some(Dynamic::Affects(_)) | Some(Dynamic::Clear)
-            );
+            // The probe tests only what the runtime change does, so runtime
+            // first is available only when the runtime facet is pending and
+            // itself affects the path; a change that affects the permanent
+            // configuration alone cannot be tested now and is refused.
+            let available = matches!(runtime_dynamic, Some(Dynamic::Affects(_)))
+                && !matches!(permanent_dynamic, Some(Dynamic::Unknown(_)));
             match rules::decide(item.class, &dynamic, approved, recovery, available) {
                 rules::Decision::Proceed => {}
                 rules::Decision::Guarded(_) => guarded = true,
@@ -587,12 +600,17 @@ impl Engine {
             self.risk.earlier_change = true;
         }
         let note = format!(
-            "connection-risk class={} dynamic={} approval={}{}",
+            "connection-risk class={} dynamic={} approval={}{}{}",
             item.class.label(),
             dynamic.label(),
             if approved { "yes" } else { "no" },
             if guarded {
                 " procedure=runtime-first (recovery is not guaranteed)"
+            } else {
+                ""
+            },
+            if permanent_dynamic.is_some() && runtime_dynamic.is_none() {
+                " permanent-only (takes effect at the next reload or boot; not tested now)"
             } else {
                 ""
             }
@@ -784,7 +802,15 @@ impl Engine {
             steps: vec![_op.to_string()],
             desired: Default::default(),
         };
-        match rules::decide(item.class, &dynamic, false, Recovery::None, false) {
+        let approved = self
+            .risk
+            .ctx
+            .as_ref()
+            .and_then(|c| c.approval.as_ref())
+            .and_then(|a| a["resources"].as_array())
+            .is_some_and(|r| r.iter().any(|x| x == key.as_str()));
+        record.approved = approved;
+        match rules::decide(item.class, &dynamic, approved, Recovery::None, false) {
             rules::Decision::Proceed => {
                 self.risk_push(record);
                 Ok(())
@@ -832,7 +858,7 @@ pub fn content_object(
             })
         })
         .collect();
-    let model_digest = store.keyed(key, &json!({"resources": model_repr, "handlers": model.handlers.iter().map(|h| format!("{:?}", (&h.id, &h.kind, &h.service, &h.action, &h.command))).collect::<Vec<_>>()}));
+    let model_digest = store.keyed(key, &json!({"resources": model_repr, "handlers": model.handlers.iter().map(|h| format!("{:?}", (&h.id, &h.kind, &h.service, &h.action, &h.command, &h.plugin_op))).collect::<Vec<_>>()}));
     let resources: Vec<J> = report
         .resources
         .iter()

@@ -476,6 +476,8 @@ fn known(zone: ZoneState, ifaces: &[&str]) -> PathState {
         loopback_reload_measured: false,
         perm_zone: zone.clone(),
         zone,
+        bound_zones: Default::default(),
+        perm_bound_zones: Default::default(),
     })
 }
 
@@ -550,10 +552,10 @@ fn firewalld_rules() {
         rules::firewalld(RuleKind::FwInterface, &pub_if, &ch),
         Dynamic::Affects(_)
     ));
-    assert_eq!(
+    assert!(matches!(
         rules::firewalld(RuleKind::FwInterface, &pub_src, &ch),
-        Dynamic::Clear
-    );
+        Dynamic::Affects(_)
+    ));
     ch.interface = Some("eth9".into());
     assert_eq!(
         rules::firewalld(RuleKind::FwInterface, &pub_if, &ch),

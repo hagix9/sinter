@@ -3819,6 +3819,18 @@ impl FakeExecutor {
             "dnf" | "apt-get" => self.run_manager(&prog, &req.args),
             "systemctl" => self.run_systemctl(&req.args),
             "ss" if req.program == "/usr/bin/ss" => self.target.manager.net.ss(&req.args),
+            // A missing nmcli answers like env does for a missing program.
+            "nmcli"
+                if req.program == "/usr/bin/nmcli"
+                    && !self.target.program_outputs.contains_key(&req.program)
+                    && !self.target.executables.contains(&req.program) =>
+            {
+                Self::exited(
+                    127,
+                    String::new(),
+                    "env: '/usr/bin/nmcli': No such file or directory\n".into(),
+                )
+            }
             "ip" if req.program == "/usr/sbin/ip" => self.target.manager.net.ip(&req.args),
             "systemd-analyze" if req.program == "/usr/bin/systemd-analyze" => {
                 self.run_systemd_analyze(&req.args)

@@ -526,11 +526,12 @@ impl Engine {
         let result = |state: HandlerOutcomeState, reason: Option<String>| HandlerResult {
             id: h.id.clone(),
             kind: h.kind,
-            service: provenance.clone(),
+            service: String::new(),
             action: "run".to_string(),
             state,
             reason,
             sensitive: h.sensitive,
+            provenance: Some(provenance.clone()),
         };
         if let Err(e) = self.risk_check_handler(h, catalog, &op_id) {
             return Ok(result(HandlerOutcomeState::Failed, Some(e.message)));

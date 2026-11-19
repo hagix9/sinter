@@ -566,7 +566,11 @@ fn reload_runs_only_when_the_permanent_configuration_keeps_the_connection() {
         rep.handlers_run
     );
     assert_eq!(f.lock().unwrap().reloads, 1);
-    assert!(rep.handlers_run[0].service.contains("op=reload"));
+    assert!(rep.handlers_run[0]
+        .provenance
+        .as_deref()
+        .unwrap()
+        .contains("op=reload"));
     // affects: the permanent configuration does not allow 22.
     let f = fw();
     f.lock()
@@ -945,4 +949,177 @@ fn the_030_classification_is_bound_to_the_candidate_bytes_and_030_is_not_registe
     assert!(!crate::plugin::FIRST_PARTY_CATALOGS
         .iter()
         .any(|c| c.id == "firewalld" && c.version == "0.3.0"));
+}
+
+#[test]
+fn a_change_that_affects_only_the_permanent_configuration_is_refused_even_approved() {
+    // Audit B-1 (E1): runtime eth0 in public, permanent eth0 in internal;
+    // removing the management port from internal is clear at runtime and
+    // affects the permanent configuration. Runtime first cannot test it.
+    let s = Setup::new();
+    let body = res(
+        "p",
+        "port",
+        "zone: internal, port: \"2222/tcp\", state: absent",
+    );
+    let mk = || {
+        let f = fw();
+        f.lock().unwrap().perm_interfaces = Some(
+            [("eth0".to_string(), "internal".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let mut n = net(2222);
+        n.reconnect = Some(true);
+        (f.clone(), target(&f, n))
+    };
+    let (_d, c) = approval_for(&s, &body, "", || mk().1);
+    let (f, t) = mk();
+    let (r, l) = run(s.model(&body, "").unwrap(), Mode::Apply, t, c);
+    refused(&r, &f, "p", "no guarded recovery procedure");
+    assert!(record(&l, "p").approved);
+    assert_eq!(f.lock().unwrap().reloads, 0);
+}
+
+#[test]
+fn a_permanent_only_change_on_the_path_is_refused_and_says_permanent_only() {
+    // M2: the runtime facet already matches (not pending); only the
+    // permanent facet would change and it affects the path.
+    let s = Setup::new();
+    let body = res(
+        "p",
+        "port",
+        "zone: public, port: \"2222/tcp\", state: absent",
+    );
+    let mk = || {
+        let f = fw();
+        f.lock()
+            .unwrap()
+            .ports_runtime
+            .remove(&("public".to_string(), "2222/tcp".to_string()));
+        let mut n = net(2222);
+        n.reconnect = Some(true);
+        (f.clone(), target(&f, n))
+    };
+    let (r, l) = run(s.model(&body, "").unwrap(), Mode::Plan, mk().1, ctx());
+    let rep = r.unwrap();
+    assert!(
+        rep.resources[0]
+            .notes
+            .iter()
+            .any(|n| n.contains("permanent-only")),
+        "{:?}",
+        rep.resources[0].notes
+    );
+    assert!(record(&l, "p").dynamic.starts_with("affects"));
+    let (_d, c) = approval_for(&s, &body, "", || mk().1);
+    let (f, t) = mk();
+    let (r, _) = run(s.model(&body, "").unwrap(), Mode::Apply, t, c);
+    refused(&r, &f, "p", "no guarded recovery procedure");
+}
+
+#[test]
+fn a_restore_that_does_not_restore_is_indeterminate() {
+    // M1: the restoring add reports success but changes nothing.
+    let s = Setup::new();
+    let body = res("x", "service", "zone: public, service: alt, state: absent");
+    let mk = |reconnect: bool| {
+        let f = fw();
+        {
+            let mut g = f.lock().unwrap();
+            g.services.insert("alt".into());
+            g.runtime.insert(("public".into(), "alt".into()));
+            g.permanent.insert(("public".into(), "alt".into()));
+            g.service_info
+                .insert("alt".into(), "alt\n  ports: 2222/tcp\n".into());
+        }
+        let mut n = net(2222);
+        n.reconnect = Some(reconnect);
+        (f.clone(), target(&f, n))
+    };
+    let (_d, c) = approval_for(&s, &body, "", || mk(true).1);
+    let (f, t) = mk(false);
+    f.lock().unwrap().forced.push((
+        "--add-service=alt".into(),
+        Output {
+            completion: Completion::Exited(0),
+            stdout: b"success\n".to_vec(),
+            stderr: Vec::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        },
+    ));
+    let (r, _) = run(s.model(&body, "").unwrap(), Mode::Apply, t, c);
+    let rep = r.unwrap();
+    let x = &rep.resources[0];
+    assert_eq!(x.execution, Execution::Indeterminate, "{x:?}");
+    assert!(
+        x.reason
+            .as_deref()
+            .unwrap()
+            .contains("could not be verified"),
+        "{x:?}"
+    );
+    assert!(
+        f.lock()
+            .unwrap()
+            .permanent
+            .contains(&("public".into(), "alt".into())),
+        "permanent untouched"
+    );
+}
+
+#[test]
+fn permanent_policies_are_read_from_the_permanent_configuration() {
+    // Audit B-2: a permanent-only policy makes the reload unknown.
+    let s = Setup::new();
+    let body = notify_reload(&res(
+        "p",
+        "port",
+        "zone: public, port: \"9090/tcp\", state: present",
+    ));
+    let f = fw();
+    f.lock().unwrap().perm_policies = vec!["admin-in".into()];
+    let (r, l) = run(
+        s.model(&body, RELOAD).unwrap(),
+        Mode::Apply,
+        target(&f, net(22)),
+        ctx(),
+    );
+    assert_eq!(
+        r.unwrap().handlers_run[0].state,
+        HandlerOutcomeState::Failed
+    );
+    assert_eq!(f.lock().unwrap().reloads, 0);
+    assert!(
+        record(&l, "handler:fwreload")
+            .dynamic
+            .starts_with("unknown"),
+        "{l:?}"
+    );
+}
+
+#[test]
+fn deleting_a_zone_of_a_management_interface_affects_and_work_is_predefined() {
+    let s = Setup::new();
+    assert!(s
+        .model(&res("z", "zone", "zone: work, state: absent"), "")
+        .is_err());
+    // eth0 is bound to `mgmt`, but a source decides the zone (internal):
+    // deleting `mgmt` still affects (a zone of a management interface).
+    let body = res("z", "zone", "zone: mgmt, state: absent");
+    let f = fw();
+    {
+        let mut g = f.lock().unwrap();
+        g.zones.insert("mgmt".into());
+        g.interfaces.insert("eth0".into(), "mgmt".into());
+    }
+    let (r, l) = run(
+        s.model(&body, "").unwrap(),
+        Mode::Plan,
+        target(&f, net(22)),
+        ctx(),
+    );
+    assert!(r.is_ok());
+    assert!(record(&l, "z").dynamic.starts_with("affects"), "{l:?}");
 }

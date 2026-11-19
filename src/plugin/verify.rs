@@ -28,7 +28,7 @@ const MAX_FIELDS: usize = 8;
 const MAX_ENUM_VALUES: usize = 16;
 const MAX_PRECHECKS: usize = 8;
 const MAX_FACETS: usize = 8;
-const MAX_DENY: usize = 8;
+const MAX_DENY: usize = 16;
 const MAX_OPERAND: usize = 64;
 /// The longest `port_spec` operand: `65534-65535/sctp`.
 const MAX_PORT_SPEC: usize = 16;

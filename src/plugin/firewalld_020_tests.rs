@@ -469,9 +469,9 @@ fn verification_refuses_misused_classes_kinds_and_deny_rules() {
             edit(
                 PLUGIN,
                 "deny = [{ port = \"22/tcp\", state = \"absent\" }]",
-                &format!("deny = [{}]", ["{ state = \"absent\" }"; 9].join(", ")),
+                &format!("deny = [{}]", ["{ state = \"absent\" }"; 17].join(", ")),
             ),
-            "more than 8 deny entries",
+            "more than 16 deny entries",
         ),
     ];
     for (label, c, p, want) in cases {

@@ -739,6 +739,7 @@ impl Engine {
                             state,
                             reason: Some(e.message.clone()),
                             sensitive: h.sensitive,
+                            provenance: None,
                         }
                     }
                 };
@@ -1048,6 +1049,7 @@ impl Engine {
             state: outcome,
             reason,
             sensitive: h.sensitive,
+            provenance: None,
         })
     }
 }
@@ -1084,6 +1086,7 @@ fn program_handler_result(
         state,
         reason,
         sensitive: h.sensitive,
+        provenance: None,
     }
 }
 

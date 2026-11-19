@@ -462,14 +462,20 @@ pub fn run_report_json(report: &RunReport, mode: &str) -> serde_json::Value {
             } else {
                 h.reason.clone()
             };
-            json!({
+            let mut v = json!({
                 "id": h.id,
                 "type": h.kind.label(),
                 "service": if h.sensitive { "<redacted>".to_string() } else { sanitize_line(&h.service) },
                 "action": h.action,
                 "state": format!("{:?}", h.state),
                 "reason": reason,
-            })
+            });
+            // Only a plugin handler has provenance; other handler types keep
+            // their keys unchanged.
+            if let Some(p) = &h.provenance {
+                v["provenance"] = json!(if h.sensitive { "<redacted>".to_string() } else { sanitize_line(p) });
+            }
+            v
         })
         .collect();
     let mut doc = json!({

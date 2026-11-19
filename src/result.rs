@@ -184,4 +184,7 @@ pub struct HandlerResult {
     pub state: HandlerOutcomeState,
     pub reason: Option<String>,
     pub sensitive: bool,
+    /// A `plugin` handler's provenance (plugin and catalog id, version,
+    /// SHA-256, operation); `None` for other handler types.
+    pub provenance: Option<String>,
 }

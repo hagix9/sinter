@@ -322,7 +322,7 @@ directory.
 | File | SHA-256 |
 |---|---|
 | `candidates/firewalld-0.3.0.catalog.toml` | `1ef3c8a18d99ef7f1bf8899f18d243095a03ab52868a43d45aa8e1d1d874989d` |
-| `candidates/firewalld-0.3.0.plugin.toml` | `fbd8e057a4cbf4d916e2f930d06a39cbb8ca1fef1ad34ad0e893e1a809242125` |
+| `candidates/firewalld-0.3.0.plugin.toml` | `df3a558edef094e7d4ca8200cc6f7d1b03d392e81b06bde12a1324f8c74ff215` |
 
 It keeps every operation and type of 0.2.0 and adds `firewalld.interface`
 (`zone`, `interface` of kind `ifname`, runtime and permanent), `firewalld.source`

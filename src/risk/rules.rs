@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 
-use super::path::{MgmtPath, PathState, ZoneBy, ZoneState};
+use super::path::{MgmtPath, PathState, ZoneState};
 use super::RiskClass;
 
 /// Which rule judges a resource type.
@@ -349,13 +349,13 @@ pub fn firewalld(kind: RuleKind, path: &PathState, change: &FwChange) -> Dynamic
             }
         }
         RuleKind::FwInterface => match change.interface.as_deref() {
-            Some(i) if p.ifaces.contains(i) => match zone.1 {
-                ZoneBy::Source => Dynamic::Clear,
-                _ => Dynamic::Affects(format!(
-                    "changes the zone of the management interface {}",
-                    i
-                )),
-            },
+            // Moving a management interface affects the connection whatever
+            // decided its zone (DESIGN §44.6 calls only a non-management
+            // interface clear).
+            Some(i) if p.ifaces.contains(i) => Dynamic::Affects(format!(
+                "changes the zone of the management interface {}",
+                i
+            )),
             Some(_) => Dynamic::Clear,
             None => Dynamic::Unknown("no interface".into()),
         },
@@ -367,8 +367,12 @@ pub fn firewalld(kind: RuleKind, path: &PathState, change: &FwChange) -> Dynamic
             _ => Dynamic::Unknown("the source is not an IP network".into()),
         },
         RuleKind::FwZoneAbsent => {
-            if in_zone {
-                Dynamic::Affects(format!("removes the management zone {}", zone.0))
+            let z = change.zone.as_deref().unwrap_or("");
+            if in_zone || p.bound_zones.contains(z) {
+                Dynamic::Affects(format!(
+                    "removes the management zone {} or a zone of a management interface",
+                    zone.0
+                ))
             } else {
                 Dynamic::Clear
             }

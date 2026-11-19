@@ -2315,6 +2315,8 @@ pub struct FakeFirewalld {
     pub rich_rules: BTreeSet<String>,
     /// Reloads served.
     pub reloads: usize,
+    /// Permanent policies besides `allow-host-ipv6`.
+    pub perm_policies: Vec<String>,
 }
 
 impl FakeFirewalld {
@@ -2409,6 +2411,11 @@ impl FakeFirewalld {
                     z.extend(self.perm_only_zones.iter().cloned());
                 }
                 return fw_out(0, &format!("{}\n", z.join(" ")), "");
+            }
+            ["--get-policies"] if perm => {
+                let mut v = vec!["allow-host-ipv6".to_string()];
+                v.extend(self.perm_policies.iter().cloned());
+                return fw_out(0, &format!("{}\n", v.join(" ")), "");
             }
             ["--direct", "--get-all-rules"] => {
                 return fw_out(

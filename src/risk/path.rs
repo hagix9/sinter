@@ -51,6 +51,9 @@ pub struct MgmtPath {
     /// The zone the permanent configuration puts it in (what a reload or a
     /// boot would give). Judges permanent facets and reloads.
     pub perm_zone: ZoneState,
+    /// Zones the management interfaces are bound to (runtime, permanent).
+    pub bound_zones: BTreeSet<String>,
+    pub perm_bound_zones: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +214,8 @@ pub fn determine(n: &NetFacts) -> PathState {
                 loopback_reload_measured: false,
                 zone: ZoneState::NoFirewalld,
                 perm_zone: ZoneState::NoFirewalld,
+                bound_zones: BTreeSet::new(),
+                perm_bound_zones: BTreeSet::new(),
             });
         }
         return PathState::Unknown(if server.is_loopback() && client.is_loopback() {
@@ -258,6 +263,8 @@ pub fn determine(n: &NetFacts) -> PathState {
         loopback_reload_measured: false,
         zone: ZoneState::NoFirewalld,
         perm_zone: ZoneState::NoFirewalld,
+        bound_zones: BTreeSet::new(),
+        perm_bound_zones: BTreeSet::new(),
     })
 }
 
@@ -380,6 +387,17 @@ pub fn with_zone(state: PathState, rt: Option<&FwFacts>, perm: Option<&FwFacts>)
                     Some(f) => zone_of(&p, f),
                     None => ZoneState::Unknown("permanent firewalld facts were not read".into()),
                 };
+                let bound = |f: Option<&FwFacts>| -> BTreeSet<String> {
+                    f.map(|f| {
+                        f.iface_zones
+                            .iter()
+                            .filter_map(|(_, z)| z.clone().ok().flatten())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+                };
+                p.bound_zones = bound(rt);
+                p.perm_bound_zones = bound(perm);
             }
             PathState::Known(p)
         }
@@ -393,6 +411,7 @@ pub fn permanent_view(state: &PathState) -> PathState {
         PathState::Known(p) => {
             let mut q = p.clone();
             q.zone = p.perm_zone.clone();
+            q.bound_zones = p.perm_bound_zones.clone();
             PathState::Known(q)
         }
         u => u.clone(),
