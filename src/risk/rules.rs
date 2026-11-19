@@ -115,14 +115,68 @@ pub fn decide(
     }
 }
 
+/// The recovery procedure a firewalld rule can use when its change affects
+/// the management path (§43.6): runtime first only where the inverse
+/// operation restores the previous runtime state exactly (adding back a
+/// removed service, port or protocol; removing an added source). Moving an
+/// interface, deleting a zone and reloading have no such inverse.
+pub fn recovery_for(kind: RuleKind) -> Recovery {
+    match kind {
+        RuleKind::FwServiceAbsent
+        | RuleKind::FwPortAbsent
+        | RuleKind::FwProtocolAbsent
+        | RuleKind::FwSource => Recovery::FirewalldRuntimeFirst,
+        _ => Recovery::None,
+    }
+}
+
+/// One `--info-service` answer: `name` then `  key: values` lines.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServiceDef {
+    pub ports: Vec<String>,
+    pub protocols: Vec<String>,
+    pub includes: Vec<String>,
+    /// helpers or modules (conntrack helpers): not judged, so unknown.
+    pub helpers: Vec<String>,
+}
+
+/// Parse `firewall-cmd --info-service=<s>` output strictly: every key line
+/// must be one Sinter knows; anything else is an error (unknown).
+pub fn parse_service_def(text: &str) -> std::result::Result<ServiceDef, String> {
+    let mut d = ServiceDef::default();
+    let mut lines = text.lines();
+    let first = lines.next().ok_or("empty service definition")?;
+    if first.trim().is_empty() || first.starts_with(' ') {
+        return Err("no service name line".into());
+    }
+    for l in lines {
+        if l.trim().is_empty() {
+            continue;
+        }
+        let (k, v) = l.trim().split_once(':').ok_or("unreadable line")?;
+        let vals: Vec<String> = v.split_whitespace().map(str::to_string).collect();
+        match k {
+            "ports" => d.ports = vals,
+            "protocols" => d.protocols = vals,
+            "includes" => d.includes = vals,
+            "helpers" | "modules" => d.helpers.extend(vals),
+            // These do not change which ports are allowed to the host.
+            "source-ports" | "destination" | "summary" | "description" => {}
+            other => return Err(format!("unknown key {}", other)),
+        }
+    }
+    Ok(d)
+}
+
 /// What the engine observed about firewalld for one rule.
 #[derive(Debug, Clone, Default)]
 pub struct FwChange {
     /// The resource's zone (`zone` field), if any.
     pub zone: Option<String>,
-    /// The removed service's ports (`22/tcp`, `1000-2000/tcp`), when the
-    /// definition could be read; `None` = unreadable.
-    pub service_ports: Option<Vec<String>>,
+    /// Whether the removed service's definition allows the management port
+    /// (ports, protocols and included services, judged by the engine);
+    /// `None` = not judged, `Err` = the definition cannot be judged.
+    pub service_allows: Option<std::result::Result<bool, String>>,
     /// The removed port or range (`22/tcp`).
     pub port: Option<String>,
     /// The removed protocol.
@@ -258,26 +312,16 @@ pub fn firewalld(kind: RuleKind, path: &PathState, change: &FwChange) -> Dynamic
             if !in_zone {
                 return Dynamic::Clear;
             }
-            match &change.service_ports {
-                None => Dynamic::Unknown("the service definition could not be read".into()),
-                Some(ports) => {
-                    let mut hit = false;
-                    for s in ports {
-                        match port_spec_includes(s, p.server_port) {
-                            Some(true) => hit = true,
-                            Some(false) => {}
-                            None => return Dynamic::Unknown(format!("unreadable port {}", s)),
-                        }
-                    }
-                    if hit {
-                        Dynamic::Affects(format!(
-                            "removes a service of the management zone {} that allows the management port",
-                            zone.0
-                        ))
-                    } else {
-                        Dynamic::Clear
-                    }
+            match &change.service_allows {
+                None => Dynamic::Unknown("the service definition was not judged".into()),
+                Some(Err(why)) => {
+                    Dynamic::Unknown(format!("the service definition cannot be judged: {}", why))
                 }
+                Some(Ok(true)) => Dynamic::Affects(format!(
+                    "removes a service of the management zone {} that allows the management port",
+                    zone.0
+                )),
+                Some(Ok(false)) => Dynamic::Clear,
             }
         }
         RuleKind::FwPortAbsent => {

@@ -236,7 +236,8 @@ impl Engine {
             .map(|f| (f.name.clone(), f.observed.clone(), f.want.clone()))
             .collect();
         let pending_ops: Vec<String> = pending.iter().filter_map(|f| f.ensure_op.clone()).collect();
-        let risk_note = self.risk_check_plugin(res, &obs.values, &facet_view, &pending_ops)?;
+        let verdict = self.risk_check_plugin(res, &obs.values, &facet_view, &pending_ops)?;
+        let risk_note = verdict.note.clone();
         let summary = |facets: &[FacetState], observed: bool| {
             facets
                 .iter()
@@ -299,7 +300,13 @@ impl Engine {
         // Apply.
         let permit = self.fs.mutation_permit()?;
         let set = obs.set.clone();
-        let (_, catalog, _) = resolve(&set, res)?;
+        let (_, catalog, rtype) = resolve(&set, res)?;
+        // Runtime first (DESIGN §43.6): the runtime facet changes, a new
+        // connection is tested, and only then the permanent facet changes.
+        let mut pending = pending;
+        if verdict.guarded {
+            pending.sort_by_key(|f| if f.name == "runtime" { 0 } else { 1 });
+        }
         let mut changed_any = false;
         let mut done = Vec::new();
         let mark = |e: SinterError, changed_any: bool, dispatched: bool| {
@@ -366,6 +373,17 @@ impl Engine {
                 Ok(state) if state == f.want => {
                     changed_any = true;
                     done.push(f.name.clone());
+                    if verdict.guarded && f.name == "runtime" {
+                        self.plugin_runtime_first_probe(res, f, rtype, catalog, &obs.values, sensitive, &permit)
+                            .map_err(|e| {
+                                if e.kind == crate::error::ErrorKind::Indeterminate {
+                                    e.possible()
+                                } else {
+                                    e.changed()
+                                }
+                            })?;
+                        obs.ops_run.push("probe-new-connection".into());
+                    }
                 }
                 Ok(state) => {
                     return Err(mark(
@@ -410,6 +428,134 @@ impl Engine {
         ));
         r.notes.extend(risk_note);
         Ok(r)
+    }
+}
+
+impl Engine {
+    /// After the runtime facet of a guarded change (DESIGN §43.6): open a new
+    /// SSH connection with full host-key verification and run
+    /// `/usr/bin/true`. If that fails, the previous runtime state is restored
+    /// through the facet's own ensure operation for it and observed again;
+    /// the resource then fails (restored) or is indeterminate (the original
+    /// connection could not restore it). Nothing guarantees recovery.
+    #[allow(clippy::too_many_arguments)]
+    fn plugin_runtime_first_probe(
+        &mut self,
+        res: &FrozenResource,
+        f: &FacetState,
+        rtype: &ResourceType,
+        catalog: &VerifiedCatalog,
+        values: &BTreeMap<String, String>,
+        sensitive: bool,
+        permit: &crate::targetfs::MutationPermit,
+    ) -> Result<()> {
+        if self.fs.probe_new_connection() {
+            return Ok(());
+        }
+        let restore = rtype
+            .facets()
+            .iter()
+            .find(|d| d.name() == f.name)
+            .and_then(|d| d.ensure_op(&f.observed))
+            .map(str::to_string);
+        let Some(restore) = restore else {
+            return Err(SinterError::indeterminate(format!(
+                "{}: a new connection failed after the runtime change, and no operation restores the previous runtime state; the host may be unreachable (recovery is not guaranteed)",
+                res.id
+            )));
+        };
+        let rop = op(catalog, &restore)?;
+        let call = MutateCall::new(rop, values, sensitive)?;
+        let restored = match self.fs.plugin_mutate(permit, &call) {
+            Ok(out) => classify_mutation(rop, &out),
+            Err(e) => Mutated::Unknown(e.message),
+        };
+        if restored != Mutated::Ok {
+            return Err(SinterError::indeterminate(format!(
+                "{}: a new connection failed after the runtime change and restoring the previous runtime state did not succeed; the result is unknown and the host may be unreachable (recovery is not guaranteed)",
+                res.id
+            )));
+        }
+        let oop = op(catalog, &f.observe_op)?;
+        match self.plugin_observe_op(oop, values, sensitive) {
+            Ok(state) if state == f.observed => Err(SinterError::apply(format!(
+                "{}: a new connection failed after the runtime change; the previous runtime state was restored and verified, and the permanent configuration was not changed",
+                res.id
+            ))),
+            _ => Err(SinterError::indeterminate(format!(
+                "{}: a new connection failed after the runtime change; the restore ran but the previous runtime state could not be verified (recovery is not guaranteed)",
+                res.id
+            ))),
+        }
+    }
+}
+
+impl Engine {
+    /// A `plugin` handler (DESIGN §44.2): its catalog handler operation on
+    /// the mutate channel, after the connection-risk check. The C1 gate has
+    /// already refused a run whose handler operation the trust file does not
+    /// allow; `MutateCall::new` refuses it again here.
+    pub(crate) fn run_plugin_handler(
+        &mut self,
+        h: &crate::model::FrozenHandler,
+    ) -> Result<crate::result::HandlerResult> {
+        use crate::result::{HandlerOutcomeState, HandlerResult};
+        let (plugin_id, op_id) = h.plugin_op.clone().ok_or_else(|| {
+            SinterError::schema(format!("handler {}: not a plugin handler", h.id))
+        })?;
+        let set = self.model.plugins.clone().ok_or_else(|| {
+            SinterError::schema(format!("handler {}: no plugin is enabled", h.id))
+        })?;
+        let (plugin, catalog, mop) =
+            super::resolve_handler(&set, &plugin_id, &op_id).ok_or_else(|| {
+                SinterError::schema(format!(
+                    "handler {}: plugin {} has no handler operation {}",
+                    h.id, plugin_id, op_id
+                ))
+            })?;
+        let provenance = format!(
+            "plugin={}@{} plugin_sha256={} catalog={}@{} catalog_sha256={} op={} registry=first-party",
+            plugin.id(),
+            plugin.version(),
+            plugin.sha256(),
+            catalog.id(),
+            catalog.version(),
+            catalog.sha256(),
+            op_id
+        );
+        let result = |state: HandlerOutcomeState, reason: Option<String>| HandlerResult {
+            id: h.id.clone(),
+            kind: h.kind,
+            service: provenance.clone(),
+            action: "run".to_string(),
+            state,
+            reason,
+            sensitive: h.sensitive,
+        };
+        if let Err(e) = self.risk_check_handler(h, catalog, &op_id) {
+            return Ok(result(HandlerOutcomeState::Failed, Some(e.message)));
+        }
+        let permit = self.fs.mutation_permit()?;
+        let call = MutateCall::new(mop, &BTreeMap::new(), h.sensitive)?;
+        let outcome = match self.fs.plugin_mutate(&permit, &call) {
+            Ok(out) => classify_mutation(mop, &out),
+            Err(e) => Mutated::Unknown(format!(
+                "operation {} could not be completed: {} (not retried)",
+                call.op_id(),
+                e.message
+            )),
+        };
+        Ok(match outcome {
+            Mutated::Ok => result(HandlerOutcomeState::Succeeded, None),
+            Mutated::Failed(m) => result(
+                HandlerOutcomeState::Failed,
+                Some(format!("handler {}: {}", h.id, m)),
+            ),
+            Mutated::Unknown(m) => result(
+                HandlerOutcomeState::Indeterminate,
+                Some(format!("handler {}: {}", h.id, m)),
+            ),
+        })
     }
 }
 
@@ -533,6 +679,27 @@ pub fn require_allowed_mutations(model: &crate::model::Model) -> Result<()> {
                 res.type_,
                 missing.join(", ")
             )));
+        }
+    }
+    // Handler operations are checked too (DESIGN §44.2): a run never reaches
+    // a notified handler whose operation the trust file does not allow.
+    for h in &model.handlers {
+        if let Some((plugin, op)) = &h.plugin_op {
+            match super::resolve_handler(set, plugin, op) {
+                Some((_, _, o)) if o.is_enabled() => {}
+                Some(_) => {
+                    return Err(SinterError::schema(format!(
+                        "handler {}: operation {} of plugin {} is not allowed by the trust file; plan and apply refuse it before contacting any target (allow it under allowed_mutate)",
+                        h.id, op, plugin
+                    )))
+                }
+                None => {
+                    return Err(SinterError::schema(format!(
+                        "handler {}: plugin {} has no handler operation {}",
+                        h.id, plugin, op
+                    )))
+                }
+            }
         }
     }
     Ok(())

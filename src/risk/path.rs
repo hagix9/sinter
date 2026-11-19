@@ -46,7 +46,11 @@ pub struct MgmtPath {
     /// Whether it was measured that loopback traffic survives a firewalld
     /// reload on this target (P3 measurement; false until then).
     pub loopback_reload_measured: bool,
+    /// The zone the connection is in now (runtime configuration).
     pub zone: ZoneState,
+    /// The zone the permanent configuration puts it in (what a reload or a
+    /// boot would give). Judges permanent facets and reloads.
+    pub perm_zone: ZoneState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +85,15 @@ pub struct FwFacts {
     pub iface_zones: Vec<(String, std::result::Result<Option<String>, ()>)>,
     /// Non-default policies or direct rules exist (`None` = unknown).
     pub extra_rules: Option<bool>,
+    /// `AllowZoneDrifting=no` is set explicitly in firewalld.conf. Anything
+    /// else (yes, absent, unreadable) is not assumed safe (P3; measured per
+    /// version before it is relaxed).
+    pub drifting_off: bool,
+    /// Interfaces NetworkManager manages (their permanent zone may be held
+    /// by NetworkManager); `None` = it could not be determined.
+    pub nm_managed: Option<BTreeSet<String>>,
+    /// Facts of the permanent configuration (permanent facets, reload).
+    pub permanent: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +210,7 @@ pub fn determine(n: &NetFacts) -> PathState {
                 loopback: true,
                 loopback_reload_measured: false,
                 zone: ZoneState::NoFirewalld,
+                perm_zone: ZoneState::NoFirewalld,
             });
         }
         return PathState::Unknown(if server.is_loopback() && client.is_loopback() {
@@ -243,6 +257,7 @@ pub fn determine(n: &NetFacts) -> PathState {
         loopback: false,
         loopback_reload_measured: false,
         zone: ZoneState::NoFirewalld,
+        perm_zone: ZoneState::NoFirewalld,
     })
 }
 
@@ -301,6 +316,12 @@ pub fn zone_of(p: &MgmtPath, f: &FwFacts) -> ZoneState {
             let mut bound: BTreeSet<String> = BTreeSet::new();
             let mut unbound = false;
             for i in &p.ifaces {
+                if f.permanent && f.nm_managed.as_ref().is_none_or(|m| m.contains(i)) {
+                    return ZoneState::Unknown(format!(
+                        "the permanent zone of interface {} may be held by NetworkManager (or that could not be determined)",
+                        i
+                    ));
+                }
                 match f.iface_zones.iter().find(|(n, _)| n == i).map(|(_, z)| z) {
                     Some(Ok(Some(z))) => {
                         bound.insert(z.clone());
@@ -328,6 +349,11 @@ pub fn zone_of(p: &MgmtPath, f: &FwFacts) -> ZoneState {
             }
         }
     };
+    if chosen.1 == ZoneBy::Source && !f.drifting_off {
+        return ZoneState::Unknown(
+            "the zone is decided by a source and AllowZoneDrifting is not explicitly off".into(),
+        );
+    }
     match zones.iter().find(|z| z.name == chosen.0) {
         Some(z) if z.forward_ports => ZoneState::Unknown(format!(
             "zone {} has forward ports; the management port firewalld sees may differ",
@@ -341,18 +367,34 @@ pub fn zone_of(p: &MgmtPath, f: &FwFacts) -> ZoneState {
     }
 }
 
-/// Attach the zone to a known path.
-pub fn with_zone(state: PathState, f: Option<&FwFacts>) -> PathState {
+/// Attach the runtime and permanent zones to a known path.
+pub fn with_zone(state: PathState, rt: Option<&FwFacts>, perm: Option<&FwFacts>) -> PathState {
     match state {
         PathState::Known(mut p) => {
             if !p.loopback {
-                p.zone = match f {
+                p.zone = match rt {
                     Some(f) => zone_of(&p, f),
                     None => ZoneState::Unknown("firewalld facts were not read".into()),
+                };
+                p.perm_zone = match perm {
+                    Some(f) => zone_of(&p, f),
+                    None => ZoneState::Unknown("permanent firewalld facts were not read".into()),
                 };
             }
             PathState::Known(p)
         }
         u => u,
+    }
+}
+
+/// The same path judged against the permanent configuration.
+pub fn permanent_view(state: &PathState) -> PathState {
+    match state {
+        PathState::Known(p) => {
+            let mut q = p.clone();
+            q.zone = p.perm_zone.clone();
+            PathState::Known(q)
+        }
+        u => u.clone(),
     }
 }

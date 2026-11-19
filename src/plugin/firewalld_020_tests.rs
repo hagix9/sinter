@@ -408,7 +408,7 @@ fn verification_refuses_misused_classes_kinds_and_deny_rules() {
             edit(
                 CATALOG,
                 port_slot,
-                "port = { class = \"cidr\", max_len = 16 }",
+                "port = { class = \"macaddr\", max_len = 16 }",
             ),
             PLUGIN.to_string(),
             "must be class ident",

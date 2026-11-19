@@ -92,6 +92,7 @@ static ENFORCED_020: &[CatalogRules] = &[CatalogRules {
     enforcement: Enforcement::Enforced,
     types: T020,
     ops: OPS_020,
+    handlers: &[],
 }];
 const TR: &[TypeRule] = &[
     TypeRule {
@@ -113,6 +114,7 @@ static R_020: &[CatalogRules] = &[CatalogRules {
     enforcement: Enforcement::Enforced,
     types: TR,
     ops: OPS_020,
+    handlers: &[],
 }];
 /// The classified digest is not the catalog's.
 static WRONG_DIGEST_020: &[CatalogRules] = &[CatalogRules {
@@ -122,6 +124,7 @@ static WRONG_DIGEST_020: &[CatalogRules] = &[CatalogRules {
     enforcement: Enforcement::Enforced,
     types: T020,
     ops: OPS_020,
+    handlers: &[],
 }];
 /// No entry at all for 0.2.0.
 static EMPTY: &[CatalogRules] = &[];
@@ -253,6 +256,7 @@ fn fw() -> Arc<Mutex<FakeFirewalld>> {
     f.service_ports
         .insert("ssh-alt".into(), vec!["2222/tcp".into()]);
     f.interfaces.insert("eth0".into(), "public".into());
+    f.priorities = Some(BTreeMap::new());
     Arc::new(Mutex::new(f))
 }
 
@@ -470,6 +474,7 @@ fn known(zone: ZoneState, ifaces: &[&str]) -> PathState {
         ifaces: ifaces.iter().map(|s| s.to_string()).collect(),
         loopback: false,
         loopback_reload_measured: false,
+        perm_zone: zone.clone(),
         zone,
     })
 }
@@ -496,23 +501,23 @@ fn firewalld_rules() {
     };
     // service absent
     let mut ch = c("public");
-    ch.service_ports = Some(vec!["22/tcp".into()]);
+    ch.service_allows = Some(Ok(true));
     assert!(matches!(
         rules::firewalld(RuleKind::FwServiceAbsent, &pub_if, &ch),
         Dynamic::Affects(_)
     ));
-    ch.service_ports = Some(vec!["80/tcp".into()]);
+    ch.service_allows = Some(Ok(false));
     assert_eq!(
         rules::firewalld(RuleKind::FwServiceAbsent, &pub_if, &ch),
         Dynamic::Clear
     );
-    ch.service_ports = None;
+    ch.service_allows = Some(Err("helpers".into()));
     assert!(matches!(
         rules::firewalld(RuleKind::FwServiceAbsent, &pub_if, &ch),
         Dynamic::Unknown(_)
     ));
     let mut other = c("internal");
-    other.service_ports = Some(vec!["22/tcp".into()]);
+    other.service_allows = Some(Ok(true));
     assert_eq!(
         rules::firewalld(RuleKind::FwServiceAbsent, &pub_if, &other),
         Dynamic::Clear
@@ -790,6 +795,9 @@ fn zone_precedence_source_interface_default() {
         zones: Some(vec![zone("public", &[]), zone("internal", &[])]),
         iface_zones: vec![("eth0".into(), Ok(Some("internal".into())))],
         extra_rules: Some(false),
+        drifting_off: true,
+        nm_managed: Some(BTreeSet::new()),
+        permanent: false,
     };
     assert_eq!(
         path::zone_of(&p, &base),
@@ -1087,10 +1095,10 @@ fn unknown_paths_are_refused_even_with_an_approval_in_force() {
             }),
         ),
         (
-            "modern firewalld without readable priority",
+            "priority not answered (any version)",
             Box::new(|| net(22)),
             Box::new(|f: &mut FakeFirewalld| {
-                f.version = Some("2.1.0".into());
+                f.priorities = None;
             }),
         ),
         (
@@ -1163,7 +1171,18 @@ fn ipv6_nat_source_and_default_zones() {
         .unwrap()
         .sources
         .insert("internal".into(), vec!["203.0.113.0/24".into()]);
+    // AllowZoneDrifting is not explicitly off: a source-decided zone is
+    // not trusted.
     let (r, l) = run(m(), Mode::Apply, target(&f, net(2222)), ctx());
+    assert_refused(&r, &f, "p", "unknown");
+    assert!(record(&l, "p").dynamic.starts_with("unknown"));
+    let drift_off = |f: &Arc<Mutex<FakeFirewalld>>| {
+        target(f, net(2222)).with_fake_fs().with_fs_file(
+            "/etc/firewalld/firewalld.conf",
+            "DefaultZone=public\nAllowZoneDrifting=no\n",
+        )
+    };
+    let (r, l) = run(m(), Mode::Apply, drift_off(&f), ctx());
     assert_eq!(r.unwrap().status, AggregateStatus::Success, "{l:?}");
     assert_eq!(record(&l, "p").dynamic, "clear");
     // An unbound interface falls to the default zone.
@@ -1710,6 +1729,7 @@ static SERVICE_ONLY_020: &[CatalogRules] = &[CatalogRules {
     enforcement: Enforcement::Enforced,
     types: TSERVICE_ONLY,
     ops: OPS_020,
+    handlers: &[],
 }];
 
 #[test]

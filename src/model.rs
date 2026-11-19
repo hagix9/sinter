@@ -66,6 +66,8 @@ pub struct FrozenHandler {
     pub command: Option<crate::ir::CommandHandlerSpec>,
     pub sensitive: bool,
     pub origin: String,
+    /// The plugin id and handler operation of a `plugin` handler.
+    pub plugin_op: Option<(String, String)>,
 }
 
 impl FrozenHandler {
@@ -79,6 +81,7 @@ impl FrozenHandler {
             },
             HandlerKind::CaTrust => "refresh",
             HandlerKind::Command => "run",
+            HandlerKind::Plugin => "run",
         }
     }
 }
@@ -762,6 +765,7 @@ fn expand_document(canon: &Path, doc: Document, state: &mut LoadState) -> Result
             command: h.command.clone(),
             sensitive: h.sensitive,
             origin: h.origin.clone(),
+            plugin_op: h.plugin_op.clone(),
         });
     }
     Ok(())
@@ -2781,6 +2785,39 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
         }
     }
 
+    for h in &state.handlers {
+        if let Some((plugin, op)) = &h.plugin_op {
+            crate::plugin::check_handler(state.plugins.as_deref(), plugin, op, &h.id)?;
+        }
+    }
+    // DESIGN §44.3: a reload discards runtime-only changes. A plugin
+    // resource whose type has no permanent facet and that can notify a
+    // plugin handler loses its change when that handler reloads.
+    if let Some(set) = state.plugins.as_deref() {
+        let plugin_handlers: Vec<&str> = state
+            .handlers
+            .iter()
+            .filter(|h| h.plugin_op.is_some())
+            .map(|h| h.id.as_str())
+            .collect();
+        for r in &frozen {
+            if !r
+                .notify
+                .iter()
+                .any(|n| plugin_handlers.contains(&n.as_str()))
+            {
+                continue;
+            }
+            if let Some((_, rtype)) = set.resource_type(&r.type_) {
+                if !rtype.facets().iter().any(|f| f.name() == "permanent") {
+                    warnings.push(format!(
+                        "{}: resource type {} changes only the runtime configuration and notifies a plugin handler; a reload would discard that change",
+                        r.id, r.type_
+                    ));
+                }
+            }
+        }
+    }
     Ok(Model {
         vars,
         resources: frozen,

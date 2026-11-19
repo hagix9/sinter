@@ -183,6 +183,32 @@ the connection Sinter itself uses. A port range has no `absent`: firewalld answe
 "no" for a range that is only partly allowed, so close ports one by one with
 `firewalld.port`.
 
+## firewalld 0.3.0 (candidate, not available)
+
+firewalld 0.3.0 is developed but **not registered**: no release can install
+or use it until it has been measured on real hosts. It keeps everything of
+0.2.0 and adds `firewalld.interface` (an interface in a zone),
+`firewalld.source` (a network in a zone, canonical CIDR such as
+`198.51.100.0/24`), `firewalld.zone` (a permanent zone; predefined zones
+cannot be deleted) and a `reload` handler operation:
+
+```yaml
+handlers:
+  - id: fw-reload
+    type: plugin
+    plugin: firewalld
+    op: reload
+```
+
+A `plugin` handler runs one handler operation of an enabled plugin. Its
+operation must be allowed in the trust file, or plan and apply refuse the run
+before contacting any host. Every firewalld 0.3.0 change goes through the
+connection-risk control (see [CLI: connection-risk approvals](/en/reference/cli/)):
+interface and source changes always need an approval; removals need one when
+they touch the management connection; anything Sinter cannot judge is
+refused. A reload runs only when the permanent configuration still allows the
+management connection. Rich rules are not supported.
+
 ## Verification
 
 firewalld 0.1.0 and 0.2.0 were measured on real hosts, and run through Sinter, on

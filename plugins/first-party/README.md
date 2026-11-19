@@ -311,3 +311,24 @@ refused with nothing changed, 5 a failure after a change began.
 Sinter cannot prove that an observe operation is read-only on the host; the
 classification above rests on the measurements listed here (DESIGN §38.13).
 Catalogs from anyone else are not supported.
+
+## Candidate: firewalld 0.3.0 (not registered)
+
+`candidates/` holds firewalld 0.3.0, which is **not** in the release's
+registry and cannot be used by a released Sinter: it has not been measured on
+real hosts (DESIGN §38.4, §44.3). The registry test does not look at this
+directory.
+
+| File | SHA-256 |
+|---|---|
+| `candidates/firewalld-0.3.0.catalog.toml` | `1ef3c8a18d99ef7f1bf8899f18d243095a03ab52868a43d45aa8e1d1d874989d` |
+| `candidates/firewalld-0.3.0.plugin.toml` | `fbd8e057a4cbf4d916e2f930d06a39cbb8ca1fef1ad34ad0e893e1a809242125` |
+
+It keeps every operation and type of 0.2.0 and adds `firewalld.interface`
+(`zone`, `interface` of kind `ifname`, runtime and permanent), `firewalld.source`
+(`zone`, `source` of kind `cidr`, runtime and permanent), `firewalld.zone`
+(permanent only; the predefined zones cannot be deleted) and the handler
+operation `reload` for a `plugin` handler (never `--complete-reload`). Every
+change is judged by the connection-risk control (DESIGN §43, §44.6) before
+it runs. The exit codes are firewall-cmd's documented convention and are not
+measured; neither is any behaviour listed in DESIGN §44.7.

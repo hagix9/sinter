@@ -120,6 +120,11 @@ pub struct FakeNet {
     pub default_route: Option<String>,
     /// Invocations served, in order.
     pub received: Vec<Vec<String>>,
+    /// Whether a new connection succeeds (runtime-first probe); `None` is
+    /// unmodeled and fails.
+    pub reconnect: Option<bool>,
+    /// Probes served.
+    pub probes: usize,
 }
 
 impl FakeNet {
@@ -2296,6 +2301,20 @@ pub struct FakeFirewalld {
     pub direct_rules: Vec<String>,
     /// service -> ports of its definition (`22/tcp`).
     pub service_ports: BTreeMap<String, Vec<String>>,
+    /// service -> full `--info-service` answer (overrides `service_ports`).
+    pub service_info: BTreeMap<String, String>,
+    /// Permanent sources and interface bindings; `None` = same as runtime
+    /// until a permanent change copies them.
+    pub perm_sources: Option<BTreeMap<String, Vec<String>>>,
+    pub perm_interfaces: Option<BTreeMap<String, String>>,
+    /// Zones created permanently, present at runtime only after a reload.
+    pub perm_only_zones: BTreeSet<String>,
+    /// zone -> target (`default` when absent).
+    pub targets: BTreeMap<String, String>,
+    /// Zones with rich rules.
+    pub rich_rules: BTreeSet<String>,
+    /// Reloads served.
+    pub reloads: usize,
 }
 
 impl FakeFirewalld {
@@ -2341,13 +2360,16 @@ impl FakeFirewalld {
                 .find_map(|a| a.strip_prefix(p).map(str::to_string))
         };
         if let Some(z) = val("--info-zone=") {
-            return if self.zones.contains(&z) {
+            return if self.zones.contains(&z) || (perm && self.perm_only_zones.contains(&z)) {
                 fw_out(0, "public (active)\n  interfaces: eth0\n", "")
             } else {
                 fw_out(112, "", "Error: INVALID_ZONE\n")
             };
         }
         if let Some(sv) = val("--info-service=") {
+            if let Some(info) = self.service_info.get(&sv) {
+                return fw_out(0, info, "");
+            }
             return if self.services.contains(&sv) {
                 match self.service_ports.get(&sv) {
                     Some(p) => fw_out(0, &format!("{}\n  ports: {}\n", sv, p.join(" ")), ""),
@@ -2373,9 +2395,77 @@ impl FakeFirewalld {
                 "",
             );
         }
-        if args == ["--get-zones"] {
-            let z: Vec<String> = self.zones.iter().cloned().collect();
-            return fw_out(0, &format!("{}\n", z.join(" ")), "");
+        // Read-only list queries and zone-level changes, runtime or
+        // permanent (`--permanent` first).
+        let a: Vec<&str> = args
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|x| *x != "--permanent")
+            .collect();
+        match a.as_slice() {
+            ["--get-zones"] => {
+                let mut z: Vec<String> = self.zones.iter().cloned().collect();
+                if perm {
+                    z.extend(self.perm_only_zones.iter().cloned());
+                }
+                return fw_out(0, &format!("{}\n", z.join(" ")), "");
+            }
+            ["--direct", "--get-all-rules"] => {
+                return fw_out(
+                    0,
+                    &self
+                        .direct_rules
+                        .iter()
+                        .map(|r| format!("{}\n", r))
+                        .collect::<String>(),
+                    "",
+                )
+            }
+            ["--reload"] if !perm => {
+                self.mutations.push(args.to_vec());
+                self.reloads += 1;
+                self.runtime = self.permanent.clone();
+                self.ports_runtime = self.ports_permanent.clone();
+                self.protocols_runtime = self.protocols_permanent.clone();
+                if let Some(ps) = &self.perm_sources {
+                    self.sources = ps.clone();
+                }
+                if let Some(pi) = &self.perm_interfaces {
+                    self.interfaces = pi.clone();
+                }
+                let created: Vec<String> = self.perm_only_zones.iter().cloned().collect();
+                self.zones.extend(created);
+                self.perm_only_zones.clear();
+                return fw_out(0, "success\n", "");
+            }
+            [x] if perm && x.starts_with("--new-zone=") => {
+                let z = x.trim_start_matches("--new-zone=").to_string();
+                if self.zones.contains(&z) || self.perm_only_zones.contains(&z) {
+                    return fw_out(26, "", "Error: NAME_CONFLICT\n");
+                }
+                self.mutations.push(args.to_vec());
+                self.perm_only_zones.insert(z);
+                return fw_out(0, "success\n", "");
+            }
+            [x] if perm && x.starts_with("--delete-zone=") => {
+                let z = x.trim_start_matches("--delete-zone=").to_string();
+                if !self.zones.contains(&z) && !self.perm_only_zones.contains(&z) {
+                    return fw_out(112, "", "Error: INVALID_ZONE\n");
+                }
+                self.mutations.push(args.to_vec());
+                self.perm_only_zones.remove(&z);
+                self.zones.remove(&z);
+                return fw_out(0, "success\n", "");
+            }
+            _ => {}
+        }
+        if let Some(z) = val("--info-zone=") {
+            let exists = self.zones.contains(&z) || (perm && self.perm_only_zones.contains(&z));
+            return if exists {
+                fw_out(0, &format!("{}\n", z), "")
+            } else {
+                fw_out(112, "", "Error: INVALID_ZONE\n")
+            };
         }
         if args == ["--get-active-policies"] {
             return fw_out(0, &format!("{}\n", self.active_policies.join(" ")), "");
@@ -2392,7 +2482,14 @@ impl FakeFirewalld {
             );
         }
         if let Some(i) = val("--get-zone-of-interface=") {
-            return match self.interfaces.get(&i) {
+            let map = if perm {
+                self.perm_interfaces
+                    .clone()
+                    .unwrap_or_else(|| self.interfaces.clone())
+            } else {
+                self.interfaces.clone()
+            };
+            return match map.get(&i) {
                 Some(z) => fw_out(0, &format!("{}\n", z), ""),
                 None => fw_out(2, "no zone\n", ""),
             };
@@ -2400,14 +2497,178 @@ impl FakeFirewalld {
         let Some(zone) = val("--zone=") else {
             return fw_out(2, "", "usage\n");
         };
-        if !self.zones.contains(&zone) {
+        if !(self.zones.contains(&zone) || (perm && self.perm_only_zones.contains(&zone))) {
             return fw_out(112, "", "Error: INVALID_ZONE\n");
         }
-        if args.len() == 2 && args[1] == "--list-sources" {
-            let s = self.sources.get(&zone).cloned().unwrap_or_default();
+        let a: Vec<&str> = args
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|x| *x != "--permanent")
+            .collect();
+        let tail = if a.len() == 2 { a[1] } else { "" };
+        if tail == "--list-sources" {
+            let map = if perm {
+                self.perm_sources
+                    .clone()
+                    .unwrap_or_else(|| self.sources.clone())
+            } else {
+                self.sources.clone()
+            };
+            let s = map.get(&zone).cloned().unwrap_or_default();
             return fw_out(0, &format!("{}\n", s.join(" ")), "");
         }
-        if args.len() == 2 && args[1] == "--list-forward-ports" {
+        if tail == "--get-target" {
+            return fw_out(
+                0,
+                &format!(
+                    "{}\n",
+                    self.targets
+                        .get(&zone)
+                        .cloned()
+                        .unwrap_or_else(|| "default".into())
+                ),
+                "",
+            );
+        }
+        if tail == "--list-rich-rules" {
+            return fw_out(
+                0,
+                if self.rich_rules.contains(&zone) {
+                    "rule family=\"ipv4\" drop\n"
+                } else {
+                    "\n"
+                },
+                "",
+            );
+        }
+        if tail == "--list-ports" {
+            let set = if perm {
+                &self.ports_permanent
+            } else {
+                &self.ports_runtime
+            };
+            let v: Vec<String> = set
+                .iter()
+                .filter(|(z, _)| *z == zone)
+                .map(|(_, p)| p.clone())
+                .collect();
+            return fw_out(0, &format!("{}\n", v.join(" ")), "");
+        }
+        if tail == "--list-protocols" {
+            let set = if perm {
+                &self.protocols_permanent
+            } else {
+                &self.protocols_runtime
+            };
+            let v: Vec<String> = set
+                .iter()
+                .filter(|(z, _)| *z == zone)
+                .map(|(_, p)| p.clone())
+                .collect();
+            return fw_out(0, &format!("{}\n", v.join(" ")), "");
+        }
+        if tail == "--list-services" {
+            let set = if perm { &self.permanent } else { &self.runtime };
+            let v: Vec<String> = set
+                .iter()
+                .filter(|(z, _)| *z == zone)
+                .map(|(_, p)| p.clone())
+                .collect();
+            return fw_out(0, &format!("{}\n", v.join(" ")), "");
+        }
+        // Interfaces and sources (firewalld 0.3.0).
+        if let Some(i) = val("--query-interface=") {
+            let map = if perm {
+                self.perm_interfaces
+                    .clone()
+                    .unwrap_or_else(|| self.interfaces.clone())
+            } else {
+                self.interfaces.clone()
+            };
+            return if map.get(&i) == Some(&zone) {
+                fw_out(0, "yes\n", "")
+            } else {
+                fw_out(1, "no\n", "")
+            };
+        }
+        if let Some(i) = val("--change-interface=") {
+            self.mutations.push(args.to_vec());
+            if perm {
+                let mut m = self
+                    .perm_interfaces
+                    .clone()
+                    .unwrap_or_else(|| self.interfaces.clone());
+                m.insert(i, zone);
+                self.perm_interfaces = Some(m);
+            } else {
+                self.interfaces.insert(i, zone);
+            }
+            return fw_out(0, "success\n", "");
+        }
+        if let Some(i) = val("--remove-interface=") {
+            let mut m = if perm {
+                self.perm_interfaces
+                    .clone()
+                    .unwrap_or_else(|| self.interfaces.clone())
+            } else {
+                self.interfaces.clone()
+            };
+            if m.get(&i) != Some(&zone) {
+                return fw_out(0, "Warning: UNKNOWN_INTERFACE\n", "");
+            }
+            self.mutations.push(args.to_vec());
+            m.remove(&i);
+            if perm {
+                self.perm_interfaces = Some(m)
+            } else {
+                self.interfaces = m
+            }
+            return fw_out(0, "success\n", "");
+        }
+        if let Some(src) = val("--query-source=") {
+            let map = if perm {
+                self.perm_sources
+                    .clone()
+                    .unwrap_or_else(|| self.sources.clone())
+            } else {
+                self.sources.clone()
+            };
+            return if map.get(&zone).is_some_and(|v| v.contains(&src)) {
+                fw_out(0, "yes\n", "")
+            } else {
+                fw_out(1, "no\n", "")
+            };
+        }
+        for (opt, add) in [("--add-source=", true), ("--remove-source=", false)] {
+            if let Some(src) = val(opt) {
+                let mut m = if perm {
+                    self.perm_sources
+                        .clone()
+                        .unwrap_or_else(|| self.sources.clone())
+                } else {
+                    self.sources.clone()
+                };
+                if add && m.iter().any(|(z, v)| *z != zone && v.contains(&src)) {
+                    return fw_out(102, "", "Error: ZONE_CONFLICT\n");
+                }
+                self.mutations.push(args.to_vec());
+                let e = m.entry(zone.clone()).or_default();
+                if add {
+                    if !e.contains(&src) {
+                        e.push(src);
+                    }
+                } else {
+                    e.retain(|x| *x != src);
+                }
+                if perm {
+                    self.perm_sources = Some(m)
+                } else {
+                    self.sources = m
+                }
+                return fw_out(0, "success\n", "");
+            }
+        }
+        if tail == "--list-forward-ports" {
             return fw_out(
                 0,
                 if self.forward_ports.contains(&zone) {
@@ -2418,7 +2679,7 @@ impl FakeFirewalld {
                 "",
             );
         }
-        if args.len() == 2 && args[1] == "--get-priority" {
+        if tail == "--get-priority" {
             return match &self.priorities {
                 Some(p) => fw_out(0, &format!("{}\n", p.get(&zone).copied().unwrap_or(0)), ""),
                 None => fw_out(2, "", "usage: unrecognized arguments: --get-priority\n"),

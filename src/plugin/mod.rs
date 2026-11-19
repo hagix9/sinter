@@ -44,9 +44,9 @@ mod tests;
 pub use format::CatalogRef;
 pub use run::require_allowed_mutations;
 pub use verify::{
-    operand_ok, operand_ok_for, port_single_ok, port_spec_ok, ArgToken, Facet, FieldKind, OpClass,
-    ResourceType, SlotClass, VerifiedCatalog, VerifiedOp, VerifiedPlugin, Want,
-    BUILTIN_RESOURCE_TYPES,
+    cidr_ok, ifaddr_ok, ifname_ok, operand_ok, operand_ok_for, port_single_ok, port_spec_ok,
+    ArgToken, Facet, FieldKind, OpClass, ResourceType, SlotClass, VerifiedCatalog, VerifiedOp,
+    VerifiedPlugin, Want, BUILTIN_RESOURCE_TYPES,
 };
 
 use crate::error::{Result, SinterError};
@@ -273,6 +273,61 @@ impl PluginContext {
 /// be exactly the type's, and every literal value must be a valid operand.
 /// A value with `{{ }}` is checked when it is evaluated. Without enabled
 /// plugins the error is the one every unknown type gets.
+/// A `plugin` handler (DESIGN §44.2): the plugin is enabled by the recipe
+/// and its catalog has the operation as a handler operation. Whether the
+/// trust file allows it is the C1 gate's question (before contact).
+pub(crate) fn check_handler(
+    set: Option<&PluginSet>,
+    plugin: &str,
+    op: &str,
+    id: &str,
+) -> Result<()> {
+    let set = set.ok_or_else(|| {
+        SinterError::schema(format!(
+            "handler {}: a plugin handler needs the recipe to enable plugin {} (plugins:)",
+            id, plugin
+        ))
+    })?;
+    let p = set
+        .plugins()
+        .iter()
+        .find(|p| p.id() == plugin)
+        .ok_or_else(|| {
+            SinterError::schema(format!(
+                "handler {}: plugin {} is not enabled by the recipe",
+                id, plugin
+            ))
+        })?;
+    let catalog = set.catalog(p.catalog()).ok_or_else(|| {
+        SinterError::schema(format!(
+            "handler {}: the catalog of plugin {} is not loaded",
+            id, plugin
+        ))
+    })?;
+    match catalog.op(op) {
+        Some(o) if o.is_handler() => Ok(()),
+        _ => Err(SinterError::schema(format!(
+            "handler {}: catalog {}@{} has no handler operation {}",
+            id,
+            catalog.id(),
+            catalog.version(),
+            op
+        ))),
+    }
+}
+
+/// The plugin, catalog and operation of a `plugin` handler.
+pub(crate) fn resolve_handler<'a>(
+    set: &'a PluginSet,
+    plugin: &str,
+    op: &str,
+) -> Option<(&'a VerifiedPlugin, &'a VerifiedCatalog, &'a VerifiedOp)> {
+    let p = set.plugins().iter().find(|p| p.id() == plugin)?;
+    let c = set.catalog(p.catalog())?;
+    let o = c.op(op).filter(|o| o.is_handler())?;
+    Some((p, c, o))
+}
+
 pub(crate) fn check_declaration(
     set: Option<&PluginSet>,
     type_: &str,

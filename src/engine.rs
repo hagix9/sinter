@@ -1015,6 +1015,7 @@ impl Engine {
                 let (state, why) = self.handler_command(h)?;
                 Ok(program_handler_result(h, state, why))
             }
+            crate::ir::HandlerKind::Plugin => self.run_plugin_handler(h),
         }
     }
 

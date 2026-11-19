@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_FILE_BYTES: usize = 64 * 1024;
 const MAX_TRUST_ENTRIES: usize = 64;
-const MAX_OPS: usize = 32;
+const MAX_OPS: usize = 48;
 const MAX_ARGV: usize = 16;
 const MAX_SLOTS: usize = 4;
 const MAX_EXIT_ENTRIES: usize = 16;
@@ -213,6 +213,82 @@ pub enum SlotClass {
     Ident,
     /// [`port_spec_ok`].
     PortSpec,
+    /// [`ifname_ok`] (DESIGN §44.1).
+    Ifname,
+    /// [`cidr_ok`]: a network in canonical form.
+    Cidr,
+    /// [`ifaddr_ok`]: an address with prefix in canonical form.
+    Ifaddr,
+}
+
+/// Longest `cidr`/`ifaddr` operand (a full IPv6 address and `/128`).
+const MAX_CIDR: usize = 43;
+
+/// A Linux interface name: 1–15 bytes of `[A-Za-z0-9_.-]`, starting with a
+/// letter or digit (no `:` alias names, no `/`, so it cannot be an option).
+pub fn ifname_ok(v: &str, max: usize) -> bool {
+    let b = v.as_bytes();
+    !b.is_empty()
+        && b.len() <= max.min(15)
+        && b[0].is_ascii_alphanumeric()
+        && b.iter()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-'))
+}
+
+/// `addr/prefix` parsed strictly and written canonically (IPv4 dotted
+/// decimal without leading zeros, IPv6 per RFC 5952, decimal prefix without
+/// leading zeros). Returns the address, the prefix and whether the text was
+/// already canonical.
+fn parse_prefixed(v: &str) -> Option<(std::net::IpAddr, u8, bool)> {
+    let (a, p) = v.split_once('/')?;
+    if p.is_empty()
+        || p.len() > 3
+        || !p.bytes().all(|c| c.is_ascii_digit())
+        || (p.len() > 1 && p.starts_with('0'))
+    {
+        return None;
+    }
+    let prefix: u8 = p.parse().ok()?;
+    let addr: std::net::IpAddr = a.parse().ok()?;
+    let max = if addr.is_ipv4() { 32 } else { 128 };
+    if prefix > max {
+        return None;
+    }
+    let canonical = format!("{}/{}", addr, prefix) == v;
+    Some((addr, prefix, canonical))
+}
+
+fn host_bits_zero(addr: std::net::IpAddr, prefix: u8) -> bool {
+    match addr {
+        std::net::IpAddr::V4(a) => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            u32::from(a) & !mask == 0
+        }
+        std::net::IpAddr::V6(a) => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            u128::from(a) & !mask == 0
+        }
+    }
+}
+
+/// A network with an explicit prefix, host bits zero, in canonical form
+/// (only the canonical text is accepted, so only it reaches a command).
+pub fn cidr_ok(v: &str, max: usize) -> bool {
+    v.len() <= max.min(MAX_CIDR)
+        && parse_prefixed(v).is_some_and(|(a, p, canon)| canon && host_bits_zero(a, p))
+}
+
+/// An interface address with prefix in canonical form (host bits allowed).
+pub fn ifaddr_ok(v: &str, max: usize) -> bool {
+    v.len() <= max.min(MAX_CIDR) && parse_prefixed(v).is_some_and(|(_, _, canon)| canon)
 }
 
 /// One decimal port 1..=65535 in canonical form (no sign, no leading zero).
@@ -259,6 +335,9 @@ pub fn operand_ok_for(class: SlotClass, v: &str, max: usize) -> bool {
     match class {
         SlotClass::Ident => operand_ok(v, max),
         SlotClass::PortSpec => port_spec_ok(v, max),
+        SlotClass::Ifname => ifname_ok(v, max),
+        SlotClass::Cidr => cidr_ok(v, max),
+        SlotClass::Ifaddr => ifaddr_ok(v, max),
     }
 }
 
@@ -365,6 +444,8 @@ pub struct VerifiedOp {
     stdout_map: BTreeMap<String, String>,
     /// Attested (observe) or allowed (mutate) by the Owner's trust file.
     enabled: bool,
+    /// A handler operation (`role = "handler"`, DESIGN §44.2).
+    handler: bool,
 }
 
 impl VerifiedOp {
@@ -397,6 +478,9 @@ impl VerifiedOp {
     }
     pub fn stdout_map(&self) -> &BTreeMap<String, String> {
         &self.stdout_map
+    }
+    pub fn is_handler(&self) -> bool {
+        self.handler
     }
     pub fn is_enabled(&self) -> bool {
         self.enabled
@@ -445,6 +529,12 @@ pub enum FieldKind {
     /// A single port (no range); fills `port_spec` slots only.
     PortSingle,
     Enum(Vec<String>),
+    /// Fills `ifname` slots only.
+    Ifname,
+    /// Fills `cidr` slots only.
+    Cidr,
+    /// Fills `ifaddr` slots only.
+    Ifaddr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -566,6 +656,9 @@ impl ResourceType {
             Some(FieldKind::PortSpec) => port_spec_ok(value, limit),
             Some(FieldKind::PortSingle) => port_single_ok(value, limit),
             Some(FieldKind::Enum(allowed)) => allowed.iter().any(|a| a == value),
+            Some(FieldKind::Ifname) => ifname_ok(value, limit),
+            Some(FieldKind::Cidr) => cidr_ok(value, limit),
+            Some(FieldKind::Ifaddr) => ifaddr_ok(value, limit),
         };
         if !ok {
             return Err(refuse(format!(
@@ -813,9 +906,12 @@ fn verify_op(d: &OpDef, trusted: &TrustedCatalog) -> Result<VerifiedOp> {
         let class = match (s.class.as_str(), s.max_len) {
             ("ident", 1..=MAX_OPERAND) => SlotClass::Ident,
             ("port_spec", 1..=MAX_PORT_SPEC) => SlotClass::PortSpec,
+            ("ifname", 1..=15) => SlotClass::Ifname,
+            ("cidr", 1..=MAX_CIDR) => SlotClass::Cidr,
+            ("ifaddr", 1..=MAX_CIDR) => SlotClass::Ifaddr,
             _ => {
                 return Err(refuse(format!(
-                    "operation {}: slot {} must be class ident with max_len 1..=64 or class port_spec with max_len 1..=16",
+                    "operation {}: slot {} must be class ident with max_len 1..=64 or class port_spec with max_len 1..=16 (or ifname with 1..=15, cidr or ifaddr with 1..=43)",
                     op, k
                 )))
             }
@@ -904,6 +1000,19 @@ fn verify_op(d: &OpDef, trusted: &TrustedCatalog) -> Result<VerifiedOp> {
             }
         }
     }
+    let handler = match d.role.as_deref() {
+        None => false,
+        Some("handler") => {
+            if class != OpClass::Mutate || !slots.is_empty() {
+                return Err(refuse(format!(
+                    "operation {}: a handler operation is a mutate operation without slots",
+                    op
+                )));
+            }
+            true
+        }
+        Some(_) => return Err(refuse(format!("operation {}: role must be handler", op))),
+    };
     let enabled = match class {
         OpClass::Observe => trusted.attested_observe.contains(&d.id),
         OpClass::Mutate => trusted.allowed_mutate.contains(&d.id),
@@ -918,7 +1027,33 @@ fn verify_op(d: &OpDef, trusted: &TrustedCatalog) -> Result<VerifiedOp> {
         exit,
         stdout_map: d.stdout_map.clone(),
         enabled,
+        handler,
     })
+}
+
+/// Tests: verify catalog text as if pinned and registered (id firewalld,
+/// version 0.3.0).
+#[cfg(test)]
+pub(crate) fn verify_catalog_text_for_test(text: &str) -> Result<VerifiedCatalog> {
+    use sha2::Digest;
+    let sha: String = sha2::Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    let trusted = TrustedCatalog {
+        id: "firewalld".into(),
+        version: "0.3.0".into(),
+        sha256: sha.clone(),
+        attested_observe: Vec::new(),
+        allowed_mutate: Vec::new(),
+    };
+    let leaked: &'static str = Box::leak(sha.clone().into_boxed_str());
+    let fp = [super::FirstPartyCatalog {
+        id: "firewalld",
+        version: "0.3.0",
+        sha256: leaked,
+    }];
+    verify_catalog(text.as_bytes(), &sha, "test", &trusted, &fp)
 }
 
 pub(crate) fn verify_catalog(
@@ -1117,6 +1252,9 @@ pub(crate) fn verify_plugin(
                 ("ident", true) => FieldKind::Ident,
                 ("port_spec", true) => FieldKind::PortSpec,
                 ("port_single", true) => FieldKind::PortSingle,
+                ("ifname", true) => FieldKind::Ifname,
+                ("cidr", true) => FieldKind::Cidr,
+                ("ifaddr", true) => FieldKind::Ifaddr,
                 ("enum", false) => {
                     let set: BTreeSet<&String> = f.values.iter().collect();
                     if f.values.len() > MAX_ENUM_VALUES
@@ -1215,6 +1353,12 @@ pub(crate) fn verify_plugin(
                 // (`run::require_allowed_mutations`), and the mutate channel
                 // refuses it again (`MutateCall::new`).
                 let op = defined(catalog, op_id, OpClass::Mutate, &fctx)?;
+                if op.is_handler() {
+                    return Err(refuse(format!(
+                        "{}: a handler operation cannot be an ensure operation",
+                        fctx
+                    )));
+                }
                 referenced.push(op);
                 ensure.insert(state.clone(), op_id.clone());
             }
@@ -1244,6 +1388,9 @@ pub(crate) fn verify_plugin(
                     SlotClass::PortSpec => {
                         matches!(kind, FieldKind::PortSpec | FieldKind::PortSingle)
                     }
+                    SlotClass::Ifname => matches!(kind, FieldKind::Ifname),
+                    SlotClass::Cidr => matches!(kind, FieldKind::Cidr),
+                    SlotClass::Ifaddr => matches!(kind, FieldKind::Ifaddr),
                 };
                 if !matches {
                     return Err(refuse(format!(

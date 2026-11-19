@@ -33,6 +33,14 @@ pub struct RiskContext {
     pub store: Option<Store>,
 }
 
+/// What a connection-risk resource may do at its turn.
+#[derive(Debug, Clone, Default)]
+pub struct RiskVerdict {
+    pub note: Option<String>,
+    /// Apply through the runtime-first procedure (§43.6).
+    pub guarded: bool,
+}
+
 /// One connection-risk resource as plan or apply saw it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RiskRecord {
@@ -204,11 +212,14 @@ impl Engine {
         if !firewalld {
             return state;
         }
-        let facts = match &state {
-            PathState::Known(p) if !p.loopback => Some(self.risk_firewalld_facts(&p.ifaces)),
-            _ => None,
+        let (rt, perm) = match &state {
+            PathState::Known(p) if !p.loopback => (
+                Some(self.risk_firewalld_facts(&p.ifaces, false)),
+                Some(self.risk_firewalld_facts(&p.ifaces, true)),
+            ),
+            _ => (None, None),
         };
-        super::path::with_zone(state, facts.as_ref())
+        super::path::with_zone(state, rt.as_ref(), perm.as_ref())
     }
 
     fn fw(&mut self, args: &[&str]) -> Option<String> {
@@ -218,36 +229,45 @@ impl Engine {
             .and_then(|o| stdout(&o))
     }
 
-    fn risk_firewalld_facts(&mut self, ifaces: &BTreeSet<String>) -> FwFacts {
+    /// firewalld facts of the runtime or the permanent configuration. Every
+    /// answer Sinter cannot read exactly leaves the matching fact unknown.
+    fn risk_firewalld_facts(&mut self, ifaces: &BTreeSet<String>, permanent: bool) -> FwFacts {
         let state = self.fs.risk_observe("/usr/bin/firewall-cmd", &["--state"]);
         let running = matches!(&state, Ok(o) if o.completion == Completion::Exited(0));
         if !running {
             // Not running (252) is a fact; a failed query is unknown.
             return match state {
-                Ok(o) if o.completion == Completion::Exited(252) => FwFacts::default(),
+                Ok(o) if o.completion == Completion::Exited(252) => FwFacts {
+                    permanent,
+                    ..Default::default()
+                },
                 _ => FwFacts {
                     running: true,
+                    permanent,
                     ..Default::default()
                 },
             };
         }
+        let p: &[&str] = if permanent { &["--permanent"] } else { &[] };
+        let with = |extra: &[&str]| -> Vec<String> {
+            p.iter()
+                .chain(extra.iter())
+                .map(|s| s.to_string())
+                .collect()
+        };
         let mut f = FwFacts {
             running: true,
+            permanent,
             version: self.fw(&["--version"]).map(|s| s.trim().to_string()),
+            // The default zone is a permanent setting that also applies now.
             default_zone: self
                 .fw(&["--get-default-zone"])
                 .map(|s| s.trim().to_string())
                 .filter(|z| safe_name(z)),
             ..Default::default()
         };
-        let modern = f
-            .version
-            .as_deref()
-            .and_then(|v| v.split('.').next())
-            .and_then(|m| m.parse::<u32>().ok())
-            .map(|m| m >= 2)
-            .unwrap_or(true);
-        if let Some(list) = self.fw(&["--get-zones"]) {
+        let zone_list = self.fw_args(&with(&["--get-zones"]));
+        if let Some(list) = zone_list {
             let mut zones = Vec::new();
             let mut ok = true;
             for z in list.split_whitespace() {
@@ -256,26 +276,22 @@ impl Engine {
                     break;
                 }
                 let zarg = format!("--zone={}", z);
-                let Some(src) = self.fw(&[&zarg, "--list-sources"]) else {
+                let Some(src) = self.fw_args(&with(&[&zarg, "--list-sources"])) else {
                     ok = false;
                     break;
                 };
-                let Some(fwd) = self.fw(&[&zarg, "--list-forward-ports"]) else {
+                let Some(fwd) = self.fw_args(&with(&[&zarg, "--list-forward-ports"])) else {
                     ok = false;
                     break;
                 };
-                let prio = match self
-                    .fs
-                    .risk_observe("/usr/bin/firewall-cmd", &[&zarg, "--get-priority"])
-                {
-                    Ok(o) if o.completion == Completion::Exited(0) => stdout(&o)
-                        .and_then(|s| s.trim().parse::<i64>().ok())
-                        .map(|n| Ok(Some(n)))
-                        .unwrap_or(Err(())),
-                    // A version without zone priorities rejects the option.
-                    Ok(o) if !modern && matches!(o.completion, Completion::Exited(_)) => Ok(None),
-                    _ => Err(()),
-                };
+                // A priority must be read exactly; a version that does not
+                // answer the query is not assumed to use the default (P3:
+                // measured per version before this is relaxed).
+                let prio = self
+                    .fw_args(&with(&[&zarg, "--get-priority"]))
+                    .and_then(|s| s.trim().parse::<i64>().ok())
+                    .map(|n| Ok(Some(n)))
+                    .unwrap_or(Err(()));
                 zones.push(FwZone {
                     name: z.to_string(),
                     sources: src.split_whitespace().map(str::to_string).collect(),
@@ -288,8 +304,16 @@ impl Engine {
             }
         }
         f.extra_rules = match (
-            self.fw(&["--get-active-policies"]),
-            self.fw(&["--direct", "--get-all-rules"]),
+            self.fw_args(&with(&["--get-active-policies"])).or_else(|| {
+                // `--get-active-policies` has no permanent form: the active
+                // policies are the runtime answer in both views.
+                if permanent {
+                    self.fw(&["--get-active-policies"])
+                } else {
+                    None
+                }
+            }),
+            self.fw_args(&with(&["--direct", "--get-all-rules"])),
         ) {
             (Some(pol), Some(direct)) => {
                 let extra_policy = pol.split_whitespace().any(|p| p != "allow-host-ipv6");
@@ -300,14 +324,15 @@ impl Engine {
         for i in ifaces {
             let q = format!("--get-zone-of-interface={}", i);
             let ans = if safe_name(i) {
-                match self.fs.risk_observe("/usr/bin/firewall-cmd", &[&q]) {
+                let args = with(&[&q]);
+                let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                match self.fs.risk_observe("/usr/bin/firewall-cmd", &refs) {
                     Ok(o) if o.completion == Completion::Exited(0) => match stdout(&o) {
                         Some(z) if safe_name(z.trim()) => Ok(Some(z.trim().to_string())),
                         _ => Err(()),
                     },
-                    // `no zone` answers exit 2 (INVALID_ARGUMENT/ZONE_CONFLICT
-                    // differ by version: anything but this exact answer is
-                    // unknown).
+                    // An unbound interface answers `no zone` with exit 2
+                    // (assumed until measured; any other answer is unknown).
                     Ok(o)
                         if o.completion == Completion::Exited(2)
                             && String::from_utf8_lossy(&o.stdout).trim() == "no zone" =>
@@ -321,7 +346,42 @@ impl Engine {
             };
             f.iface_zones.push((i.clone(), ans));
         }
+        // AllowZoneDrifting (firewalld 0.8/0.9): only an explicit `no` in
+        // firewalld.conf counts as off.
+        f.drifting_off = self
+            .fs
+            .read_file("/etc/firewalld/firewalld.conf")
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .is_some_and(|text| {
+                text.lines().any(|l| {
+                    let l = l.trim();
+                    l.strip_prefix("AllowZoneDrifting=")
+                        .is_some_and(|v| v.trim().eq_ignore_ascii_case("no"))
+                })
+            });
+        // NetworkManager-managed interfaces: their permanent zone may be held
+        // by NetworkManager (`connection.zone`).
+        f.nm_managed = match self
+            .fs
+            .risk_observe("/usr/bin/nmcli", &["-t", "-f", "DEVICE,STATE", "device"])
+        {
+            Ok(o) if o.completion == Completion::Exited(127) => Some(BTreeSet::new()),
+            Ok(o) if o.completion == Completion::Exited(0) => stdout(&o).map(|text| {
+                text.lines()
+                    .filter_map(|l| l.split_once(':'))
+                    .filter(|(_, st)| *st != "unmanaged")
+                    .map(|(d, _)| d.to_string())
+                    .collect()
+            }),
+            _ => None,
+        };
         f
+    }
+
+    fn fw_args(&mut self, args: &[String]) -> Option<String> {
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        self.fw(&refs)
     }
 
     fn risk_key(&self) -> Option<&[u8]> {
@@ -337,9 +397,9 @@ impl Engine {
         values: &std::collections::BTreeMap<String, String>,
         facets: &[(String, String, String)],
         pending_ops: &[String],
-    ) -> Result<Option<String>> {
+    ) -> Result<RiskVerdict> {
         let Some(item) = self.risk.items.iter().find(|i| i.id == res.id).cloned() else {
-            return Ok(None);
+            return Ok(RiskVerdict::default());
         };
         let sensitive = res.sensitive || res.derived_sensitive;
         if sensitive {
@@ -353,6 +413,8 @@ impl Engine {
             }
         };
         let apply = self.opts.mode == Mode::Apply;
+        // The runtime facet's own result (None: no runtime facet pending).
+        let mut runtime_dynamic: Option<Dynamic> = None;
         let digest = self.risk_key().map(|k| {
             let v = json!({
                 "id": res.id,
@@ -401,7 +463,10 @@ impl Engine {
                 d
             );
             self.risk_push(record);
-            return Ok(Some(note));
+            return Ok(RiskVerdict {
+                note: Some(note),
+                guarded: false,
+            });
         }
         let dynamic = if pending_ops.is_empty() {
             Dynamic::NoChange
@@ -419,12 +484,43 @@ impl Engine {
                 .path
                 .clone()
                 .unwrap_or_else(|| PathState::Unknown("not determined".into()));
-            let change = self.risk_fw_change(item.rule, values);
             match item.rule {
                 RuleKind::NmConnection => {
                     Dynamic::Unknown("NetworkManager facts are not observed yet".into())
                 }
-                k => rules::firewalld(k, &path, &change),
+                k => {
+                    // Each pending facet is judged against its own
+                    // configuration: runtime against the zone the connection
+                    // is in now, permanent against the zone the permanent
+                    // configuration gives it.
+                    let mut worst = Dynamic::Clear;
+                    for (name, observed, want) in facets {
+                        if observed == want {
+                            continue;
+                        }
+                        let permanent = name == "permanent";
+                        let view = if permanent {
+                            super::path::permanent_view(&path)
+                        } else {
+                            path.clone()
+                        };
+                        let change = self.risk_fw_change(k, values, permanent);
+                        let d = rules::firewalld(k, &view, &change);
+                        if permanent {
+                            runtime_dynamic.get_or_insert(Dynamic::NoChange);
+                        } else {
+                            runtime_dynamic = Some(d.clone());
+                        }
+                        worst = match (&worst, &d) {
+                            (Dynamic::Unknown(_), _) => worst,
+                            (_, Dynamic::Unknown(_)) => d,
+                            (Dynamic::Affects(_), _) => worst,
+                            (_, Dynamic::Affects(_)) => d,
+                            _ => worst,
+                        };
+                    }
+                    worst
+                }
             }
         };
         record.dynamic = dynamic.label().to_string();
@@ -447,6 +543,7 @@ impl Engine {
             _ => false,
         };
         record.approved = approved;
+        let mut guarded = false;
         if apply {
             if let Some(a) = &approval {
                 let listed = a["resources"]
@@ -462,9 +559,17 @@ impl Engine {
                     )));
                 }
             }
-            match rules::decide(item.class, &dynamic, approved, Recovery::None, false) {
+            // Runtime first can test the change only through a pending
+            // runtime facet whose own result is known; the permanent facet
+            // follows only after the probe (§43.6).
+            let recovery = rules::recovery_for(item.rule);
+            let available = matches!(
+                runtime_dynamic,
+                Some(Dynamic::Affects(_)) | Some(Dynamic::Clear)
+            );
+            match rules::decide(item.class, &dynamic, approved, recovery, available) {
                 rules::Decision::Proceed => {}
-                rules::Decision::Guarded(_) => unreachable!("no guarded procedure in this version"),
+                rules::Decision::Guarded(_) => guarded = true,
                 rules::Decision::Refuse(why) => {
                     record.dynamic = format!("{} (refused)", dynamic.label());
                     self.risk_push(record);
@@ -476,17 +581,27 @@ impl Engine {
                 }
             }
         }
-        if !pending_ops.is_empty() {
+        // Only a C or R change can have moved the management path; an N
+        // change (an addition) cannot, by its classification.
+        if !pending_ops.is_empty() && item.class != RiskClass::N {
             self.risk.earlier_change = true;
         }
         let note = format!(
-            "connection-risk class={} dynamic={} approval={}",
+            "connection-risk class={} dynamic={} approval={}{}",
             item.class.label(),
             dynamic.label(),
-            if approved { "yes" } else { "no" }
+            if approved { "yes" } else { "no" },
+            if guarded {
+                " procedure=runtime-first (recovery is not guaranteed)"
+            } else {
+                ""
+            }
         );
         self.risk_push(record);
-        Ok(Some(note))
+        Ok(RiskVerdict {
+            note: Some(note),
+            guarded,
+        })
     }
 
     fn risk_push(&mut self, mut r: RiskRecord) {
@@ -502,11 +617,13 @@ impl Engine {
             .push(r);
     }
 
-    /// The facts a firewalld rule needs, observed read-only.
+    /// The facts a firewalld rule needs, observed read-only, for the
+    /// runtime or the permanent configuration.
     fn risk_fw_change(
         &mut self,
         rule: RuleKind,
         v: &std::collections::BTreeMap<String, String>,
+        permanent: bool,
     ) -> FwChange {
         let mut c = FwChange {
             zone: v.get("zone").cloned(),
@@ -517,16 +634,173 @@ impl Engine {
             ..Default::default()
         };
         if rule == RuleKind::FwServiceAbsent {
-            if let Some(s) = v.get("service").filter(|s| safe_name(s)) {
-                let q = format!("--info-service={}", s);
-                c.service_ports = self.fw(&[&q]).and_then(|text| {
-                    text.lines()
-                        .find_map(|l| l.trim().strip_prefix("ports:"))
-                        .map(|p| p.split_whitespace().map(str::to_string).collect())
-                });
-            }
+            let port = match &self.risk.path {
+                Some(PathState::Known(p)) => Some(p.server_port),
+                _ => None,
+            };
+            c.service_allows = match (v.get("service"), port) {
+                (Some(s), Some(port)) => Some(self.risk_service_allows(s, permanent, port, 0)),
+                _ => Some(Err("no service or no management port".into())),
+            };
         }
         c
+    }
+
+    /// Whether a service definition allows `port`/tcp: its ports, its
+    /// protocols (tcp allows every port) and, recursively (at most four
+    /// levels), the services it includes. A definition with helpers, an
+    /// unknown key, or one that cannot be read cannot be judged.
+    fn risk_service_allows(
+        &mut self,
+        svc: &str,
+        permanent: bool,
+        port: u16,
+        depth: u8,
+    ) -> std::result::Result<bool, String> {
+        if depth > 4 {
+            return Err("service includes nest too deeply".into());
+        }
+        if !safe_name(svc) {
+            return Err("unreadable service name".into());
+        }
+        let q = format!("--info-service={}", svc);
+        let text = if permanent {
+            self.fw(&["--permanent", &q])
+        } else {
+            self.fw(&[&q])
+        }
+        .ok_or_else(|| format!("the definition of {} could not be read", svc))?;
+        let d = rules::parse_service_def(&text)?;
+        if !d.helpers.is_empty() {
+            return Err(format!("service {} uses helpers", svc));
+        }
+        for spec in &d.ports {
+            match rules::port_spec_includes(spec, port) {
+                Some(true) => return Ok(true),
+                Some(false) => {}
+                None => return Err(format!("unreadable port {}", spec)),
+            }
+        }
+        if d.protocols.iter().any(|p| p == "tcp") {
+            return Ok(true);
+        }
+        for inc in &d.includes {
+            if self.risk_service_allows(inc, permanent, port, depth + 1)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether the permanent configuration of `zone` allows the management
+    /// port: target ACCEPT, a port, tcp, or a service that allows it. Rich
+    /// rules, or anything unreadable, cannot be judged (`None`).
+    fn risk_permanent_zone_allows(&mut self, zone: &str, port: u16) -> Option<bool> {
+        if !safe_name(zone) {
+            return None;
+        }
+        let z = format!("--zone={}", zone);
+        let target = self.fw(&["--permanent", &z, "--get-target"])?;
+        if target.trim() == "ACCEPT" {
+            return Some(true);
+        }
+        let rich = self.fw(&["--permanent", &z, "--list-rich-rules"])?;
+        if !rich.trim().is_empty() {
+            return None;
+        }
+        let ports = self.fw(&["--permanent", &z, "--list-ports"])?;
+        for spec in ports.split_whitespace() {
+            if rules::port_spec_includes(spec, port)? {
+                return Some(true);
+            }
+        }
+        let protocols = self.fw(&["--permanent", &z, "--list-protocols"])?;
+        if protocols.split_whitespace().any(|p| p == "tcp") {
+            return Some(true);
+        }
+        let services = self.fw(&["--permanent", &z, "--list-services"])?;
+        for svc in services.split_whitespace() {
+            match self.risk_service_allows(svc, true, port, 0) {
+                Ok(true) => return Some(true),
+                Ok(false) => {}
+                Err(_) => return None,
+            }
+        }
+        Some(false)
+    }
+
+    /// The connection-risk check of a `plugin` handler at its turn (§44.4):
+    /// a reload makes the runtime configuration equal to the permanent one,
+    /// so the management connection's permanent zone is determined again
+    /// from fresh observations and must allow the management port. Only a
+    /// `clear` result runs; `affects` and `unknown` are refused, with or
+    /// without an approval (no recovery procedure exists for a reload).
+    pub(crate) fn risk_check_handler(
+        &mut self,
+        h: &crate::model::FrozenHandler,
+        _catalog: &crate::plugin::VerifiedCatalog,
+        _op: &str,
+    ) -> Result<()> {
+        let key = format!("handler:{}", h.id);
+        let Some(item) = self.risk.items.iter().find(|i| i.id == key).cloned() else {
+            return Ok(());
+        };
+        if item.enforcement != Enforcement::Enforced || item.class == RiskClass::N {
+            return Ok(());
+        }
+        let path = self
+            .risk
+            .path
+            .clone()
+            .unwrap_or_else(|| PathState::Unknown("not determined".into()));
+        let mut change = FwChange::default();
+        let fresh = match &path {
+            PathState::Known(p) if !p.loopback => {
+                let ifaces = p.ifaces.clone();
+                let perm = self.risk_firewalld_facts(&ifaces, true);
+                let mut q = p.clone();
+                q.perm_zone = super::path::zone_of(p, &perm);
+                if let super::path::ZoneState::Known { zone, .. } = &q.perm_zone {
+                    change.zone = Some(zone.clone());
+                    change.permanent_allows = self.risk_permanent_zone_allows(zone, p.server_port);
+                }
+                super::path::permanent_view(&PathState::Known(q))
+            }
+            other => other.clone(),
+        };
+        let dynamic = rules::firewalld(item.rule, &fresh, &change);
+        let mut record = RiskRecord {
+            id: key.clone(),
+            type_: "handler".into(),
+            class: item.class,
+            enforced: true,
+            dynamic: dynamic.label().to_string(),
+            reason: match &dynamic {
+                Dynamic::Affects(w) | Dynamic::Unknown(w) => Some(w.clone()),
+                _ => None,
+            },
+            change_digest: None,
+            approved: false,
+            steps: vec![_op.to_string()],
+            desired: Default::default(),
+        };
+        match rules::decide(item.class, &dynamic, false, Recovery::None, false) {
+            rules::Decision::Proceed => {
+                self.risk_push(record);
+                Ok(())
+            }
+            rules::Decision::Guarded(_) | rules::Decision::Refuse(_) => {
+                let why = record.reason.clone().unwrap_or_default();
+                record.dynamic = format!("{} (refused)", dynamic.label());
+                self.risk_push(record);
+                Err(SinterError::apply(format!(
+                    "handler {}: connection-risk control refused the reload ({}): {}; nothing was run",
+                    h.id,
+                    dynamic.label(),
+                    if h.sensitive { "[redacted]".to_string() } else { why }
+                )))
+            }
+        }
     }
 }
 

@@ -172,6 +172,20 @@ catalog が observe と分類した操作が、ホスト上で読み取り専用
 firewalld は「no」と答えるためです。ポートを閉じるには、`firewalld.port` で 1 つずつ指定して
 ください。
 
+## firewalld 0.3.0（候補、まだ使えない）
+
+firewalld 0.3.0 は開発済みですが、**登録していません**。実機で測定するまで、どのリリースもインストールも使用もできません。0.2.0 のすべてを引き継ぎ、`firewalld.interface`（zone の interface）、`firewalld.source`（zone のネットワーク。`198.51.100.0/24` のような正規の CIDR）、`firewalld.zone`（permanent の zone。既定の zone は削除できない）と、handler の操作 `reload` を加えます。
+
+```yaml
+handlers:
+  - id: fw-reload
+    type: plugin
+    plugin: firewalld
+    op: reload
+```
+
+`plugin` handler は、有効にした plugin の handler 操作を 1 つ実行します。その操作が trust ファイルで許可されていなければ、plan と apply はどのホストにも接続する前に実行を拒否します。firewalld 0.3.0 の変更はすべて接続リスクの制御を通ります（[CLI: 接続リスクの承認](/ja/reference/cli/)）。interface と source の変更には常に承認が要り、削除は管理接続に当たる場合に承認が要り、Sinter が判定できないものは拒否します。reload は、permanent の設定が管理接続を許したままの場合だけ実行します。rich rule には対応していません。
+
 ## 検証
 
 firewalld 0.1.0 と 0.2.0 は、次のシステムの実機で測定し、Sinter を通して実行しました。

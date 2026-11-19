@@ -596,7 +596,7 @@ fn parse_handler(item: &Value, origin: &str, idx: usize) -> Result<HandlerDecl> 
         None => HandlerKind::Service,
         Some(Value::Str(s)) => HandlerKind::from_label(s).ok_or_else(|| {
             SinterError::schema(format!(
-                "{}: unknown handler type {} (supported: service, ca_trust, command)",
+                "{}: unknown handler type {} (supported: service, ca_trust, command, plugin)",
                 ctx,
                 printable_token(s)
             ))
@@ -633,9 +633,10 @@ fn parse_handler(item: &Value, origin: &str, idx: usize) -> Result<HandlerDecl> 
     // handler's, `with` is the command handler's. A `ca_trust` handler has none
     // of them (it refreshes the trust store with a fixed, OS-chosen tool).
     let foreign: &[&str] = match kind {
-        HandlerKind::Service => &["with"],
-        HandlerKind::CaTrust => &["service", "action", "with"],
-        HandlerKind::Command => &["service", "action"],
+        HandlerKind::Service => &["with", "plugin", "op"],
+        HandlerKind::CaTrust => &["service", "action", "with", "plugin", "op"],
+        HandlerKind::Command => &["service", "action", "plugin", "op"],
+        HandlerKind::Plugin => &["service", "action", "with"],
     };
     for f in foreign {
         if map.contains_key(*f) {
@@ -683,6 +684,28 @@ fn parse_handler(item: &Value, origin: &str, idx: usize) -> Result<HandlerDecl> 
     } else {
         None
     };
+    let plugin_op = if kind == HandlerKind::Plugin {
+        let name = |key: &str| -> Result<String> {
+            match map.get(key) {
+                Some(Value::Str(s))
+                    if !s.is_empty()
+                        && s.len() <= 64
+                        && s.bytes().all(|b| {
+                            b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-'
+                        }) =>
+                {
+                    Ok(s.clone())
+                }
+                _ => Err(SinterError::schema(format!(
+                    "{}: a plugin handler needs {} (a plugin id or catalog operation name)",
+                    ctx, key
+                ))),
+            }
+        };
+        Some((name("plugin")?, name("op")?))
+    } else {
+        None
+    };
     Ok(HandlerDecl {
         id,
         kind,
@@ -691,6 +714,7 @@ fn parse_handler(item: &Value, origin: &str, idx: usize) -> Result<HandlerDecl> 
         command,
         sensitive,
         origin: origin.to_string(),
+        plugin_op,
     })
 }
 

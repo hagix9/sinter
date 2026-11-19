@@ -69,6 +69,10 @@ pub struct OpDef {
     /// Observe only: trimmed standard output template -> state.
     #[serde(default)]
     pub stdout_map: BTreeMap<String, String>,
+    /// `handler`: a mutate operation without slots that only a `plugin`
+    /// handler runs (DESIGN §44.2). Absent for every other operation.
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -1309,6 +1309,12 @@ impl TargetFs {
         self.ex.probe_ssh_connection()
     }
 
+    /// The runtime-first probe: a new, host-key-verified connection that runs
+    /// `/usr/bin/true` (DESIGN §43.6).
+    pub(crate) fn probe_new_connection(&mut self) -> bool {
+        self.ex.probe_new_connection()
+    }
+
     pub(crate) fn host_key_sha256(&self) -> Option<String> {
         self.ex.host_key_sha256()
     }
@@ -1326,7 +1332,7 @@ impl TargetFs {
     pub(crate) fn risk_observe(&mut self, program: &str, args: &[&str]) -> Result<Output> {
         if !matches!(
             program,
-            "/usr/bin/ss" | "/usr/sbin/ip" | "/usr/bin/firewall-cmd"
+            "/usr/bin/ss" | "/usr/sbin/ip" | "/usr/bin/firewall-cmd" | "/usr/bin/nmcli"
         ) {
             return Err(SinterError::apply(format!(
                 "internal error: {} is not a management-path observation",

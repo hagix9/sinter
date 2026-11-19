@@ -417,6 +417,7 @@ impl ExecStatsHandle {
     }
 }
 
+#[derive(Clone)]
 pub struct SshConfig {
     pub host: String,
     pub port: u16,
@@ -489,6 +490,20 @@ impl Executor {
             Executor::Local(_) => None,
             Executor::Ssh(s) => s.probe_ssh_connection(),
             Executor::Fake(f) => f.target.manager.net.ssh_connection.clone(),
+        }
+    }
+
+    /// The runtime-first probe (DESIGN §43.6): can a new connection reach
+    /// the target? Always false for a local target (there is no connection
+    /// to test) and for a scripted target that does not model it.
+    pub fn probe_new_connection(&mut self) -> bool {
+        match self {
+            Executor::Local(_) => false,
+            Executor::Ssh(s) => s.probe_new_connection(),
+            Executor::Fake(f) => {
+                f.target.manager.net.probes += 1;
+                f.target.manager.net.reconnect.unwrap_or(false)
+            }
         }
     }
 
@@ -1096,6 +1111,9 @@ pub struct SshExecutor {
     /// SHA-256 (hex) of the verified host key blob (DESIGN §43.4).
     host_key_sha256: String,
     user: String,
+    /// The configuration this connection was made with, for the new
+    /// connection of the runtime-first probe (DESIGN §43.6).
+    cfg: Box<SshConfig>,
 }
 
 impl SshExecutor {
@@ -1208,7 +1226,21 @@ impl SshExecutor {
             stats,
             host_key_sha256,
             user: cfg.user.clone(),
+            cfg: Box::new(cfg.clone()),
         })
+    }
+
+    /// A new SSH connection with the same configuration (full host-key
+    /// verification against known_hosts), running `/usr/bin/true` without
+    /// sudo. True only when it connected and the command exited 0.
+    fn probe_new_connection(&self) -> bool {
+        match SshExecutor::connect(&self.cfg, false) {
+            Ok(mut e) => {
+                let req = ExecRequest::new("/usr/bin/true");
+                matches!(e.run(&req), Ok(o) if o.completion == Completion::Exited(0))
+            }
+            Err(_) => false,
+        }
     }
 
     /// `SSH_CONNECTION` of this session (DESIGN §43.3): the one command

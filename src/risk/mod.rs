@@ -82,6 +82,8 @@ pub struct CatalogRules {
     /// classified by the operations it can run: only N operations make it N;
     /// anything else, or an operation missing here, is refused.
     pub ops: &'static [(&'static str, RiskClass)],
+    /// Handler operations (`role = "handler"`) with their class and rule.
+    pub handlers: &'static [(&'static str, RiskClass, rules::RuleKind)],
 }
 
 fn always_n(_: &BTreeMap<String, Value>) -> RiskClass {
@@ -146,6 +148,81 @@ pub(crate) const OPS_020: &[(&str, RiskClass)] = &[
     ("remove_protocol_permanent", RiskClass::C),
 ];
 
+fn always_r(_: &BTreeMap<String, Value>) -> RiskClass {
+    RiskClass::R
+}
+
+/// `state: absent` is R, `present` N (firewalld zone).
+fn absent_is_r(v: &BTreeMap<String, Value>) -> RiskClass {
+    match v.get("state") {
+        Some(Value::Str(s)) if s == "present" => RiskClass::N,
+        _ => RiskClass::R,
+    }
+}
+
+const FIREWALLD_030: &[TypeRule] = &[
+    TypeRule {
+        type_name: "firewalld.service",
+        classify: absent_is_c,
+        rule: rules::RuleKind::FwServiceAbsent,
+    },
+    TypeRule {
+        type_name: "firewalld.port",
+        classify: absent_is_c,
+        rule: rules::RuleKind::FwPortAbsent,
+    },
+    TypeRule {
+        type_name: "firewalld.port_range",
+        classify: always_n,
+        rule: rules::RuleKind::None,
+    },
+    TypeRule {
+        type_name: "firewalld.protocol",
+        classify: absent_is_c,
+        rule: rules::RuleKind::FwProtocolAbsent,
+    },
+    TypeRule {
+        type_name: "firewalld.interface",
+        classify: always_r,
+        rule: rules::RuleKind::FwInterface,
+    },
+    TypeRule {
+        type_name: "firewalld.source",
+        classify: always_r,
+        rule: rules::RuleKind::FwSource,
+    },
+    TypeRule {
+        type_name: "firewalld.zone",
+        classify: absent_is_r,
+        rule: rules::RuleKind::FwZoneAbsent,
+    },
+];
+
+pub(crate) const OPS_030: &[(&str, RiskClass)] = &[
+    ("add_service_runtime", RiskClass::N),
+    ("add_service_permanent", RiskClass::N),
+    ("remove_service_runtime", RiskClass::C),
+    ("remove_service_permanent", RiskClass::C),
+    ("add_port_runtime", RiskClass::N),
+    ("add_port_permanent", RiskClass::N),
+    ("remove_port_runtime", RiskClass::C),
+    ("remove_port_permanent", RiskClass::C),
+    ("add_protocol_runtime", RiskClass::N),
+    ("add_protocol_permanent", RiskClass::N),
+    ("remove_protocol_runtime", RiskClass::C),
+    ("remove_protocol_permanent", RiskClass::C),
+    ("change_interface_runtime", RiskClass::R),
+    ("change_interface_permanent", RiskClass::R),
+    ("remove_interface_runtime", RiskClass::R),
+    ("remove_interface_permanent", RiskClass::R),
+    ("add_source_runtime", RiskClass::R),
+    ("add_source_permanent", RiskClass::R),
+    ("remove_source_runtime", RiskClass::R),
+    ("remove_source_permanent", RiskClass::R),
+    ("new_zone_permanent", RiskClass::N),
+    ("delete_zone_permanent", RiskClass::R),
+];
+
 /// The classified first-party catalogs (DESIGN §43.2). firewalld 0.3.0 is
 /// added here, with its digest, when it is registered (P3).
 pub const CATALOG_RULES: &[CatalogRules] = &[
@@ -156,6 +233,7 @@ pub const CATALOG_RULES: &[CatalogRules] = &[
         enforcement: Enforcement::Enforced,
         types: FIREWALLD_010,
         ops: OPS_010,
+        handlers: &[],
     },
     CatalogRules {
         id: "firewalld",
@@ -164,6 +242,19 @@ pub const CATALOG_RULES: &[CatalogRules] = &[
         enforcement: Enforcement::PendingOwner("D-13"),
         types: FIREWALLD_020,
         ops: OPS_020,
+        handlers: &[],
+    },
+    // firewalld 0.3.0: classified and enforced, but NOT in the first-party
+    // registry until it is measured on real hosts (DESIGN §38.4, §44.3), so
+    // no release can load it yet.
+    CatalogRules {
+        id: "firewalld",
+        version: "0.3.0",
+        sha256: "1ef3c8a18d99ef7f1bf8899f18d243095a03ab52868a43d45aa8e1d1d874989d",
+        enforcement: Enforcement::Enforced,
+        types: FIREWALLD_030,
+        ops: OPS_030,
+        handlers: &[("reload", RiskClass::C, rules::RuleKind::FwReload)],
     },
 ];
 
@@ -454,6 +545,58 @@ pub fn static_gate(model: &Model, approved: Option<&BTreeSet<String>>) -> Result
             }
         }
     }
+    // `plugin` handlers (DESIGN §44.2): classified by their operation.
+    if let Some(set) = model.plugins.as_deref() {
+        for h in &model.handlers {
+            let Some((plugin, op)) = &h.plugin_op else {
+                continue;
+            };
+            let Some((_, catalog, _)) = crate::plugin::resolve_handler(set, plugin, op) else {
+                return Err(SinterError::schema(format!(
+                    "handler {}: plugin {} has no handler operation {}",
+                    h.id, plugin, op
+                )));
+            };
+            let dangerous = catalog_can_change_connection(catalog);
+            let entry = with_table(|t| {
+                t.iter()
+                    .find(|c| c.id == catalog.id() && c.version == catalog.version())
+                    .map(|c| {
+                        (
+                            c.sha256 == catalog.sha256(),
+                            c.enforcement,
+                            c.handlers.iter().find(|(o, _, _)| o == op).copied(),
+                        )
+                    })
+            });
+            let source = format!("{}@{}", catalog.id(), catalog.version());
+            match entry {
+                Some((true, enforcement, Some((_, class, rule)))) => {
+                    if enforcement == Enforcement::Enforced && class == RiskClass::R {
+                        if let Some(set) = approved {
+                            if !set.contains(&format!("handler:{}", h.id)) {
+                                missing.push(format!("handler:{}", h.id));
+                            }
+                        }
+                    }
+                    out.push(StaticItem {
+                        id: format!("handler:{}", h.id),
+                        class,
+                        enforcement,
+                        rule,
+                        source,
+                    });
+                }
+                _ if dangerous => {
+                    return Err(SinterError::schema(format!(
+                        "handler {}: operation {} of catalog {} has no connection-risk classification and the catalog can change the management connection",
+                        h.id, op, source
+                    )))
+                }
+                _ => {}
+            }
+        }
+    }
     if !missing.is_empty() {
         return Err(SinterError::schema(format!(
             "connection-risk resources {} need an approval (sinter plan --approval-request, sinter approve, then sinter apply --approval); nothing was contacted",
@@ -463,5 +606,7 @@ pub fn static_gate(model: &Model, approved: Option<&BTreeSet<String>>) -> Result
     Ok(out)
 }
 
+#[cfg(test)]
+mod p3_tests;
 #[cfg(test)]
 mod tests;

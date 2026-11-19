@@ -51,6 +51,8 @@ pub struct HandlerDecl {
     pub command: Option<CommandHandlerSpec>,
     pub sensitive: bool,
     pub origin: String,
+    /// The plugin id and handler operation of a `plugin` handler.
+    pub plugin_op: Option<(String, String)>,
 }
 
 /// What a `command` handler runs (DESIGN §4.3). Every value is static text
@@ -88,6 +90,9 @@ pub enum HandlerKind {
     CaTrust,
     /// Run one program after a change (an absolute path and exact arguments).
     Command,
+    /// Run one handler operation of an activated Resource Plugin's catalog
+    /// (DESIGN §44.2), on the mutate channel.
+    Plugin,
 }
 
 impl HandlerKind {
@@ -97,6 +102,7 @@ impl HandlerKind {
             HandlerKind::Service => "service",
             HandlerKind::CaTrust => "ca_trust",
             HandlerKind::Command => "command",
+            HandlerKind::Plugin => "plugin",
         }
     }
 
@@ -105,6 +111,7 @@ impl HandlerKind {
             "service" => Some(HandlerKind::Service),
             "ca_trust" => Some(HandlerKind::CaTrust),
             "command" => Some(HandlerKind::Command),
+            "plugin" => Some(HandlerKind::Plugin),
             _ => None,
         }
     }
@@ -149,5 +156,14 @@ pub const COMMON_RESOURCE_FIELDS: &[&str] = &[
 /// Fields accepted on a handler. `type` selects the handler type; `service`
 /// and `action` belong to the `service` type, `with` to the `command` type. The
 /// parser rejects a field that does not belong to the handler's type.
-pub const HANDLER_FIELDS: &[&str] = &["id", "type", "service", "action", "with", "sensitive"];
+pub const HANDLER_FIELDS: &[&str] = &[
+    "id",
+    "type",
+    "service",
+    "action",
+    "with",
+    "sensitive",
+    "plugin",
+    "op",
+];
 pub const VAR_FIELDS: &[&str] = &["value", "sensitive", "required"];
