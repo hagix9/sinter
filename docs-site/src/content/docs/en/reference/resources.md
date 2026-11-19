@@ -15,6 +15,7 @@ complete supported set — unknown `with` fields are schema errors.
 | [command](/en/reference/resources/command/) | Exact-argv program execution | `program`, `args`, `creates`/`removes`, `changed_when`, `register` |
 | [package](/en/reference/resources/package/) | Package install/remove (apt/dnf) | `name`, `state` |
 | [service](/en/reference/resources/service/) | systemd state + enablement | `name`, `state`, `enabled` |
+| [systemd_timer](/en/reference/resources/systemd_timer/) | systemd timer unit + enablement | `name`, `on_calendar`, `on_boot_sec`, `state`, `enabled` |
 | [group](/en/reference/resources/group/) | Local Linux group | `name`, `state`, `gid`, `system` |
 | [user](/en/reference/resources/user/) | Local Linux user | `name`, `state`, `uid`, `group`, `groups`, `shell`, `home`, `create_home`, `system`, `password_hash` |
 | [postgresql_role](/en/reference/resources/postgresql_role/) | Role of a local PostgreSQL server (since v1.5.1) | `name`, `state`, `login`, `superuser`, …, `connection_limit`, `password_verifier` |

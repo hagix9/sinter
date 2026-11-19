@@ -1303,6 +1303,39 @@ impl TargetFs {
         )
     }
 
+    /// Where a unit's definition comes from (`systemd_timer`, DESIGN §42.3):
+    /// its fragment path and drop-in paths. Read-only, exact argv, the unit
+    /// name after `--`; no mutation permit is needed.
+    pub fn systemctl_show_unit_files_sensitive(
+        &mut self,
+        name: &str,
+        sensitive: bool,
+    ) -> Result<Output> {
+        self.run_argv_sensitivity(
+            "/usr/bin/systemctl",
+            &[
+                "show".to_string(),
+                "--property=FragmentPath,DropInPaths".to_string(),
+                "--".to_string(),
+                name.to_string(),
+            ],
+            sensitive,
+        )
+    }
+
+    /// Check one `OnCalendar` expression with the target's own systemd
+    /// (`systemd_timer`, DESIGN §42.4). The expression was checked by Sinter
+    /// first (printable ASCII, no leading `-`, no `\` or `%`), so it cannot
+    /// become an option. Read-only: it parses and prints, and needs no
+    /// mutation permit.
+    pub fn systemd_analyze_calendar(&mut self, expr: &str, sensitive: bool) -> Result<Output> {
+        self.run_argv_sensitivity(
+            "/usr/bin/systemd-analyze",
+            &["calendar".to_string(), expr.to_string()],
+            sensitive,
+        )
+    }
+
     /// Read the system manager's unit load path. Read-only; the argv is
     /// fixed and carries no recipe-controlled value. The property is a
     /// manager property, so no unit operand (and no `--`) is present.

@@ -289,7 +289,8 @@ handlerは遅延実行されるserviceの`restart` / `reload`アクションで�
 v1.2.0以降、ローカルアカウント用の`group`と`user`の2種類があります。
 宣言順と`depends_on`による順序、ローカルデータベースのみ、番号の振り直しなし、補助グループは
 追加のみ、`absent`は`-r` / `-f`なし、という契約です。v1.5.1 では
-`postgresql_role` が加わります。リソースリファレンスを
+`postgresql_role` が加わります。`systemd_timer` は systemd タイマーのユニットと有効化を
+管理します（未リリース）。リソースリファレンスを
 参照してください。
 
 また、v1.2.0以降は`sinter secrets encrypt | decrypt | list`があり、

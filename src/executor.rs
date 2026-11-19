@@ -3320,6 +3320,35 @@ impl FakeTarget {
         self
     }
 
+    /// `systemd_timer` support: `/usr/bin/systemd-analyze` is present.
+    pub fn with_systemd_analyze(mut self) -> Self {
+        self.executables
+            .insert("/usr/bin/systemd-analyze".to_string());
+        self
+    }
+
+    /// The `FragmentPath` the manager reports for `unit`.
+    pub fn with_fragment_path(mut self, unit: &str, path: &str) -> Self {
+        self.manager
+            .fragment_paths
+            .insert(unit.to_string(), path.to_string());
+        self
+    }
+
+    /// The `DropInPaths` the manager reports for `unit`.
+    pub fn with_dropin_paths(mut self, unit: &str, paths: &str) -> Self {
+        self.manager
+            .dropin_paths
+            .insert(unit.to_string(), paths.to_string());
+        self
+    }
+
+    /// A calendar expression `systemd-analyze calendar` rejects.
+    pub fn with_invalid_calendar(mut self, expr: &str) -> Self {
+        self.manager.invalid_calendars.insert(expr.to_string());
+        self
+    }
+
     /// Declare a systemd unit. `state` is (LoadState, ActiveState, UnitFileState).
     pub fn with_service(mut self, name: &str, state: (&str, &str, &str)) -> Self {
         self.services.insert(
@@ -3661,6 +3690,9 @@ impl FakeExecutor {
             "dpkg-query" => self.run_dpkg_query(&req.args),
             "dnf" | "apt-get" => self.run_manager(&prog, &req.args),
             "systemctl" => self.run_systemctl(&req.args),
+            "systemd-analyze" if req.program == "/usr/bin/systemd-analyze" => {
+                self.run_systemd_analyze(&req.args)
+            }
             "mktemp" => self
                 .target
                 .mktemp_output
@@ -4525,6 +4557,33 @@ impl FakeExecutor {
         }
     }
 
+    /// `systemd-analyze calendar <expr>`: present only when declared as an
+    /// executable; rejects the expressions the manager lists as invalid.
+    fn run_systemd_analyze(&mut self, args: &[String]) -> Output {
+        if !self.target.executables.contains("/usr/bin/systemd-analyze") {
+            return Self::exited(127, String::new(), "systemd-analyze: not found".into());
+        }
+        match args {
+            [verb, expr] if verb == "calendar" => {
+                self.target.manager.calendar_checks += 1;
+                if self.target.manager.invalid_calendars.contains(expr) {
+                    Self::exited(
+                        1,
+                        String::new(),
+                        format!("Failed to parse calendar specification '{}'", expr),
+                    )
+                } else {
+                    Self::exited(0, format!("  Original form: {}\n", expr), String::new())
+                }
+            }
+            _ => Self::exited(
+                1,
+                String::new(),
+                "fake systemd-analyze: unexpected argv".into(),
+            ),
+        }
+    }
+
     fn run_systemctl(&mut self, args: &[String]) -> Output {
         let verb = args.first().map(|s| s.as_str()).unwrap_or("");
         if verb == "show" && args.iter().any(|a| a == "--property=UnitPath") {
@@ -4536,6 +4595,40 @@ impl FakeExecutor {
                     String::new(),
                 ),
             };
+        }
+        if verb == "show"
+            && args.len() == 4
+            && args[1] == "--property=FragmentPath,DropInPaths"
+            && args[2] == "--"
+        {
+            let name = &args[3];
+            let fragment = match self.target.manager.fragment_paths.get(name) {
+                Some(f) => f.clone(),
+                None if self.target.manager.disk.contains_key(name) => {
+                    format!("/etc/systemd/system/{}", name)
+                }
+                None if self
+                    .target
+                    .services
+                    .get(name)
+                    .is_some_and(|e| e.0 != "not-found") =>
+                {
+                    format!("/usr/lib/systemd/system/{}", name)
+                }
+                None => String::new(),
+            };
+            let dropins = self
+                .target
+                .manager
+                .dropin_paths
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
+            return Self::exited(
+                0,
+                format!("FragmentPath={}\nDropInPaths={}\n", fragment, dropins),
+                String::new(),
+            );
         }
         if verb == "daemon-reload" {
             if args.len() != 1 {

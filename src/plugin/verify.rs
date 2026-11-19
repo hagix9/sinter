@@ -148,6 +148,7 @@ pub const BUILTIN_RESOURCE_TYPES: &[&str] = &[
     "command",
     "package",
     "service",
+    "systemd_timer",
     "postgresql_role",
     "user",
     "group",

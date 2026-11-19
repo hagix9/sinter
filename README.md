@@ -297,7 +297,8 @@ Resource types: `file`, `directory`, `template`, `link`, `command`,
 Since v1.2.0 Sinter also has two local
 account types, `group` and `user`: order by declaration and `depends_on`, local database only,
 no renumbering, additive supplementary groups, `absent` without `-r`/`-f`.
-v1.5.1 adds `postgresql_role`. See the
+v1.5.1 adds `postgresql_role`, and `systemd_timer` manages a systemd timer
+unit and its enablement (not yet released). See the
 resource reference.
 
 Also since v1.2.0: `sinter secrets encrypt | decrypt | list`

@@ -3074,7 +3074,7 @@ IMPLEMENTED (not released): `sinter serve init [--config] [--key-file] [--client
 
 42. `systemd_timer` resource (v1.15.0)
 
-PLANNED (v1.15.0 P0 design, Owner decision D-1 of 2026-11-19; not implemented). A recipe that uses the type is rejected at validation (unknown resource type) until it is built. The labels of §1.2 apply.
+IMPLEMENTED (v1.15.0 P1, not released; Owner decision D-1 of 2026-11-19): §42.1–§42.6 as written, with the implementation notes of §42.7. The labels of §1.2 apply.
 
 42.1 Purpose and reuse
 
@@ -3137,7 +3137,7 @@ The `OnCalendar` grammar depends on the systemd version, so each expression is c
 
 42.5 Decision, order and the three modes
 
-One decision function serves plan, apply and audit (avoiding a further copy like `audit_service`, §28): it takes the observation (file state and digest, the timer unit's four properties, the triggered unit's `LoadState`, the calendar validation) and returns the ordered steps. Plan reports them, apply runs them, audit maps each step to a drift item.
+The timer-specific decisions (the checks of §42.3–§42.5 that refuse a timer, and how the unit file and the activation are derived from the fields) are one function set that plan, apply and audit share. The unit file is then decided and written by the `file` code and the activation by the `service` code, and audit uses the matching `file` and `service` audits; no timer-specific copy of those decisions exists. The existing separation of `run_service` and `audit_service` (§28) is kept as it is (§42.7).
 
 - Order for `running`/`stopped`/`enabled`: write the unit file → manager sync (the daemon-reload of §28 runs because a unit path changed) → enable/disable → start/stop. This is the §28 table with the write first. After the steps the timer is re-observed and every managed dimension verified.
 - When activation is managed (`state: running` or `enabled: true`), the triggered unit must exist (`LoadState` not `not-found`) after the manager sync; otherwise the resource fails before enable/start. In plan, a triggered unit that an earlier resource of the run creates is unknown (deferred), as for `service` after a package (§29).
@@ -3148,7 +3148,18 @@ One decision function serves plan, apply and audit (avoiding a further copy like
 
 42.6 Unchanged and compatibility
 
-No existing type, field, exit code or JSON key changes. `systemd_timer` is added to the built-in type list (also used to refuse plugin type names). `service` with `name: <x>.timer` keeps working as today (it is not deprecated); a test is added because nothing covers it yet. MCP plans the type like any built-in type only after §42.4 is verified.
+No existing type, field, exit code or JSON key changes. `systemd_timer` is added to the built-in type list (also used to refuse plugin type names). `service` with `name: <x>.timer` keeps working as today (it is not deprecated); a test is added because nothing covers it yet. Until §42.4 is verified, every MCP manifest tool refuses a manifest with a `systemd_timer` resource (§42.7).
+
+42.7 Implementation notes (P1)
+
+- Code: `src/timer.rs` (field rules, unit text, the synthetic `file` and `service` resources, the FragmentPath/DropInPaths answer and the refusal rules), `src/timer_engine.rs` (plan and apply), `audit_systemd_timer` in `src/audit.rs`. Two read-only observations are added to `TargetFs`: `systemctl show --property=FragmentPath,DropInPaths -- <unit>` and `systemd-analyze calendar <expr>`.
+- Order in apply: manager sync and the timer unit's observation (masked), FragmentPath/DropInPaths, every calendar check — all before any change; then the unit file (`file` code); then, when activation is managed and needs it, a manager sync that observes the timer and the triggered unit (a missing triggered unit fails the resource before enable/start, with the unit-file change reported); then the `service` code on `<name>.timer`. `state: absent`: stop and disable through the `service` code (only if the unit is loaded), remove the unit file through the `file` code, sync the manager and require `not-found`.
+- Plan: when earlier resources leave manager input pending, the timer is deferred/unknown, as a service is. After its own unit-file change, the activation part is deferred until apply's reload. A triggered unit that does not exist yet is reported as unknown in plan; apply refuses it.
+- A failure after the unit file changed keeps that change in the result (exit code and `change` as for any partly applied resource).
+- `name` and `unit` may come from variables (static identifiers, §4.9) but not from facts or registers. Other fields may be interpolated and are checked again once evaluated.
+- Command statistics and progress label the type as `other`, as for `postgresql_role`; no JSON enumeration changes.
+- MCP: every manifest tool refuses a manifest with a `systemd_timer` resource until §42.4 is verified, so no MCP tool can make a host run `systemd-analyze`.
+- NOT VERIFIED on a real host: that `systemd-analyze calendar` changes nothing; the real FragmentPath/DropInPaths answers; enabling through `timers.target`; daemon-reload of the written unit. Recorded for the P8 Tier F acceptance.
 
 43. Connection-risk control and approvals (v1.15.0)
 

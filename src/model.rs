@@ -1326,6 +1326,12 @@ fn validate_declaration_shape(
                 }
             }
         }
+        "systemd_timer" => {
+            validate_with_fields(&d.with, SYSTEMD_TIMER_FIELDS, ctx)?;
+            require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
+            require_optional_static_string(&d.with, "unit", ctx, field_sensitive("unit"))?;
+            crate::timer::TimerSpec::check(&d.with, ctx, true)?;
+        }
         "postgresql_role" => {
             validate_with_fields(&d.with, crate::pgrole::PGROLE_FIELDS, ctx)?;
             require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
@@ -2314,6 +2320,47 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         Ok(())
                     })?;
                 }
+                "systemd_timer" => {
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(&r.with, SYSTEMD_TIMER_FIELDS, &resource_ctx)
+                    })?;
+                    let name = staged_field(&mut stage, &tol, "name", || {
+                        let name = static_string(
+                            &r.with,
+                            "name",
+                            &scope,
+                            &resource_ctx,
+                            true,
+                            field_sensitive("name"),
+                        )?;
+                        if !crate::timer::valid_timer_name(&name) {
+                            return Err(SinterError::schema(format!(
+                                "{}: systemd_timer name is not a valid timer name ([A-Za-z0-9:_.-], 1-200 bytes, not starting with . or -, without .timer)",
+                                resource_ctx
+                            )));
+                        }
+                        Ok(name)
+                    })?;
+                    if let Some(name) = &name {
+                        fr.service_name = Some(crate::timer::timer_unit(name));
+                        fr.path = Some(crate::timer::unit_path(name));
+                    }
+                    if r.with.contains_key("unit") {
+                        staged_field(&mut stage, &tol, "unit", || {
+                            static_string(
+                                &r.with,
+                                "unit",
+                                &scope,
+                                &resource_ctx,
+                                true,
+                                field_sensitive("unit"),
+                            )
+                        })?;
+                    }
+                    staged(&mut stage, Stage::ValueFree, || {
+                        crate::timer::TimerSpec::check(&r.with, &resource_ctx, true).map(|_| ())
+                    })?;
+                }
                 "postgresql_role" => {
                     staged(&mut stage, Stage::ValueFree, || {
                         validate_with_fields(&r.with, crate::pgrole::PGROLE_FIELDS, &resource_ctx)
@@ -2513,7 +2560,10 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
             }
 
             // Ownership conflicts for filesystem resources.
-            if matches!(r.type_.as_str(), "file" | "template" | "directory" | "link") {
+            if matches!(
+                r.type_.as_str(),
+                "file" | "template" | "directory" | "link" | "systemd_timer"
+            ) {
                 if let Some(p) = &fr.path {
                     if let Some(prev) = path_owner.insert(p.clone(), r.id.clone()) {
                         // May depend on a variable: left unjudged, the other
@@ -3419,6 +3469,19 @@ pub const COMMAND_FIELDS: &[&str] = &[
 ];
 pub const PACKAGE_FIELDS: &[&str] = &["name", "state", "env"];
 pub const SERVICE_FIELDS: &[&str] = &["name", "state", "enabled"];
+pub const SYSTEMD_TIMER_FIELDS: &[&str] = &[
+    "name",
+    "unit",
+    "on_calendar",
+    "on_boot_sec",
+    "on_unit_active_sec",
+    "persistent",
+    "accuracy_sec",
+    "randomized_delay_sec",
+    "description",
+    "state",
+    "enabled",
+];
 pub const GROUP_FIELDS: &[&str] = &["name", "state", "gid", "system"];
 pub const USER_FIELDS: &[&str] = &[
     "name",

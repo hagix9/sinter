@@ -239,6 +239,7 @@ function register() {
             'command',
             'package',
             'service',
+            'systemd_timer',
             'group',
             'user',
             'postgresql_role',

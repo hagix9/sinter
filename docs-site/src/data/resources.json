@@ -105,6 +105,26 @@
       "example": "resources:\n  - id: sshd\n    type: service\n    with:\n      name: sshd\n      state: running\n      enabled: true"
     },
     {
+      "type": "systemd_timer",
+      "summary": "Manage a systemd timer unit file and its enablement and run state.",
+      "docPath": "reference/resources/systemd_timer",
+      "parameters": [
+        { "name": "name", "required": true, "type": "string", "default": null, "description": "Timer name without .timer ([A-Za-z0-9:_.-], 1-200 bytes, not starting with . or -). The unit file is /etc/systemd/system/<name>.timer." },
+        { "name": "unit", "required": false, "type": "string", "default": null, "description": "Unit the timer activates (Unit=). Default <name>.service. Must end in a unit suffix other than .timer." },
+        { "name": "on_calendar", "required": false, "type": "string or list", "default": null, "description": "OnCalendar= expressions, checked by the target's systemd-analyze calendar. Printable ASCII without \\ or %." },
+        { "name": "on_boot_sec", "required": false, "type": "string", "default": null, "description": "OnBootSec= time span (an integer, or groups like 5min or 1h 30m)." },
+        { "name": "on_unit_active_sec", "required": false, "type": "string", "default": null, "description": "OnUnitActiveSec= time span." },
+        { "name": "persistent", "required": false, "type": "boolean", "default": null, "description": "Persistent=; requires on_calendar." },
+        { "name": "accuracy_sec", "required": false, "type": "string", "default": null, "description": "AccuracySec= time span." },
+        { "name": "randomized_delay_sec", "required": false, "type": "string", "default": null, "description": "RandomizedDelaySec= time span." },
+        { "name": "description", "required": false, "type": "string", "default": null, "description": "Description= (printable ASCII without \\ or %). Default \"Sinter timer <name>\"." },
+        { "name": "state", "required": false, "type": "string", "default": null, "description": "running, stopped or absent. absent stops, disables and removes the timer and allows only name." },
+        { "name": "enabled", "required": false, "type": "boolean", "default": null, "description": "Whether the timer is enabled (WantedBy=timers.target is always written)." }
+      ],
+      "platforms": ["ubuntu", "rocky", "rhel", "almalinux"],
+      "example": "resources:\n  - id: backup-timer\n    type: systemd_timer\n    with:\n      name: backup\n      on_calendar: \"*-*-* 03:00:00\"\n      persistent: true\n      state: running\n      enabled: true"
+    },
+    {
       "type": "group",
       "summary": "Ensure a local Linux group exists or is absent, with an optional fixed gid.",
       "docPath": "reference/resources/group",

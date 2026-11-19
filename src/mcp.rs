@@ -356,6 +356,20 @@ fn check_mcp_manifest_authority(doc: &Document) -> Result<(), ToolError> {
         });
     }
     for r in &doc.resources {
+        // `systemd_timer` checks every OnCalendar expression with the
+        // target's `systemd-analyze`. Until that command is confirmed
+        // read-only on every supported target (DESIGN §42.4), MCP does not
+        // offer the type, so no MCP tool can make a host run it.
+        if r.type_ == "systemd_timer" {
+            return Err(ToolError {
+                category: "invalid_manifest",
+                kind: Some("schema"),
+                message: "MCP manifests may not use the systemd_timer resource type \
+                          yet — its target-side calendar check is not confirmed \
+                          read-only (DESIGN §42.4)"
+                    .to_string(),
+            });
+        }
         if r.with.contains_key("source") {
             return Err(ToolError {
                 category: "invalid_manifest",

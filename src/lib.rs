@@ -48,6 +48,8 @@ pub mod sshconfig;
 pub mod style;
 pub mod targetfs;
 pub mod targets;
+pub mod timer;
+pub(crate) mod timer_engine;
 pub mod toml_front;
 pub mod value;
 pub mod varsfile;

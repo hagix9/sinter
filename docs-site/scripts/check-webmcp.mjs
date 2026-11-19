@@ -106,6 +106,7 @@ if (resources) {
     command: ['src/model.rs', 'COMMAND_FIELDS'],
     package: ['src/model.rs', 'PACKAGE_FIELDS'],
     service: ['src/model.rs', 'SERVICE_FIELDS'],
+    systemd_timer: ['src/model.rs', 'SYSTEMD_TIMER_FIELDS'],
     group: ['src/model.rs', 'GROUP_FIELDS'],
     user: ['src/model.rs', 'USER_FIELDS'],
     postgresql_role: ['src/pgrole.rs', 'PGROLE_FIELDS'],

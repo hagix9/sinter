@@ -897,6 +897,7 @@ impl Engine {
             "command" => self.run_command(res, item),
             "package" => self.run_package(res, item),
             "service" => self.run_service(res, item),
+            "systemd_timer" => self.run_systemd_timer(res, item),
             "group" => self.run_group(res, item),
             "user" => self.run_user(res, item),
             "postgresql_role" => self.run_postgresql_role(res, item),
@@ -918,7 +919,10 @@ impl Engine {
                 // nor probes for it, and no status or exit code changes.
                 if self.opts.mode == Mode::Plan
                     && r.change == Change::Changed
-                    && matches!(res.type_.as_str(), "package" | "user" | "group")
+                    && matches!(
+                        res.type_.as_str(),
+                        "package" | "user" | "group" | "systemd_timer"
+                    )
                     && !self.fs.runs_as_root()
                 {
                     r.notes.push(format!(

@@ -490,6 +490,37 @@ fn include_is_policy_rejected_without_path_echo() {
 }
 
 #[test]
+fn systemd_timer_is_refused_by_every_manifest_tool() {
+    // DESIGN §42.4: the type runs `systemd-analyze calendar` on the target;
+    // MCP does not offer it until that is confirmed read-only.
+    let mut m = Mcp::start();
+    init(&mut m);
+    let manifest = "version: 1\nresources:\n  - id: t\n    type: systemd_timer\n    with: { name: backup, on_calendar: daily }\n";
+    let calls = [
+        ("sinter_validate_manifest", json!({"manifest": manifest})),
+        ("sinter_inspect_manifest", json!({"manifest": manifest})),
+        (
+            "sinter_plan",
+            json!({"manifest": manifest, "target": "rocky9"}),
+        ),
+        (
+            "sinter_plan_host",
+            json!({"manifest": manifest, "target": "web01"}),
+        ),
+        (
+            "sinter_audit_host",
+            json!({"manifest": manifest, "target": "web01"}),
+        ),
+    ];
+    for (i, (tool, args)) in calls.into_iter().enumerate() {
+        let (is_err, v) = Mcp::payload(&m.tool(10 + i as u64, tool, args));
+        assert!(is_err, "{tool} accepted a systemd_timer manifest: {v}");
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("systemd_timer"), "{tool}: {msg}");
+    }
+}
+
+#[test]
 fn plugins_are_refused_by_every_manifest_tool() {
     // Resource Plugins are not available over MCP (DESIGN §38.12): a manifest
     // that enables one is refused before anything is loaded, by every tool

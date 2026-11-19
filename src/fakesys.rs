@@ -86,6 +86,17 @@ pub struct FakeManager {
     pub(crate) show_failures_left: usize,
     pub(crate) forced_stale: BTreeSet<String>,
     pub(crate) rev: u64,
+    /// `FragmentPath` answered per unit (`systemd_timer`); without an entry
+    /// a unit with a file on disk answers `/etc/systemd/system/<unit>`, a
+    /// loaded unit without one `/usr/lib/systemd/system/<unit>`, and any
+    /// other unit an empty value.
+    pub fragment_paths: BTreeMap<String, String>,
+    /// `DropInPaths` answered per unit (empty without an entry).
+    pub dropin_paths: BTreeMap<String, String>,
+    /// Calendar expressions `systemd-analyze calendar` rejects.
+    pub invalid_calendars: BTreeSet<String>,
+    /// `systemd-analyze calendar` invocations served.
+    pub calendar_checks: usize,
 }
 
 impl Default for FakeManager {
@@ -114,6 +125,10 @@ impl Default for FakeManager {
             show_failures_left: 0,
             forced_stale: BTreeSet::new(),
             rev: 0,
+            fragment_paths: BTreeMap::new(),
+            dropin_paths: BTreeMap::new(),
+            invalid_calendars: BTreeSet::new(),
+            calendar_checks: 0,
         }
     }
 }

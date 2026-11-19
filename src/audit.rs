@@ -382,6 +382,7 @@ fn audit_resource(engine: &mut Engine, res: &FrozenResource) -> AuditResourceRes
         "link" => audit_link(engine, res, item.as_ref(), sensitive),
         "package" => audit_package(engine, res, item.as_ref(), sensitive),
         "service" => audit_service(engine, res, item.as_ref(), sensitive),
+        "systemd_timer" => audit_systemd_timer(engine, res, item.as_ref(), sensitive),
         "group" => audit_group(engine, res, item.as_ref(), sensitive),
         "user" => audit_user(engine, res, item.as_ref(), sensitive),
         "postgresql_role" => audit_postgresql_role(engine, res, item.as_ref(), sensitive),
@@ -1204,6 +1205,105 @@ fn audit_service(
         details.push(manager_reload_detail(sensitive));
     }
     finish_drift(res, sensitive, details, "service matches desired state")
+}
+
+/// Audit a `systemd_timer` (DESIGN §42.5): the checks that would stop plan
+/// and apply are errors here too (never "no drift"); then the unit file is
+/// audited as a `file` and the activation as a `service`, and the triggered
+/// unit must exist when activation is managed. Read-only throughout.
+fn audit_systemd_timer(
+    engine: &mut Engine,
+    res: &FrozenResource,
+    item: Option<&EvalVal>,
+    sensitive: bool,
+) -> AuditResourceResult {
+    let vals = match obs_or_error(res, sensitive, engine.eval_with(res, item)) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let spec = match obs_or_error(
+        res,
+        sensitive,
+        crate::timer_engine::evaluated_spec(res, &vals),
+    ) {
+        Ok(s) => s,
+        Err(r) => return *r,
+    };
+    let load_state = match obs_or_error(
+        res,
+        sensitive,
+        engine.timer_prechecks(res, &spec, sensitive),
+    ) {
+        Ok(l) => l,
+        Err(r) => return *r,
+    };
+    let mut parts: Vec<AuditResourceResult> = Vec::new();
+    let mut extra: Vec<AuditDriftDetail> = Vec::new();
+    let file = spec.file_part(res);
+    parts.push(audit_file(engine, &file, None, sensitive));
+    if spec.state == Some(crate::timer::TimerState::Absent) {
+        if load_state != "not-found" {
+            extra.push(AuditDriftDetail::new(
+                "state",
+                format!("unit {}", load_state),
+                "absent".to_string(),
+                sensitive,
+            ));
+        }
+    } else {
+        if spec.needs_trigger_unit() {
+            let target = spec.triggered_unit();
+            match obs_or_error(
+                res,
+                sensitive,
+                engine.observe_service_sensitive(&target, sensitive),
+            ) {
+                Ok(o) if o.load_state == "not-found" => extra.push(AuditDriftDetail::new(
+                    "unit",
+                    format!(
+                        "{} not found",
+                        if sensitive {
+                            "[redacted]"
+                        } else {
+                            target.as_str()
+                        }
+                    ),
+                    "present".to_string(),
+                    true,
+                )),
+                Ok(_) => {}
+                Err(r) => return *r,
+            }
+        }
+        if let Some(svc) = spec.service_part(res) {
+            parts.push(audit_service(engine, &svc, None, sensitive));
+        }
+    }
+    let mut details = Vec::new();
+    let mut reasons: Vec<String> = Vec::new();
+    for p in parts {
+        match p.status {
+            AuditResourceStatus::Compliant => {}
+            AuditResourceStatus::Drift => {
+                details.extend(p.details);
+                if let Some(why) = p.reason {
+                    reasons.push(why);
+                }
+            }
+            _ => {
+                let mut r = AuditResourceResult::base(res, p.status, sensitive);
+                r.reason = p.reason;
+                r.details = p.details;
+                return r;
+            }
+        }
+    }
+    details.extend(extra);
+    let mut r = finish_drift(res, sensitive, details, "timer matches desired state");
+    if r.status == AuditResourceStatus::Drift && !reasons.is_empty() && r.reason.is_none() {
+        r.reason = Some(reasons.join("; "));
+    }
+    r
 }
 
 fn manager_reload_detail(sensitive: bool) -> AuditDriftDetail {

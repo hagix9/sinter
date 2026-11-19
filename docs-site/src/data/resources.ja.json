@@ -75,6 +75,22 @@
         "enabled": "ユニットを有効化するかどうか。state と enabled の少なくとも一方が必須。"
       }
     },
+    "systemd_timer": {
+      "summary": "systemd タイマーのユニットファイルと、その有効化・起動状態を管理する。",
+      "parameters": {
+        "name": "タイマー名（.timer を除く。[A-Za-z0-9:_.-]、1〜200 バイト、. や - で始めない）。ユニットファイルは /etc/systemd/system/<name>.timer。",
+        "unit": "タイマーが起動するユニット（Unit=）。既定は <name>.service。.timer 以外のユニット接尾辞で終わること。",
+        "on_calendar": "OnCalendar= の式。対象の systemd-analyze calendar で検査する。\\ と % を含まない印字可能な ASCII。",
+        "on_boot_sec": "OnBootSec= の時間（整数、または 5min や 1h 30m のような並び）。",
+        "on_unit_active_sec": "OnUnitActiveSec= の時間。",
+        "persistent": "Persistent=。on_calendar が必要。",
+        "accuracy_sec": "AccuracySec= の時間。",
+        "randomized_delay_sec": "RandomizedDelaySec= の時間。",
+        "description": "Description=（\\ と % を含まない印字可能な ASCII）。既定は \"Sinter timer <name>\"。",
+        "state": "running、stopped、absent のいずれか。absent は停止・無効化・削除を行い、name 以外を指定できない。",
+        "enabled": "タイマーを有効にするかどうか（WantedBy=timers.target は常に書く）。"
+      }
+    },
     "group": {
       "summary": "ローカル Linux グループを存在（または不在）させ、必要なら gid を固定する。",
       "parameters": {
