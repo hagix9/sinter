@@ -136,6 +136,8 @@ apply re-observes every stateful resource immediately before deciding whether to
 
 A v0.1 plan is not an approved or replayable execution artifact.
 
+v1.15.0 (planned, Owner decision D-4 of 2026-11-19): an approval may name the digest of a plan, so that apply stops when its fresh observation does not give the approved result. This does not make a plan approved or replayable: apply still decides from what it observes, and the approval can only stop a run, never widen it (DESIGN §43.4).
+
 6. Plan safety
 
 Plan may perform observation operations only.
