@@ -122,24 +122,38 @@ pub(crate) fn merge(res: &FrozenResource, parts: Vec<ResourceResult>) -> Resourc
     r
 }
 
-/// A failure of the timer after the unit file may already have changed:
-/// the error keeps that change (a mutation is never hidden).
-fn after_change(mut e: SinterError, file_changed: bool) -> SinterError {
-    if file_changed && e.mutation == MutationState::None {
+/// A failure of the timer after the unit file (or the activation) already
+/// changed: that change is certain, so the error reports it as `Changed`,
+/// whatever a later step could only call possible or none (a confirmed
+/// mutation is never weakened by later uncertainty).
+fn after_change(mut e: SinterError, changed: bool) -> SinterError {
+    if changed {
         e.mutation = MutationState::Changed;
     }
     e
 }
 
+/// Outcome of the timer prechecks.
+pub(crate) enum Prechecked {
+    /// Every check passed; the timer unit's LoadState.
+    Ready(String),
+    /// Plan/audit only: the manager reports the timer's loaded definition
+    /// stale, so nothing about it can be judged before apply reloads.
+    Stale,
+}
+
 impl Engine {
     /// The checks that change nothing and must pass before a timer is
-    /// touched (DESIGN §42.3–§42.5). Returns the timer unit's LoadState.
+    /// touched (DESIGN §42.3–§42.5). In plan and audit, a timer whose loaded
+    /// definition the manager reports stale (`NeedDaemonReload=yes`) is not
+    /// judged from that stale state: `Prechecked::Stale` is returned before
+    /// any other observation (apply synchronizes first and never sees it).
     pub(crate) fn timer_prechecks(
         &mut self,
         res: &FrozenResource,
         spec: &TimerSpec,
         sensitive: bool,
-    ) -> Result<String> {
+    ) -> Result<Prechecked> {
         let unit = timer_unit(&spec.name);
         let obs = if self.opts.mode == Mode::Apply {
             // Synchronize the manager first (pending unit input of earlier
@@ -157,14 +171,17 @@ impl Engine {
         } else {
             self.observe_service_sensitive(&unit, sensitive)?
         };
+        if self.opts.mode != Mode::Apply && obs.need_daemon_reload {
+            return Ok(Prechecked::Stale);
+        }
         let files = self.observe_timer_unit_files(&unit, sensitive)?;
-        if let Some(why) = refusal(&spec.name, &files, &obs.unit_file_state) {
+        if let Some(why) = refusal(&spec.name, &files, &obs.load_state, &obs.unit_file_state) {
             return Err(SinterError::apply(format!("{}: {}", res.id, why)));
         }
         for (i, expr) in spec.on_calendar.iter().enumerate() {
             self.check_calendar(res, i, expr, sensitive)?;
         }
-        Ok(obs.load_state)
+        Ok(Prechecked::Ready(obs.load_state))
     }
 
     fn observe_timer_unit_files(
@@ -263,7 +280,17 @@ impl Engine {
             );
             return Ok(r);
         }
-        let load_state = self.timer_prechecks(res, &spec, sensitive)?;
+        let load_state = match self.timer_prechecks(res, &spec, sensitive)? {
+            Prechecked::Ready(l) => l,
+            Prechecked::Stale => {
+                let mut r = unknown_result(res);
+                r.reason = Some(
+                    "deferred/unknown until manager synchronization at apply: the timer's loaded definition is stale (NeedDaemonReload=yes)"
+                        .into(),
+                );
+                return Ok(r);
+            }
+        };
         let file = spec.file_part(res);
         let service = spec.service_part(res);
 

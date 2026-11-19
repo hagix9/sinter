@@ -97,6 +97,10 @@ pub struct FakeManager {
     pub invalid_calendars: BTreeSet<String>,
     /// `systemd-analyze calendar` invocations served.
     pub calendar_checks: usize,
+    /// Units the manager loads again after every reload whatever the disk
+    /// copy in `/etc` says (another fragment of the same name, for example
+    /// under `/run/systemd/system`, takes over once the first is removed).
+    pub present_after_reload: BTreeMap<String, (String, String, String)>,
 }
 
 impl Default for FakeManager {
@@ -129,6 +133,7 @@ impl Default for FakeManager {
             dropin_paths: BTreeMap::new(),
             invalid_calendars: BTreeSet::new(),
             calendar_checks: 0,
+            present_after_reload: BTreeMap::new(),
         }
     }
 }
@@ -197,6 +202,9 @@ impl FakeManager {
             if services.contains_key(unit) {
                 services.insert(unit.clone(), state.clone());
             }
+        }
+        for (unit, state) in &self.present_after_reload {
+            services.insert(unit.clone(), state.clone());
         }
     }
 

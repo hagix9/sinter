@@ -1234,7 +1234,18 @@ fn audit_systemd_timer(
         sensitive,
         engine.timer_prechecks(res, &spec, sensitive),
     ) {
-        Ok(l) => l,
+        Ok(crate::timer_engine::Prechecked::Ready(l)) => l,
+        Ok(crate::timer_engine::Prechecked::Stale) => {
+            // Nothing else can be judged from a stale loaded definition; the
+            // stale state itself is drift (never repaired by audit).
+            let mut r = AuditResourceResult::base(res, AuditResourceStatus::Drift, sensitive);
+            r.details.push(manager_reload_detail(sensitive));
+            r.reason = Some(
+                "the timer's loaded definition is stale (NeedDaemonReload=yes); its unit files were not judged"
+                    .to_string(),
+            );
+            return r;
+        }
         Err(r) => return *r,
     };
     let mut parts: Vec<AuditResourceResult> = Vec::new();
@@ -1269,7 +1280,7 @@ fn audit_systemd_timer(
                         }
                     ),
                     "present".to_string(),
-                    true,
+                    sensitive,
                 )),
                 Ok(_) => {}
                 Err(r) => return *r,

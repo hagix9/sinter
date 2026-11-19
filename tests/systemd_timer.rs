@@ -752,3 +752,103 @@ fn state_from_a_variable_is_judged_once_evaluated() {
         ),
     }
 }
+
+#[test]
+fn reload_failure_after_the_write_reports_the_change_as_certain() {
+    let r = recipe(
+        "tm-f-reload",
+        &doc(&[timer("      state: running\n      enabled: true\n")], ""),
+    );
+    let mut t = fake();
+    t.manager.reload_completion = Some(Completion::Exited(1));
+    let a = apply(&r, t);
+    let at = find(&a, "t");
+    assert_ne!(a.status, AggregateStatus::Success);
+    assert_ne!(at.execution, Execution::Succeeded, "{at:?}");
+    assert_eq!(
+        at.change,
+        Change::Changed,
+        "the written unit file is certain: {at:?}"
+    );
+    assert_eq!(
+        a.fake_fs.as_ref().unwrap().file_bytes(UNIT_PATH).unwrap(),
+        RENDERED.as_bytes()
+    );
+    assert!(!has(&a, "enable:backup.timer"), "{:?}", trace(&a));
+}
+
+#[test]
+fn reload_failure_after_removal_reports_the_change_as_certain() {
+    let r = recipe("tm-f-reload-absent", &doc(&["  - id: t\n    type: systemd_timer\n    with:\n      name: backup\n      state: absent\n".to_string()], ""));
+    let mut t = converged();
+    t.manager.reload_completion = Some(Completion::Exited(1));
+    let a = apply(&r, t);
+    let at = find(&a, "t");
+    assert_ne!(at.execution, Execution::Succeeded, "{at:?}");
+    assert_eq!(at.change, Change::Changed, "{at:?}");
+    assert!(a.fake_fs.as_ref().unwrap().file_bytes(UNIT_PATH).is_none());
+}
+
+#[test]
+fn removal_that_leaves_the_unit_loaded_fails_verification() {
+    let r = recipe("tm-f-still", &doc(&["  - id: t\n    type: systemd_timer\n    with:\n      name: backup\n      state: absent\n".to_string()], ""));
+    let mut t = converged();
+    t.manager.present_after_reload.insert(
+        "backup.timer".to_string(),
+        (
+            "loaded".to_string(),
+            "inactive".to_string(),
+            "disabled".to_string(),
+        ),
+    );
+    let a = apply(&r, t);
+    let at = find(&a, "t");
+    assert_eq!(at.execution, Execution::Failed, "{at:?}");
+    assert_eq!(at.verification, Verification::Failed, "{at:?}");
+    assert_eq!(at.change, Change::Changed, "{at:?}");
+    assert!(
+        at.reason.as_deref().unwrap().contains("still loaded"),
+        "{at:?}"
+    );
+}
+
+#[test]
+fn stale_loaded_definition_is_deferred_in_plan_and_drift_in_audit() {
+    let r = recipe(
+        "tm-f-stale",
+        &doc(&[timer("      state: running\n      enabled: true\n")], ""),
+    );
+    let stale = || {
+        let mut t = converged();
+        t.manager.disk_changed("backup.timer", true);
+        t
+    };
+    let p = plan(&r, stale());
+    let pt = find(&p, "t");
+    assert!(pt.unknown, "{pt:?}");
+    assert!(
+        pt.reason.as_deref().unwrap().contains("NeedDaemonReload"),
+        "{pt:?}"
+    );
+    assert!(
+        !trace(&p).iter().any(|x| x.starts_with("files:")),
+        "{:?}",
+        trace(&p)
+    );
+    assert_eq!(mutation_command_count(&p), 0);
+    let u = audit(&r, stale());
+    assert_eq!(
+        u.resources[0].status,
+        AuditResourceStatus::Drift,
+        "{:?}",
+        u.resources[0]
+    );
+    let a = apply(&r, stale());
+    let at = find(&a, "t");
+    assert_eq!(at.execution, Execution::Succeeded, "{at:?}");
+    assert!(
+        has(&a, "daemon-reload"),
+        "apply synchronizes first: {:?}",
+        trace(&a)
+    );
+}

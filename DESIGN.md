@@ -3133,7 +3133,7 @@ Before any change the timer unit is also observed with `systemctl show --propert
 
 42.4 Validation on the target
 
-The `OnCalendar` grammar depends on the systemd version, so each expression is checked on the target with a new fixed-argv observation, `/usr/bin/systemd-analyze calendar <expr>` (no permit, no sudo needed). Exit 0 is valid; any other result is a failure of the resource in plan, apply and audit, never a guess. That this command changes nothing on the host must be confirmed from the systemd source and on every supported target before the type is released (P1 exit condition); until then it is NOT VERIFIED and the type must not be exposed through MCP (§38.13 applies by analogy).
+The `OnCalendar` grammar depends on the systemd version, so each expression is checked on the target with a new fixed-argv observation, `/usr/bin/systemd-analyze calendar <expr>` (no mutation permit; it runs with the run's privileges, so through sudo when `--sudo` is given, like every other observation). Exit 0 is valid; any other result is a failure of the resource in plan, apply and audit, never a guess. That this command changes nothing on the host must be confirmed from the systemd source and on every supported target before the type is released (P1 exit condition); until then it is NOT VERIFIED and the type must not be exposed through MCP (§38.13 applies by analogy).
 
 42.5 Decision, order and the three modes
 
@@ -3159,6 +3159,11 @@ No existing type, field, exit code or JSON key changes. `systemd_timer` is added
 - `name` and `unit` may come from variables (static identifiers, §4.9) but not from facts or registers. Other fields may be interpolated and are checked again once evaluated.
 - Command statistics and progress label the type as `other`, as for `postgresql_role`; no JSON enumeration changes.
 - MCP: every manifest tool refuses a manifest with a `systemd_timer` resource until §42.4 is verified, so no MCP tool can make a host run `systemd-analyze`.
+- Masked: a `LoadState` of `masked` or a `UnitFileState` starting with `masked` (including `masked-runtime`) is refused as masked.
+- Stale definition: in plan and audit, a timer whose `NeedDaemonReload` is `yes` is not judged from that stale state (no FragmentPath/DropInPaths or calendar check runs): plan reports it deferred/unknown, audit reports the stale manager state as drift. Apply synchronizes the manager first.
+- A failure after the unit file was written or removed (for example a failed daemon-reload) reports the change as `changed`, never only `possible`.
+- Deviation from §42.5: `NextElapseUSecRealtime` and `LastTriggerUSec` are not shown in audit in v1.15.0 P1 (information only; no decision depends on them).
+- A timer unit whose `UnitFileState` is `static` (no `[Install]` section, which Sinter never writes) cannot be disabled; `state: absent` on it fails through the `service` code with nothing changed.
 - NOT VERIFIED on a real host: that `systemd-analyze calendar` changes nothing; the real FragmentPath/DropInPaths answers; enabling through `timers.target`; daemon-reload of the written unit. Recorded for the P8 Tier F acceptance.
 
 43. Connection-risk control and approvals (v1.15.0)

@@ -82,7 +82,7 @@ pub fn valid_triggered_unit(s: &str) -> bool {
     let Some((stem, suffix)) = s.rsplit_once('.') else {
         return false;
     };
-    s.len() <= 256
+    s.len() <= 255
         && TRIGGER_SUFFIXES.contains(&suffix)
         && !stem.is_empty()
         && !stem.starts_with('.')
@@ -498,8 +498,13 @@ pub fn parse_unit_files(stdout: &str) -> std::result::Result<UnitFiles, String> 
 
 /// The reason a timer must not be touched, from its unit files and its
 /// `UnitFileState`, or `None` when Sinter may manage it (DESIGN §42.3, §42.5).
-pub fn refusal(name: &str, files: &UnitFiles, unit_file_state: &str) -> Option<String> {
-    if unit_file_state == "masked" {
+pub fn refusal(
+    name: &str,
+    files: &UnitFiles,
+    load_state: &str,
+    unit_file_state: &str,
+) -> Option<String> {
+    if load_state == "masked" || unit_file_state.starts_with("masked") {
         return Some(format!(
             "timer {} is masked; Sinter does not unmask units",
             timer_unit(name)
@@ -706,22 +711,32 @@ mod tests {
     fn unit_file_observation_and_refusal() {
         let f =
             parse_unit_files("FragmentPath=/etc/systemd/system/t.timer\nDropInPaths=\n").unwrap();
-        assert_eq!(refusal("t", &f, "enabled"), None);
+        assert_eq!(refusal("t", &f, "loaded", "enabled"), None);
         assert!(parse_unit_files("FragmentPath=a\n").is_err());
         assert!(parse_unit_files("FragmentPath=a\nFragmentPath=b\nDropInPaths=\n").is_err());
         assert!(parse_unit_files("FragmentPath=a\nDropInPaths=\nOther=x\n").is_err());
         let vendor =
             parse_unit_files("FragmentPath=/usr/lib/systemd/system/t.timer\nDropInPaths=\n")
                 .unwrap();
-        assert!(refusal("t", &vendor, "enabled")
+        assert!(refusal("t", &vendor, "loaded", "enabled")
             .unwrap()
             .contains("outside"));
         let dropin =
             parse_unit_files("FragmentPath=\nDropInPaths=/etc/systemd/system/t.timer.d/x.conf\n")
                 .unwrap();
-        assert!(refusal("t", &dropin, "").unwrap().contains("drop-ins"));
+        assert!(refusal("t", &dropin, "loaded", "")
+            .unwrap()
+            .contains("drop-ins"));
         let none = parse_unit_files("FragmentPath=\nDropInPaths=\n").unwrap();
-        assert!(refusal("t", &none, "masked").unwrap().contains("masked"));
-        assert_eq!(refusal("t", &none, ""), None);
+        assert!(refusal("t", &none, "loaded", "masked")
+            .unwrap()
+            .contains("masked"));
+        assert_eq!(refusal("t", &none, "not-found", ""), None);
+        assert!(refusal("t", &none, "loaded", "masked-runtime")
+            .unwrap()
+            .contains("masked"));
+        assert!(refusal("t", &none, "masked", "")
+            .unwrap()
+            .contains("masked"));
     }
 }
