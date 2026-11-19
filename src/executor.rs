@@ -1217,7 +1217,14 @@ impl SshExecutor {
     /// unset, the command fails or anything is unexpected.
     fn probe_ssh_connection(&mut self) -> Option<String> {
         let deadline = Instant::now() + Duration::from_secs(10);
+        let previous = self.session.timeout();
         self.session.set_timeout(10_000);
+        let out = self.probe_ssh_connection_inner(deadline);
+        self.session.set_timeout(previous);
+        out
+    }
+
+    fn probe_ssh_connection_inner(&mut self, deadline: Instant) -> Option<String> {
         let mut ch = self.session.channel_session().ok()?;
         ch.exec("/usr/bin/printenv SSH_CONNECTION").ok()?;
         let mut s = Vec::new();

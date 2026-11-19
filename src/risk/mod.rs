@@ -270,12 +270,33 @@ pub fn classify(set: Option<&PluginSet>, res: &FrozenResource) -> Classification
     });
     let source = format!("{}@{}", catalog.id(), catalog.version());
     match entry {
-        Some((true, enforcement, Some((classify, rule)), _)) => Classification::Risk {
-            class: classify(&res.with),
-            enforcement,
-            rule,
-            source,
-        },
+        Some((true, enforcement, Some((classify, rule)), ops)) => {
+            // The class is the larger of the type rule's and that of every
+            // operation the resource can run: a plugin definition cannot
+            // make a C or R operation look N (its facets choose the ops).
+            let Some(op_class) = ops_class(set, res, ops) else {
+                return Classification::Refused(format!(
+                    "{}: resource type {} of catalog {} can run an operation that has no connection-risk classification",
+                    res.id, res.type_, source
+                ));
+            };
+            let class = classify(&res.with).max(op_class);
+            if class != RiskClass::N && rule == rules::RuleKind::None {
+                return Classification::Refused(format!(
+                    "{}: resource type {} of catalog {} can run {} operations but has no rule to judge them",
+                    res.id,
+                    res.type_,
+                    source,
+                    class.label()
+                ));
+            }
+            Classification::Risk {
+                class,
+                enforcement,
+                rule,
+                source,
+            }
+        }
         Some((true, _, None, _)) if !dangerous => Classification::NotRisk,
         Some((true, enforcement, None, ops)) => {
             // Another type on a classified catalog: by its operations.
@@ -310,6 +331,22 @@ pub fn classify(set: Option<&PluginSet>, res: &FrozenResource) -> Classification
         )),
         _ => Classification::NotRisk,
     }
+}
+
+/// The largest class of the operations a plugin resource can run, or `None`
+/// when one of them is not in the catalog's classification.
+fn ops_class(
+    set: &PluginSet,
+    res: &FrozenResource,
+    ops: &[(&str, RiskClass)],
+) -> Option<RiskClass> {
+    let used = crate::plugin::run::wanted_ensure_ops(set, res).ok()?;
+    let mut c = RiskClass::N;
+    for op in used {
+        let (_, k) = ops.iter().find(|(o, _)| *o == op)?;
+        c = c.max(*k);
+    }
+    Some(c)
 }
 
 /// What a value refers to inside `{{ … }}`.
@@ -381,19 +418,24 @@ pub fn static_gate(model: &Model, approved: Option<&BTreeSet<String>>) -> Result
                 rule,
                 source,
             } => {
-                let mut refs = Refs::default();
-                for v in res.with.values() {
-                    refs_in(v, &registers, &mut refs);
-                }
-                if refs.registers {
-                    return Err(SinterError::schema(format!(
-                        "{}: a connection-risk resource may not depend on a register: its change could not be reviewed before contact",
-                        res.id
-                    )));
-                }
-                if refs.facts {
-                    // Facts are known only after contact: worst case.
-                    class = RiskClass::R;
+                // The new restrictions apply only where the control is in
+                // force and the resource can do more than N operations
+                // (whose worst case already counts every possible state).
+                if enforcement == Enforcement::Enforced && class != RiskClass::N {
+                    let mut refs = Refs::default();
+                    for v in res.with.values() {
+                        refs_in(v, &registers, &mut refs);
+                    }
+                    if refs.registers {
+                        return Err(SinterError::schema(format!(
+                            "{}: a connection-risk resource may not depend on a register: its change could not be reviewed before contact",
+                            res.id
+                        )));
+                    }
+                    if refs.facts {
+                        // Facts are known only after contact: worst case.
+                        class = RiskClass::R;
+                    }
                 }
                 if enforcement == Enforcement::Enforced && class == RiskClass::R {
                     if let Some(set) = approved {

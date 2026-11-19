@@ -166,6 +166,9 @@ struct Setup {
 
 impl Setup {
     fn with(catalog: &str) -> Setup {
+        Setup::with_plugin(catalog, PLUGIN_020)
+    }
+    fn with_plugin(catalog: &str, plugin: &str) -> Setup {
         let tmp = tempfile::tempdir().unwrap();
         let boundary = tmp.path().to_path_buf();
         let root = boundary.join("plugins-root");
@@ -180,7 +183,7 @@ impl Setup {
         );
         write_mode(
             &root.join("plugins/firewalld-0.2.0.plugin.toml"),
-            PLUGIN_020,
+            plugin,
             0o644,
         );
         let trust = format!(
@@ -188,7 +191,7 @@ impl Setup {
             approval::sha256_hex(catalog.as_bytes()),
             list(OBSERVE),
             list(MUTATE),
-            approval::sha256_hex(PLUGIN_020.as_bytes())
+            approval::sha256_hex(plugin.as_bytes())
         );
         write_mode(&root.join("trust.toml"), &trust, 0o600);
         Setup {
@@ -1481,11 +1484,37 @@ fn approvals_refuse_other_hosts_expiry_tampering_and_double_approval() {
         .unwrap()
         .replace("\"x\"", "\"y\"");
     std::fs::write(&p, text).unwrap();
+    let e = s.approve(&p, 600, "t", |_| Ok(true)).unwrap_err();
+    assert!(e.message.contains("integrity"), "{}", e.message);
+    // the summary alone edited (shown to the approver, not digested): also refused
+    let p = s
+        .write_request(
+            &d.path().join("req5b"),
+            "web01",
+            content("web01", &[("p", "R", "x")]),
+            json!({"note": "real"}),
+        )
+        .unwrap();
+    let text = std::fs::read_to_string(&p)
+        .unwrap()
+        .replace("\"real\"", "\"fake\"");
+    std::fs::write(&p, text).unwrap();
     assert!(s
         .approve(&p, 600, "t", |_| Ok(true))
         .unwrap_err()
         .message
-        .contains("does not match"));
+        .contains("integrity"));
+    // a request file readable by others is refused
+    let p = s
+        .write_request(
+            &d.path().join("req5c"),
+            "web01",
+            content("web01", &[("p", "R", "x")]),
+            json!({}),
+        )
+        .unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(s.approve(&p, 600, "t", |_| Ok(true)).is_err());
     // refused confirmation
     let p = s
         .write_request(
@@ -1712,4 +1741,76 @@ fn an_unlisted_type_is_classified_by_the_operations_it_can_run() {
         classify(m.plugins.as_deref(), &m.resources[0]),
         Classification::Refused(_)
     ));
+}
+
+#[test]
+fn not_enforced_or_n_resources_keep_v114_behaviour_with_registers_and_facts() {
+    // Production table: 0.2.0 is not enforced, so neither registers nor
+    // facts change anything (B-1).
+    let s = Setup::new();
+    let m = s
+        .model("  - id: c\n    type: command\n    with: { program: /usr/bin/true, register: out }\n  - id: p\n    type: firewalld.port\n    depends_on: [c]\n    with: { zone: \"{{ registers.out.stdout }}\", port: \"8080/tcp\", state: present }\n")
+        .unwrap();
+    assert!(static_gate(&m, Some(&BTreeSet::new())).is_ok());
+    let m = s
+        .model("  - id: p\n    type: firewalld.port\n    with: { zone: \"{{ facts.hostname }}\", port: \"8080/tcp\", state: absent }\n")
+        .unwrap();
+    let items = static_gate(&m, Some(&BTreeSet::new())).unwrap();
+    assert_ne!(items[0].class, RiskClass::R);
+    // Enforced, but every operation the resource can run is N: facts do not
+    // make it R and registers are not refused.
+    let _g = TableGuard::set(ENFORCED_020);
+    let m = s
+        .model("  - id: p\n    type: firewalld.port\n    with: { zone: \"{{ facts.hostname }}\", port: \"8080/tcp\", state: present }\n")
+        .unwrap();
+    assert_eq!(
+        static_gate(&m, Some(&BTreeSet::new())).unwrap()[0].class,
+        RiskClass::N
+    );
+}
+
+#[test]
+fn a_plugin_definition_cannot_make_a_removal_look_n() {
+    // B-2: a pinned plugin for the same catalog whose port facets want a
+    // separate field. `state: present, mode: absent` runs the remove ops.
+    let plugin = PLUGIN_020.replacen(
+        "name = \"firewalld.port\"\nfields = { zone = { kind = \"ident\" }, port = { kind = \"port_single\" }, state = { kind = \"enum\", values = [\"present\", \"absent\"] } }",
+        "name = \"firewalld.port\"\nfields = { zone = { kind = \"ident\" }, port = { kind = \"port_single\" }, state = { kind = \"enum\", values = [\"present\", \"absent\"] }, mode = { kind = \"enum\", values = [\"present\", \"absent\"] } }",
+        1,
+    );
+    let plugin = plugin.replacen(
+        "observe = \"query_port_runtime\"\nwant = \"field:state\"",
+        "observe = \"query_port_runtime\"\nwant = \"field:mode\"",
+        1,
+    );
+    let plugin = plugin.replacen(
+        "observe = \"query_port_permanent\"\nwant = \"field:state\"",
+        "observe = \"query_port_permanent\"\nwant = \"field:mode\"",
+        1,
+    );
+    assert_ne!(plugin, PLUGIN_020, "the variant differs");
+    let s = Setup::with_plugin(CATALOG_020, Box::leak(plugin.into_boxed_str()));
+    let _g = TableGuard::set(ENFORCED_020);
+    let m = s
+        .model("  - id: p\n    type: firewalld.port\n    with: { zone: public, port: \"2222/tcp\", state: present, mode: absent }\n")
+        .expect("the variant plugin loads");
+    match classify(m.plugins.as_deref(), &m.resources[0]) {
+        Classification::Risk { class, .. } => assert_eq!(class, RiskClass::C),
+        other => panic!("{other:?}"),
+    }
+    let f = fw();
+    let (r, _) = run(m, Mode::Apply, target(&f, net(2222)), ctx());
+    assert_refused(&r, &f, "p", "affects the management connection");
+}
+
+#[test]
+fn a_declared_loopback_on_a_remote_connection_is_unknown() {
+    let mut n = net_facts(
+        "203.0.113.9 50000 192.0.2.10 22",
+        "0 0 192.0.2.10:22 203.0.113.9:50000\n",
+        "2: eth0    inet 192.0.2.10/24 scope global eth0\n",
+        "203.0.113.9 from 192.0.2.10 dev eth0\n",
+    );
+    n.loopback_declared = true;
+    assert!(matches!(path::determine(&n), PathState::Unknown(_)));
 }

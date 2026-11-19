@@ -3785,10 +3785,17 @@ fn execute(
                     Err(e) if e.kind == ErrorKind::Indeterminate => "indeterminate",
                     Err(_) => "failed",
                 };
-                st.ledger(
+                // The run's own result wins: a ledger failure is reported,
+                // never turned into an exit code that hides a change.
+                if let Err(e) = st.ledger(
                     event,
                     serde_json::json!({"approval_id": rec["approval_id"], "host": host}),
-                )?;
+                ) {
+                    eprintln!(
+                        "sinter: warning: the approval ledger was not written: {}",
+                        sanitize_line(&e.message)
+                    );
+                }
             }
             Outcome::Run(Box::new(run?))
         }
@@ -3855,6 +3862,20 @@ fn approve_command(a: ApproveArgs) -> Result<u8, SinterError> {
                     sanitize_line(r["class"].as_str().unwrap_or("-")),
                     sanitize_line(r["dynamic"].as_str().unwrap_or("")),
                 );
+                if let Some(d) = r["desired"].as_object() {
+                    for (k, v) in d {
+                        println!(
+                            "      {} = {}",
+                            sanitize_line(k),
+                            sanitize_line(v.as_str().unwrap_or("?"))
+                        );
+                    }
+                }
+                if let Some(steps) = r["steps"].as_array() {
+                    for st in steps {
+                        println!("      step: {}", sanitize_line(st.as_str().unwrap_or("?")));
+                    }
+                }
             }
         }
         if let Some(rs) = req["summary"]["risk"].as_array() {

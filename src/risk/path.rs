@@ -181,6 +181,11 @@ pub fn determine(n: &NetFacts) -> PathState {
     let Some((client, cp, server, sp)) = parse_ssh_connection(raw) else {
         return PathState::Unknown("SSH_CONNECTION is not four valid fields".into());
     };
+    if n.loopback_declared && !(server.is_loopback() && client.is_loopback()) {
+        return PathState::Unknown(
+            "a direct local connection was declared, but the connection is not a loopback connection".into(),
+        );
+    }
     if server.is_loopback() || client.is_loopback() {
         if server.is_loopback() && client.is_loopback() && n.loopback_declared {
             return PathState::Known(MgmtPath {

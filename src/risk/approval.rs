@@ -218,8 +218,8 @@ impl Store {
                     return Err(err(format!("{} is not a 32-byte key", p.display())));
                 }
                 let mut b = Vec::new();
-                File::open(&p)
-                    .and_then(|mut f| f.read_to_end(&mut b))
+                open_private(&p, false)?
+                    .read_to_end(&mut b)
                     .map_err(|e| err(format!("cannot read {}: {}", p.display(), e)))?;
                 if b.len() != 32 {
                     return Err(err(format!("{} is not a 32-byte key", p.display())));
@@ -316,8 +316,12 @@ impl Store {
         if !valid_host_label(host) {
             return Err(err("the host name cannot be used in a request file name"));
         }
-        std::fs::create_dir_all(dir)
-            .map_err(|e| err(format!("cannot create {}: {}", dir.display(), e)))?;
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| err(format!("cannot create {}: {}", parent.display(), e)))?;
+        }
+        self.private_dir(dir)?;
+        let key = self.key()?;
         let nonce = hex(&random_bytes::<16>()?);
         let content_digest = sha256_hex(canonical(&content).as_bytes());
         let req = json!({
@@ -328,8 +332,12 @@ impl Store {
             "created_at": now_secs(),
             "nonce": nonce,
         });
+        // The whole request, summary included, is authenticated: what the
+        // approver is shown is what this controller wrote.
+        let mut signed = req.clone();
+        signed["mac"] = J::String(keyed(&key, &req));
         let p = dir.join(format!("{}.request.json", host));
-        let text = serde_json::to_string_pretty(&req).unwrap() + "\n";
+        let text = serde_json::to_string_pretty(&signed).unwrap() + "\n";
         crate::securefile::publish_new(&p, text.as_bytes(), 0o600)
             .map_err(|e| err(format!("cannot write {}: {}", p.display(), e)))?;
         self.ledger(
@@ -353,11 +361,23 @@ impl Store {
             return Err(err("an approval expires after 1 second to 24 hours"));
         }
         let key = self.key()?;
+        let meta = std::fs::symlink_metadata(request)
+            .map_err(|e| err(format!("cannot inspect {}: {}", request.display(), e)))?;
+        check_private(request, &meta, false)?;
         let text = read_small(request, 4 * 1024 * 1024)?;
-        let req: J =
+        let mut req: J =
             serde_json::from_str(&text).map_err(|_| err("the request is not valid JSON"))?;
         if req["schema"] != REQUEST_SCHEMA {
             return Err(err("not an approval request"));
+        }
+        let mac = req["mac"].as_str().unwrap_or("").to_string();
+        if let J::Object(m) = &mut req {
+            m.remove("mac");
+        }
+        if !same_digest(&mac, &keyed(&key, &req)) {
+            return Err(err(
+                "the request fails its integrity check (edited, or not written by this controller)",
+            ));
         }
         let content = &req["content"];
         let content_digest = sha256_hex(canonical(content).as_bytes());

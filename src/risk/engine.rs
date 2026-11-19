@@ -44,6 +44,10 @@ pub struct RiskRecord {
     pub reason: Option<String>,
     pub change_digest: Option<String>,
     pub approved: bool,
+    /// The planned operations and the desired values, for the approval
+    /// prompt (values withheld for a sensitive resource).
+    pub steps: Vec<String>,
+    pub desired: std::collections::BTreeMap<String, String>,
 }
 
 /// What an engine leaves for the CLI after a run.
@@ -369,6 +373,20 @@ impl Engine {
             reason: None,
             change_digest: digest.clone(),
             approved: false,
+            steps: pending_ops.to_vec(),
+            desired: values
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        if sensitive {
+                            "[redacted]".to_string()
+                        } else {
+                            v.clone()
+                        },
+                    )
+                })
+                .collect(),
         };
         if let Enforcement::PendingOwner(d) = item.enforcement {
             record.dynamic = "not-enforced".into();
@@ -534,10 +552,13 @@ pub fn content_object(
                 "when": r.when,
                 "depends_on": r.depends_on,
                 "notify": r.notify,
+                "sensitive": r.sensitive,
+                "loop_index": r.loop_index,
+                "loop_item": format!("{:?}", r.loop_item),
             })
         })
         .collect();
-    let model_digest = store.keyed(key, &json!({"resources": model_repr, "handlers": model.handlers.iter().map(|h| h.id.clone()).collect::<Vec<_>>()}));
+    let model_digest = store.keyed(key, &json!({"resources": model_repr, "handlers": model.handlers.iter().map(|h| format!("{:?}", (&h.id, &h.kind, &h.service, &h.action, &h.command))).collect::<Vec<_>>()}));
     let resources: Vec<J> = report
         .resources
         .iter()
@@ -552,6 +573,8 @@ pub fn content_object(
                 "class": risk.map(|x| x.class.label()).unwrap_or("-"),
                 "dynamic": risk.map(|x| x.dynamic.clone()).unwrap_or_default(),
                 "change_digest": risk.and_then(|x| x.change_digest.clone()),
+                "steps": risk.map(|x| x.steps.clone()).unwrap_or_default(),
+                "desired": risk.map(|x| json!(x.desired)).unwrap_or(J::Null),
             })
         })
         .collect();
