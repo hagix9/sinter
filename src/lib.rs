@@ -35,6 +35,7 @@ pub mod project;
 pub mod recipe_search;
 pub mod resources;
 pub mod result;
+pub mod risk;
 pub mod secret_source;
 pub mod secrets;
 pub mod secrets_cli;

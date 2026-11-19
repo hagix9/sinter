@@ -52,6 +52,9 @@ struct HostEntry {
     known_hosts: Option<PathBuf>,
     #[serde(default)]
     identity_files: Vec<PathBuf>,
+    /// `loopback`: the connection is a direct local connection (DESIGN
+    /// §43.3). No other value exists.
+    management_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,6 +82,9 @@ pub struct InventoryHost {
     pub user: Option<String>,
     pub known_hosts: Option<PathBuf>,
     pub identity_files: Vec<PathBuf>,
+    /// The administrator declared a direct local connection over the
+    /// loopback interface (`management_path: loopback`, DESIGN §43.3).
+    pub management_loopback: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +164,15 @@ pub(crate) fn parse_inventory(text: &str, path: &Path) -> Result<Inventory> {
         if !valid_name(&name) {
             return Err(bad_name("host", &name));
         }
+        let management_loopback = match h.management_path.as_deref() {
+            None => false,
+            Some("loopback") => true,
+            Some(_) => {
+                return Err(SinterError::schema(format!(
+                    "inventory {ctx}: host {name}: management_path must be loopback"
+                )))
+            }
+        };
         let address = h.address.unwrap_or_else(|| name.clone());
         crate::sshconfig::validate_host_arg(&address).map_err(|e| {
             SinterError::schema(format!("inventory {ctx}: host {name}: {}", e.message))
@@ -176,6 +191,7 @@ pub(crate) fn parse_inventory(text: &str, path: &Path) -> Result<Inventory> {
                 user: h.user,
                 known_hosts: h.known_hosts.map(expand_home),
                 identity_files: h.identity_files.into_iter().map(expand_home).collect(),
+                management_loopback,
             },
         );
     }

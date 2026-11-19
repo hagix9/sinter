@@ -1303,6 +1303,40 @@ impl TargetFs {
         )
     }
 
+    /// `SSH_CONNECTION` of the connection (DESIGN §43.3), read once without
+    /// `env -i`; `None` for a local target or when it cannot be read.
+    pub(crate) fn probe_ssh_connection(&mut self) -> Option<String> {
+        self.ex.probe_ssh_connection()
+    }
+
+    pub(crate) fn host_key_sha256(&self) -> Option<String> {
+        self.ex.host_key_sha256()
+    }
+
+    pub(crate) fn ssh_user(&self) -> Option<String> {
+        self.ex.ssh_user()
+    }
+
+    /// A read-only observation of the management path (DESIGN §43.3). Only
+    /// the programs of that check are accepted (`ss`, `ip`, `firewall-cmd`);
+    /// the arguments are fixed by the caller or values Sinter checked (IP
+    /// addresses it parsed, names that passed the plugin `ident` rule). No
+    /// mutation permit is taken; the forms are the read-only shapes of
+    /// DESIGN §47.1.
+    pub(crate) fn risk_observe(&mut self, program: &str, args: &[&str]) -> Result<Output> {
+        if !matches!(
+            program,
+            "/usr/bin/ss" | "/usr/sbin/ip" | "/usr/bin/firewall-cmd"
+        ) {
+            return Err(SinterError::apply(format!(
+                "internal error: {} is not a management-path observation",
+                program
+            )));
+        }
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        self.run_argv(program, &args)
+    }
+
     /// Where a unit's definition comes from (`systemd_timer`, DESIGN §42.3):
     /// its fragment path and drop-in paths. Read-only, exact argv, the unit
     /// name after `--`; no mutation permit is needed.

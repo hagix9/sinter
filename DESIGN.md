@@ -3168,7 +3168,7 @@ No existing type, field, exit code or JSON key changes. `systemd_timer` is added
 
 43. Connection-risk control and approvals (v1.15.0)
 
-PLANNED (v1.15.0 P0 design, Owner decisions D-3, D-4 and D-12 of 2026-11-19; not implemented).
+IMPLEMENTED (Core, v1.15.0 P2, not released; Owner decisions D-3, D-4 and D-12 of 2026-11-19), with the notes and deviations of §43.7. No connection-risk type is enforced in a release yet: firewalld 0.2.0 waits for Owner decision D-13, firewalld 0.3.0 comes with P3 and `nm_connection` with P4.
 
 43.1 Purpose
 
@@ -3248,6 +3248,19 @@ firewalld (`affects`, approved): if the resource has a runtime facet to change, 
 NetworkManager (`affects`, approved): requires a checkpoint (§45.7). Without one the resource fails before any mutation (D-12).
 
 Neither procedure guarantees recovery. A daemon restart, a reboot, routes or filters outside the managed tool, and the network outside the host are not covered. Documentation and plan output must state this; no text may describe the recovery as guaranteed.
+
+43.7 Implementation notes (P2)
+
+- Code: `src/risk/mod.rs` (classification table bound to catalog digests, the static gate), `src/risk/path.rs` (management path and zone), `src/risk/rules.rs` (clear/affects/unknown rules of §44.4, §44.6, §45.6 and the §43.3 decision table), `src/risk/approval.rs` (store, key, HMAC, requests, approvals, use markers, ledger), `src/risk/engine.rs` (engine glue, content object). CLI: `plan --approval-request <dir>`, `apply --approval <id>` (repeatable), `--management-path loopback` (with `--host`), inventory `management_path: loopback`, `sinter approve <request> [--expires <minutes>]`, `sinter approvals list`.
+- Classification table: firewalld 0.1.0 (all N, enforced) and 0.2.0 (service, port and protocol `absent` C, `port_range` N; **not enforced**: Owner decision D-13 is pending, so 0.2.0 recipes run exactly as in v1.14 and plan/apply only note the class). An activated catalog with a mutate operation whose verified program's final component is `firewall-cmd`, `nmcli`, `ip` or `busctl`, and that is not in the table with its exact digest, is refused before contact. Unit tests install other tables for their own thread only (compiled into tests alone). A resource type of a classified catalog that the table does not list (another plugin built on the same catalog) is classified by the catalog operations it can run: only operations the table classifies N make it N; any other operation, or one missing from the table, refuses it before contact.
+- Before contact: the CLI checks every execution of the run (static gate) and, for apply with approvals, loads and authenticates every record, then marks all used, before the first host is contacted. `Engine::run` repeats the static gate for other callers (it runs after the engine's connection, so the CLI check is the before-contact one).
+- Register references are detected in the `registers.<name>` namespace; a fact reference makes the resource R.
+- Content digest (deviation from §43.4 in form, not in effect): the content object holds the Sinter version, host, target identity (SSH user, sudo, SHA-256 of the verified host key), a keyed digest of the frozen model (which already contains the variable values, so no separate variables digest), and for every resource its id, type, change label, unknown flag and a keyed digest of its diff, plus, for connection-risk resources, the class, the dynamic result and the change digest (keyed: id, type, class, desired values, observed and wanted facets, planned operations). Raw observations of other resources are represented by their plan outcome.
+- Apply preflight (deviation): the read-only re-plan runs as a separate plan-mode engine, so on its own SSH connection, right before the apply engine; the per-resource change digest check at each connection-risk resource's turn closes the gap between them.
+- Guarded procedures are not implemented in P2 (firewalld runtime-first comes with P3, the NetworkManager checkpoint with P4): every `affects` result is refused, even with an approval.
+- JSON: the per-resource `risk` key of §43.5 is not added in P2 (no enforced type exists yet); the class, dynamic result and approval are in the resource notes, the request summary and the approval prompt. It is added with the first enforced type (P3).
+- Observations used for the zone that are assumptions until measured on real hosts (P3, §44.3): `firewall-cmd --zone=<z> --get-priority` (a firewalld whose major version is 2 or more must answer it, older ones may reject it), `--get-zone-of-interface` answering `no zone` with exit 2 for an unbound interface, `allow-host-ipv6` being the only default active policy, and the program paths `/usr/bin/ss`, `/usr/sbin/ip`, `/usr/bin/firewall-cmd`. Any other answer makes the path or zone unknown (refused), never assumed.
+- `loopback_reload_measured` is false: a reload on a declared loopback path stays unknown until measured (§44.4).
 
 44. Resource Plugin Core extensions and firewalld 0.3.0 (v1.15.0)
 

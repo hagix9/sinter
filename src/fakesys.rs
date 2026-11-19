@@ -101,6 +101,64 @@ pub struct FakeManager {
     /// copy in `/etc` says (another fragment of the same name, for example
     /// under `/run/systemd/system`, takes over once the first is removed).
     pub present_after_reload: BTreeMap<String, (String, String, String)>,
+    /// The scripted network view of the connection (DESIGN §43.3).
+    pub net: FakeNet,
+}
+
+/// What the management-path observations of the scripted target answer.
+/// Every field `None` answers like a missing tool (exit 127).
+#[derive(Debug, Clone, Default)]
+pub struct FakeNet {
+    pub ssh_connection: Option<String>,
+    pub host_key_sha256: Option<String>,
+    pub ssh_user: Option<String>,
+    pub ss: Option<String>,
+    pub ip_addr: Option<String>,
+    /// `ip -o route get <client> from <server>`, by client address; the
+    /// `default_route` answer for any other client.
+    pub routes: BTreeMap<String, String>,
+    pub default_route: Option<String>,
+    /// Invocations served, in order.
+    pub received: Vec<Vec<String>>,
+}
+
+impl FakeNet {
+    fn out(code: i32, stdout: &str) -> crate::executor::Output {
+        crate::executor::Output {
+            completion: crate::executor::Completion::Exited(code),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }
+    }
+    pub fn ss(&mut self, args: &[String]) -> crate::executor::Output {
+        self.received.push(args.to_vec());
+        match (&self.ss, args) {
+            (Some(o), [a, b, c]) if a == "-Htn" && b == "state" && c == "established" => {
+                Self::out(0, o)
+            }
+            (None, _) => Self::out(127, ""),
+            _ => Self::out(1, ""),
+        }
+    }
+    pub fn ip(&mut self, args: &[String]) -> crate::executor::Output {
+        self.received.push(args.to_vec());
+        let a: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        match a.as_slice() {
+            ["-o", "addr", "show"] => match &self.ip_addr {
+                Some(o) => Self::out(0, o),
+                None => Self::out(127, ""),
+            },
+            ["-o", "route", "get", client, "from", _] => {
+                match self.routes.get(*client).or(self.default_route.as_ref()) {
+                    Some(o) => Self::out(0, o),
+                    None => Self::out(2, ""),
+                }
+            }
+            _ => Self::out(1, ""),
+        }
+    }
 }
 
 impl Default for FakeManager {
@@ -134,6 +192,7 @@ impl Default for FakeManager {
             invalid_calendars: BTreeSet::new(),
             calendar_checks: 0,
             present_after_reload: BTreeMap::new(),
+            net: FakeNet::default(),
         }
     }
 }
@@ -2222,6 +2281,21 @@ pub struct FakeFirewalld {
     /// When set, a successful `--add-service` reports success without
     /// changing anything (a tool that lies), for post-condition tests.
     pub add_is_noop: bool,
+    /// Connection-risk observations (DESIGN §43.3).
+    pub version: Option<String>,
+    pub default_zone: Option<String>,
+    /// zone -> sources.
+    pub sources: BTreeMap<String, Vec<String>>,
+    /// interface -> zone.
+    pub interfaces: BTreeMap<String, String>,
+    /// Zones with forward ports.
+    pub forward_ports: BTreeSet<String>,
+    /// zone -> priority; `None` answers `--get-priority` as an unknown option.
+    pub priorities: Option<BTreeMap<String, i64>>,
+    pub active_policies: Vec<String>,
+    pub direct_rules: Vec<String>,
+    /// service -> ports of its definition (`22/tcp`).
+    pub service_ports: BTreeMap<String, Vec<String>>,
 }
 
 impl FakeFirewalld {
@@ -2275,9 +2349,52 @@ impl FakeFirewalld {
         }
         if let Some(sv) = val("--info-service=") {
             return if self.services.contains(&sv) {
-                fw_out(0, "http\n  ports: 80/tcp\n", "")
+                match self.service_ports.get(&sv) {
+                    Some(p) => fw_out(0, &format!("{}\n  ports: {}\n", sv, p.join(" ")), ""),
+                    None => fw_out(0, "http\n  ports: 80/tcp\n", ""),
+                }
             } else {
                 fw_out(101, "", "Error: INVALID_SERVICE\n")
+            };
+        }
+        if args == ["--version"] {
+            return match &self.version {
+                Some(v) => fw_out(0, &format!("{}\n", v), ""),
+                None => fw_out(0, "1.3.4\n", ""),
+            };
+        }
+        if args == ["--get-default-zone"] {
+            return fw_out(
+                0,
+                &format!(
+                    "{}\n",
+                    self.default_zone.clone().unwrap_or_else(|| "public".into())
+                ),
+                "",
+            );
+        }
+        if args == ["--get-zones"] {
+            let z: Vec<String> = self.zones.iter().cloned().collect();
+            return fw_out(0, &format!("{}\n", z.join(" ")), "");
+        }
+        if args == ["--get-active-policies"] {
+            return fw_out(0, &format!("{}\n", self.active_policies.join(" ")), "");
+        }
+        if args == ["--direct", "--get-all-rules"] {
+            return fw_out(
+                0,
+                &self
+                    .direct_rules
+                    .iter()
+                    .map(|r| format!("{}\n", r))
+                    .collect::<String>(),
+                "",
+            );
+        }
+        if let Some(i) = val("--get-zone-of-interface=") {
+            return match self.interfaces.get(&i) {
+                Some(z) => fw_out(0, &format!("{}\n", z), ""),
+                None => fw_out(2, "no zone\n", ""),
             };
         }
         let Some(zone) = val("--zone=") else {
@@ -2285,6 +2402,27 @@ impl FakeFirewalld {
         };
         if !self.zones.contains(&zone) {
             return fw_out(112, "", "Error: INVALID_ZONE\n");
+        }
+        if args.len() == 2 && args[1] == "--list-sources" {
+            let s = self.sources.get(&zone).cloned().unwrap_or_default();
+            return fw_out(0, &format!("{}\n", s.join(" ")), "");
+        }
+        if args.len() == 2 && args[1] == "--list-forward-ports" {
+            return fw_out(
+                0,
+                if self.forward_ports.contains(&zone) {
+                    "port=2222:proto=tcp:toport=22:toaddr=\n"
+                } else {
+                    "\n"
+                },
+                "",
+            );
+        }
+        if args.len() == 2 && args[1] == "--get-priority" {
+            return match &self.priorities {
+                Some(p) => fw_out(0, &format!("{}\n", p.get(&zone).copied().unwrap_or(0)), ""),
+                None => fw_out(2, "", "usage: unrecognized arguments: --get-priority\n"),
+            };
         }
         if let Some(sv) = val("--query-service=") {
             let set = if perm { &self.permanent } else { &self.runtime };

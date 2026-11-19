@@ -210,6 +210,8 @@ pub struct Engine {
     pub(crate) progress: Arc<dyn ProgressSink>,
     /// Plan only: what the resources planned so far may change.
     pub(crate) planned: PlannedEffects,
+    /// Connection-risk control state (DESIGN §43).
+    pub(crate) risk: crate::risk::engine::RiskState,
 }
 
 impl Engine {
@@ -380,6 +382,7 @@ impl Engine {
             secrets: None,
             progress,
             planned: PlannedEffects::default(),
+            risk: Default::default(),
         })
     }
 
@@ -425,6 +428,10 @@ impl Engine {
         // execution of the run before contacting a target; this keeps every
         // other caller of `run` equally safe. audit does not come here.
         crate::plugin::require_allowed_mutations(&self.model)?;
+        // Connection-risk control (DESIGN §43): the static gate, then the
+        // management path when the run has enforced connection-risk
+        // resources. Before any backup, observation or change.
+        self.risk_begin()?;
         let order = execution_order(&self.model)?;
         // Cloned so the stage trackers borrow this handle, not `self`, which
         // the traversal needs mutably. Observation only: nothing below reads

@@ -1371,6 +1371,7 @@ mod tests {
                         user: None,
                         known_hosts: None,
                         identity_files: Vec::new(),
+                        management_loopback: false,
                     },
                 );
             }

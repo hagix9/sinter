@@ -33,7 +33,7 @@ pub(crate) struct FacetState {
 /// Everything plan, apply and audit need after observing a resource.
 pub(crate) struct Observation {
     set: Arc<PluginSet>,
-    values: BTreeMap<String, String>,
+    pub(crate) values: BTreeMap<String, String>,
     pub sensitive: bool,
     pub facets: Vec<FacetState>,
     /// `plugin firewalld@0.1.0 (catalog firewalld@0.1.0)`, for messages.
@@ -55,7 +55,7 @@ fn withheld(sensitive: bool, msg: String) -> String {
 }
 
 /// The plugin, its catalog and the type that provide `type_`.
-fn resolve<'a>(
+pub(crate) fn resolve<'a>(
     set: &'a PluginSet,
     res: &FrozenResource,
 ) -> Result<(&'a VerifiedPlugin, &'a VerifiedCatalog, &'a ResourceType)> {
@@ -228,6 +228,15 @@ impl Engine {
             .filter(|f| f.observed != f.want)
             .cloned()
             .collect();
+        // Connection-risk control (DESIGN §43): after observing, before any
+        // mutation. An error refuses the resource with nothing changed.
+        let facet_view: Vec<(String, String, String)> = obs
+            .facets
+            .iter()
+            .map(|f| (f.name.clone(), f.observed.clone(), f.want.clone()))
+            .collect();
+        let pending_ops: Vec<String> = pending.iter().filter_map(|f| f.ensure_op.clone()).collect();
+        let risk_note = self.risk_check_plugin(res, &obs.values, &facet_view, &pending_ops)?;
         let summary = |facets: &[FacetState], observed: bool| {
             facets
                 .iter()
@@ -255,6 +264,7 @@ impl Engine {
                 obs.provenance,
                 obs.ops_run.join(",")
             ));
+            r.notes.extend(risk_note.clone());
             return Ok(r);
         }
         if self.opts.mode == Mode::Plan {
@@ -282,6 +292,7 @@ impl Engine {
                 obs.ops_run.join(","),
                 would.join(",")
             ));
+            r.notes.extend(risk_note.clone());
             return Ok(r);
         }
 
@@ -397,6 +408,7 @@ impl Engine {
             obs.ops_run.join(","),
             done.join(",")
         ));
+        r.notes.extend(risk_note);
         Ok(r)
     }
 }
@@ -424,6 +436,35 @@ fn result(
         handler_notifications: Vec::new(),
         loop_index: res.loop_index,
     }
+}
+
+/// Every ensure operation a plugin resource could run (static, as
+/// [`unallowed_mutations`] counts them). `Err` when a wanted state has no
+/// operation or the type is not provided.
+pub(crate) fn wanted_ensure_ops(
+    set: &PluginSet,
+    res: &FrozenResource,
+) -> std::result::Result<Vec<String>, ()> {
+    let mut out = std::collections::BTreeSet::new();
+    let (_, _, rtype) = resolve(set, res).map_err(|_| ())?;
+    for f in rtype.facets() {
+        let wanted: Vec<String> = match f.want() {
+            Want::State(s) => vec![s.clone()],
+            Want::Field(field) => match res.with.get(field) {
+                Some(crate::value::Value::Str(v)) if !crate::expressions::has_interpolation(v) => {
+                    vec![v.clone()]
+                }
+                _ => match rtype.fields().get(field) {
+                    Some(super::verify::FieldKind::Enum(values)) => values.clone(),
+                    _ => return Err(()),
+                },
+            },
+        };
+        for state in &wanted {
+            out.insert(f.ensure_op(state).ok_or(())?.to_string());
+        }
+    }
+    Ok(out.into_iter().collect())
 }
 
 /// The mutate operations a plugin resource could need that the trust file

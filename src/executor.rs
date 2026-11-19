@@ -482,6 +482,34 @@ impl Executor {
         self.run_with_observer(req, None)
     }
 
+    /// `SSH_CONNECTION` of the connection (DESIGN §43.3); `None` for a local
+    /// target or when it cannot be read.
+    pub fn probe_ssh_connection(&mut self) -> Option<String> {
+        match self {
+            Executor::Local(_) => None,
+            Executor::Ssh(s) => s.probe_ssh_connection(),
+            Executor::Fake(f) => f.target.manager.net.ssh_connection.clone(),
+        }
+    }
+
+    /// SHA-256 of the verified host key (`None` for a local target).
+    pub fn host_key_sha256(&self) -> Option<String> {
+        match self {
+            Executor::Local(_) => None,
+            Executor::Ssh(s) => Some(s.host_key_sha256.clone()),
+            Executor::Fake(f) => f.target.manager.net.host_key_sha256.clone(),
+        }
+    }
+
+    /// The SSH user (`None` for a local target).
+    pub fn ssh_user(&self) -> Option<String> {
+        match self {
+            Executor::Local(_) => None,
+            Executor::Ssh(s) => Some(s.user.clone()),
+            Executor::Fake(f) => f.target.manager.net.ssh_user.clone(),
+        }
+    }
+
     /// [`run`](Self::run) with an observation-only consumer of the raw output
     /// chunks. The observer cannot change the request, the capture, the
     /// timeout, the completion classification or the statistics.
@@ -1065,6 +1093,9 @@ pub struct SshExecutor {
     pub home: String,
     pub log: Vec<CommandRecord>,
     stats: ExecStatsHandle,
+    /// SHA-256 (hex) of the verified host key blob (DESIGN §43.4).
+    host_key_sha256: String,
+    user: String,
 }
 
 impl SshExecutor {
@@ -1158,6 +1189,16 @@ impl SshExecutor {
             false
         };
 
+        let host_key_sha256 = session
+            .host_key()
+            .map(|(k, _)| {
+                use sha2::Digest;
+                sha2::Sha256::digest(k)
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
         Ok(SshExecutor {
             sudo,
             root_direct,
@@ -1165,7 +1206,55 @@ impl SshExecutor {
             home,
             log: Vec::new(),
             stats,
+            host_key_sha256,
+            user: cfg.user.clone(),
         })
+    }
+
+    /// `SSH_CONNECTION` of this session (DESIGN §43.3): the one command
+    /// Sinter runs without `env -i` after setup, fixed text, no sudo, a
+    /// 10-second budget and a 512-byte bound. `None` when the variable is
+    /// unset, the command fails or anything is unexpected.
+    fn probe_ssh_connection(&mut self) -> Option<String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        self.session.set_timeout(10_000);
+        let mut ch = self.session.channel_session().ok()?;
+        ch.exec("/usr/bin/printenv SSH_CONNECTION").ok()?;
+        let mut s = Vec::new();
+        let mut tmp = [0u8; 256];
+        loop {
+            if Instant::now() >= deadline {
+                let _ = ch.close();
+                return None;
+            }
+            match ch.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if s.len() + n > 512 {
+                        let _ = ch.close();
+                        return None;
+                    }
+                    s.extend_from_slice(&tmp[..n]);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    wait_readable_until(self.session.as_raw_fd(), deadline);
+                }
+                Err(_) => {
+                    let _ = ch.close();
+                    return None;
+                }
+            }
+        }
+        ch.wait_close().ok()?;
+        if ch.exit_status().ok()? != 0 {
+            return None;
+        }
+        let text = String::from_utf8(s).ok()?;
+        let line = text.strip_suffix('\n').unwrap_or(&text);
+        if line.contains('\n') || line.is_empty() {
+            return None;
+        }
+        Some(line.to_string())
     }
 
     fn wraps_sudo(&self) -> bool {
@@ -3690,6 +3779,8 @@ impl FakeExecutor {
             "dpkg-query" => self.run_dpkg_query(&req.args),
             "dnf" | "apt-get" => self.run_manager(&prog, &req.args),
             "systemctl" => self.run_systemctl(&req.args),
+            "ss" if req.program == "/usr/bin/ss" => self.target.manager.net.ss(&req.args),
+            "ip" if req.program == "/usr/sbin/ip" => self.target.manager.net.ip(&req.args),
             "systemd-analyze" if req.program == "/usr/bin/systemd-analyze" => {
                 self.run_systemd_analyze(&req.args)
             }

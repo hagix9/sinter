@@ -124,6 +124,39 @@ There is no SSH-specific audit logic.
 Audit also reports systemd manager synchronization as its own drift dimension,
 `manager_reload` (see [Reading audit output](#reading-audit-output)).
 
+## Connection-risk approvals (approve, approvals)
+
+Some changes can cut the SSH connection Sinter uses (firewalld zones,
+sources, interfaces, reload; NetworkManager profiles). Resources of such
+types are classified before contact: **R** always needs an approval, **C**
+needs one only if it is found on the management path, **N** never does.
+After connecting, Sinter finds the interfaces and the firewalld zone that
+carry its own connection; when it cannot determine them, the change is
+refused, with or without an approval. No release enforces a connection-risk
+type yet (firewalld 0.2.0 waits for an Owner decision; firewalld 0.3.0 and
+`nm_connection` come later), so ordinary runs are unchanged.
+
+- `sinter plan <recipe> --approval-request <dir>` writes
+  `<dir>/<host>.request.json` for each host.
+- `sinter approve <request> [--expires <minutes>]` shows the request on a
+  terminal and asks for the first 16 hex digits of its content digest. It
+  writes one approval per request (default 30 minutes, at most 24 hours) and
+  prints its id. It refuses without a terminal.
+- `sinter apply <recipe> --approval <id>` (one per host) checks and spends the
+  approvals before contacting any host, re-plans read-only, and stops before
+  any change if the result differs from what was approved.
+- `sinter approvals list` shows each approval and whether it is unused, used
+  or expired; a used approval without a final result is shown as interrupted.
+- `--management-path loopback` (with `--host`), or `management_path:
+  loopback` for an inventory host, declares a direct local connection over
+  the loopback interface. Without it a loopback connection is treated as
+  unknown.
+
+Approvals live under `$XDG_STATE_HOME/sinter` (else `~/.local/state/sinter`),
+private to the controller account. They protect against mistakes, stale
+reviews and replay, not against a process running as the same account.
+Recovery after a cut connection is never guaranteed.
+
 ## secrets
 
 ```sh

@@ -98,6 +98,37 @@ enum Command {
     /// `remove` takes them out again. None of them reads a recipe, contacts a
     /// host or enables a plugin (a recipe does, with `plugins:`).
     Plugin(PluginArgs),
+    /// Approve an approval request on this terminal (DESIGN §43.4).
+    ///
+    /// Shows every resource of the request and asks for the first 16 hex
+    /// digits of its content digest. Needs a terminal on stdin and stdout.
+    /// Writes one approval record (one per request) into the approval store
+    /// and prints its id for `sinter apply --approval`. Contacts no host.
+    Approve(ApproveArgs),
+    /// List approvals of this controller account and their state.
+    Approvals(ApprovalsArgs),
+}
+
+#[derive(Args, Debug)]
+struct ApproveArgs {
+    /// The request file written by `sinter plan --approval-request`.
+    request: PathBuf,
+    /// Validity in minutes (default 30, at most 1440).
+    #[arg(long, default_value_t = 30)]
+    expires: u64,
+}
+
+#[derive(Args, Debug)]
+struct ApprovalsArgs {
+    #[command(subcommand)]
+    command: ApprovalsCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum ApprovalsCommand {
+    /// Show each approval: id, host, state (unused, used, expired) and
+    /// whether a used one finished (interrupted runs have no final event).
+    List,
 }
 
 #[derive(Args, Debug)]
@@ -942,6 +973,22 @@ struct TargetArgs {
     /// Output format: text or json.
     #[arg(long, default_value = "text")]
     format: String,
+    /// plan only: write an approval request for each host into DIR
+    /// (DESIGN §43.4). Review and approve it with `sinter approve`.
+    #[arg(long, value_name = "DIR")]
+    approval_request: Option<PathBuf>,
+    /// apply only: an approval id from `sinter approve` (repeatable, at most
+    /// one per host). Checked and spent before any host is contacted; apply
+    /// then re-plans read-only and stops if anything differs.
+    #[arg(long = "approval", value_name = "ID")]
+    approvals: Vec<String>,
+    /// With --host: declare the connection a direct local connection over
+    /// the loopback interface (DESIGN §43.3). Only `loopback` exists.
+    #[arg(long, value_parser = ["loopback"])]
+    management_path: Option<String>,
+    /// The approvals of this run, per host, once checked and spent.
+    #[arg(skip)]
+    risk_run: std::cell::OnceCell<std::collections::BTreeMap<String, serde_json::Value>>,
 }
 
 #[derive(Args, Debug)]
@@ -994,6 +1041,8 @@ fn run(cli: Cli) -> Result<u8, SinterError> {
         }
         Command::Secrets(a) => secrets_command(a),
         Command::Plugin(a) => plugin_command(a),
+        Command::Approve(a) => approve_command(a),
+        Command::Approvals(a) => approvals_command(a),
         Command::Serve(a) => serve_command(a),
         Command::Mcp(a) => {
             // Load once, fail closed: a missing/unreadable/malformed targets
@@ -2127,6 +2176,10 @@ fn run_phase(phase: Phase, a: &TargetArgs) -> Result<u8, SinterError> {
         exec,
         verbose: a.verbose,
         format: a.format.clone(),
+        approval_request: a.approval_request.clone(),
+        approvals: a.approvals.clone(),
+        management_path: a.management_path.clone(),
+        risk_run: Default::default(),
     };
     print_resolved(
         &a.recipe,
@@ -2250,8 +2303,10 @@ fn run_one_target(
                 None => model,
             };
             let session = progress.begin(unit_info(phase, u));
-            let executed = single_target(a, Some(&session))
-                .and_then(|target| execute(phase, model, target.spec, a, None, session.sink()));
+            let executed = single_target(a, Some(&session)).and_then(|target| {
+                risk_gate(phase, a, &[(target.name.clone(), model.clone())])?;
+                execute(phase, model, &target, a, None, session.sink())
+            });
             session.end(run_outcome_of(&executed));
             let outcome = executed?;
             let extras = resolved_json(&a.recipe, &a.exec).is_some()
@@ -2912,6 +2967,8 @@ fn static_failure(problems: sinter::varsfile::Problems) -> SinterError {
 struct Target {
     name: String,
     spec: TargetSpec,
+    /// The administrator declared a direct local connection (DESIGN §43.3).
+    loopback: bool,
 }
 
 impl Target {
@@ -2948,6 +3005,7 @@ fn single_target(a: &TargetArgs, session: Option<&ProgressSession>) -> Result<Ta
         None => Target {
             name: "localhost".to_string(),
             spec: TargetSpec { ssh: None },
+            loopback: false,
         },
         Some(host) => {
             let req = TargetRequest {
@@ -2973,6 +3031,7 @@ fn single_target(a: &TargetArgs, session: Option<&ProgressSession>) -> Result<Ta
             Target {
                 name: host.clone(),
                 spec: TargetSpec { ssh: Some(ssh) },
+                loopback: a.management_path.is_some(),
             }
         }
     })
@@ -3131,6 +3190,7 @@ fn inventory_targets(
                 Target {
                     name: name.to_string(),
                     spec: TargetSpec { ssh: Some(spec) },
+                    loopback: h.management_loopback,
                 },
             );
         }
@@ -3401,6 +3461,24 @@ fn run_executions(
     if text {
         print_resolution(source, &plan, !a.selector.is_empty(), ro, &a.exec);
     }
+    // Connection-risk control (DESIGN §43.2, §43.4): every execution is
+    // checked, and approvals are spent, before any host is contacted.
+    let gate_models: Vec<(String, Model)> = plan
+        .executions
+        .iter()
+        .map(|ex| {
+            let m = ex
+                .model
+                .clone()
+                .unwrap_or_else(|| units[ex.unit].model.clone());
+            let m = match a.exec.skips() {
+                Some(s) => s.filter(ex.unit, m),
+                None => m,
+            };
+            (ex.target.name.clone(), m)
+        })
+        .collect();
+    risk_gate(phase, a, &gate_models)?;
     let run_id = sinter::backup::new_run_id();
     let mut results: Vec<ExecResult> = Vec::new();
     let mut stopped_by: Option<String> = None;
@@ -3431,14 +3509,7 @@ fn run_executions(
             Some(s) => s.filter(ex.unit, model),
             None => model,
         };
-        let executed = execute(
-            phase,
-            model,
-            ex.target.spec.clone(),
-            a,
-            Some(&id),
-            session.sink(),
-        );
+        let executed = execute(phase, model, &ex.target, a, Some(&id), session.sink());
         session.end(run_outcome_of(&executed));
         let backup = backup_record(phase, u, Some(&executed));
         let (code, label, json) = match executed {
@@ -3609,11 +3680,65 @@ fn run_executions(
 fn execute(
     phase: Phase,
     model: Model,
-    target: TargetSpec,
+    target: &Target,
     a: &TargetArgs,
     backup_run_id: Option<&str>,
     progress: Arc<dyn ProgressSink>,
 ) -> Result<Outcome, SinterError> {
+    let host = target.name.as_str();
+    let loopback = target.loopback;
+    let target = target.spec.clone();
+    let approval = a.risk_run.get().and_then(|m| m.get(host)).cloned();
+    let wants_store = phase != Phase::Audit && (a.approval_request.is_some() || approval.is_some());
+    let store = if wants_store {
+        Some(sinter::risk::approval::Store::default_location()?)
+    } else {
+        None
+    };
+    let risk_ctx = |approval: Option<serde_json::Value>| sinter::risk::engine::RiskContext {
+        host: host.to_string(),
+        loopback_declared: loopback,
+        approval,
+        store: store.clone(),
+    };
+    // Apply with an approval: a read-only plan of this host first; a
+    // different content digest stops before any mutation (DESIGN §43.4).
+    if phase == Phase::Apply {
+        if let (Some(rec), Some(st)) = (&approval, &store) {
+            let opts = RunOptions {
+                mode: Mode::Plan,
+                sudo: a.exec.sudo,
+                target: target.clone(),
+                verbose: false,
+                fault: None,
+                fake_target: test_fake_target(),
+            };
+            let engine = Engine::new(model.clone(), opts)?
+                .with_secrets(sinter::secret_source::process_secrets())
+                .with_risk(risk_ctx(None));
+            let log = engine.risk_log();
+            let report = engine.run()?;
+            let key = st.key()?;
+            let log = log.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let content =
+                sinter::risk::engine::content_object(st, &key, host, &model, &report, &log);
+            let digest = sinter::risk::approval::sha256_hex(
+                sinter::risk::approval::canonical(&content).as_bytes(),
+            );
+            let want = rec["content_digest"].as_str().unwrap_or("");
+            if !sinter::risk::approval::same_digest(&digest, want) {
+                st.ledger(
+                    "mismatch",
+                    serde_json::json!({"approval_id": rec["approval_id"], "host": host}),
+                )?;
+                return Err(SinterError::apply(format!(
+                    "host {}: the re-observed plan differs from the approved plan (approval {}); nothing was changed",
+                    host,
+                    rec["approval_id"].as_str().unwrap_or("?")
+                )));
+            }
+        }
+    }
     #[cfg(test)]
     tests::EXECUTED_MODELS.with(|m| m.borrow_mut().push(model.clone()));
     // Audit uses Plan-mode construction: a read-only TargetFs, and run_audit
@@ -3634,16 +3759,237 @@ fn execute(
     };
     // Secrets are opened lazily: a recipe that names none never touches an
     // identity or the terminal.
+    let request_model = if phase == Phase::Plan && a.approval_request.is_some() {
+        Some(model.clone())
+    } else {
+        None
+    };
     let mut engine = Engine::new_with_progress(model, opts, progress)?
         .with_secrets(sinter::secret_source::process_secrets());
     if let Some(id) = backup_run_id {
         engine = engine.with_backup_run_id(id.to_string());
     }
     engine = engine.with_backup_store(a.exec.backup_store());
-    Ok(match phase {
+    if phase != Phase::Audit {
+        engine = engine.with_risk(risk_ctx(approval.clone()));
+    }
+    let log = engine.risk_log();
+    let outcome = match phase {
         Phase::Audit => Outcome::Audit(run_audit(engine)?),
-        _ => Outcome::Run(Box::new(engine.run()?)),
-    })
+        _ => {
+            let run = engine.run();
+            if let (Phase::Apply, Some(rec), Some(st)) = (phase, &approval, &store) {
+                let event = match &run {
+                    Ok(r) if r.status == sinter::engine::AggregateStatus::Success => "applied",
+                    Ok(_) => "failed",
+                    Err(e) if e.kind == ErrorKind::Indeterminate => "indeterminate",
+                    Err(_) => "failed",
+                };
+                st.ledger(
+                    event,
+                    serde_json::json!({"approval_id": rec["approval_id"], "host": host}),
+                )?;
+            }
+            Outcome::Run(Box::new(run?))
+        }
+    };
+    if let (Phase::Plan, Some(dir), Some(st), Outcome::Run(report), Some(model)) =
+        (phase, &a.approval_request, &store, &outcome, &request_model)
+    {
+        let key = st.key()?;
+        let log = log.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let content = sinter::risk::engine::content_object(st, &key, host, model, report, &log);
+        let summary: Vec<serde_json::Value> = log
+            .records
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id, "type": r.type_, "class": r.class.label(),
+                    "dynamic": r.dynamic, "reason": r.reason,
+                })
+            })
+            .collect();
+        let p = st.write_request(
+            dir,
+            host,
+            content,
+            serde_json::json!({"risk": summary, "path": log.path}),
+        )?;
+        eprintln!("approval request written: {}", p.display());
+    }
+    Ok(outcome)
+}
+
+/// `sinter approve` (DESIGN §43.4): a terminal on stdin and stdout, the full
+/// request shown, the content digest prefix typed by the approver.
+fn approve_command(a: ApproveArgs) -> Result<u8, SinterError> {
+    // SAFETY: isatty has no preconditions.
+    let tty = unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 };
+    if !tty {
+        return Err(SinterError::schema(
+            "sinter approve needs a terminal on stdin and stdout; approvals are never given by a pipe or a script",
+        ));
+    }
+    if a.expires == 0 || a.expires > 1440 {
+        return Err(SinterError::schema("--expires is 1 to 1440 minutes"));
+    }
+    let store = sinter::risk::approval::Store::default_location()?;
+    let approver = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
+    let rec = store.approve(&a.request, a.expires * 60, &approver, |req| {
+        let content = &req["content"];
+        println!(
+            "host: {}",
+            sanitize_line(content["host"].as_str().unwrap_or("?"))
+        );
+        println!(
+            "sinter: {}",
+            sanitize_line(content["sinter_version"].as_str().unwrap_or("?"))
+        );
+        if let Some(rs) = content["resources"].as_array() {
+            for r in rs {
+                println!(
+                    "  {} {} change={} class={} dynamic={}",
+                    sanitize_line(r["id"].as_str().unwrap_or("?")),
+                    sanitize_line(r["type"].as_str().unwrap_or("?")),
+                    sanitize_line(r["change"].as_str().unwrap_or("?")),
+                    sanitize_line(r["class"].as_str().unwrap_or("-")),
+                    sanitize_line(r["dynamic"].as_str().unwrap_or("")),
+                );
+            }
+        }
+        if let Some(rs) = req["summary"]["risk"].as_array() {
+            for r in rs {
+                if let Some(why) = r["reason"].as_str() {
+                    println!(
+                        "  {}: {}",
+                        sanitize_line(r["id"].as_str().unwrap_or("?")),
+                        sanitize_line(why)
+                    );
+                }
+            }
+        }
+        let digest = req["content_digest"].as_str().unwrap_or("");
+        println!("content digest: {}", digest);
+        print!("type the first 16 hex digits of the content digest to approve: ");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| SinterError::schema(format!("cannot read the answer: {}", e)))?;
+        Ok(digest.len() >= 16 && line.trim() == &digest[..16])
+    })?;
+    println!("approved: {}", rec["approval_id"].as_str().unwrap_or("?"));
+    Ok(0)
+}
+
+/// `sinter approvals list`.
+fn approvals_command(a: ApprovalsArgs) -> Result<u8, SinterError> {
+    match a.command {
+        ApprovalsCommand::List => {
+            let store = sinter::risk::approval::Store::default_location()?;
+            let ledger = store.ledger_lines()?;
+            for (rec, state) in store.list()? {
+                let id = rec["approval_id"].as_str().unwrap_or("?");
+                let finished = ledger.iter().any(|l| {
+                    l["approval_id"] == id
+                        && matches!(
+                            l["event"].as_str(),
+                            Some("applied" | "failed" | "indeterminate" | "mismatch")
+                        )
+                });
+                let state = if state == "used" && !finished {
+                    "used (interrupted: state unknown)"
+                } else {
+                    state
+                };
+                println!(
+                    "{} host={} {}",
+                    id,
+                    sanitize_line(rec["host"].as_str().unwrap_or("?")),
+                    state
+                );
+            }
+            Ok(0)
+        }
+    }
+}
+
+/// Connection-risk control before any contact (DESIGN §43.2, §43.4): the
+/// static gate for every execution, and, for apply, the approvals: each
+/// checked, then all spent. Audit is not gated (it never mutates).
+fn risk_gate(phase: Phase, a: &TargetArgs, execs: &[(String, Model)]) -> Result<(), SinterError> {
+    if phase == Phase::Audit {
+        if a.approval_request.is_some() || !a.approvals.is_empty() {
+            return Err(SinterError::schema(
+                "--approval-request and --approval are for plan and apply",
+            ));
+        }
+        return Ok(());
+    }
+    if phase == Phase::Plan && !a.approvals.is_empty() {
+        return Err(SinterError::schema(
+            "--approval is for apply; plan never needs an approval",
+        ));
+    }
+    if phase == Phase::Apply && a.approval_request.is_some() {
+        return Err(SinterError::schema("--approval-request is for plan"));
+    }
+    if a.management_path.is_some() && a.exec.host.is_none() {
+        return Err(SinterError::schema(
+            "--management-path needs --host (inventory hosts declare it with management_path: loopback)",
+        ));
+    }
+    if a.risk_run.get().is_some() {
+        return Ok(());
+    }
+    let mut records: std::collections::BTreeMap<String, serde_json::Value> = Default::default();
+    let store = if phase == Phase::Apply && !a.approvals.is_empty() {
+        let st = sinter::risk::approval::Store::default_location()?;
+        for id in &a.approvals {
+            let rec = st.load(id)?;
+            let h = rec["host"].as_str().unwrap_or("").to_string();
+            if records.insert(h.clone(), rec).is_some() {
+                return Err(SinterError::schema(format!(
+                    "more than one approval for host {}",
+                    h
+                )));
+            }
+        }
+        Some(st)
+    } else {
+        None
+    };
+    for (host, model) in execs {
+        let approved: Option<std::collections::BTreeSet<String>> = if phase == Phase::Apply {
+            Some(
+                records
+                    .get(host)
+                    .and_then(|r| r["resources"].as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            )
+        } else {
+            None
+        };
+        sinter::risk::static_gate(model, approved.as_ref()).map_err(|e| SinterError {
+            message: format!("host {}: {}", host, e.message),
+            ..e
+        })?;
+    }
+    let used = match store {
+        Some(st) => {
+            let hosts: std::collections::BTreeSet<String> =
+                execs.iter().map(|(h, _)| h.clone()).collect();
+            st.use_for_run(&a.approvals, &hosts)?
+        }
+        None => Default::default(),
+    };
+    let _ = a.risk_run.set(used);
+    Ok(())
 }
 
 /// The CLI never runs against a scripted target; unit tests of this file do.
@@ -4043,7 +4389,11 @@ mod tests {
         let outcome = execute(
             Phase::Audit,
             source.units()[0].model.clone(),
-            TargetSpec { ssh: None },
+            &Target {
+                name: "localhost".to_string(),
+                spec: TargetSpec { ssh: None },
+                loopback: false,
+            },
             &a,
             None,
             Arc::new(sinter::progress::NoopSink),
@@ -4242,6 +4592,80 @@ mod tests {
     /// Needs the package backend, so a target without one fails at connect.
     const PKG_RECIPE: &str = "version: 1\nresources:\n  - id: p\n    type: package\n    with:\n      name: jq\n      state: present\n";
     const WEB_RECIPE: &str = "version: 1\ntargets:\n  groups: [web]\nresources:\n  - id: p\n    type: package\n    with:\n      name: jq\n      state: present\n";
+
+    #[test]
+    fn risk_options_are_checked_before_contact() {
+        let dir = fixture();
+        let recipe = write(&dir, "r.yaml", "version: 1\nresources:\n  - id: f\n    type: file\n    with: { path: /etc/x, content: y }\n");
+        let model = load_source(std::path::Path::new(&recipe)).unwrap().units()[0]
+            .model
+            .clone();
+        let execs = vec![("localhost".to_string(), model)];
+        let cases: &[(Phase, &[&str], &str)] = &[
+            (
+                Phase::Plan,
+                &["--approval", "0123456789abcdef0123456789abcdef"],
+                "--approval is for apply",
+            ),
+            (
+                Phase::Apply,
+                &["--approval-request", "/nonexistent"],
+                "--approval-request is for plan",
+            ),
+            (
+                Phase::Audit,
+                &["--approval-request", "/nonexistent"],
+                "are for plan and apply",
+            ),
+            (
+                Phase::Plan,
+                &["--management-path", "loopback"],
+                "needs --host",
+            ),
+        ];
+        for (phase, extra, want) in cases {
+            let mut argv = vec![recipe.as_str()];
+            argv.extend_from_slice(extra);
+            let a = target_args(*phase, &argv);
+            let e = risk_gate(*phase, &a, &execs).unwrap_err();
+            assert!(e.message.contains(want), "{want}: {}", e.message);
+        }
+        // An approval id that does not exist is refused before anything
+        // runs; no fake target is consumed (nothing was contacted).
+        let state = fixture();
+        std::env::set_var("XDG_STATE_HOME", state.path());
+        let a = target_args(
+            Phase::Apply,
+            &[
+                recipe.as_str(),
+                "--approval",
+                "0123456789abcdef0123456789abcdef",
+            ],
+        );
+        FAKE_TARGETS.with(|f| f.borrow_mut().clear());
+        FAKE_TARGETS.with(|f| f.borrow_mut().push_back(base()));
+        assert!(risk_gate(Phase::Apply, &a, &execs)
+            .unwrap_err()
+            .message
+            .contains("no approval"));
+        assert_eq!(
+            FAKE_TARGETS.with(|f| f.borrow().len()),
+            1,
+            "nothing was contacted"
+        );
+        FAKE_TARGETS.with(|f| f.borrow_mut().clear());
+        std::env::remove_var("XDG_STATE_HOME");
+    }
+
+    #[test]
+    fn approve_needs_a_terminal() {
+        let e = approve_command(ApproveArgs {
+            request: std::path::PathBuf::from("/nonexistent"),
+            expires: 30,
+        })
+        .unwrap_err();
+        assert!(e.message.contains("needs a terminal"), "{}", e.message);
+    }
 
     fn fixture() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
@@ -5865,6 +6289,7 @@ mod tests {
         executions.push(Execution {
             unit: executions[0].unit,
             target: Target {
+                loopback: false,
                 name: "web02".to_string(),
                 spec: executions[0].target.spec.clone(),
             },
@@ -5876,6 +6301,7 @@ mod tests {
         executions.push(Execution {
             unit: executions[0].unit,
             target: Target {
+                loopback: false,
                 name: "db01".to_string(),
                 spec: executions[0].target.spec.clone(),
             },
@@ -6032,6 +6458,7 @@ mod tests {
             color: false,
         };
         let target = Target {
+            loopback: false,
             name: "web01".to_string(),
             spec: TargetSpec { ssh: None },
         };
@@ -6083,6 +6510,7 @@ mod tests {
             .map(|(unit, host)| Execution {
                 unit: *unit,
                 target: Target {
+                    loopback: false,
                     name: host.to_string(),
                     spec: TargetSpec { ssh: None },
                 },

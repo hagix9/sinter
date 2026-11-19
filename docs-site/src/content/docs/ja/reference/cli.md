@@ -125,6 +125,18 @@ audit は systemd マネージャの同期状態も、独立したドリフト�
 `manager_reload` として報告します（[audit の出力を読む](#audit-の出力を読む)を
 参照）。
 
+## 接続リスクの承認（approve、approvals）
+
+変更によっては、Sinter が使う SSH 接続を切ることがあります（firewalld の zone、source、interface、reload、NetworkManager のプロファイル）。こうした型のリソースは接続の前に分類されます。**R** は常に承認が必要、**C** は管理経路に当たる場合だけ承認が必要、**N** は不要です。接続の後、Sinter は自分の接続を運ぶ interface と firewalld の zone を調べます。判定できなければ、承認の有無にかかわらず変更を拒否します。接続リスクの型を強制するリリースはまだありません（firewalld 0.2.0 は Owner の判断待ち、firewalld 0.3.0 と `nm_connection` はこの後）。通常の実行は変わりません。
+
+- `sinter plan <recipe> --approval-request <dir>` は、ホストごとに `<dir>/<host>.request.json` を書きます。
+- `sinter approve <request> [--expires <分>]` は、端末に要求を表示し、内容の digest の先頭 16 桁を入力させます。要求 1 つにつき承認を 1 つ書き（既定 30 分、最大 24 時間）、その id を表示します。端末が無ければ拒否します。
+- `sinter apply <recipe> --approval <id>`（ホストごとに 1 つ）は、どのホストにも接続する前に承認を検査して使用済みにし、読み取り専用で plan をやり直し、承認した内容と違えば何も変えずに止まります。
+- `sinter approvals list` は、各承認が未使用・使用済み・期限切れのどれかを表示します。結果の記録が無い使用済みの承認は、中断として表示します。
+- `--management-path loopback`（`--host` と一緒に）、またはインベントリのホストの `management_path: loopback` は、ループバック interface による直接のローカル接続であることを宣言します。宣言が無ければ、ループバックの接続は不明として扱います。
+
+承認は `$XDG_STATE_HOME/sinter`（無ければ `~/.local/state/sinter`）に、コントローラのアカウント専用で置かれます。間違い、古い確認、再使用は防ぎますが、同じアカウントで動くプロセスは防げません。接続が切れた後の回復は保証しません。
+
 ## secrets
 
 ```sh
