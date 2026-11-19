@@ -507,6 +507,47 @@ impl Executor {
         }
     }
 
+    /// Whether the original connection still answers (NetworkManager
+    /// checkpoint, DESIGN §45.7): `/usr/bin/true` with a 10-second budget.
+    /// Always false for a local target.
+    pub fn original_alive(&mut self) -> bool {
+        match self {
+            Executor::Local(_) => false,
+            Executor::Ssh(s) => {
+                let mut req = ExecRequest::new("/usr/bin/true");
+                req.timeout_secs = 10;
+                matches!(s.run(&req), Ok(o) if o.completion == Completion::Exited(0))
+            }
+            Executor::Fake(f) => f.target.manager.net.original_alive.unwrap_or(true),
+        }
+    }
+
+    /// Wait `secs` seconds (the checkpoint rollback timeout plus a margin).
+    /// The scripted target records the wait instead of sleeping, and its
+    /// NetworkManager rolls an open checkpoint back as the real one does.
+    pub fn wait_secs(&mut self, secs: u64) {
+        match self {
+            Executor::Local(_) | Executor::Ssh(_) => std::thread::sleep(Duration::from_secs(secs)),
+            Executor::Fake(f) => {
+                f.target.manager.net.waited += secs;
+                if let Some(nm) = &f.target.nm {
+                    nm.lock().unwrap_or_else(|e| e.into_inner()).expire();
+                }
+            }
+        }
+    }
+
+    /// Replace the connection with a new one (full host-key verification
+    /// against known_hosts; the same host key is required). True when it
+    /// connected. Always false for a local target.
+    pub fn reconnect(&mut self) -> bool {
+        match self {
+            Executor::Local(_) => false,
+            Executor::Ssh(s) => s.reconnect(),
+            Executor::Fake(f) => f.target.manager.net.reconnect_after_wait.unwrap_or(false),
+        }
+    }
+
     /// SHA-256 of the verified host key (`None` for a local target).
     pub fn host_key_sha256(&self) -> Option<String> {
         match self {
@@ -1240,6 +1281,18 @@ impl SshExecutor {
                 matches!(e.run(&req), Ok(o) if o.completion == Completion::Exited(0))
             }
             Err(_) => false,
+        }
+    }
+
+    /// Replace this session with a new connection made with the same
+    /// configuration; the host key must be the one verified before.
+    fn reconnect(&mut self) -> bool {
+        match SshExecutor::connect(&self.cfg, self.sudo) {
+            Ok(e) if e.host_key_sha256 == self.host_key_sha256 => {
+                self.session = e.session;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -2941,6 +2994,9 @@ pub struct FakeTarget {
     /// Plugin tests, DESIGN §38). Absent unless a test sets it up; clones of
     /// the target share it, so a test can read the state a run left.
     pub firewalld: Option<std::sync::Arc<std::sync::Mutex<crate::fakesys::FakeFirewalld>>>,
+    /// Scripted NetworkManager reached through `/usr/bin/nmcli` and
+    /// `/usr/bin/busctl` (`nm_connection`, DESIGN §45).
+    pub nm: Option<std::sync::Arc<std::sync::Mutex<crate::fakesys::FakeNm>>>,
 }
 
 /// One change of the scripted filesystem, applied by [`FsEvent`].
@@ -3121,6 +3177,7 @@ impl FakeTarget {
             fs_events: Vec::new(),
             pg: crate::fakesys::FakePostgres::default(),
             firewalld: None,
+            nm: None,
         }
     }
 
@@ -3195,6 +3252,7 @@ impl FakeTarget {
             fs_events: Vec::new(),
             pg: crate::fakesys::FakePostgres::default(),
             firewalld: None,
+            nm: None,
         }
     }
 
@@ -3255,6 +3313,7 @@ impl FakeTarget {
             fs_events: Vec::new(),
             pg: crate::fakesys::FakePostgres::default(),
             firewalld: None,
+            nm: None,
         }
     }
 
@@ -3318,6 +3377,7 @@ impl FakeTarget {
             fs_events: Vec::new(),
             pg: crate::fakesys::FakePostgres::default(),
             firewalld: None,
+            nm: None,
         }
     }
 
@@ -3375,6 +3435,7 @@ impl FakeTarget {
             fs_events: Vec::new(),
             pg: crate::fakesys::FakePostgres::default(),
             firewalld: None,
+            nm: None,
         }
     }
 
@@ -3408,6 +3469,19 @@ impl FakeTarget {
     /// Make `setpriv` unavailable on the scripted target.
     pub fn without_setpriv(mut self) -> Self {
         self.setpriv_missing = true;
+        self
+    }
+
+    /// A scripted NetworkManager: `nmcli` and `busctl` present and
+    /// `NetworkManager.service` active.
+    pub fn with_nm(mut self, nm: std::sync::Arc<std::sync::Mutex<crate::fakesys::FakeNm>>) -> Self {
+        self.executables.insert(crate::nm::NMCLI.to_string());
+        self.executables.insert(crate::nm::BUSCTL.to_string());
+        self.services.insert(
+            crate::nm::NM_SERVICE.to_string(),
+            ("loaded".into(), "active".into(), "enabled".into()),
+        );
+        self.nm = Some(nm);
         self
     }
 
@@ -3743,6 +3817,21 @@ impl FakeExecutor {
             .next()
             .unwrap_or(&req.program)
             .to_string();
+        if req.program == crate::nm::NMCLI || req.program == crate::nm::BUSCTL {
+            if let Some(nm) = &self.target.nm {
+                if self.target.executables.contains(&req.program) {
+                    return nm
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .run(&req.program, &req.args);
+                }
+                return Self::exited(
+                    127,
+                    String::new(),
+                    format!("env: '{}': No such file or directory\n", req.program),
+                );
+            }
+        }
         if req.program == "/usr/bin/firewall-cmd" {
             if let Some(fw) = &self.target.firewalld {
                 return fw.lock().unwrap_or_else(|e| e.into_inner()).run(&req.args);

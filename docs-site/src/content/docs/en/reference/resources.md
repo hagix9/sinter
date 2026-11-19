@@ -16,6 +16,7 @@ complete supported set — unknown `with` fields are schema errors.
 | [package](/en/reference/resources/package/) | Package install/remove (apt/dnf) | `name`, `state` |
 | [service](/en/reference/resources/service/) | systemd state + enablement | `name`, `state`, `enabled` |
 | [systemd_timer](/en/reference/resources/systemd_timer/) | systemd timer unit + enablement | `name`, `on_calendar`, `on_boot_sec`, `state`, `enabled` |
+| [nm_connection](/en/reference/resources/nm_connection/) | NetworkManager Ethernet profile (v1.15.0, not released) | `name`, `ifname`, `autoconnect`, `ipv4`, `ipv6`, `state`, `active` |
 | [group](/en/reference/resources/group/) | Local Linux group | `name`, `state`, `gid`, `system` |
 | [user](/en/reference/resources/user/) | Local Linux user | `name`, `state`, `uid`, `group`, `groups`, `shell`, `home`, `create_home`, `system`, `password_hash` |
 | [postgresql_role](/en/reference/resources/postgresql_role/) | Role of a local PostgreSQL server (since v1.5.1) | `name`, `state`, `login`, `superuser`, …, `connection_limit`, `password_verifier` |

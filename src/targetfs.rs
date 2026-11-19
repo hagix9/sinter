@@ -1343,6 +1343,102 @@ impl TargetFs {
         self.run_argv(program, &args)
     }
 
+    /// A read-only NetworkManager observation (`nm_connection`, DESIGN
+    /// §45.3, §45.7). Only the terse escaped `nmcli ... connection show`
+    /// queries and the `busctl` introspection, `GetPermissions` and
+    /// `GetDeviceByIpIface` calls are accepted; anything else is refused
+    /// before dispatch. No mutation permit is taken.
+    pub(crate) fn nm_read(
+        &mut self,
+        program: &str,
+        args: &[String],
+        sensitive: bool,
+    ) -> Result<Output> {
+        let a: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let ok = match program {
+            crate::nm::NMCLI => match a.as_slice() {
+                ["-t", "-e", "yes", "-f", _, "connection", "show"]
+                | ["-t", "-e", "yes", "-f", _, "connection", "show", "--active"] => true,
+                ["-t", "-e", "yes", "-f", _, "connection", "show", "uuid", u] => {
+                    crate::nm::valid_uuid(u)
+                }
+                _ => false,
+            },
+            crate::nm::BUSCTL => {
+                let base = crate::nm::introspect_argv();
+                let call = crate::nm::call_argv("GetPermissions", &[]);
+                args == base.as_slice()
+                    || args == call.as_slice()
+                    || (a.len() == 8
+                        && args[..6] == crate::nm::call_argv("GetDeviceByIpIface", &[])[..]
+                        && a[6] == "s"
+                        && crate::plugin::ifname_ok(a[7], 15))
+            }
+            _ => false,
+        };
+        if !ok {
+            return Err(SinterError::apply(
+                "internal error: not a NetworkManager observation",
+            ));
+        }
+        self.run_argv_sensitivity(program, args, sensitive)
+    }
+
+    /// A NetworkManager change: `nmcli connection add|modify|up|down|delete`
+    /// or a `busctl` checkpoint call (`CheckpointCreate`, `CheckpointDestroy`,
+    /// `CheckpointRollback`). It requires the mutation permit, so a read-only
+    /// (plan/audit) target can never reach it; argv only, never a shell.
+    pub(crate) fn nm_change(
+        &mut self,
+        _permit: &MutationPermit,
+        program: &str,
+        args: &[String],
+        sensitive: bool,
+    ) -> Result<Output> {
+        let a: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let ok = match program {
+            crate::nm::NMCLI => matches!(
+                a.as_slice(),
+                [
+                    "connection",
+                    "add" | "modify" | "up" | "down" | "delete",
+                    ..
+                ]
+            ),
+            crate::nm::BUSCTL => {
+                a.len() >= 7
+                    && args[..5] == crate::nm::call_argv("", &[])[..5]
+                    && matches!(
+                        a[5],
+                        "CheckpointCreate" | "CheckpointDestroy" | "CheckpointRollback"
+                    )
+            }
+            _ => false,
+        };
+        if !ok || a.iter().any(|x| x.contains('\0')) {
+            return Err(SinterError::apply(
+                "internal error: not a NetworkManager change",
+            ));
+        }
+        self.identity_memo.clear();
+        self.run_argv_sensitivity(program, args, sensitive)
+    }
+
+    /// Whether the original connection still answers (checkpoint, §45.7).
+    pub(crate) fn original_alive(&mut self) -> bool {
+        self.ex.original_alive()
+    }
+
+    /// Wait for a checkpoint's rollback timeout (§45.7).
+    pub(crate) fn wait_secs(&mut self, secs: u64) {
+        self.ex.wait_secs(secs)
+    }
+
+    /// Replace the connection after a checkpoint rollback wait (§45.7).
+    pub(crate) fn reconnect(&mut self) -> bool {
+        self.ex.reconnect()
+    }
+
     /// Where a unit's definition comes from (`systemd_timer`, DESIGN §42.3):
     /// its fragment path and drop-in paths. Read-only, exact argv, the unit
     /// name after `--`; no mutation permit is needed.

@@ -126,6 +126,7 @@ pub fn recovery_for(kind: RuleKind) -> Recovery {
         | RuleKind::FwPortAbsent
         | RuleKind::FwProtocolAbsent
         | RuleKind::FwSource => Recovery::FirewalldRuntimeFirst,
+        RuleKind::NmConnection => Recovery::NmCheckpoint,
         _ => Recovery::None,
     }
 }
@@ -393,6 +394,9 @@ pub fn firewalld(kind: RuleKind, path: &PathState, change: &FwChange) -> Dynamic
 pub struct NmChange {
     /// `connection.interface-name` after the change (`None` = unset).
     pub ifname: Option<String>,
+    /// `connection.interface-name` before the change (an existing profile
+    /// moved away from a management interface concerns it too).
+    pub ifname_before: Option<String>,
     /// Devices the profile is active on now; `None` = could not be read.
     pub active_on: Option<BTreeSet<String>>,
     pub autoconnect: bool,
@@ -418,7 +422,7 @@ pub fn nm(path: &PathState, c: &NmChange) -> Dynamic {
     if !c.routing_readable {
         return Dynamic::Unknown("routing could not be read".into());
     }
-    if let Some(i) = &c.ifname {
+    for i in c.ifname.iter().chain(c.ifname_before.iter()) {
         if p.ifaces.contains(i) {
             return Dynamic::Affects(format!("concerns the management interface {}", i));
         }

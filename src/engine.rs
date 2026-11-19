@@ -906,6 +906,7 @@ impl Engine {
             "package" => self.run_package(res, item),
             "service" => self.run_service(res, item),
             "systemd_timer" => self.run_systemd_timer(res, item),
+            "nm_connection" => self.run_nm_connection(res, item),
             "group" => self.run_group(res, item),
             "user" => self.run_user(res, item),
             "postgresql_role" => self.run_postgresql_role(res, item),
@@ -929,7 +930,7 @@ impl Engine {
                     && r.change == Change::Changed
                     && matches!(
                         res.type_.as_str(),
-                        "package" | "user" | "group" | "systemd_timer"
+                        "package" | "user" | "group" | "systemd_timer" | "nm_connection"
                     )
                     && !self.fs.runs_as_root()
                 {

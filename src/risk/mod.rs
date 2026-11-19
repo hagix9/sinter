@@ -609,4 +609,6 @@ pub fn static_gate(model: &Model, approved: Option<&BTreeSet<String>>) -> Result
 #[cfg(test)]
 mod p3_tests;
 #[cfg(test)]
+mod p4_tests;
+#[cfg(test)]
 mod tests;

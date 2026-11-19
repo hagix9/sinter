@@ -383,6 +383,7 @@ fn audit_resource(engine: &mut Engine, res: &FrozenResource) -> AuditResourceRes
         "package" => audit_package(engine, res, item.as_ref(), sensitive),
         "service" => audit_service(engine, res, item.as_ref(), sensitive),
         "systemd_timer" => audit_systemd_timer(engine, res, item.as_ref(), sensitive),
+        "nm_connection" => audit_nm_connection(engine, res, item.as_ref(), sensitive),
         "group" => audit_group(engine, res, item.as_ref(), sensitive),
         "user" => audit_user(engine, res, item.as_ref(), sensitive),
         "postgresql_role" => audit_postgresql_role(engine, res, item.as_ref(), sensitive),
@@ -1205,6 +1206,33 @@ fn audit_service(
         details.push(manager_reload_detail(sensitive));
     }
     finish_drift(res, sensitive, details, "service matches desired state")
+}
+
+/// Audit an `nm_connection` (DESIGN §45.5): drift per declared field,
+/// presence and (when declared) the active state. The precheck and every
+/// observation failure are errors, never drift. Read-only: the same
+/// observation and comparison as plan, and nothing else.
+fn audit_nm_connection(
+    engine: &mut Engine,
+    res: &FrozenResource,
+    item: Option<&EvalVal>,
+    sensitive: bool,
+) -> AuditResourceResult {
+    let (_, _, steps) = match obs_or_error(res, sensitive, engine.nm_compare(res, item)) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let details = steps
+        .drift
+        .into_iter()
+        .map(|(f, o, d)| AuditDriftDetail::new(&f, o, d, sensitive))
+        .collect();
+    finish_drift(
+        res,
+        sensitive,
+        details,
+        "NetworkManager profile matches the declared fields",
+    )
 }
 
 /// Audit a `systemd_timer` (DESIGN §42.5): the checks that would stop plan

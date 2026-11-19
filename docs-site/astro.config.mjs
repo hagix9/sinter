@@ -129,6 +129,7 @@ export default defineConfig({
                 { slug: 'reference/resources/package' },
                 { slug: 'reference/resources/service' },
                 { slug: 'reference/resources/systemd_timer' },
+                { slug: 'reference/resources/nm_connection' },
                 { slug: 'reference/resources/group' },
                 { slug: 'reference/resources/user' },
                 { slug: 'reference/resources/postgresql_role' },

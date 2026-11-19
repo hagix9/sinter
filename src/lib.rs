@@ -19,6 +19,8 @@ pub mod ir;
 pub mod manager;
 pub mod mcp;
 pub mod model;
+pub mod nm;
+pub(crate) mod nm_engine;
 pub mod output;
 pub mod package_progress;
 pub(crate) mod package_removal;

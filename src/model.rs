@@ -1330,6 +1330,11 @@ fn validate_declaration_shape(
                 }
             }
         }
+        "nm_connection" => {
+            validate_with_fields(&d.with, crate::nm::NM_FIELDS, ctx)?;
+            require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
+            crate::nm::NmSpec::check(&d.with, ctx, true)?;
+        }
         "systemd_timer" => {
             validate_with_fields(&d.with, SYSTEMD_TIMER_FIELDS, ctx)?;
             require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
@@ -1863,6 +1868,8 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
     // Resolve static identifiers, validate dependencies and ownership conflicts.
     let mut frozen: Vec<FrozenResource> = Vec::with_capacity(state.resources.len());
     let mut path_owner: BTreeMap<String, String> = BTreeMap::new();
+    // `nm_connection` names: one resource per profile name (DESIGN §45.2).
+    let mut nm_owner: BTreeMap<String, String> = BTreeMap::new();
     let mut account_name_owner: BTreeMap<(String, String), String> = BTreeMap::new();
     // Recipe-wide default environment, applied to `package`/`command`
     // resources as a base their own `env` overrides (DESIGN §27.1).
@@ -2365,6 +2372,24 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         crate::timer::TimerSpec::check(&r.with, &resource_ctx, true).map(|_| ())
                     })?;
                 }
+                "nm_connection" => {
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(&r.with, crate::nm::NM_FIELDS, &resource_ctx)
+                    })?;
+                    staged_field(&mut stage, &tol, "name", || {
+                        static_string(
+                            &r.with,
+                            "name",
+                            &scope,
+                            &resource_ctx,
+                            true,
+                            field_sensitive("name"),
+                        )
+                    })?;
+                    staged(&mut stage, Stage::ValueFree, || {
+                        crate::nm::NmSpec::check(&r.with, &resource_ctx, true).map(|_| ())
+                    })?;
+                }
                 "postgresql_role" => {
                     staged(&mut stage, Stage::ValueFree, || {
                         validate_with_fields(&r.with, crate::pgrole::PGROLE_FIELDS, &resource_ctx)
@@ -2560,6 +2585,19 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         "{}: unknown resource type {}",
                         resource_ctx, other
                     )));
+                }
+            }
+
+            // One `nm_connection` per profile name (its name is static).
+            if r.type_ == "nm_connection" {
+                if let Some(Value::Str(n)) = r.with.get("name") {
+                    if let Some(prev) = nm_owner.insert(n.clone(), r.id.clone()) {
+                        stage = Stage::ValueFree;
+                        return Err(SinterError::schema(format!(
+                            "conflicting ownership of NetworkManager profile {:?} by resources {} and {}",
+                            n, prev, r.id
+                        )));
+                    }
                 }
             }
 

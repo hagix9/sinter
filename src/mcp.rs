@@ -360,6 +360,17 @@ fn check_mcp_manifest_authority(doc: &Document) -> Result<(), ToolError> {
         // target's `systemd-analyze`. Until that command is confirmed
         // read-only on every supported target (DESIGN §42.4), MCP does not
         // offer the type, so no MCP tool can make a host run it.
+        // `nm_connection` reads and changes NetworkManager through forms
+        // that are not measured on real hosts yet (DESIGN §45.10); MCP does
+        // not offer it (MCP stays read-only either way).
+        if r.type_ == "nm_connection" {
+            return Err(ToolError {
+                category: "invalid_manifest",
+                kind: Some("schema"),
+                message: "MCP manifests may not use the nm_connection resource type                           yet — its NetworkManager observations are not measured on                           real hosts (DESIGN §45.10)"
+                    .to_string(),
+            });
+        }
         if r.type_ == "systemd_timer" {
             return Err(ToolError {
                 category: "invalid_manifest",

@@ -298,8 +298,10 @@ Since v1.2.0 Sinter also has two local
 account types, `group` and `user`: order by declaration and `depends_on`, local database only,
 no renumbering, additive supplementary groups, `absent` without `-r`/`-f`.
 v1.5.1 adds `postgresql_role`, and `systemd_timer` manages a systemd timer
-unit and its enablement (not yet released). See the
-resource reference.
+unit and its enablement (not yet released). `nm_connection` declares a
+NetworkManager Ethernet profile, protected by connection-risk control and a
+NetworkManager checkpoint (not yet released; its real-host forms are not
+measured yet). See the resource reference.
 
 Also since v1.2.0: `sinter secrets encrypt | decrypt | list`
 encrypts secret files in the standard age format (recipients or a terminal-only

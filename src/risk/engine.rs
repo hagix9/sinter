@@ -41,6 +41,29 @@ pub struct RiskVerdict {
     pub guarded: bool,
 }
 
+/// What `nm_connection` gives the connection-risk check (§45.6).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NmRiskInput {
+    pub desired: std::collections::BTreeMap<String, String>,
+    pub observed: std::collections::BTreeMap<String, String>,
+    pub steps: Vec<String>,
+    pub change: rules::NmChange,
+    /// The change takes effect now (activation, or deactivation or
+    /// deletion of an active profile), so a new connection tests it.
+    pub takes_effect_now: bool,
+    /// Devices the profile concerns (its interface before and after, the
+    /// device it is active on).
+    pub devices: BTreeSet<String>,
+}
+
+/// What an `nm_connection` may do at its turn.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NmVerdict {
+    pub note: Option<String>,
+    /// Run inside a checkpoint for these devices (§45.7).
+    pub checkpoint: Option<Vec<String>>,
+}
+
 /// One connection-risk resource as plan or apply saw it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RiskRecord {
@@ -620,6 +643,224 @@ impl Engine {
             note: Some(note),
             guarded,
         })
+    }
+
+    /// The connection-risk check of an `nm_connection` (DESIGN §45.6),
+    /// after observing and before any mutation. The rule is the §45.6 rule
+    /// (`rules::nm`) and the decision the §43.3 table (`rules::decide`), the
+    /// same functions every connection-risk type uses. A checkpoint (the
+    /// guarded procedure of §45.7) is available only when the change takes
+    /// effect now (the profile is activated, or an active one is
+    /// deactivated or deleted), so the probe tests what changed, and when
+    /// the device it concerns is known; a change that would take effect
+    /// only at a later activation or boot is refused even with an approval,
+    /// as a permanent-only firewalld change is (§43.6).
+    pub(crate) fn risk_check_nm(
+        &mut self,
+        res: &crate::model::FrozenResource,
+        input: NmRiskInput,
+    ) -> Result<NmVerdict> {
+        let Some(item) = self.risk.items.iter().find(|i| i.id == res.id).cloned() else {
+            return Ok(NmVerdict::default());
+        };
+        let sensitive = res.sensitive || res.derived_sensitive;
+        if sensitive {
+            self.risk.sensitive_ids.insert(res.id.clone());
+        }
+        let apply = self.opts.mode == Mode::Apply;
+        let digest = self.risk_key().map(|k| {
+            let v = json!({
+                "id": res.id,
+                "type": res.type_,
+                "class": item.class.label(),
+                "desired": input.desired,
+                "observed": input.observed,
+                "steps": input.steps,
+            });
+            super::approval::keyed(k, &v)
+        });
+        let mut record = RiskRecord {
+            id: res.id.clone(),
+            type_: res.type_.clone(),
+            class: item.class,
+            enforced: true,
+            dynamic: String::new(),
+            reason: None,
+            change_digest: digest.clone(),
+            approved: false,
+            steps: input.steps.clone(),
+            desired: input
+                .desired
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        if sensitive {
+                            "[redacted]".to_string()
+                        } else {
+                            v.clone()
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let path = self
+            .risk
+            .path
+            .clone()
+            .unwrap_or_else(|| PathState::Unknown("not determined".into()));
+        let dynamic = if input.steps.is_empty() {
+            Dynamic::NoChange
+        } else if self.risk.earlier_change {
+            if apply {
+                Dynamic::Unknown("an earlier connection-risk change of this run".into())
+            } else {
+                Dynamic::Deferred
+            }
+        } else {
+            let mut c = input.change.clone();
+            c.routing_readable = matches!(path, PathState::Known(_));
+            rules::nm(&path, &c)
+        };
+        record.dynamic = dynamic.label().to_string();
+        record.reason = match &dynamic {
+            Dynamic::Affects(w) | Dynamic::Unknown(w) => Some(w.clone()),
+            _ => None,
+        };
+        let approval = self.risk.ctx.as_ref().and_then(|c| c.approval.clone());
+        let approved = match (&approval, &digest) {
+            (Some(a), Some(d)) => a["changes"].as_array().is_some_and(|ch| {
+                ch.iter().any(|c| {
+                    c["id"] == res.id.as_str()
+                        && super::approval::same_digest(
+                            c["change_digest"].as_str().unwrap_or(""),
+                            d,
+                        )
+                })
+            }),
+            _ => false,
+        };
+        record.approved = approved;
+        let mut checkpoint = None;
+        if apply {
+            if let Some(a) = &approval {
+                let listed = a["resources"]
+                    .as_array()
+                    .is_some_and(|r| r.iter().any(|x| x == res.id.as_str()));
+                if listed && !approved && !matches!(dynamic, Dynamic::NoChange) {
+                    record.dynamic = "refused".into();
+                    record.reason = Some("the change differs from the approved change".into());
+                    self.risk_push(record);
+                    return Err(SinterError::apply(format!(
+                        "{}: the change differs from the approved change (re-observed state or steps changed); nothing was changed",
+                        res.id
+                    )));
+                }
+            }
+            let recovery = rules::recovery_for(item.rule);
+            let mgmt = match &path {
+                PathState::Known(p) => Some(p.ifaces.clone()),
+                PathState::Unknown(_) => None,
+            };
+            let untestable = if !input.takes_effect_now {
+                Some("the change takes effect only at a later activation or boot, so a checkpoint cannot test it now")
+            } else if input.change.ifname.is_none() && input.change.autoconnect {
+                Some("a profile that autoconnects without an interface may later take another device, which a checkpoint cannot test now")
+            } else if input.devices.is_empty() || mgmt.is_none() {
+                Some("the devices the change concerns are not known")
+            } else {
+                None
+            };
+            let available = untestable.is_none();
+            match rules::decide(item.class, &dynamic, approved, recovery, available) {
+                rules::Decision::Proceed => {}
+                rules::Decision::Guarded(_) => {
+                    let mut devs: BTreeSet<String> = mgmt.unwrap_or_default();
+                    devs.extend(input.devices.iter().cloned());
+                    checkpoint = Some(devs.into_iter().collect::<Vec<_>>());
+                }
+                rules::Decision::Refuse(why) => {
+                    let why = match (&dynamic, approved, untestable) {
+                        (Dynamic::Affects(_), true, Some(u)) => format!("{} ({})", why, u),
+                        _ => why,
+                    };
+                    record.dynamic = format!("{} (refused)", dynamic.label());
+                    self.risk_push(record);
+                    return Err(SinterError::apply(format!(
+                        "{}: connection-risk control: {}; nothing was changed",
+                        res.id,
+                        if sensitive {
+                            "[redacted]".to_string()
+                        } else {
+                            why
+                        }
+                    )));
+                }
+            }
+        }
+        if !input.steps.is_empty() && item.class != RiskClass::N {
+            self.risk.earlier_change = true;
+        }
+        let note = format!(
+            "connection-risk class={} dynamic={} approval={}{}",
+            item.class.label(),
+            dynamic.label(),
+            if approved { "yes" } else { "no" },
+            if checkpoint.is_some() {
+                " procedure=checkpoint (recovery is not guaranteed; a NetworkManager restart, a reboot or routes outside NetworkManager are not covered)"
+            } else {
+                ""
+            }
+        );
+        self.risk_push(record);
+        Ok(NmVerdict {
+            note: Some(note),
+            checkpoint,
+        })
+    }
+
+    /// Mark the latest record of `id` refused (a checkpoint that turned out
+    /// to be unavailable after the decision).
+    pub(crate) fn risk_mark_refused(&mut self, id: &str, why: &str) {
+        let mut log = self.risk.log.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(r) = log.records.iter_mut().rev().find(|r| r.id == id) {
+            r.dynamic = format!("{} (refused)", r.dynamic);
+            if !self.risk.sensitive_ids.contains(id) {
+                r.reason = Some(why.to_string());
+            }
+        }
+    }
+
+    /// Append a checkpoint event to the approval ledger (§45.7). Without a
+    /// store no checkpoint can run (an `affects` change needs an approval,
+    /// and approvals need the store), so that is an error here.
+    pub(crate) fn risk_ledger(&mut self, event: &str, fields: J) -> Result<()> {
+        let host = self
+            .risk
+            .ctx
+            .as_ref()
+            .map(|c| c.host.clone())
+            .unwrap_or_default();
+        let approval_id = self
+            .risk
+            .ctx
+            .as_ref()
+            .and_then(|c| c.approval.as_ref())
+            .map(|a| a["approval_id"].clone())
+            .unwrap_or(J::Null);
+        let store = self
+            .risk
+            .ctx
+            .as_ref()
+            .and_then(|c| c.store.clone())
+            .ok_or_else(|| SinterError::apply("no approval store for the checkpoint record"))?;
+        let mut obj = match fields {
+            J::Object(m) => m,
+            _ => serde_json::Map::new(),
+        };
+        obj.insert("host".into(), J::String(host));
+        obj.insert("approval_id".into(), approval_id);
+        store.ledger(event, J::Object(obj))
     }
 
     fn risk_push(&mut self, mut r: RiskRecord) {

@@ -125,6 +125,14 @@ pub struct FakeNet {
     pub reconnect: Option<bool>,
     /// Probes served.
     pub probes: usize,
+    /// Whether the original connection still answers after a change
+    /// (NetworkManager checkpoint); `None` answers.
+    pub original_alive: Option<bool>,
+    /// Whether a new connection after the rollback wait succeeds; `None`
+    /// is unmodeled and fails.
+    pub reconnect_after_wait: Option<bool>,
+    /// Seconds waited (recorded, never slept).
+    pub waited: u64,
 }
 
 impl FakeNet {
@@ -2831,4 +2839,443 @@ fn fake_port_ok(v: &str) -> bool {
 
 fn fw_out(code: i32, stdout: &str, stderr: &str) -> Output {
     out(code, stdout.to_string(), stderr.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// NetworkManager (`nm_connection`, DESIGN §45)
+// ---------------------------------------------------------------------------
+
+/// How a scripted checkpoint rollback behaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FakeRollback {
+    /// Restores the snapshot and reports result 0 for every device.
+    Works,
+    /// Fails (non-zero exit) and restores nothing.
+    Fails,
+    /// Reports success but restores nothing.
+    Noop,
+}
+
+/// A scripted NetworkManager reached through `/usr/bin/nmcli` and
+/// `/usr/bin/busctl`. Profiles are setting maps keyed by the names Sinter
+/// reads (`crate::nm::PROFILE_FIELDS`); lists are stored as NetworkManager
+/// prints them (comma-separated). Every command it does not model fails
+/// (exit 2): nothing succeeds implicitly.
+#[derive(Debug, Clone)]
+pub struct FakeNm {
+    pub profiles: Vec<BTreeMap<String, String>>,
+    /// (uuid, device, state) of active profiles.
+    pub active: Vec<(String, String, String)>,
+    /// Devices NetworkManager knows (index + 1 is the D-Bus object number).
+    pub devices: Vec<String>,
+    pub checkpoint_api: bool,
+    /// Answer for `org.freedesktop.NetworkManager.checkpoint-rollback`.
+    pub permission: String,
+    /// Forced failure of `CheckpointCreate` (exit, stderr).
+    pub create_fails: Option<(i32, String)>,
+    pub destroy_fails: bool,
+    pub rollback: FakeRollback,
+    /// Forced failure of one nmcli verb (`add`, `modify`, `up`, `down`,
+    /// `delete`): (exit, stderr).
+    pub fail_verb: BTreeMap<String, (i32, String)>,
+    /// Raw stdout served instead of the modeled answer, by query
+    /// (`list`, `active`, `profile`).
+    pub raw: BTreeMap<String, String>,
+    /// Open checkpoint: (path, devices, snapshot of profiles and active).
+    #[allow(clippy::type_complexity)]
+    pub checkpoint: Option<(
+        String,
+        Vec<String>,
+        Vec<BTreeMap<String, String>>,
+        Vec<(String, String, String)>,
+    )>,
+    next_uuid: u32,
+    next_checkpoint: u32,
+    /// Profile-changing nmcli invocations served, in order.
+    pub mutations: Vec<Vec<String>>,
+    /// Checkpoint calls served: `create`, `destroy`, `rollback`, `expired`.
+    pub checkpoint_calls: Vec<String>,
+    /// Every invocation served (program, argv).
+    pub received: Vec<(String, Vec<String>)>,
+}
+
+impl Default for FakeNm {
+    fn default() -> Self {
+        FakeNm {
+            profiles: Vec::new(),
+            active: Vec::new(),
+            devices: vec!["eth0".into(), "eth1".into(), "lo".into()],
+            checkpoint_api: true,
+            permission: "yes".into(),
+            create_fails: None,
+            destroy_fails: false,
+            rollback: FakeRollback::Works,
+            fail_verb: BTreeMap::new(),
+            raw: BTreeMap::new(),
+            checkpoint: None,
+            next_uuid: 1,
+            next_checkpoint: 1,
+            mutations: Vec::new(),
+            checkpoint_calls: Vec::new(),
+            received: Vec::new(),
+        }
+    }
+}
+
+const NM_SETTABLE: &[&str] = &[
+    "connection.interface-name",
+    "connection.autoconnect",
+    "ipv4.method",
+    "ipv4.addresses",
+    "ipv4.gateway",
+    "ipv4.dns",
+    "ipv4.dns-search",
+    "ipv6.method",
+    "ipv6.addresses",
+    "ipv6.gateway",
+    "ipv6.dns",
+];
+
+impl FakeNm {
+    fn out(code: i32, stdout: String, stderr: &str) -> crate::executor::Output {
+        crate::executor::Output {
+            completion: crate::executor::Completion::Exited(code),
+            stdout: stdout.into_bytes(),
+            stderr: stderr.as_bytes().to_vec(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }
+    }
+
+    fn uuid(n: u32) -> String {
+        format!("00000000-0000-4000-8000-{:012x}", n)
+    }
+
+    /// A profile as `connection add` would create it (NetworkManager's
+    /// defaults: autoconnect on, automatic addressing).
+    pub fn profile(name: &str, ifname: &str) -> BTreeMap<String, String> {
+        let mut m = BTreeMap::new();
+        m.insert("connection.id".into(), name.into());
+        m.insert("connection.uuid".into(), String::new());
+        m.insert("connection.type".into(), crate::nm::ETHERNET_SETTING.into());
+        m.insert("connection.interface-name".into(), ifname.into());
+        m.insert("connection.autoconnect".into(), "yes".into());
+        for f in [
+            "ipv4.addresses",
+            "ipv4.gateway",
+            "ipv4.dns",
+            "ipv4.dns-search",
+            "ipv6.addresses",
+            "ipv6.gateway",
+            "ipv6.dns",
+        ] {
+            m.insert(f.into(), String::new());
+        }
+        m.insert("ipv4.method".into(), "auto".into());
+        m.insert("ipv6.method".into(), "auto".into());
+        m
+    }
+
+    /// Add a profile; returns its UUID.
+    pub fn add(&mut self, mut p: BTreeMap<String, String>) -> String {
+        let u = Self::uuid(self.next_uuid);
+        self.next_uuid += 1;
+        p.insert("connection.uuid".into(), u.clone());
+        self.profiles.push(p);
+        u
+    }
+
+    pub fn activate(&mut self, uuid: &str, device: &str) {
+        self.active.retain(|(u, d, _)| u != uuid && d != device);
+        self.active
+            .push((uuid.into(), device.into(), "activated".into()));
+    }
+
+    pub fn find(&self, name: &str) -> Option<&BTreeMap<String, String>> {
+        self.profiles.iter().find(|p| p["connection.id"] == name)
+    }
+
+    /// The scripted rollback timeout passed: an open checkpoint is rolled
+    /// back (NetworkManager's own behaviour).
+    pub fn expire(&mut self) {
+        if let Some((_, _, profiles, active)) = self.checkpoint.take() {
+            self.profiles = profiles;
+            self.active = active;
+            self.checkpoint_calls.push("expired".into());
+        }
+    }
+
+    fn by_uuid(&mut self, u: &str) -> Option<usize> {
+        self.profiles.iter().position(|p| p["connection.uuid"] == u)
+    }
+
+    pub fn run(&mut self, program: &str, args: &[String]) -> crate::executor::Output {
+        self.received.push((program.to_string(), args.to_vec()));
+        if program == crate::nm::BUSCTL {
+            return self.busctl(args);
+        }
+        let a: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        match a.as_slice() {
+            ["-t", "-f", "DEVICE,STATE", "device"] => {
+                let body: String = self
+                    .devices
+                    .iter()
+                    .map(|d| format!("{}:connected\n", d))
+                    .collect();
+                Self::out(0, body, "")
+            }
+            ["-t", "-e", "yes", "-f", "NAME,UUID,TYPE", "connection", "show"] => {
+                if let Some(r) = self.raw.get("list") {
+                    return Self::out(0, r.clone(), "");
+                }
+                let body: String = self
+                    .profiles
+                    .iter()
+                    .map(|p| {
+                        format!(
+                            "{}:{}:{}\n",
+                            crate::nm::escape_terse(&p["connection.id"]),
+                            p["connection.uuid"],
+                            p["connection.type"]
+                        )
+                    })
+                    .collect();
+                Self::out(0, body, "")
+            }
+            ["-t", "-e", "yes", "-f", "NAME,UUID,DEVICE,STATE", "connection", "show", "--active"] =>
+            {
+                if let Some(r) = self.raw.get("active") {
+                    return Self::out(0, r.clone(), "");
+                }
+                let mut body = String::new();
+                for (u, d, st) in &self.active {
+                    let name = self
+                        .profiles
+                        .iter()
+                        .find(|p| &p["connection.uuid"] == u)
+                        .map(|p| p["connection.id"].clone())
+                        .unwrap_or_default();
+                    body.push_str(&format!(
+                        "{}:{}:{}:{}\n",
+                        crate::nm::escape_terse(&name),
+                        u,
+                        d,
+                        st
+                    ));
+                }
+                Self::out(0, body, "")
+            }
+            ["-t", "-e", "yes", "-f", fields, "connection", "show", "uuid", u] => {
+                if *fields != crate::nm::PROFILE_FIELDS.join(",") {
+                    return Self::out(2, String::new(), "Error: unmodeled field list");
+                }
+                if let Some(r) = self.raw.get("profile") {
+                    return Self::out(0, r.clone(), "");
+                }
+                let Some(i) = self.by_uuid(u) else {
+                    return Self::out(10, String::new(), "Error: no such connection profile.");
+                };
+                let p = &self.profiles[i];
+                let body: String = crate::nm::PROFILE_FIELDS
+                    .iter()
+                    .map(|f| format!("{}:{}\n", f, crate::nm::escape_terse(&p[*f])))
+                    .collect();
+                Self::out(0, body, "")
+            }
+            ["connection", verb, rest @ ..] => self.change(verb, rest, args),
+            _ => Self::out(2, String::new(), "Error: unmodeled nmcli invocation"),
+        }
+    }
+
+    fn change(&mut self, verb: &str, rest: &[&str], args: &[String]) -> crate::executor::Output {
+        if let Some((code, err)) = self.fail_verb.get(verb).cloned() {
+            self.mutations.push(args.to_vec());
+            return Self::out(code, String::new(), &err);
+        }
+        let set = |p: &mut BTreeMap<String, String>, kv: &[&str]| -> Result<(), String> {
+            if !kv.len().is_multiple_of(2) {
+                return Err("Error: value missing".into());
+            }
+            for c in kv.chunks(2) {
+                if !NM_SETTABLE.contains(&c[0]) {
+                    return Err(format!("Error: invalid property '{}'", c[0]));
+                }
+                p.insert(c[0].to_string(), c[1].to_string());
+            }
+            Ok(())
+        };
+        match (verb, rest) {
+            ("add", ["type", "ethernet", "con-name", name, tail @ ..]) => {
+                self.mutations.push(args.to_vec());
+                let (ifname, kv) = match tail {
+                    ["ifname", i, kv @ ..] => (*i, kv),
+                    kv => ("", kv),
+                };
+                let mut p = Self::profile(name, ifname);
+                if let Err(e) = set(&mut p, kv) {
+                    return Self::out(2, String::new(), &e);
+                }
+                let u = self.add(p);
+                Self::out(
+                    0,
+                    format!("Connection '{}' ({}) successfully added.\n", name, u),
+                    "",
+                )
+            }
+            ("modify", ["uuid", u, kv @ ..]) => {
+                self.mutations.push(args.to_vec());
+                let Some(i) = self.by_uuid(u) else {
+                    return Self::out(10, String::new(), "Error: no such connection profile.");
+                };
+                let mut p = self.profiles[i].clone();
+                if let Err(e) = set(&mut p, kv) {
+                    return Self::out(2, String::new(), &e);
+                }
+                self.profiles[i] = p;
+                Self::out(0, String::new(), "")
+            }
+            ("up", ["uuid", u]) => {
+                self.mutations.push(args.to_vec());
+                let Some(i) = self.by_uuid(u) else {
+                    return Self::out(10, String::new(), "Error: no such connection profile.");
+                };
+                let ifname = self.profiles[i]["connection.interface-name"].clone();
+                if ifname.is_empty() || !self.devices.contains(&ifname) {
+                    return Self::out(4, String::new(), "Error: no suitable device found.");
+                }
+                let u = u.to_string();
+                self.activate(&u, &ifname);
+                Self::out(0, "Connection successfully activated.\n".into(), "")
+            }
+            ("down", ["uuid", u]) => {
+                self.mutations.push(args.to_vec());
+                let before = self.active.len();
+                self.active.retain(|(x, _, _)| x != u);
+                if self.active.len() == before {
+                    return Self::out(10, String::new(), "Error: not an active connection.");
+                }
+                Self::out(0, String::new(), "")
+            }
+            ("delete", ["uuid", u]) => {
+                self.mutations.push(args.to_vec());
+                let Some(i) = self.by_uuid(u) else {
+                    return Self::out(10, String::new(), "Error: no such connection profile.");
+                };
+                self.profiles.remove(i);
+                self.active.retain(|(x, _, _)| x != u);
+                Self::out(0, String::new(), "")
+            }
+            _ => Self::out(2, String::new(), "Error: unmodeled nmcli invocation"),
+        }
+    }
+
+    fn busctl(&mut self, args: &[String]) -> crate::executor::Output {
+        let a: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let base = ["--system"];
+        let nm = crate::nm::NM_BUS;
+        let path = crate::nm::NM_PATH;
+        if a.len() < 5 || a[0] != base[0] || a[2] != nm || a[3] != path || a[4] != nm {
+            return Self::out(2, String::new(), "unmodeled busctl invocation");
+        }
+        match (a[1], &a[5..]) {
+            ("introspect", []) => {
+                let mut t = String::from("NAME TYPE SIGNATURE RESULT/VALUE FLAGS\n");
+                t.push_str(".GetDeviceByIpIface method s o -\n");
+                t.push_str(".GetPermissions method - a{ss} -\n");
+                if self.checkpoint_api {
+                    t.push_str(".CheckpointCreate method aouu o -\n");
+                    t.push_str(".CheckpointDestroy method o - -\n");
+                    t.push_str(".CheckpointRollback method o a{su} -\n");
+                }
+                Self::out(0, t, "")
+            }
+            ("call", ["GetPermissions"]) => Self::out(
+                0,
+                format!(
+                    "a{{ss}} 2 \"org.freedesktop.NetworkManager.network-control\" \"yes\" \"org.freedesktop.NetworkManager.checkpoint-rollback\" \"{}\"\n",
+                    self.permission
+                ),
+                "",
+            ),
+            ("call", ["GetDeviceByIpIface", "s", dev]) => {
+                match self.devices.iter().position(|d| d == dev) {
+                    Some(i) => Self::out(
+                        0,
+                        format!("o \"/org/freedesktop/NetworkManager/Devices/{}\"\n", i + 1),
+                        "",
+                    ),
+                    None => Self::out(
+                        1,
+                        String::new(),
+                        "Call failed: No device found for the requested iface.",
+                    ),
+                }
+            }
+            ("call", ["CheckpointCreate", "aouu", n, rest @ ..]) => {
+                if !self.checkpoint_api {
+                    return Self::out(1, String::new(), "Call failed: Unknown method");
+                }
+                self.checkpoint_calls.push("create".into());
+                if let Some((c, e)) = self.create_fails.clone() {
+                    return Self::out(c, String::new(), &e);
+                }
+                let n: usize = n.parse().unwrap_or(usize::MAX);
+                if rest.len() != n + 2 || self.checkpoint.is_some() {
+                    return Self::out(1, String::new(), "Call failed: checkpoint conflict");
+                }
+                let devs: Vec<String> = rest[..n].iter().map(|s| s.to_string()).collect();
+                let p = format!(
+                    "/org/freedesktop/NetworkManager/Checkpoint/{}",
+                    self.next_checkpoint
+                );
+                self.next_checkpoint += 1;
+                self.checkpoint = Some((
+                    p.clone(),
+                    devs,
+                    self.profiles.clone(),
+                    self.active.clone(),
+                ));
+                Self::out(0, format!("o \"{}\"\n", p), "")
+            }
+            ("call", ["CheckpointDestroy", "o", p]) => {
+                self.checkpoint_calls.push("destroy".into());
+                if self.destroy_fails {
+                    return Self::out(1, String::new(), "Call failed: destroy refused");
+                }
+                match &self.checkpoint {
+                    Some((cp, _, _, _)) if cp == p => {
+                        self.checkpoint = None;
+                        Self::out(0, String::new(), "")
+                    }
+                    _ => Self::out(1, String::new(), "Call failed: no such checkpoint"),
+                }
+            }
+            ("call", ["CheckpointRollback", "o", p]) => {
+                self.checkpoint_calls.push("rollback".into());
+                let Some((cp, devs, profiles, active)) = self.checkpoint.clone() else {
+                    return Self::out(1, String::new(), "Call failed: no such checkpoint");
+                };
+                if cp != *p {
+                    return Self::out(1, String::new(), "Call failed: no such checkpoint");
+                }
+                match self.rollback {
+                    FakeRollback::Fails => Self::out(1, String::new(), "Call failed: rollback"),
+                    mode => {
+                        if mode == FakeRollback::Works {
+                            self.profiles = profiles;
+                            self.active = active;
+                        }
+                        self.checkpoint = None;
+                        let mut t = format!("a{{su}} {}", devs.len());
+                        for d in &devs {
+                            t.push_str(&format!(" \"{}\" 0", d));
+                        }
+                        t.push('\n');
+                        Self::out(0, t, "")
+                    }
+                }
+            }
+            _ => Self::out(2, String::new(), "unmodeled busctl invocation"),
+        }
+    }
 }

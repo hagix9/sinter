@@ -17,6 +17,7 @@ Sinter v1.14.1 は 10 の組み込みリソースタイプを実装していま�
 | [package](/ja/reference/resources/package/) | パッケージのインストール/削除（apt/dnf） | `name`、`state` |
 | [service](/ja/reference/resources/service/) | systemd の状態と有効化 | `name`、`state`、`enabled` |
 | [systemd_timer](/ja/reference/resources/systemd_timer/) | systemd タイマーのユニットと有効化 | `name`、`on_calendar`、`on_boot_sec`、`state`、`enabled` |
+| [nm_connection](/ja/reference/resources/nm_connection/) | NetworkManager の Ethernet プロファイル(v1.15.0、未リリース) | `name`、`ifname`、`autoconnect`、`ipv4`、`ipv6`、`state`、`active` |
 | [group](/ja/reference/resources/group/) | ローカル Linux グループ | `name`、`state`、`gid`、`system` |
 | [user](/ja/reference/resources/user/) | ローカル Linux ユーザー | `name`、`state`、`uid`、`group`、`groups`、`shell`、`home`、`create_home`、`system`、`password_hash` |
 | [postgresql_role](/ja/reference/resources/postgresql_role/) | ローカルの PostgreSQL サーバーのロール（v1.5.1 から） | `name`、`state`、`login`、`superuser`、…、`connection_limit`、`password_verifier` |
