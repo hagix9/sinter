@@ -148,7 +148,12 @@ not exist yet in code; Sinter's privilege model cannot limit a `command`
 resource (T2), so only the proposal policy keeps it out; and the guarded
 procedures of §43 are themselves new. W1 may be implemented after the approval
 primitive of DESIGN §43.4 is implemented and released, this ADR passes an
-independent review, and the Owner approves W1.
+independent review, and the Owner approves W1. A local approval does not resist a malicious
+process of the same local account (it can read the controller key and write
+records, and a pseudo-terminal satisfies the terminal check). W1 therefore
+also requires that approval records be created by a different local account
+than the proposal process, or be otherwise tamper-resistant (for example
+signed with a key the proposal process cannot read).
 
 ## 7. Consequences
 

@@ -3082,7 +3082,7 @@ PLANNED (v1.15.0 P0 design, Owner decision D-1 of 2026-11-19; not implemented). 
 
 - the content write, backup and diff of the `file` resource (§24–§26) for `/etc/systemd/system/<name>.timer`;
 - the manager input classification and the automatic daemon-reload (§28; `timer` is already a unit suffix of the manager);
-- the service observation (`systemctl show --property=LoadState,ActiveState,UnitFileState,NeedDaemonReload`), the enable/disable/start/stop/reset-failed steps and their verification (§28), applied to the unit `<name>.timer`;
+- the service observation (`systemctl show --property=LoadState,ActiveState,UnitFileState,NeedDaemonReload -- <unit>`), the enable/disable/start/stop/reset-failed steps and their verification (§28), applied to the unit `<name>.timer`;
 - notification of handlers (§18).
 
 The `--user` manager stays out of scope (UNCHANGED LIMIT, §28).
@@ -3093,11 +3093,11 @@ The `--user` manager stays out of scope (UNCHANGED LIMIT, §28).
 |---|---|---|
 | `name` | required, static | Unit name without `.timer`: 1–200 bytes of `[A-Za-z0-9:_.-]`, not starting with `.` or `-`. `@` (templates) and `\` are refused in v1.15.0 |
 | `unit` | optional, static | The unit the timer activates (`Unit=`). Default `<name>.service`, which is then not written. Same character rule plus a unit suffix of §28 other than `timer` |
-| `on_calendar` | string or list of strings | One `OnCalendar=` line each. Each: 1–128 bytes, printable ASCII, no leading `-` |
+| `on_calendar` | string or list of strings | One `OnCalendar=` line each. Each: 1–128 bytes of printable ASCII without `\` and `%`, no leading or trailing space, not starting with `-` |
 | `on_boot_sec`, `on_unit_active_sec` | time span | `OnBootSec=`, `OnUnitActiveSec=` |
 | `persistent` | boolean | `Persistent=`; exit 2 without `on_calendar` |
 | `accuracy_sec`, `randomized_delay_sec` | time span | `AccuracySec=`, `RandomizedDelaySec=` |
-| `description` | optional string | `[Unit] Description=`, 1–256 bytes printable; `%` is written as `%%` |
+| `description` | optional string | `[Unit] Description=`, 1–256 bytes of printable ASCII without `\` and `%`, no leading or trailing space (so no specifier and no line continuation can change what is written) |
 | `state` | `running`, `stopped` or `absent` | `running`/`stopped` as §28. `absent` is new (a service has no `absent`): stop, disable, remove the unit file, daemon-reload |
 | `enabled` | boolean | As §28 |
 
@@ -3127,6 +3127,10 @@ WantedBy=timers.target
 
 Owner `root`, group `root`, mode `0644`. The run needs root on the target (as any `/etc` path, §21). Comparison is the SHA-256 comparison of §26. A pre-existing file with other content is replaced and backed up exactly as a `file` resource with content would be.
 
+The path `/etc/systemd/system/<name>.timer` takes part in the ownership-conflict check of §4.11 like a `file` path: a `file`, `template` or `link` resource (or a second `systemd_timer`) on the same path is exit 2 at validation.
+
+Before any change the timer unit is also observed with `systemctl show --property=FragmentPath,DropInPaths -- <name>.timer` (a new fixed read-only shape, §47.1). The resource fails, with nothing changed, when `FragmentPath` is set and is not `/etc/systemd/system/<name>.timer` (a unit of that name exists elsewhere, for example a vendor unit; writing would shadow it and `absent` could never reach `not-found`), and when `DropInPaths` is not empty (drop-ins would change the effective timer without Sinter seeing it; managing drop-ins is an UNCHANGED LIMIT of v1.15.0). Audit reports both as errors, never as no drift.
+
 42.4 Validation on the target
 
 The `OnCalendar` grammar depends on the systemd version, so each expression is checked on the target with a new fixed-argv observation, `/usr/bin/systemd-analyze calendar <expr>` (no permit, no sudo needed). Exit 0 is valid; any other result is a failure of the resource in plan, apply and audit, never a guess. That this command changes nothing on the host must be confirmed from the systemd source and on every supported target before the type is released (P1 exit condition); until then it is NOT VERIFIED and the type must not be exposed through MCP (§38.13 applies by analogy).
@@ -3138,7 +3142,7 @@ One decision function serves plan, apply and audit (avoiding a further copy like
 - Order for `running`/`stopped`/`enabled`: write the unit file → manager sync (the daemon-reload of §28 runs because a unit path changed) → enable/disable → start/stop. This is the §28 table with the write first. After the steps the timer is re-observed and every managed dimension verified.
 - When activation is managed (`state: running` or `enabled: true`), the triggered unit must exist (`LoadState` not `not-found`) after the manager sync; otherwise the resource fails before enable/start. In plan, a triggered unit that an earlier resource of the run creates is unknown (deferred), as for `service` after a package (§29).
 - `state: absent`: stop (if active) → disable (if enabled) → remove the unit file (the `file` absent path, with its backup) → daemon-reload → verify `LoadState` is `not-found`.
-- `masked` timer with `running` requested fails, as §28.
+- A timer whose `UnitFileState` is `masked` fails before any change, whatever is requested (the mask is a symlink to `/dev/null` at the very path Sinter would write; unmasking is out of scope). This check comes before the write.
 - Audit drift items: content, enabled, state, missing triggered unit, `NeedDaemonReload=yes`. `NextElapseUSecRealtime` and `LastTriggerUSec` are shown as information only.
 - A change of content, enablement or state counts as a change for notifications (§18).
 
@@ -3152,26 +3156,29 @@ PLANNED (v1.15.0 P0 design, Owner decisions D-3, D-4 and D-12 of 2026-11-19; not
 
 43.1 Purpose
 
-Some changes can cut the SSH connection Sinter manages the host through (firewalld zones, sources, interfaces, reload; NetworkManager profiles). Sinter cannot guarantee that such a change leaves the host reachable, nor that it can be undone if it does not. This section fixes what Sinter does instead: classify before contact, refuse without an approval, find the management path after contact, refuse what it cannot determine, and use a recovery mechanism where one exists without claiming it always works. It applies to `nm_connection` (§45) and the firewalld 0.3.0 types (§44) and to nothing else in v1.15.0. A run without such resources is unchanged and needs no approval.
+Some changes can cut the SSH connection Sinter manages the host through (firewalld zones, sources, interfaces, reload; NetworkManager profiles). Sinter cannot guarantee that such a change leaves the host reachable, nor that it can be undone if it does not. This section fixes what Sinter does instead: classify before contact, refuse without an approval, find the management path after contact, refuse what it cannot determine, and use a recovery mechanism where one exists without claiming it always works. It applies to `nm_connection` (§45) and the firewalld 0.3.0 types (§44) and to nothing else in v1.15.0. A run without such resources is unchanged and needs no approval. Sinter can only see and protect the SSH connection it uses itself; another session (for example an operator's own session over another interface, or the outer session of a host Sinter reaches through a jump host or a loopback forward) is not seen, and a change can cut it while Sinter's connection survives.
 
 43.2 Static classification (before any contact)
 
-Every resource of a connection-risk type is classified from its type and values alone:
+Connection-risk types are `nm_connection` and the types of the first-party firewalld catalogs 0.2.0 and 0.3.0, identified by the registered catalog digest (§38.4), not by type name alone. The 0.2.0 types are included although 0.2.0 is already released: their `absent` operations can cut the management connection; this tightens 0.2.0 behaviour (§47.2). An activated catalog that is not in this table but has a mutate operation whose program is `/usr/bin/firewall-cmd`, `/usr/bin/nmcli`, `/usr/sbin/ip` or `/usr/bin/busctl` is refused before contact (exit 2): no catalog can bypass the classification. Every resource of a connection-risk type is classified from its type and values alone:
 
 - R (risky): always needs an approval. `firewalld.zone` with `state: absent`; `firewalld.source` (any state); `firewalld.interface` (any state).
 - C (conditional): needs an approval only if the dynamic check (§43.3) finds it on the management path. `firewalld.service`, `firewalld.port`, `firewalld.protocol` with `state: absent`; `firewalld.rich_rule` (if built, §44.5) other than an `accept` rule being added; a notified `firewalld.reload` handler (§44.4); every `nm_connection` change.
 - N: everything else (for example adding a service or port).
 
-Values of connection-risk types may use variables and facts (known when the host is planned) but not registers: a register-dependent value in such a resource is exit 2 at validation, because its change could not be reviewed in advance. Plan, apply and audit print the class. Apply refuses the whole run with exit 2 before contacting any target when an R resource of a selected host has no matching approval (§43.4), checked for every host and unit the run would reach, exactly where the C1 gate already runs (`src/main.rs` before contact, `require_allowed_mutations`). Audit never needs an approval: it runs no mutation.
+The classification runs before contact, when only literals and variables (§40) are known. A risk-relevant field that depends on a fact is classified for its worst case (R), as the C1 gate evaluates every possible value; a register-dependent value in such a resource is exit 2 at validation, because its change could not be reviewed in advance. A resource with `when` is classified as if it runs. Plan, apply and audit print the class. Apply refuses the whole run with exit 2 before contacting any target when an R resource of a selected host has no matching approval (§43.4), checked for every host and unit the run would reach, exactly where the C1 gate already runs (`src/main.rs` before contact, `require_allowed_mutations`). Plan never needs an approval (it is how a request is made); audit never needs one (it runs no mutation).
+
+A local target (no SSH) has no management connection Sinter can see: every C or R resource on a local target is `unknown` (§43.3) and therefore refused at its turn.
 
 43.3 Dynamic management-path check (after contact)
 
 Only runs that contain C or R resources do this; it adds observations, never a mutation.
 
-1. During session setup Sinter runs the fixed command `/usr/bin/printenv SSH_CONNECTION` without `env -i` and without sudo, as it already runs `getent passwd` and `/usr/bin/id -u` there (`src/executor.rs`). Every other command keeps `env -i` (§20), which is why the variable is read only here. The answer must be exactly four space-separated fields (client address, client port, server address, server port) with valid IP addresses and ports; anything else (empty, a forced command, a restricted shell, a loopback server address from a forwarded port) makes the path unknown.
-2. Ingress interface: the interface that holds the server address (`/usr/sbin/ip -o addr show`, parsed strictly). None, or more than one, is unknown. Egress interface: `/usr/sbin/ip -o route get <client address>`. If they differ (asymmetric routing, several NICs) both are management interfaces. The server address is the post-NAT address the target itself sees, so a NAT in front of the host (for example a cloud external address) does not make the path unknown; a DNAT or port forward on the target itself does (below).
-3. firewalld zone of the management connection, in firewalld's own precedence: a zone whose sources contain the client address (computed by Sinter from the zones' source lists); if the sources of more than one zone match, if any source is an ipset or MAC source, or if the firewalld version uses zone priorities that Sinter does not model, the zone is unknown. Otherwise the zone of each management interface (`--get-zone-of-interface`), else the default zone. If the zone has forward ports, or non-default policies or direct rules exist, the management port as firewalld sees it may differ from the server port: unknown.
+1. During session setup Sinter runs the fixed command `/usr/bin/printenv SSH_CONNECTION` without `env -i` and without sudo, as it already runs `getent passwd` and `/usr/bin/id -u` there (`src/executor.rs`). Every other command keeps `env -i` (§20), which is why the variable is read only here. The answer must be exactly four space-separated fields (client address, client port, server address, server port) with valid IP addresses and ports; anything else (empty, a forced command, a restricted shell) makes the path unknown. When both addresses are loopback addresses, the management path is the loopback interface `lo`: a change is `affects` only if it concerns `lo` (Sinter cannot tell a direct local connection from a port forwarded to the target's loopback; either way the connection it uses enters through `lo`). A loopback server address with a non-loopback client address is unknown. Because the account can set this variable itself (`~/.ssh/environment`, rc files), the four values are cross-checked with `/usr/bin/ss -Htn state established` (no process names, no sudo): exactly one established TCP socket must have the server address and port as local and the client address and port as peer; otherwise the path is unknown.
+2. Ingress interface: the interface that holds the server address (`/usr/sbin/ip -o addr show`, parsed strictly). None, or more than one, is unknown. Egress interface: `/usr/sbin/ip -o route get <client address> from <server address>` (so policy routing is taken into account). If they differ (asymmetric routing, several NICs) both are management interfaces. The server address is the post-NAT address the target itself sees, so a NAT in front of the host (for example a cloud external address) does not make the path unknown; a DNAT or port forward on the target itself does (below).
+3. firewalld zone of the management connection, in firewalld's own precedence: a zone whose sources contain the client address (computed by Sinter from the zones' source lists); if the sources of more than one zone match, or if any source is an ipset or MAC source, the zone is unknown. Zone priorities (newer firewalld) can reorder source and interface dispatch: the priority of each zone is observed with the query the installed version offers (fixed argv, measured per target in P3); any zone with a non-default priority, or a version that has priorities which cannot be observed, makes the zone unknown. Otherwise the zone of each management interface (`--get-zone-of-interface`), else the default zone. If the zone has forward ports, or non-default policies or direct rules exist, the management port as firewalld sees it may differ from the server port: unknown.
 4. Result per C or R resource: `clear` (shown not to touch the management path), `affects`, or `unknown`. The rules per type are in §44.6 and §45.6.
+5. The path is determined once, before the first resource of the host runs, and each resource's result is computed at its turn from fresh observations. If an earlier resource of the same run is a connection-risk resource that changed something, the result of every later C or R resource is `deferred` in plan and `unknown` at its turn in apply (refused): changes that build on each other's effect on the path must be applied in separate runs.
 
 Decision, at the resource's turn and before its first mutation:
 
@@ -3185,14 +3192,34 @@ Earlier resources of the run may already have changed the host when a later one 
 
 43.4 Approval requests, approvals and the plan digest (D-4)
 
-The plan remains a preview (§12, GOALS §5). An approval binds what the Owner reviewed to what apply may do; apply still re-observes everything and stops if the result differs.
+The plan remains a preview (§12, GOALS §5). An approval binds what the Owner reviewed to what apply may do; apply still re-observes everything and stops if the result differs. Local approvals protect against mistakes, stale reviews and replay; they do not protect against a malicious process running as the same local account, which can read the key and write records (that limit is restated in ADR 0003 §6).
 
-- `sinter plan … --approval-request <dir>` writes, for each host, `<dir>/<host>.request.json` (mode 0600, created exclusively): schema `sinter-approval-request/1`, Sinter version, host (inventory name), target identity (SSH user, sudo flag, SHA-256 fingerprint of the verified host key), digest of the frozen model, keyed digest of the variable values, creation time, a 128-bit random nonce, a 256-bit random key `k` (never printed), and per resource: id, type, class, dynamic result, planned steps, a non-sensitive summary and a change digest.
-- Change digest of a resource: SHA-256 of the canonical JSON (sorted keys, UTF-8, no insignificant whitespace) of id, type, normalized desired fields, the normalized observations the decision used, and the planned steps. For a sensitive resource (§31) HMAC-SHA256 with `k` replaces SHA-256, so no unkeyed digest of secret material exists anywhere. Plan digest: SHA-256 of the canonical request without `k`.
-- `sinter approve <request>` requires a terminal on stdin and stdout, shows every resource of the host with a change (not only the risky ones) and the full planned steps of every C and R resource, and asks for the first 16 hex digits of the plan digest. It writes an approval record (mode 0600) into `$XDG_STATE_HOME/sinter/approvals/` (else `~/.local/state/sinter/approvals/`, directory 0700): approval id (128-bit random), plan digest, host, the covered resource ids, approval time, expiry (default 30 minutes, `--expires` up to 24 hours), the local account that approved. The record shows which local account approved, not which person; the Owner's written record remains the authority for releases.
-- `sinter apply … --approval <id>` (repeatable; allowed for any run, where it only adds checks). Before contact: the record exists, is not expired, is unused, names a selected host, and covers every R resource of that host; else exit 2. Then Sinter marks the approval used — exclusive creation of `used/<id>` and a ledger line — before contacting the host, so an approval is spent even if apply fails or is interrupted. After connecting, apply first computes the plan of the whole host on the same connection (observations only) and its digest. A different digest stops the run before any mutation: every resource is reported skipped with reason `approval mismatch`, exit 5. Then each C or R resource, at its turn, recomputes its change digest from its fresh observation; a difference fails that resource before any mutation (exit 5). Ordinary resources follow the unchanged apply contract.
-- Ledger: `$XDG_STATE_HOME/sinter/approval-ledger.jsonl`, append-only, one JSON line per event (`requested`, `approved`, `used`, `mismatch`, `applied`, `failed`, `indeterminate`) with time, approval id, host, plan digest and the SHA-256 of the previous line; writers take a lock. The chain detects edits to individual lines; someone who can write the file can rewrite it entirely (tamper-evident, not tamper-proof). A `used` without a final event is shown by `sinter approvals list` as interrupted, state unknown; it needs a new plan and a new approval.
-- No request, approval or ledger file contains a secret value, a decrypted secret or an unkeyed digest of one.
+Controller key. `$XDG_STATE_HOME/sinter/approval.key` (else `~/.local/state/sinter/approval.key`; directory 0700, file 0600, 32 random bytes, created on first use, never printed or copied into a request or approval). It keys the digests of sensitive content.
+
+Canonical form. JSON with sorted keys, UTF-8, no insignificant whitespace, integers only.
+
+Change digest of a resource. SHA-256 of the canonical object `{id, type, class, desired, observed, steps}`:
+- `desired`: the normalized declared fields;
+- `observed`: only the managed dimensions the decision used (for example content digest, owner, group, mode; installed or not; active and enabled; each facet's state; each declared profile setting), or the literal `"unknown"` where plan has no value (future-created state, §29);
+- `steps`: the planned steps;
+- excluded: times, process ids, the SSH connection's addresses and ports, versions or other values that are not managed, and any message text.
+For a sensitive resource (§31) HMAC-SHA256 with the controller key replaces SHA-256; no unkeyed digest of secret material exists anywhere.
+
+Content digest of a host. SHA-256 of the canonical object `{sinter_version, host, target: {ssh_user, sudo, host_key_sha256}, model_digest, vars_digest, resources: [{id, change_digest, dynamic}]}`, where `dynamic` is the §43.3 result (`clear`, `affects`, `unknown`, `deferred`, or `none` for other resources) and `vars_digest` is keyed. Everything in it is recomputed from a fresh plan; nothing comes from the request file.
+
+Request. `sinter plan … --approval-request <dir>` writes `<dir>/<host>.request.json` (0600, created exclusively): schema `sinter-approval-request/1`, the content digest and every input listed above (without the key), a non-sensitive summary per resource, the creation time and a 128-bit random nonce. Request digest: SHA-256 of the canonical request.
+
+Approval. `sinter approve <request>` requires a terminal on stdin and stdout, shows every resource of the host with a change and the full planned steps of every C and R resource, and asks for the first 16 hex digits of the content digest. A terminal shows interactive use, not that a person typed the answer. It creates, exclusively, `approvals/by-request/<request digest>` (a second approval of the same request is refused) and the approval record `approvals/<approval id>.json` (0600): approval id (128-bit random), request digest, content digest, nonce, host, the covered resource ids, approval time, expiry (default 30 minutes, `--expires` up to 24 hours) and the local account that approved.
+
+Use. `sinter apply … --approval <id>` (repeatable; allowed for any run, where it only adds checks):
+1. Before contact, for every selected host: each record exists, is unexpired, its request digest has no `used/<request digest>` marker, it names a selected host, at most one approval per host, and together they cover every R resource; otherwise exit 2 and nothing is marked.
+2. Still before contact, every approval of the run is marked used by exclusive creation of `used/<request digest>` and a ledger line. If any marker already exists (a concurrent run), the run stops with exit 2; markers created a moment earlier stay (those approvals are spent: fail closed).
+3. After connecting to a host and before any mutation, apply computes a plan of that host on the same connection with a separate plan-mode, read-only `TargetFs` (no mutation permit), and its content digest. A different digest stops that host's run before any mutation: every resource is reported skipped with reason `approval mismatch`, exit 5.
+4. Each C or R resource, at its turn, recomputes its change digest from its fresh observation; a difference fails it before any mutation (exit 5). Ordinary resources follow the unchanged apply contract.
+
+Ledger. `$XDG_STATE_HOME/sinter/approval-ledger.jsonl`, append-only, one JSON line per event (`requested`, `approved`, `used`, `mismatch`, `applied`, `failed`, `indeterminate`) with time, approval id, request digest, host and the SHA-256 of the previous line; writers take a lock. The chain detects edits to individual lines; someone who can write the file can rewrite it entirely (tamper-evident, not tamper-proof). A `used` without a final event is shown by `sinter approvals list` as interrupted, state unknown; it needs a new plan and a new approval.
+
+No request, approval or ledger file contains a secret value, a decrypted secret or an unkeyed digest of one.
 
 43.5 Exit codes and JSON
 
@@ -3200,7 +3227,7 @@ No new exit code: missing or invalid approvals are 2 (before contact), a refused
 
 43.6 Guarded procedures and their limits
 
-firewalld (`affects`, approved): if the resource has a runtime facet to change, apply the runtime facet first; then open a new SSH session (full host-key verification, `/usr/bin/true`, 30 s); on success apply the permanent facet. On failure, if the original session still answers, restore the previous runtime state and verify it, and the resource fails; if it does not answer, the result is indeterminate (exit 6) and an out-of-band console is needed. A permanent-only change takes effect at the next reload or boot: Sinter cannot test it now and says so in plan and apply.
+firewalld (`affects`, approved): if the resource has a runtime facet to change, apply the runtime facet first; then open a new SSH session (full host-key verification, `/usr/bin/true`, 30 s); on success apply the permanent facet. On failure, if the original session still answers, restore the previous runtime state and verify it, and the resource fails; if it does not answer, the result is indeterminate (exit 6) and an out-of-band console is needed. A permanent-only change takes effect at the next reload or boot: Sinter cannot test it now and says so in plan and apply. A reload whose result is `affects` (§44.4) is refused even with an approval: after a reload Sinter has no runtime state to restore, so no guarded procedure exists for it; the permanent configuration must first allow the management connection.
 
 NetworkManager (`affects`, approved): requires a checkpoint (§45.7). Without one the resource fails before any mutation (D-12).
 
@@ -3222,7 +3249,7 @@ Catalog format 1 gains the class names; a v1.14 Sinter refuses a catalog that us
 
 44.2 Plugin handler operations
 
-A catalog may declare an op with `role = "handler"`: a mutate op without slots, no observe op and no facet. A recipe uses it with a new handler type `plugin` (`type: plugin`, `op: <catalog op name>` of an activated plugin). It runs on the mutate channel with the permit, is allowed only under `allowed_mutate` (C1 applies to it), and records plugin provenance like any plugin op. The handler-type set of §18 grows by this one value; recipes valid today keep their meaning.
+A catalog may declare an op with `role = "handler"`: a mutate op without slots, no observe op and no facet. A recipe uses it with a new handler type `plugin` (`type: plugin`, `op: <catalog op name>` of an activated plugin). It runs on the mutate channel with the permit, is allowed only under `allowed_mutate`, and records plugin provenance like any plugin op. The before-contact C1 gate (`require_allowed_mutations`, which today looks at resources only) is extended to every declared `plugin` handler, so an unallowed handler op refuses the run before contact. The handler-type set of §18 grows by this one value; recipes valid today keep their meaning.
 
 44.3 firewalld 0.3.0 catalog
 
@@ -3243,7 +3270,7 @@ Reload and runtime state: a reload discards runtime-only changes. `validate` war
 
 44.4 Reload classification
 
-A notified reload handler is C (§43.2): `affects` when the management zone at runtime allows the management port (service, port, protocol) and the permanent configuration of that zone does not (observed through the existing query ops with and without `--permanent`), `unknown` when either cannot be observed, `clear` otherwise.
+A notified reload handler is C (§43.2); an `affects` reload is refused even with an approval (§43.6). It is `affects` when the management zone at runtime allows the management port (service, port, protocol) and the permanent configuration of that zone does not (observed through the existing query ops with and without `--permanent`), `unknown` when either cannot be observed, `clear` otherwise.
 
 44.5 Rich rules (design review, D-10)
 
@@ -3313,7 +3340,7 @@ Drift per declared field, presence and active state; observation failures are er
 
 45.6 Management-path rules
 
-Every change is C (§43.2). With the management interfaces of §43.3: affects if the profile's `ifname` is a management interface, if the profile is currently active on a management interface, if the profile would be created or changed with `autoconnect` and no `ifname` (it may take any Ethernet device), or if `active: false`/`absent` concerns a profile active on a management interface; clear otherwise; unknown if the active-profile list cannot be read.
+Every change is C (§43.2). With the management interfaces and client address A of §43.3, a change is `affects` if: the profile's `ifname` is a management interface; the profile is currently active on a management interface; it would be created or changed with `autoconnect` and no `ifname` (it may take any Ethernet device); `active: false` or `absent` concerns a profile active on a management interface; or it can change routing for A on any interface — `ipv4.method`/`ipv6.method` `auto` (DHCP or router advertisements may install a default route), a `gateway` (a default route), or an address whose prefix contains A (a connected route would take the return traffic). Only a change that is none of these is `clear` (for example DNS settings, or a manual address without a gateway on a non-management interface whose prefix does not contain A). `unknown` if the active-profile list or the routing check cannot be read.
 
 45.7 Checkpoint (D-12)
 
@@ -3322,7 +3349,7 @@ An approved `affects` change runs only inside a NetworkManager checkpoint:
 2. Create a checkpoint for the management devices and the profile's device with rollback timeout T (default 90 s, field `checkpoint_timeout`, 30–600 s).
 3. Apply §45.4.
 4. Open a new SSH session (as §43.6). Success: destroy the checkpoint (keeps the change), verify. Failure: if the original session answers, roll back explicitly and verify; otherwise wait T + 15 s, reconnect and verify. Verified rollback: the resource fails (exit 5). Cannot verify: indeterminate (exit 6).
-The checkpoint can restore NetworkManager's configuration if NetworkManager keeps running; it does not cover a NetworkManager restart, a reboot, or anything outside NetworkManager. Sinter never states that recovery is guaranteed.
+If Sinter itself is interrupted after creating a checkpoint, NetworkManager rolls back at T even a change that worked; this is the intended fail-closed effect, and the ledger shows the run as interrupted. The checkpoint can restore NetworkManager's configuration if NetworkManager keeps running; it does not cover a NetworkManager restart, a reboot, or anything outside NetworkManager. Sinter never states that recovery is guaranteed.
 
 45.8 Platforms
 
@@ -3348,12 +3375,12 @@ The collector uses `TargetFs` with `allow_mutation = false`, so every mutation p
 
 - packages: Debian family `apt-mark showmanual`; Red Hat family a user-installed query that does not refresh metadata (cache-only form of the installed `dnf`, measured per target). If no such query works, the profile reports `unsupported` with the reason; it never falls back to listing every installed package.
 - units: `systemctl list-unit-files --type=service --type=timer --state=enabled --no-legend --plain --no-pager`; units whose state equals the vendor preset are left out when the preset column exists, otherwise all enabled units are listed with a warning.
-- accounts: `getent -s files passwd` and `group`, limited to `UID_MIN`–`UID_MAX` / `GID_MIN`–`GID_MAX` of `/etc/login.defs`; `/etc/shadow` is never read.
+- accounts: `getent -s files passwd` and `group`, limited to `UID_MIN`–`UID_MAX` / `GID_MIN`–`GID_MAX` of `/etc/login.defs`; `/etc/shadow` is never read and the GECOS (comment) field is never emitted (it often holds personal data).
 - files: only the paths given with `--include-path`. Regular files up to 64 KiB of UTF-8 text, symbolic links and directories (metadata). Nothing is walked recursively.
 
 46.3 Secrets (fail closed)
 
-A file's content is emitted only if it is positively classified as not secret. Always excluded: shadow and gshadow files, SSH host and user keys, `*.key`, `*.pem`, `*.p12`, files without the read bit for others (readable only by their owner or group, which is how most credential files are protected), and any content containing a private-key header, a credential assignment (`password`, `passwd`, `secret`, `token`, `api_key` and similar keys followed by a value), a long high-entropy token, or bytes the classifier cannot decode (control characters, invalid UTF-8, mixed encodings). Excluded files appear in the unsupported list with path and reason class only: no value, fragment or digest of the content is written anywhere (output, provenance, logs, errors).
+A file's content is emitted only if it is positively classified as not secret. The classifier is a heuristic: it can be wrong, so every uncertain case excludes, the output says that a reviewer must check the candidate before use, and the classifier's patterns are tested with synthetic canaries only. The file is read once and its metadata observed again afterwards; a change between the two (size, mode, owner, inode) excludes it. Always excluded: shadow and gshadow files, SSH host and user keys, `*.key`, `*.pem`, `*.p12`, files without the read bit for others (readable only by their owner or group, which is how most credential files are protected), and any content containing a private-key header, a credential assignment (`password`, `passwd`, `secret`, `token`, `api_key` and similar keys followed by a value), a long high-entropy token, or bytes the classifier cannot decode (control characters, invalid UTF-8, mixed encodings). Excluded files appear in the unsupported list with path and reason class only: no value, fragment or digest of the content is written anywhere (output, provenance, logs, errors).
 
 46.4 Normalization and generation
 
@@ -3378,11 +3405,13 @@ PLANNED (v1.15.0 P0, 2026-11-19).
 - §18: one handler type (`plugin`, §44.2) is added.
 - §38.9: three operand classes are added (§44.1).
 - §1.4 (FR-025/067): a collector and recipe candidates are now designed (§46) within the limits §1.4 set.
+- §28 read-only command shapes (the allow-list of observation commands): new fixed shapes are added, each read-only — `systemctl show --property=FragmentPath,DropInPaths -- <unit>`, `systemd-analyze calendar <expr>` (§42.4, read-only status to be verified), and for connection-risk runs `printenv SSH_CONNECTION` (session setup), `ss -Htn state established`, `ip -o addr show`, `ip -o route get <a> from <b>`, the firewalld zone/source/priority queries and the `nmcli … show` forms of §45.3; discover's collectors (§46.2) are used only by discover.
+- §43.2 applies to the already released firewalld 0.2.0 types (stricter than v1.14).
 
 47.2 Compatibility
 
-No existing recipe, field, JSON key or exit code changes meaning. New subcommands: `discover`, `approve`, `approvals list`; new options: `plan --approval-request`, `apply --approval`. New built-in type names cannot collide with plugin types (plugin types contain a dot). A recipe using a new type or handler type is rejected by older Sinter versions (unknown type), and a catalog using a new operand class or handler op is refused by older versions. The MCP tool list stays at eight tools; discover, approve and approval files are not reachable from MCP.
+No existing recipe, field, JSON key or exit code changes meaning. New subcommands: `discover`, `approve`, `approvals list`; new options: `plan --approval-request`, `apply --approval`. New built-in type names cannot collide with plugin types (plugin types contain a dot). Exception, by design: recipes that remove services, ports or protocols with firewalld 0.2.0 now go through §43 and are refused when the management path cannot be determined (stricter, never looser). A recipe using a new type or handler type is rejected by older Sinter versions (unknown type), and a catalog using a new operand class or handler op is refused by older versions. The MCP tool list stays at eight tools; discover, approve and approval files are not reachable from MCP.
 
 47.3 Acceptance applicability
 
-Release acceptance may record a check as NOT APPLICABLE only for an `nm_connection` check on a target whose recorded observation shows NetworkManager is not installed or not running, and only where the reviewed applicability table of the release lists that pair. NOT APPLICABLE is never counted as PASS; `skipped` stays a failure condition. The release documents define the manifest fields and checker rules.
+Release acceptance may record a check as NOT APPLICABLE only for an `nm_connection` check on a target whose recorded observation shows `nmcli` is not installed (D-8: an OS where nmcli is not available), and only where the reviewed applicability table of the release lists that target. An installed but stopped NetworkManager is not a reason: the check runs and fails. NOT APPLICABLE is never counted as PASS; `skipped` stays a failure condition. The release documents define the manifest fields and checker rules.
