@@ -20,7 +20,7 @@
 //!     command resources are never executed. The boundary tests in
 //!     `mcp_boundary_tests.rs` check the commands actually sent;
 //!   - a host tool observes what the profile's SSH account (with its sudo
-//!     setting) can read on the target, nothing more and nothing less;
+//!     setting) can read on the target; Sinter adds no further limit;
 //!   - manifest content is written to a private temporary file solely so the
 //!     existing `load_model` parser can process it, then deleted.
 //!
@@ -377,7 +377,9 @@ fn check_mcp_manifest_authority(doc: &Document) -> Result<(), ToolError> {
             return Err(ToolError {
                 category: "invalid_manifest",
                 kind: Some("schema"),
-                message: "MCP manifests may not use the nm_connection resource type                           yet — its NetworkManager observations are not measured on                           real hosts (DESIGN §45.10)"
+                message: "MCP manifests may not use the nm_connection resource type \
+                          yet — its NetworkManager observations are not measured on \
+                          real hosts (DESIGN §45.10)"
                     .to_string(),
             });
         }

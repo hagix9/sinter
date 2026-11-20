@@ -104,6 +104,24 @@ ChatGPT からこの tunnel を使える人は全員、同じ targets file に�
 所有で保存し、値を埋めた unit を表示します（インストールはしません）。unit の
 先頭に書かれたプレースホルダーをすべて置き換えてからインストールしてください。
 
+| プレースホルダー | 値 |
+|------------------|----|
+| `<SERVICE_USER>` | 両方のプロセスを動かす、専用の非特権ユーザー |
+| `<KEY_FILE>` | Restricted key（Tunnels Read + Use）を書いたファイル。systemd が credential としてサービスに渡す |
+| `<TUNNEL_CLIENT>` | 公式 `tunnel-client` の絶対パス |
+| `<TUNNEL_ID>` | tunnel ID 全体（`tunnel_` で始まる） |
+| `<SINTER_BIN>` | `sinter` バイナリの絶対パス |
+| `<TARGETS_FILE>` | targets file の絶対パス |
+
+**再起動の挙動。** unit は `Restart=always` です。一度開始すると、
+`systemctl stop sinter-tunnel` を実行するまで、正常終了（status 0）を含めて
+終了するたびに再起動します。そのため接続はクライアント 1 回分より長く続きます。
+これは接続時間を厳密に区切ることより自動復旧を優先した設定です。クライアントの
+終了で接続も終わらせたい場合は、代わりに `Restart=no`（制限時間として
+`RuntimeMaxSec=` を併用してもよい）を使ってください。この構成は実機で確認して
+いません。`tunnel-client` v0.0.19 以降は、終了した `sinter mcp` の子プロセスを
+クライアント自身が再起動します（実機では未確認）。
+
 ## 確認済みのことと未確認のこと
 
 `CHANGELOG.md` の v1.14.0 の項より:

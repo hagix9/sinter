@@ -105,7 +105,25 @@ it explicitly (`systemctl start sinter-tunnel`, `systemctl stop
 sinter-tunnel`). `sinter serve init --systemd` (as root) stores the key
 root-owned for `LoadCredential=` and prints the filled unit; it installs
 nothing. Replace every placeholder named in the unit's header before
-installing it.
+installing it:
+
+| Placeholder | Value |
+|-------------|-------|
+| `<SERVICE_USER>` | a dedicated unprivileged user that runs both processes |
+| `<KEY_FILE>` | the file holding the Restricted key (Tunnels Read + Use); systemd hands it to the service as a credential |
+| `<TUNNEL_CLIENT>` | absolute path of the official `tunnel-client` |
+| `<TUNNEL_ID>` | the tunnel ID in full (it starts with `tunnel_`) |
+| `<SINTER_BIN>` | absolute path of the `sinter` binary |
+| `<TARGETS_FILE>` | absolute path of the targets file |
+
+**Restart behaviour.** The unit has `Restart=always`: once started, it is
+restarted after any end, including a clean exit with status 0, until you run
+`systemctl stop sinter-tunnel`. So the connection stays up longer than one
+client run; this trades a strict connection window for automatic recovery.
+If you want a connection that ends when the client ends, use `Restart=no`
+(optionally with `RuntimeMaxSec=` as a time limit) instead; that variant has
+not been verified on a real host. From `tunnel-client` v0.0.19 the client
+itself restarts a `sinter mcp` child that dies (not verified on a real host).
 
 ## Verified and not verified
 

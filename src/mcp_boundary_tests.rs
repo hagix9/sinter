@@ -3,7 +3,9 @@
 //!
 //! The host tools take a scripted target here (`host_fake_target`; a build
 //! always connects over SSH) and report the engine's mode, whether it could
-//! produce a mutation permit, and every command it dispatched. Every command
+//! produce a mutation permit, and every command it recorded (the SSH session
+//! setup's own `getent passwd` and `id` lookups are not command records;
+//! they are read-only). Every command
 //! must be one of the observation forms below; anything else — a known
 //! mutation or a command nobody listed — fails the test (no unknown command
 //! is treated as safe).
@@ -171,6 +173,17 @@ fn the_mutation_detector_knows_the_mutating_commands() {
         ("/usr/bin/systemctl", vec!["start", "--", "x.service"]),
         ("/usr/bin/systemctl", vec!["enable", "--", "x.service"]),
         ("/usr/bin/systemctl", vec!["daemon-reload"]),
+        ("/usr/bin/systemctl", vec!["stop", "--", "x.service"]),
+        ("/usr/bin/systemctl", vec!["restart", "--", "x.service"]),
+        ("/usr/bin/systemctl", vec!["disable", "--", "x.service"]),
+        ("/usr/bin/nmcli", vec!["connection", "down", "uuid", "u"]),
+        ("/usr/bin/nmcli", vec!["connection", "delete", "uuid", "u"]),
+        (
+            "/usr/bin/nmcli",
+            vec!["connection", "add", "type", "ethernet"],
+        ),
+        ("/usr/sbin/groupadd", vec!["appg"]),
+        ("/usr/bin/rpm", vec!["-e", "nginx"]),
         ("/usr/bin/nmcli", vec!["connection", "modify", "uuid", "u"]),
         ("/usr/bin/nmcli", vec!["connection", "up", "uuid", "u"]),
         (
@@ -189,8 +202,10 @@ fn the_mutation_detector_knows_the_mutating_commands() {
         assert!(mutation(&c).is_some(), "{p} {a:?}");
         assert!(!observation(&c), "{p} {a:?}");
     }
-    // An unknown program is neither listed as an observation nor safe.
+    // An unknown program is neither listed as an observation nor safe, and
+    // an abbreviated nmcli form is not an observation either.
     assert!(!observation(&rec("/usr/local/bin/anything", &[])));
+    assert!(!observation(&rec("/usr/bin/nmcli", &["con", "up", "x"])));
 }
 
 fn registry(dir: &Path) -> TargetRegistry {
@@ -368,7 +383,8 @@ fn an_apply_mode_engine_is_refused_by_the_audit_runner() {
     );
 }
 
-/// Manifests every host tool refuses before it connects.
+/// Manifests every host tool refuses before it connects, with a fragment of
+/// the refusal each must give (the reason, not just any error).
 fn refused_manifests() -> Vec<(&'static str, String)> {
     let r = |ty: &str, with: &str| {
         format!("version: 1\nresources:\n  - id: x\n    type: {ty}\n    with: {{ {with} }}\n")
@@ -398,6 +414,24 @@ fn refused_manifests_never_reach_the_host() {
             reset(Some(fake()));
             let r = call(&reg, tool, json!({"manifest": m, "target": "web01"}));
             assert!(is_error(&r), "{tool} accepted {what}: {r}");
+            let msg = body(&r)["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let want = match what {
+                "plugins" => "plugins",
+                "include" => "include",
+                "source" => "source",
+                "content secret" | "password_hash secret" | "password_verifier secret" => "decrypt",
+                "unknown type" | "firewalld type without plugin" => "unknown resource type",
+                "systemd_timer" => "systemd_timer",
+                "nm_connection" => "nm_connection",
+                _ => "",
+            };
+            assert!(
+                msg.contains(want),
+                "{tool} {what}: refused for another reason: {msg}"
+            );
             assert!(fake_left(), "{tool} connected for {what}");
             assert!(
                 engines().is_empty() && commands().is_empty(),
