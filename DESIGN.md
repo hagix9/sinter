@@ -3489,6 +3489,7 @@ PLANNED (v1.15.0 P0, 2026-11-19).
 - §1.4 (FR-025/067): a collector and recipe candidates are now designed (§46) within the limits §1.4 set.
 - §28 read-only command shapes (the allow-list of observation commands): new fixed shapes are added, each read-only — `systemctl show --property=FragmentPath,DropInPaths -- <unit>`, `systemd-analyze calendar <expr>` (§42.4, read-only status to be verified), and for connection-risk runs `printenv SSH_CONNECTION` (session setup), `ss -Htn state established`, `ip -o addr show`, `ip -o route get <a> from <b>`, the firewalld zone/source/priority queries and the `nmcli … show` forms of §45.3; the read-only `busctl` query of NetworkManager's checkpoint support (§45.7); discover's collectors (§46.2) are used only by discover. Audit uses the timer shapes, the `nmcli … show` forms and the plugin observe operations; it never runs the management-path shapes (`printenv`, `ss`, `ip`, the zone-priority queries) or `busctl`, because audit makes no change and shows only the static class.
 - §43.2 applies to the already released firewalld 0.2.0 types (stricter than v1.14).
+- §48 records the P6.5 feasibility study of DNF repository and module management: deferred, nothing added.
 
 47.2 Compatibility
 
@@ -3497,3 +3498,30 @@ No existing recipe, field, JSON key or exit code changes meaning. New subcommand
 47.3 Acceptance applicability
 
 Release acceptance may record a check as NOT APPLICABLE only for an `nm_connection` check on a target whose recorded observation shows `nmcli` is not installed (D-8: an OS where nmcli is not available), and only where the reviewed applicability table of the release lists that target. An installed but stopped NetworkManager is not a reason: the check runs and fails. NOT APPLICABLE is never counted as PASS; `skipped` stays a failure condition. The release documents define the manifest fields and checker rules.
+
+48. DNF repository and module management (v1.15.0 P6.5 feasibility)
+
+DEFERRED to a later release (P6.5, 2026-11-20); nothing is implemented, registered or released. This records why, and what a later release needs.
+
+48.1 Scope looked at
+
+`dnf_repository`: observe whether an existing repository is enabled, enable or disable it, idempotent re-runs, audit drift, and (only if it could be expressed safely) creating, removing or reconfiguring repositories. `dnf_module`: list, enable, disable, reset, stream choice, profiles, observation, idempotence, audit drift. Supported targets: the Red Hat family of §1 (Rocky Linux, RHEL and AlmaLinux 9 and 10; 8 as SSH target only), whose `package` backend is DNF 4 (the exact DNF version per target was not observed in P6.5). DNF 5 (a `/usr/bin/dnf` that is dnf5, as on Fedora) is not a supported package backend (`reference/cli` "Package progress").
+
+48.2 Fit with the Resource Plugin mechanism (§38)
+
+- Observation. An observe operation maps an exit code, or the whole trimmed standard output compared exactly with a template, to a closed state (§38.6, §38.10). The DNF 4 forms that report a repository's state (`dnf -C repolist --enabled|--disabled [<id>]`, `dnf -C repolist -v`, `dnf -C repoinfo <id>`, `dnf config-manager --dump <id>`) print tables or key/value blocks that contain free text (the repository name, other keys, column padding) and, as far as documented, exit 0 whether or not the repository is enabled. No exact template or exit code separates enabled from disabled. The same holds for `dnf -C module list [--enabled|--disabled] <name>` (a table with `[d]`, `[e]`, `[x]`, `[i]` markers per stream). Neither fits the closed maps without a new observation form.
+- Operands. Repository ids fit the `ident` class (`[A-Za-z0-9_.-]`, starting alphanumeric) in the common cases; ids with other characters would be refused, never passed. Module specs need `name:stream` (and `/profile`); `:` and `/` are not in any operand class, so a new class would be needed.
+- Mutation. `dnf config-manager --set-enabled|--set-disabled <id>` (DNF 4, from dnf-plugins-core) fits a mutate operation's fixed argv; it rewrites the repository's `.repo` file, and whether it keeps the rest of that file byte for byte is not measured. `dnf module enable|disable|reset` fit as fixed argv apart from the operand class, but they resolve against repository metadata (which may need a network refresh) and change what later package transactions select.
+- Re-observation and idempotence follow from the mechanism once observation is possible. The management connection is not involved (no network configuration changes; §43 does not apply). The trust file and the C1 gate (§38.4, §38.14) would apply unchanged.
+
+48.3 Decision per function
+
+- `dnf_repository` enable/disable of an existing repository, with observation and audit: DEFER. Technically possible, but it needs either a Core-defined observation of DNF's own repository report (a strict parser of `dnf -C repolist -v` blocks; Sinter already runs that form for the `package` resource's metadata check, `src/platform.rs`) as a built-in type or a new plugin observation form, and real-host measurement on every supported Red Hat target (output, exit codes, the effect of `config-manager` on the `.repo` file, DNF 4 versions). Enabling a repository also widens what `package` resources may install: a later design must decide whether enabling requires the repository to have `gpgcheck=1` observed first.
+- `dnf_repository` creation, removal or configuration changes (arbitrary `.repo` content, `baseurl` with credentials, `gpgcheck=0`): REJECT as a plugin. A plugin cannot write file content (§38.3); a repository file is a `file` resource with the operator's own content, and Sinter does not add a path that weakens package signature checking.
+- `dnf_module` list, enable, disable, reset and stream choice: DEFER. Needs a new operand class for `name:stream`, a closed parser of `module list` (Core), and real-host measurement; the EL 10 distributions are documented as shipping no module streams in their repositories (not observed in P6.5), so module checks there would be NOT APPLICABLE only once a target's observation shows it.
+- `dnf_module` profiles (`module install`/`remove`): REJECT as a plugin. Package transactions belong to the `package` resource, with its metadata snapshot, removal preview and verification (§27); a plugin would bypass them.
+- DNF 5: NOT APPLICABLE for v1.15.0 (no supported target uses it); a later release that supports DNF 5 measures its `repo` and `module` commands separately and would need its own catalog.
+
+48.4 What a later release needs
+
+A design decision on the form (built-in type with a Core parser, as for `nm_connection` (§45), versus a new plugin observation form, with its own review of how strict a closed line or block parser must be); the `gpgcheck` rule for enabling; an operand class for module specs; measurement on Rocky Linux, RHEL and AlmaLinux 9 and 10 (DNF 4) of the observation and change commands, their exit codes and their effect on files; and acceptance checks for P8 or the release after. The P8 measurement plan may include the read-only observations (`dnf -C repolist -v`, `dnf -C module list`) as an optional item; changes need their own approval.
