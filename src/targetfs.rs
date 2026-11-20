@@ -1492,7 +1492,7 @@ impl TargetFs {
                     "/usr/bin/dd",
                     vec![
                         format!("if={}", path),
-                        "iflag=nofollow".into(),
+                        "iflag=nofollow,nonblock".into(),
                         format!("bs={}", crate::discover::MAX_FILE + 1),
                         "count=1".into(),
                         "status=none".into(),

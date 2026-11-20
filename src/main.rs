@@ -118,7 +118,8 @@ enum Command {
     /// review the candidate before use. File content is taken in only when a
     /// heuristic classifies it as not secret; excluded items are listed with
     /// path and reason only. Exit: 0 written, 2 invalid request, 3 connection,
-    /// 4 the candidate did not load back (nothing written).
+    /// 4 the candidate did not load back (nothing written), 5 a file could
+    /// not be written (the message says which exists).
     Discover(DiscoverArgs),
 }
 
@@ -4023,8 +4024,11 @@ fn discover_command(a: DiscoverArgs) -> Result<u8, SinterError> {
                 )));
             };
             let h = &inv.hosts[*name];
+            // The label is never an address: an inventory name that is an IP
+            // address or equals the host's address is withheld.
+            let label = discover::host_label(name, &h.address);
             (
-                name.to_string(),
+                label,
                 TargetRequest {
                     label: name.to_string(),
                     host: h.address.clone(),

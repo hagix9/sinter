@@ -204,6 +204,13 @@ pub fn valid_unit_name(n: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '.' | '-'))
 }
 
+/// Recipe template syntax: a generated string with `{{` (also `\{{`) would
+/// be evaluated by plan, apply and audit instead of being taken literally,
+/// so such a value is never generated (fail closed).
+pub fn has_template(v: &str) -> bool {
+    v.contains("{{")
+}
+
 /// Names whose content is never taken in (§46.3).
 pub fn secret_name(path: &str) -> bool {
     let base = path.rsplit('/').next().unwrap_or(path);
@@ -226,25 +233,82 @@ pub fn classify_content(b: &[u8]) -> std::result::Result<String, &'static str> {
     if text.starts_with('\u{feff}') || text.contains('\u{fffd}') {
         return Err("undecodable content");
     }
-    if text
-        .chars()
-        .any(|c| (c.is_control() && c != '\n' && c != '\t') || matches!(c, '\u{2028}' | '\u{2029}'))
-    {
+    if text.chars().any(|c| {
+        (c.is_control() && c != '\n' && c != '\t')
+            || matches!(
+                c,
+                '\u{2028}' | '\u{2029}' | '\u{00ad}' | '\u{061c}' | '\u{180e}'
+            )
+            || ('\u{200b}'..='\u{200f}').contains(&c)
+            || ('\u{202a}'..='\u{202e}').contains(&c)
+            || ('\u{2060}'..='\u{206f}').contains(&c)
+    }) {
         return Err("control characters");
+    }
+    if has_template(text) {
+        return Err("template syntax");
     }
     if text.contains("-----BEGIN") || text.contains("PRIVATE KEY") {
         return Err("private key or certificate block");
     }
-    if credential_assignment(text) {
+    if credential_assignment(text) || crypt_hash(text) || url_userinfo(text) {
         return Err("credential assignment");
     }
-    if high_entropy_token(text) {
+    if high_entropy_token(text) || long_mixed_token(text) {
         return Err("high-entropy token");
     }
     Ok(text.to_string())
 }
 
+/// A crypt(3) hash: `$1$`, `$2a$`/`$2b$`/`$2x$`/`$2y$`, `$5$`, `$6$`, `$y$`,
+/// `$apr1$`, `$7$`, `$gy$` followed by more text.
+pub fn crypt_hash(text: &str) -> bool {
+    [
+        "$1$", "$2$", "$2a$", "$2b$", "$2x$", "$2y$", "$5$", "$6$", "$7$", "$y$", "$gy$", "$apr1$",
+        "$argon2",
+    ]
+    .iter()
+    .any(|p| {
+        text.match_indices(p).any(|(i, _)| {
+            text[i + p.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '/' | '$' | '='))
+        })
+    })
+}
+
+/// A URL with a password in its user information (`scheme://user:pass@`).
+pub fn url_userinfo(text: &str) -> bool {
+    text.match_indices("://").any(|(i, _)| {
+        let rest = &text[i + 3..];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '/' | '"' | '\''))
+            .unwrap_or(rest.len());
+        let auth = &rest[..end];
+        auth.find('@')
+            .is_some_and(|at| auth[..at].contains(':') && at > 0)
+    })
+}
+
+/// A run of at least 40 characters of `[A-Za-z0-9+/=_-]` with lower case,
+/// upper case and a digit (base64 keys that contain `/`).
+pub fn long_mixed_token(text: &str) -> bool {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-')))
+        .any(|r| {
+            r.len() >= 40
+                && r.chars().any(|c| c.is_ascii_lowercase())
+                && r.chars().any(|c| c.is_ascii_uppercase())
+                && r.chars().any(|c| c.is_ascii_digit())
+        })
+}
+
 const CREDENTIAL_KEYS: &[&str] = &[
+    "pass",
+    "psk",
+    "bearer",
+    "authorization",
+    "community",
     "password",
     "passwd",
     "passphrase",
@@ -278,6 +342,16 @@ pub fn credential_assignment(text: &str) -> bool {
                 }
                 while j < b.len() && matches!(b[j], b' ' | b'\t' | b'"' | b'\'') {
                     j += 1;
+                }
+                // `community <value>` (SNMP) and `Bearer <token>` take their
+                // value after whitespace.
+                let spaced = matches!(*k, "community" | "bearer")
+                    && j > from + i + k.len() - 1
+                    && j < b.len()
+                    && b[j - 1].is_ascii_whitespace()
+                    && b[j] != b'#';
+                if spaced {
+                    return true;
                 }
                 if j < b.len() && matches!(b[j], b'=' | b':') {
                     j += 1;
@@ -749,6 +823,8 @@ impl Engine {
             };
             if !crate::accounts::valid_account_path(&home)
                 || !crate::accounts::valid_account_path(&shell)
+                || has_template(&home)
+                || has_template(&shell)
             {
                 d.unsupported("user", &name, "home or shell Sinter cannot declare");
                 continue;
@@ -774,6 +850,10 @@ impl Engine {
     }
 
     fn collect_file(&mut self, d: &mut Discovery, path: &str) {
+        if has_template(path) {
+            d.unsupported("file", path, "template syntax");
+            return;
+        }
         let st1 = match self.fs.inspect(path) {
             Ok(st) => st,
             Err(_) => {
@@ -818,6 +898,7 @@ impl Engine {
                     Ok(t)
                         if !t.is_empty()
                             && t.len() <= 4096
+                            && !has_template(&t)
                             && t.bytes().all(|b| (0x20..0x7f).contains(&b)) =>
                     {
                         t
@@ -887,7 +968,7 @@ impl Engine {
             argv: vec![
                 "/usr/bin/dd".into(),
                 format!("if={}", path),
-                "iflag=nofollow".into(),
+                "iflag=nofollow,nonblock".into(),
                 format!("bs={}", MAX_FILE + 1),
                 "count=1".into(),
                 "status=none".into(),
@@ -1099,6 +1180,16 @@ pub fn round_trip(yaml: &str, d: &Discovery, dir: &Path) -> Result<()> {
             e.message
         ))
     })?;
+    let templated = d.resources.iter().any(|r| {
+        r.with
+            .values()
+            .any(|v| matches!(v, Value::Str(x) if has_template(x)))
+    });
+    if templated {
+        return Err(SinterError::plan(
+            "discover: a generated value holds template syntax; nothing was written",
+        ));
+    }
     let same = model.resources.len() == d.resources.len()
         && model.resources.iter().zip(&d.resources).all(|(m, r)| {
             m.id == r.id
@@ -1183,6 +1274,12 @@ pub fn check_outputs(out: &Path) -> Result<()> {
 /// written. A failure of the second leaves the first in place and says so.
 pub fn publish(out: &Path, yaml: &str, prov: &J) -> Result<Published> {
     check_outputs(out)?;
+    publish_files(out, yaml, prov)
+}
+
+/// The two `publish_new` calls of [`publish`] (separate for the partial
+/// publication test). A failure of the second is exit 5 and names both.
+fn publish_files(out: &Path, yaml: &str, prov: &J) -> Result<Published> {
     let pp = provenance_path(out);
     let prov_text = format!(
         "{}\n",
@@ -1234,6 +1331,16 @@ pub fn rfc3339(secs: u64) -> String {
         (rem / 60) % 60,
         rem % 60
     )
+}
+
+/// The host label of an inventory host: its name, unless the name is an IP
+/// address or equals the host's address (a label is never an address).
+pub fn host_label(name: &str, address: &str) -> String {
+    if name.parse::<std::net::IpAddr>().is_ok() || name == address {
+        "inventory-host".to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 /// An empty model: discover builds a plan-mode engine with no resource.

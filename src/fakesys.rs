@@ -1017,8 +1017,8 @@ impl FakeFs {
                 _ => Self::fail(&format!("sha256sum: {}: No such file or directory", p)),
             },
             // `sinter discover` reads a regular file without following a
-            // symbolic link: `dd if=<p> iflag=nofollow bs=<n> count=1 status=none`.
-            ("dd", [ifp, "iflag=nofollow", bs, "count=1", "status=none"])
+            // symbolic link: `dd if=<p> iflag=nofollow,nonblock bs=<n> count=1 status=none`.
+            ("dd", [ifp, "iflag=nofollow,nonblock", bs, "count=1", "status=none"])
                 if ifp.starts_with("if=") && bs.starts_with("bs=") =>
             {
                 let p = &ifp[3..];

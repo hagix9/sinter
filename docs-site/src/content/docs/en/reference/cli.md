@@ -194,7 +194,8 @@ candidate is not applied anywhere. Review it, then run `validate`, `plan` and
   positively classifies it as not secret. Always excluded: shadow/gshadow,
   SSH keys, `*.key`, `*.pem`, `*.p12`, files not readable by others, private
   key blocks, credential assignments (`password = …`, `token: …`, …), long
-  high-entropy tokens, control characters, invalid UTF-8, and a file whose
+  high-entropy tokens, crypt hashes, URLs with a password, template syntax
+  (`{{`), control and Unicode format characters, invalid UTF-8, and a file whose
   size, mode, owner, inode or times changed while it was read (read with
   `dd iflag=nofollow`). Excluded items are listed with path and reason only:
   no content, fragment or digest is written anywhere. The classifier can be
@@ -202,9 +203,11 @@ candidate is not applied anywhere. Review it, then run `validate`, `plan` and
 - Generated ids: `pkg-`, `svc-`, `group-`, `user-`, `file-`, `link-`, `dir-`
   with a suffix `-2`, `-3`, … when two would collide. Every string is
   double-quoted. A header comment names the host label (the inventory name,
-  or `cli-host` with `--host`; never an address) and the collection time.
+  or `cli-host` with `--host`, or `inventory-host` when the inventory name is
+  an address; never an address) and the collection time.
 - The text is loaded back with the recipe loader and must give exactly the
-  collected resources; otherwise nothing is written (exit 4).
+  collected resources; otherwise nothing is written (exit 4). A file that
+  cannot be written is exit 5.
 - Provenance (`sinter-discover-provenance/1`): Sinter version, host label,
   time, each collector (id, fixed argv, exit status, SHA-256 of its output
   when it holds no file content or personal data), each resource (id, type,

@@ -116,7 +116,7 @@ fn read_only(log: &[crate::executor::CommandRecord]) {
                     && !c.args.iter().any(|a| a == "shadow" || a == "gshadow")
             }
             "dd" => {
-                c.args.iter().any(|a| a == "iflag=nofollow")
+                c.args.iter().any(|a| a == "iflag=nofollow,nonblock")
                     && !c.args.iter().any(|a| a.starts_with("of="))
             }
             "apt-mark" => c.args == ["showmanual"],
@@ -208,7 +208,7 @@ fn fixed_argv() {
         find("dd").unwrap(),
         [
             "if=/etc/motd",
-            "iflag=nofollow",
+            "iflag=nofollow,nonblock",
             "bs=65537",
             "count=1",
             "status=none"
@@ -833,4 +833,152 @@ fn profile_list_parser() {
     assert!(Profile::parse_list("files,files").is_err());
     assert!(Profile::parse_list("firewalld").is_err());
     assert!(Profile::parse_list("").is_err());
+}
+
+// ---------------------------------------------------------------------------
+// independent audit 1 (B-1, N-1..N-4)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn template_syntax_is_never_generated() {
+    // B-1: host text would become a Sinter expression.
+    for content in [
+        "host = {{ facts.hostname }}\n",
+        "lit = \\{{ x }}\n",
+        "v = {{ vars.x }}\n",
+        "tag = \"{{.Name}}\"\n",
+    ] {
+        let d = one_file(content.as_bytes(), 0o644);
+        assert!(d.resources.is_empty(), "{content}");
+        assert_eq!(
+            unsupported(&d, "/etc/x.conf").reason,
+            "excluded: template syntax",
+            "{content}"
+        );
+    }
+    // A path or link target with template syntax; the rest is still written.
+    let mut t = host();
+    {
+        let fs = t.fs.as_mut().unwrap();
+        fs.put_file("/etc/{{x}}", b"a\n", 0o644, 0, 0);
+        fs.put_symlink("/etc/lnk", "/opt/{{ facts.hostname }}", 0, 0);
+    }
+    t = t.with_user("tmpl", 1500, 1001, "/home/{{x}}", "/bin/sh");
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let c = cfg(&all_profiles(), &["/etc/{{x}}", "/etc/lnk", "/etc/motd"]);
+    let (d, p) = run(opts(t, Mode::Plan), &c, &dir.path().join("r.yaml")).unwrap();
+    assert_eq!(unsupported(&d, "/etc/{{x}}").reason, "template syntax");
+    assert!(unsupported(&d, "/etc/lnk")
+        .reason
+        .contains("cannot declare"));
+    assert!(unsupported(&d, "tmpl").reason.contains("cannot declare"));
+    assert!(!std::fs::read_to_string(&p.recipe).unwrap().contains("{{"));
+    // The round trip refuses template syntax as a safety net.
+    let mut d2 = Discovery::default();
+    let mut with = BTreeMap::new();
+    with.insert("name".to_string(), s("{{ x }}"));
+    d2.resources.push(IrResource {
+        id: "x".into(),
+        type_: "package".into(),
+        with,
+        collector: String::new(),
+        source_key: String::new(),
+        value_sha256: None,
+    });
+    let e = round_trip(&render_yaml(&d2, &c), &d2, dir.path()).unwrap_err();
+    assert_eq!(e.kind, crate::error::ErrorKind::Plan);
+}
+
+#[test]
+fn more_credentials_and_format_characters_are_excluded() {
+    // N-1.
+    excluded(
+        format!("admin:$apr1$Ab3dEf7h$Zq8Lp2Vw9Kx4{CANARY}\n").as_bytes(),
+        0o644,
+        "credential",
+    );
+    excluded(
+        format!("u:$6$saltsalt$abc{CANARY}\n").as_bytes(),
+        0o644,
+        "credential",
+    );
+    excluded(format!("PASS={CANARY}\n").as_bytes(), 0o644, "credential");
+    excluded(
+        format!("wpa psk={CANARY}\n").as_bytes(),
+        0o644,
+        "credential",
+    );
+    excluded(
+        format!("url = https://user:{CANARY}@example.com/x\n").as_bytes(),
+        0o644,
+        "credential",
+    );
+    excluded(
+        format!("Authorization: Bearer {CANARY}\n").as_bytes(),
+        0o644,
+        "credential",
+    );
+    excluded(
+        format!("rocommunity {CANARY}\n").as_bytes(),
+        0o644,
+        "credential",
+    );
+    excluded(
+        format!("k {CANARY}Ab9/Zq8Lp2Vw9Kx4Rt7Ym3Nb6Hc1Jd5Fg0Qe\n").as_bytes(),
+        0o644,
+        "high-entropy",
+    );
+    // N-2: bidi and zero-width characters.
+    excluded(
+        format!("a {}{CANARY}", "\u{202e}\n").as_bytes(),
+        0o644,
+        "control",
+    );
+    excluded(
+        format!("a {}{CANARY}", "\u{200b}\n").as_bytes(),
+        0o644,
+        "control",
+    );
+    // Plain text with an URL, a path and a dollar sign stays in.
+    let d = one_file(
+        b"url = https://example.com/docs\npath = /usr/share/doc/README\ncost = $5\n",
+        0o644,
+    );
+    assert_eq!(d.resources.len(), 1, "{:?}", d.unsupported);
+}
+
+#[test]
+fn a_failed_provenance_after_the_recipe_is_reported() {
+    // N-3: the provenance path appears between the check and its
+    // publication; the recipe stays and the error (exit 5) names both.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let o = dir.path().join("r.yaml");
+    let c = cfg(&[], &[]);
+    let d = Discovery::default();
+    check_outputs(&o).unwrap();
+    std::fs::write(provenance_path(&o), "other").unwrap();
+    let e = publish_files(&o, &render_yaml(&d, &c), &provenance(&d, &c)).unwrap_err();
+    assert_eq!(e.kind, crate::error::ErrorKind::Apply);
+    assert!(
+        e.message.contains("was written, but its provenance"),
+        "{}",
+        e.message
+    );
+    assert!(o.exists());
+    assert_eq!(
+        std::fs::read_to_string(provenance_path(&o)).unwrap(),
+        "other"
+    );
+}
+
+#[test]
+fn host_labels_are_never_addresses() {
+    // N-4.
+    assert_eq!(host_label("web01", "192.0.2.10"), "web01");
+    assert_eq!(host_label("192.0.2.10", "192.0.2.10"), "inventory-host");
+    assert_eq!(host_label("192.0.2.10", "web.example"), "inventory-host");
+    assert_eq!(host_label("2001:db8::1", "x"), "inventory-host");
+    assert_eq!(host_label("db.example", "db.example"), "inventory-host");
 }
