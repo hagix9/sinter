@@ -513,7 +513,7 @@ import json, os, sys
 s = json.load(open(os.environ["FAKE_SD"])); a = sys.argv[1:]
 if not s["active"]:
     sys.exit(252)
-zones = {"public": {"ssh"}, "internal": set()}
+zones = {"public": {"ssh"}, "internal": set(), "trusted": set()}
 if a == ["--state"]: print("running"); sys.exit(0)
 if a == ["--version"]: print("9.9.9"); sys.exit(0)
 if a == ["--get-default-zone"]: print("public"); sys.exit(0)
@@ -522,6 +522,8 @@ if a[0].startswith("--get-zone-of-interface="):
     if z: print(z); sys.exit(0)
     print("no zone"); sys.exit(2)
 z = a[0].split("=", 1)[1]
+if a[1] == "--list-all":
+    print(z); print("  target: %s" % ("ACCEPT" if z == "trusted" else "default")); sys.exit(0)
 if a[1] == "--query-service=ssh": print("yes" if "ssh" in zones[z] else "no"); sys.exit(0 if "ssh" in zones[z] else 1)
 if a[1] == "--query-port=22/tcp": print("no"); sys.exit(1)
 sys.exit(99)
@@ -573,6 +575,11 @@ class FirewalldPrep(unittest.TestCase):
         rc, log, after = self.run_prep({"active": False, "enabled": False}, ssh_fail=True)
         self.assertEqual(rc, 7, log)
         self.assertEqual(after, {"active": False, "enabled": False})
+
+    def test_a_zone_with_target_accept_passes(self):
+        # measured in P7-R1: the GCE Rocky Linux images put eth0 in trusted (target ACCEPT, no ssh service)
+        rc, log, after = self.run_prep({"active": True, "enabled": True}, devzone="trusted")
+        self.assertEqual(rc, 0, log); self.assertIn("target=ACCEPT", log)
 
     def test_a_firewalld_active_before_is_left_as_it_was(self):
         rc, log, after = self.run_prep({"active": True, "enabled": True}, devzone="internal")

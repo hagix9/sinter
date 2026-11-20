@@ -110,8 +110,9 @@ sudo -u sinter sudo -n true && echo "passwordless sudo OK" || { echo "STOP passw
 # missing (this VM is disposable). Starting it changes the filtering of the
 # management connection, so the zone of the default-route interface (the zone
 # the runner's connection uses; the default zone when the interface is in
-# none) must allow the ssh service or 22/tcp, and a new loopback SSH session
-# must work. Otherwise firewalld is put back as it was before (stopped and
+# none) must allow the ssh service or 22/tcp or have the target ACCEPT (the
+# trusted zone of the GCE Rocky Linux images, measured in P7-R1), and a new
+# loopback SSH session must work. Otherwise firewalld is put back as it was before (stopped and
 # disabled when it was not active) and the preparation stops (exit 7). The
 # state before is logged; nothing else is changed.
 FW_PRE=$(command -v firewall-cmd >/dev/null 2>&1 && echo installed || echo missing)
@@ -138,10 +139,13 @@ FW_DEV=$(ip -o route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) i
 FW_MZ=$(firewall-cmd --get-zone-of-interface="$FW_DEV" 2>/dev/null) || FW_MZ=$(firewall-cmd --get-default-zone 2>/dev/null)
 FW_SSH=$(firewall-cmd --zone="$FW_MZ" --query-service=ssh 2>/dev/null)
 FW_P22=$(firewall-cmd --zone="$FW_MZ" --query-port=22/tcp 2>/dev/null)
-echo "firewalld after: state=$FW_STATE default_route_dev=$FW_DEV zone=$FW_MZ ssh_service=$FW_SSH port22=$FW_P22 version=$(firewall-cmd --version 2>/dev/null)"
+# a zone whose target is ACCEPT allows every port; the runtime target is read from --list-all
+# (--get-target answers only with --permanent, measured)
+FW_TGT=$(firewall-cmd --zone="$FW_MZ" --list-all 2>/dev/null | sed -n 's/^  target: //p')
+echo "firewalld after: state=$FW_STATE default_route_dev=$FW_DEV zone=$FW_MZ ssh_service=$FW_SSH port22=$FW_P22 target=$FW_TGT version=$(firewall-cmd --version 2>/dev/null)"
 [ "$FW_STATE" = running ] || fw_stop "firewalld is not running"
 [ -n "$FW_DEV" ] && [ -n "$FW_MZ" ] || fw_stop "the default-route interface or its zone is unknown"
-[ "$FW_SSH" = yes ] || [ "$FW_P22" = yes ] || fw_stop "zone $FW_MZ of $FW_DEV allows neither the ssh service nor 22/tcp"
+[ "$FW_SSH" = yes ] || [ "$FW_P22" = yes ] || [ "$FW_TGT" = ACCEPT ] || fw_stop "zone $FW_MZ of $FW_DEV allows neither the ssh service nor 22/tcp, and its target is not ACCEPT"
 if sudo -u sinter ssh -i /opt/sinter-acceptance/ssh/id_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/opt/sinter-acceptance/ssh/known_hosts -p 22 127.0.0.1 'echo LOOPBACK_SSH_OK' 2>&1 | grep -q LOOPBACK_SSH_OK; then
   echo "loopback ssh after firewalld OK"
 else

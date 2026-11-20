@@ -1043,10 +1043,10 @@ FWZ=sintacc; FWIF=sintacc0; FWSRC=198.51.100.0/24; FWRS=192.0.2.0/24; FWRS2=203.
 FWP=8472/tcp; FWPP=8471/tcp
 FWETC=/etc/firewalld
 FWKH=/opt/sinter-acceptance/ssh/known_hosts
-FWST="$S/fw03-state"; FWPR="$S/fw03-pr"
+FWST="$WORK/fw03-state"; FWPB="$WORK/fw03-pb"; FWPR="$FWPB/pr"   # under WORK (0700), as the plugin section: $S may be 0775 under umask 002, and every ancestor of a plugin root is checked (measured in P7-R1)
 FWSSH="--host 127.0.0.1 --port 22 --user $SSHUSER --identity $SSHKEY --known-hosts $FWKH --management-path loopback"
 FWIDS="fw03-zone fw03-interface fw03-source fw03-reload risk-approved-apply fw03-no-residue"
-rm -rf "$FWST" "$FWPR"; mkdir -m 700 "$FWST"
+rm -rf "$FWST" "$FWPB"; mkdir -m 700 "$FWST" "$FWPB"
 fx() { XDG_STATE_HOME="$FWST" "$EXE" "$@"; }   # sinter with this section's own approval store
 fwq() { sudo firewall-cmd "$@" > /dev/null 2>&1; echo $?; }   # exit status of a direct firewall-cmd
 fwj() { # fwj <json file> <python expression over d> -> the value or ERR:<type>
@@ -1313,7 +1313,7 @@ if [ "$FWRAN" = yes ]; then
 fi
 [ -f "$FWST/sinter/approval-ledger.jsonl" ] && echo "FW03_LEDGER $(python3 -I -c 'import json, sys
 print(" ".join(json.loads(l).get("event", "?") for l in open(sys.argv[1]) if l.strip()))' "$FWST/sinter/approval-ledger.jsonl" 2>&1)"
-rm -rf "$FWST" "$FWPR" "$S"/fw03.*.req
+rm -rf "$FWST" "$FWPB" "$S"/fw03.*.req
 # END fw03-checks
 
 # ------------------------------------------------------- residue cleanup
