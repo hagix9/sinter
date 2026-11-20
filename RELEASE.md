@@ -914,7 +914,7 @@ and `/webmcp.json` show.
 | Release creation or asset upload fails | Tag public | §Partial publish failure: resume the unfinished steps; never delete or move the tag |
 | 17a mismatch | Release public, `main` unchanged | Incident; do not push `D`; no force-fix |
 | 17b work-branch CI fails | Release public, `main` unchanged | Fix forward with a new `D'` (parent `RC_COMMIT`), a new approval set and re-review of `D'`; the docs keep showing the previous version meanwhile |
-| `main` is not an ancestor of `RC_COMMIT` (moved meanwhile) | Release public | No force. Merge `RC_COMMIT` into the new `main` with `--no-ff` and put `D'` on that merge. A new approval set records it as `docs_base` (`make_approval_set.py --docs-base`; the verifier requires a merge with two parents, one of them `RC_COMMIT`, and `D'`'s only parent to be `docs_base`), and the Owner approves it before `D'` is pushed |
+| `main` is not an ancestor of `RC_COMMIT` (moved meanwhile) | Release public | No force. Merge `RC_COMMIT` into the new `main` with `--no-ff` and put `D'` on that merge. A new approval set records it as `docs_base` (`make_approval_set.py --docs-base`; the verifier requires a merge with two parents, one of them `RC_COMMIT`, and `D'`'s only parent to be `docs_base`), and the Owner approves it before `D'` is pushed. The merge must be the clean merge of its parents (checked with `git merge-tree --write-tree`, git 2.38 or later); a merge that needs a hand-resolved conflict is refused by the tools and needs a separate Owner decision |
 | Documentation deploy fails after 17b | `main` updated | The previous site stays published; fix forward with a docs-only commit |
 
 Until 17b, `main` and the site show the previous version and the Release
