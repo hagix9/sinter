@@ -1777,3 +1777,126 @@ fn management_path_protection_on_a_path_judged_through_usr_sbin_ss() {
     let (r, _) = run(s.model(&src, "").unwrap(), Mode::Apply, t, c);
     refused(&r, &f, "s", "");
 }
+
+// ---------------------------------------------------------------------------
+// P7-R2 re-measurement (2026-11-20): the measured answers as fixtures
+// ---------------------------------------------------------------------------
+
+/// Every `--list-all` answer captured on the four measured versions.
+fn measured_list_all(version: &str) -> Vec<(String, String, String)> {
+    let text = match version {
+        "1.3.4" => include_str!("fixtures/firewalld-1.3.4-list-all.txt"),
+        "2.1.1" => include_str!("fixtures/firewalld-2.1.1-list-all.txt"),
+        "2.3.1" => include_str!("fixtures/firewalld-2.3.1-list-all.txt"),
+        "2.4.3" => include_str!("fixtures/firewalld-2.4.3-list-all.txt"),
+        _ => unreachable!(),
+    };
+    let mut out = Vec::new();
+    let text = text.split_once('\n').unwrap().1; // the comment line
+    for part in text.split("=== ").skip(1) {
+        let (head, body) = part.split_once('\n').unwrap();
+        let (view, zone) = head.split_once(' ').unwrap();
+        out.push((view.to_string(), zone.to_string(), body.to_string()));
+    }
+    out
+}
+
+#[test]
+fn r5_every_measured_list_all_answer_is_read_as_measured() {
+    use super::path::parse_zone_priority;
+    for (v, zones) in [("1.3.4", 20), ("2.1.1", 18), ("2.3.1", 18), ("2.4.3", 20)] {
+        let all = measured_list_all(v);
+        assert_eq!(all.len(), zones, "{v}");
+        assert!(all.iter().any(|(view, _, _)| view == "runtime"));
+        assert!(all.iter().any(|(view, _, _)| view == "permanent"));
+        for (view, zone, body) in &all {
+            let want = if v == "1.3.4" { Ok(None) } else { Ok(Some(0)) };
+            assert_eq!(
+                parse_zone_priority(v, zone, body),
+                want,
+                "{v} {view} {zone}"
+            );
+            // the same answer read as another measured version's form fails closed
+            let other = if v == "1.3.4" { "2.4.3" } else { "1.3.4" };
+            assert_eq!(
+                parse_zone_priority(other, zone, body),
+                Err(()),
+                "{v} as {other}: {view} {zone}"
+            );
+        }
+    }
+    // the session copy used before the re-measurement equals the measured answer
+    let trusted = measured_list_all("2.4.3")
+        .into_iter()
+        .find(|(view, zone, _)| view == "runtime" && zone == "trusted")
+        .unwrap()
+        .2;
+    assert_eq!(
+        trusted
+            .replace("trusted (default)", "trusted (default, active)")
+            .replace("interfaces: \n", "interfaces: eth0\n"),
+        LIST_ALL_243
+    );
+}
+
+#[test]
+fn f7_an_unbound_management_interface_is_read_as_measured() {
+    // measured (P7-R2, firewalld 2.3.1, runtime and permanent): exit 2,
+    // stdout empty, stderr exactly "no zone"; the management zone is then the
+    // default zone. Before the fix the answer was expected on stdout and the
+    // zone was unknown on every Ubuntu image.
+    let s = Setup::new();
+    let body = res(
+        "p",
+        "port",
+        "zone: public, port: \"8080/tcp\", state: absent",
+    );
+    let unbound = |stdout: &str, stderr: &str| Output {
+        completion: Completion::Exited(2),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: stderr.as_bytes().to_vec(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+    };
+    let go = |o: Output| {
+        let f = fw();
+        f.lock().unwrap().version = Some("2.3.1".into());
+        f.lock().unwrap().priorities = Some(BTreeMap::new());
+        f.lock().unwrap().interfaces.clear();
+        for _ in 0..8 {
+            f.lock()
+                .unwrap()
+                .forced
+                .push(("--get-zone-of-interface=eth0".into(), o.clone()));
+        }
+        let (r, l) = run(
+            s.model(&body, "").unwrap(),
+            Mode::Apply,
+            target(&f, net(2222)),
+            ctx(),
+        );
+        (f, r, l)
+    };
+    let (_, r, l) = go(unbound("", "no zone\n"));
+    assert_eq!(r.unwrap().status, AggregateStatus::Success, "{l:?}");
+    assert_eq!(record(&l, "p").dynamic, "clear");
+    for (name, o) in [
+        ("the old assumption (stdout)", unbound("no zone\n", "")),
+        ("other text", unbound("", "no zone at all\n")),
+        (
+            "another exit status",
+            Output {
+                completion: Completion::Exited(1),
+                ..unbound("", "no zone\n")
+            },
+        ),
+        ("both streams", unbound("x\n", "no zone\n")),
+    ] {
+        let (f, r, l) = go(o);
+        refused(&r, &f, "p", "unknown");
+        assert!(
+            record(&l, "p").dynamic.starts_with("unknown"),
+            "{name}: {l:?}"
+        );
+    }
+}

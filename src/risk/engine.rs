@@ -420,11 +420,17 @@ impl Engine {
                         Some(z) if safe_name(z.trim()) => Ok(Some(z.trim().to_string())),
                         _ => Err(()),
                     },
-                    // An unbound interface answers `no zone` with exit 2
-                    // (assumed until measured; any other answer is unknown).
+                    // An unbound interface: exit 2, nothing on stdout and
+                    // exactly `no zone` on stderr (measured in P7-R2 on
+                    // firewalld 2.3.1, runtime and permanent; P7-R1 saw exit
+                    // 2 and `no zone` on all four versions). Any other answer
+                    // is unknown.
                     Ok(o)
                         if o.completion == Completion::Exited(2)
-                            && String::from_utf8_lossy(&o.stdout).trim() == "no zone" =>
+                            && !o.stdout_truncated
+                            && !o.stderr_truncated
+                            && o.stdout.is_empty()
+                            && o.stderr == b"no zone\n" =>
                     {
                         Ok(None)
                     }

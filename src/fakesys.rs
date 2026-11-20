@@ -2586,7 +2586,8 @@ impl FakeFirewalld {
             };
             return match map.get(&i) {
                 Some(z) => fw_out(0, &format!("{}\n", z), ""),
-                None => fw_out(2, "no zone\n", ""),
+                // measured (P7-R2): exit 2, stdout empty, `no zone` on stderr
+                None => fw_out(2, "", "no zone\n"),
             };
         }
         let Some(zone) = val("--zone=") else {
