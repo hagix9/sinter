@@ -91,13 +91,16 @@ disposable objects (zone `sintacc`, dummy interface `sintacc0`, RFC 5737
 networks) over SSH to 127.0.0.1 with the declared loopback management path:
 `fw03-zone`, `fw03-interface`, `fw03-source`, `fw03-reload`,
 `risk-approved-apply` (approval request, `sinter approve` on a
-pseudo-terminal, apply; refused without an approval, for an altered request,
-for another change and when reused) and `fw03-no-residue`. `target-prep.sh`
-installs and starts firewalld where it is missing and stops unless its default
-zone allows ssh and a new loopback SSH session works. The VM's management path
-is observed after every change; whatever happens, the section removes what it
-created and compares the firewall with its state before. It never removes a
-zone or interface that existed before it started. A missing prerequisite
+pseudo-terminal, apply; approve refuses a pipe, a wrong digest and an altered
+request; apply refuses no approval, another change and reuse) and
+`fw03-no-residue`. `target-prep.sh` installs and starts firewalld where it is
+missing; unless the zone of the default-route interface allows ssh or 22/tcp
+and a new loopback SSH session works, it puts firewalld back as it was and
+stops. The zone configuration of the VM's management path (and of every other
+zone) is observed after every change; at the end of the checks the section
+removes what it created and compares the firewall with its state before (a
+harness killed in the middle leaves them on the disposable VM). It never
+removes a zone, zone file or interface that existed before it started. A missing prerequisite
 (firewalld not running, firewalld 0.3.0 not in the sinter under test) fails
 all six checks; they are never SKIP or NOT APPLICABLE. They pass only after
 firewalld 0.3.0 is registered and the reload rule on a loopback path is

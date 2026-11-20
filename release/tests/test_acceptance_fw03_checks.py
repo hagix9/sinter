@@ -62,6 +62,15 @@ if a == ["--reload"]:
     save(); sys.exit(0)
 if a == ["--get-zones"]:
     print(" ".join(sorted(view))); sys.exit(0)
+if a == ["--list-all-zones"]:
+    print("\n\n".join("%s\n  %s" % (name, json.dumps(view[name], sort_keys=True)) for name in sorted(view)))
+    sys.exit(0)
+if a == ["--get-ipsets"]:
+    print(""); sys.exit(0)
+if a in (["--get-active-policies"], ["--get-policies"]):
+    print("allow-host-ipv6"); sys.exit(0)
+if a == ["--direct", "--get-all-rules"]:
+    print(""); sys.exit(0)
 if a == ["--get-default-zone"]:
     print(st["default"]); sys.exit(0)
 z = opt("--get-zone-of-interface")
@@ -120,6 +129,9 @@ sys.stderr.write("fake firewall-cmd: unsupported %r\n" % (sys.argv[1:],)); sys.e
 IP = r'''#!/usr/bin/env python3
 import json, os, sys
 st_path = os.environ["FAKE_FW"]; st = json.load(open(st_path)); a = sys.argv[1:]
+if a[:3] == ["-o", "addr", "show"]:
+    print("2: ens4    inet %s brd 198.18.0.255 scope global ens4" % ("192.0.2.10/24" if os.environ.get("FAKE_DEFECT") == "addr-overlap" else "198.18.0.10/24"))
+    sys.exit(0)
 if a[:4] == ["-o", "route", "show", "default"]:
     print("default via 192.0.2.1 dev ens4 proto dhcp metric 100"); sys.exit(0)
 if a[:2] == ["link", "add"]:
@@ -214,6 +226,8 @@ def run(path, mode):
                     fw(*((["--permanent"] if facet == "permanent" else []) + ["--zone=" + z, "--%s-%s=%s" % (verb, f, w[f])]))
         if defect == "not-idempotent":
             changed = True
+        if mode == "apply" and defect == "touch-other-rt" and ty == "interface":
+            fw("--zone=trusted", "--add-port=9999/tcp")
         if mode == "apply" and defect in ("touch-mgmt", "touch-mgmt-perm") and ty == "interface":
             fw("--zone=public", "--remove-service=ssh")
             if defect == "touch-mgmt-perm":
@@ -260,7 +274,7 @@ if cmd == "plan":
         sys.stderr.write("approval request written: %s\n" % p)
     sys.exit(rc)
 if cmd == "approve":
-    if not (os.isatty(0) and os.isatty(1)):
+    if not (os.isatty(0) and os.isatty(1)) and defect != "approve-pipe-ok":
         sys.stderr.write("sinter approve needs a terminal on stdin and stdout\n"); sys.exit(2)
     req = json.load(open(args[1]))
     m = req.pop("mac", "")
@@ -273,7 +287,7 @@ if cmd == "approve":
     print("content digest: " + req["content_digest"])
     sys.stdout.write("type the first 16 hex digits of the content digest to approve: "); sys.stdout.flush()
     line = sys.stdin.readline().strip()
-    if line != req["content_digest"][:16]:
+    if line != req["content_digest"][:16] and defect != "approve-any-answer":
         print("not approved"); sys.exit(2)
     for sub in ("approvals", "approvals/by-request", "used"):
         os.makedirs(os.path.join(store, sub), mode=0o700, exist_ok=True)
@@ -397,6 +411,10 @@ class Fw03Checks(unittest.TestCase):
             "mismatch-ok": ["risk-approved-apply"],
             "tamper-ok": ["risk-approved-apply"],
             "tamper-other-reason": ["risk-approved-apply"],
+            "approve-pipe-ok": ["risk-approved-apply"],
+            "approve-any-answer": ["risk-approved-apply"],
+            # a runtime-only change to another zone: a later reload would hide it, the step that made it fails
+            "touch-other-rt": ["fw03-interface"],
             "runtime-only": ["fw03-interface", "fw03-source"],
             "not-idempotent": ["fw03-interface", "fw03-source"],
             "zone-not-deleted": ["fw03-zone"],
@@ -418,6 +436,7 @@ class Fw03Checks(unittest.TestCase):
 
     def test_a_missing_prerequisite_fails_every_check_and_changes_nothing(self):
         for name, defect, state in (("no 0.3.0", "no-030", None),
+                                    ("a documentation network holds a VM address", "addr-overlap", None),
                                     ("firewalld stopped", "", initial_state(running=False))):
             with self.subTest(case=name):
                 before = json.loads(json.dumps(state or initial_state()))
@@ -436,6 +455,12 @@ class Fw03Checks(unittest.TestCase):
         self.assertEqual(sorted(bad), sorted(IDS), log)
         self.assertIn("disposable-names-in-use", log)
         self.assertEqual(final, before)
+        # a leftover zone file that firewalld does not list is not removed either
+        for leftover in ("zones/sintacc.xml.old", "zones/sintacc.xml"):
+            with self.subTest(leftover=leftover):
+                ok, bad, log, final, _ = self.run_section("", None, extra_files=((leftover, "left from an earlier run"),))
+                self.assertEqual(ok, [], log)
+                self.assertIn("disposable-names-in-use", log)
         st2 = initial_state(links=["lo", "ens4", "sintacc0"])
         ok, bad, log, final, _ = self.run_section("", st2)
         self.assertEqual(ok, [], log)
@@ -465,6 +490,94 @@ class Fw03Checks(unittest.TestCase):
         ids = [l.strip() for l in open(os.path.join(HARNESS, "expected-check-ids.txt")) if l.strip()]
         for i in IDS:
             self.assertIn(i, ids)
+
+
+PREP_FAKES = {
+    "systemctl": r"""#!/usr/bin/env python3
+import json, os, sys
+p = os.environ["FAKE_SD"]; s = json.load(open(p)); a = sys.argv[1:]
+if a[0] == "is-active":
+    print("active" if s["active"] else "inactive"); sys.exit(0 if s["active"] else 3)
+if a[0] == "is-enabled":
+    print("enabled" if s["enabled"] else "disabled"); sys.exit(0 if s["enabled"] else 1)
+if a[0] == "enable":
+    s["enabled"] = True; s["active"] = s["active"] or "--now" in a
+if a[0] == "disable":
+    s["enabled"] = False
+if a[0] == "stop":
+    s["active"] = False
+json.dump(s, open(p, "w")); sys.exit(0)
+""",
+    "firewall-cmd": r"""#!/usr/bin/env python3
+import json, os, sys
+s = json.load(open(os.environ["FAKE_SD"])); a = sys.argv[1:]
+if not s["active"]:
+    sys.exit(252)
+zones = {"public": {"ssh"}, "internal": set()}
+if a == ["--state"]: print("running"); sys.exit(0)
+if a == ["--version"]: print("9.9.9"); sys.exit(0)
+if a == ["--get-default-zone"]: print("public"); sys.exit(0)
+if a[0].startswith("--get-zone-of-interface="):
+    z = os.environ.get("FAKE_DEVZONE", "")
+    if z: print(z); sys.exit(0)
+    print("no zone"); sys.exit(2)
+z = a[0].split("=", 1)[1]
+if a[1] == "--query-service=ssh": print("yes" if "ssh" in zones[z] else "no"); sys.exit(0 if "ssh" in zones[z] else 1)
+if a[1] == "--query-port=22/tcp": print("no"); sys.exit(1)
+sys.exit(99)
+""",
+    "ip": r"""#!/usr/bin/env python3
+import sys
+if sys.argv[1:5] == ["-o", "route", "show", "default"]: print("default via 192.0.2.1 dev ens4"); sys.exit(0)
+sys.exit(0)
+""",
+    "ssh": r"""#!/usr/bin/env python3
+import os, sys
+if os.environ.get("FAKE_SSH_FAIL"): sys.exit(255)
+print("LOOPBACK_SSH_OK")
+""",
+}
+
+
+class FirewalldPrep(unittest.TestCase):
+    """The firewalld block of target-prep.sh (BEGIN/END fw-prep) against fakes."""
+
+    def run_prep(self, before, devzone="", ssh_fail=False):
+        text = open(os.path.join(HARNESS, "target-prep.sh"), encoding="utf-8").read()
+        body = re.search(r"^# BEGIN fw-prep\n(.*?)^# END fw-prep\n", text, re.S | re.M).group(1)
+        with tempfile.TemporaryDirectory() as d:
+            b = os.path.join(d, "bin"); os.mkdir(b)
+            for n, s in PREP_FAKES.items():
+                with open(os.path.join(b, n), "w") as f:
+                    f.write(s)
+                os.chmod(os.path.join(b, n), 0o755)
+            sd = os.path.join(d, "sd.json"); json.dump(before, open(sd, "w"))
+            prelude = 'set -u\nID_LIKE=rhel; NAME=Rocky\nsudo() { [ "$1" = -u ] && shift 2; "$@"; }\n'
+            env = dict(os.environ, FAKE_SD=sd, FAKE_DEVZONE=devzone, PATH=b + os.pathsep + os.environ["PATH"])
+            if ssh_fail:
+                env["FAKE_SSH_FAIL"] = "1"
+            p = subprocess.run(["bash", "-c", prelude + body + "\necho PREP_FW_OK\n"], capture_output=True, text=True, env=env, timeout=60)
+            return p.returncode, p.stdout + p.stderr, json.load(open(sd))
+
+    def test_a_zone_that_allows_ssh_passes(self):
+        rc, log, after = self.run_prep({"active": False, "enabled": False})
+        self.assertEqual(rc, 0, log); self.assertIn("PREP_FW_OK", log)
+        self.assertEqual(after, {"active": True, "enabled": True})
+
+    def test_the_default_route_zone_decides_and_a_stop_restores_firewalld(self):
+        # the default zone allows ssh, but the default-route interface is in a zone that does not
+        rc, log, after = self.run_prep({"active": False, "enabled": False}, devzone="internal")
+        self.assertEqual(rc, 7, log); self.assertNotIn("PREP_FW_OK", log)
+        self.assertIn("allows neither the ssh service nor 22/tcp", log)
+        self.assertEqual(after, {"active": False, "enabled": False})
+        rc, log, after = self.run_prep({"active": False, "enabled": False}, ssh_fail=True)
+        self.assertEqual(rc, 7, log)
+        self.assertEqual(after, {"active": False, "enabled": False})
+
+    def test_a_firewalld_active_before_is_left_as_it_was(self):
+        rc, log, after = self.run_prep({"active": True, "enabled": True}, devzone="internal")
+        self.assertEqual(rc, 7, log)
+        self.assertEqual(after, {"active": True, "enabled": True})
 
 
 if __name__ == "__main__":

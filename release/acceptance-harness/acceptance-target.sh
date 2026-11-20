@@ -571,10 +571,9 @@ if [ "$R" -eq 0 ]; then check audit-no-drift ok "$AST"; else check audit-no-drif
 # the default root under HOME is never named and must not appear. No check runs
 # firewall-cmd or changes the host firewall: plan and apply are given a host
 # name that cannot resolve (RFC 6761 .invalid) and must be refused before any
-# contact, and audit there fails at name resolution. Applying firewalld rules on
-# a real firewalld is not part of this matrix (the Ubuntu targets have no
-# firewalld, and starting or changing it on a target can affect the management
-# connection).
+# contact, and audit there fails at name resolution. firewalld rules on the
+# real firewalld are applied only by the fw03-checks section (v1.15.0), on
+# disposable objects.
 pyq() { # pyq <json file> <python expression over d> -> prints the value or ERR:<type>
   python3 -c '
 import json, sys
@@ -1031,10 +1030,13 @@ sudo rm -rf "$DD"; rm -rf "$S/disc"
 # over SSH to 127.0.0.1 with the declared loopback management path, the R
 # resources through the approval flow (DESIGN §43.4). The VM's own management
 # connection (its default-route interface and that interface's zone) is never
-# named by a recipe; it is observed before and after every change, and a new
-# SSH session is opened after every change. Whatever the results, fw03_restore
-# removes every disposable object with firewall-cmd and ip at the end, and
-# fw03-no-residue compares the firewall with its state before the section.
+# named by a recipe; its zone's configuration is observed before and after
+# every change (the new SSH session opened each time is a loopback session: it
+# shows that sshd answers, not that the runner's route is open). Whatever the
+# results of the checks, fw03_restore removes every disposable object with
+# firewall-cmd and ip at the end, and fw03-no-residue compares the firewall
+# with its state before the section. A harness killed in the middle leaves
+# them on this disposable VM.
 # Nothing here is ever SKIP or NOT_APPLICABLE: a missing prerequisite (no
 # running firewalld, no firewalld 0.3.0 in this sinter) fails every check.
 FWZ=sintacc; FWIF=sintacc0; FWSRC=198.51.100.0/24; FWRS=192.0.2.0/24; FWRS2=203.0.113.0/24
@@ -1061,10 +1063,19 @@ fw_mgmt() { # the VM's management path as one line: a new SSH session, the defau
   dev=$(ip -o route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
   z=$(sudo firewall-cmd --get-zone-of-interface="$dev" 2>/dev/null) || z=$(sudo firewall-cmd --get-default-zone 2>/dev/null)
   echo "ssh=$s dev=${dev:-none} zone=${z:-none} cfg=$({ sudo firewall-cmd --get-default-zone; sudo firewall-cmd --zone="$z" --list-all; \
-    sudo firewall-cmd --permanent --zone="$z" --list-all; } 2>&1 | sha256sum | cut -c1-16)"; }
-fw_snap() { # zones (runtime, permanent), every file under /etc/firewalld, the dummy interface
-  { sudo firewall-cmd --get-zones; sudo firewall-cmd --permanent --get-zones; sudo find "$FWETC" -type f -exec sha256sum {} + | sort
+    sudo firewall-cmd --permanent --zone="$z" --list-all; } 2>&1 | sha256sum | cut -c1-16) others=$(fw_others)"; }
+fw_snap() { # every zone's configuration (runtime, permanent), policies, direct rules, ipsets, every file
+  # under /etc/firewalld, NetworkManager's profiles, the dummy interface
+  { for w in "" --permanent; do sudo firewall-cmd $w --get-zones; sudo firewall-cmd $w --list-all-zones; sudo firewall-cmd $w --get-ipsets; done
+    sudo firewall-cmd --get-active-policies; sudo firewall-cmd --permanent --get-policies; sudo firewall-cmd --direct --get-all-rules
+    sudo find "$FWETC" -type f -exec sha256sum {} + | sort
+    [ -x /usr/bin/nmcli ] && sudo nmcli -t -f NAME,UUID,TYPE,DEVICE connection show
     ip -o link show "$FWIF" 2>&1 | cut -d' ' -f2; } 2>&1 | sha256sum | cut -c1-16; }
+fw_others() { # every zone except the disposable one, runtime and permanent, plus policies and direct rules; part of
+  # fw_mgmt, so a change the product makes outside the disposable zone fails the step that made it (a later
+  # reload would hide a runtime-only change)
+  { for w in "" --permanent; do sudo firewall-cmd $w --list-all-zones | awk -v z="$FWZ" 'BEGIN {RS = ""} $1 != z'; done
+    sudo firewall-cmd --get-active-policies; sudo firewall-cmd --direct --get-all-rules; } 2>&1 | sha256sum | cut -c1-16; }
 fw_apply() { # fw_apply <tag> <recipe> [args]: apply without an approval
   local t=$1 f=$2; shift 2
   fx apply "$f" $FWSSH --sudo --plugin-root "$FWPR" --format json "$@" > "$S/fw03.$t.json" 2> "$S/fw03.$t.err"; }
@@ -1083,7 +1094,8 @@ fw_recipe() { # fw_recipe <file> <type> <with> [extra lines]
   printf 'version: 1\nplugins:\n  - { id: firewalld, version: 0.3.0 }\nresources:\n  - id: acc_fw\n    type: firewalld.%s\n    with: { %s }\n%s' "$2" "$3" "${4:-}" > "$1"; }
 # sinter approve needs a terminal on stdin and stdout: this drives it through a
 # pseudo-terminal and types the digest prefix it shows (a terminal is not proof
-# that a person approved, DESIGN §43.4). No digest shown: a wrong answer.
+# that a person approved, DESIGN §43.4). No digest shown, or FW03_PTY_ANSWER=wrong:
+# a wrong answer (not hex).
 cat > "$S/fw03-pty.py" <<'PY'
 import os, pty, re, select, signal, sys, time
 pid, fd = pty.fork()
@@ -1103,7 +1115,8 @@ while time.time() < end:
     buf += chunk
     if not sent and b"to approve: " in buf:
         m = re.search(rb"content digest: ([0-9a-f]{64})", buf)
-        os.write(fd, (m.group(1)[:16] if m else b"0" * 16) + b"\n")
+        wrong = os.environ.get("FW03_PTY_ANSWER") == "wrong"
+        os.write(fd, (b"g" * 16 if wrong or not m else m.group(1)[:16]) + b"\n")
         sent = True
 else:
     os.kill(pid, signal.SIGKILL)
@@ -1130,11 +1143,26 @@ FW030=$(fwj "$S/fw03.list.json" "'embedded' if any(p['id'] == 'firewalld' and p[
 echo "== observe fw03-presence firewall-cmd=$FWC state=$FWSTATE plugin030=$FW030"
 FW_SNAP0=""; FW_MGMT0=""; FWRAN=no
 if [ "$FWC" = present ] && [ "$FWSTATE" = running ] && [ "$FW030" = embedded ]; then
-  FW_SNAP0=$(fw_snap); FW_MGMT0=$(fw_mgmt)
-  echo "FW03_BEFORE snap=$FW_SNAP0 mgmt=[$FW_MGMT0]"
+  FW_SNAP0=$(fw_snap); FW_MGMT0=$(fw_mgmt); FW_OTH0=$(fw_others)
+  echo "FW03_BEFORE snap=$FW_SNAP0 others=$FW_OTH0 mgmt=[$FW_MGMT0]"
   case "$FW_MGMT0" in ssh=ok\ *) ;; *) FW030=mgmt-unusable ;; esac
-  if [ -n "$(sudo firewall-cmd --permanent --get-zones 2>/dev/null | tr ' ' '\n' | grep -x "$FWZ")" ] || ip -o link show "$FWIF" > /dev/null 2>&1; then
+  if [ -n "$({ sudo firewall-cmd --permanent --get-zones; sudo firewall-cmd --get-zones; } 2>/dev/null | tr ' ' '\n' | grep -x "$FWZ")" ] \
+     || [ -e "$FWETC/zones/$FWZ.xml" ] || [ -e "$FWETC/zones/$FWZ.xml.old" ] || ip -o link show "$FWIF" > /dev/null 2>&1; then
     FW030=disposable-names-in-use; fi
+  # the documentation networks must not hold an address of this VM or the
+  # client of this session: the declared loopback path does not protect them
+  FWOV=$(ip -o addr show 2>/dev/null | awk '{print $4}' | python3 -I -c 'import ipaddress, os, sys
+nets = [ipaddress.ip_network(n) for n in sys.argv[1:]]
+addrs = [l.split("/")[0] for l in sys.stdin.read().split()] + os.environ.get("SSH_CONNECTION", "").split()[:1] + os.environ.get("SSH_CONNECTION", "").split()[2:3]
+bad = []
+for a in addrs:
+    try:
+        ip = ipaddress.ip_address(a)
+    except ValueError:
+        continue
+    bad += [str(ip) for n in nets if ip.version == n.version and ip in n]
+print(" ".join(bad) if bad else "none")' "$FWSRC" "$FWRS" "$FWRS2" 2>&1)
+  [ "$FWOV" = none ] || FW030="networks-overlap:$FWOV"
 fi
 if [ "$FWC" != present ] || [ "$FWSTATE" != running ] || [ "$FW030" != embedded ]; then
   for id in $FWIDS; do check "$id" FAIL "prerequisite: firewall-cmd=$FWC state=$FWSTATE plugin030=$FW030"; done
@@ -1201,6 +1229,20 @@ PY
     if tr -d '\r' < "$S/fw03.rt.approve.out" | grep -q '^approved: '; then RTA=approved
     elif [ "$RTA" != 0 ] && grep -q "fails its integrity check" "$S/fw03.rt.approve.out"; then RTA=refused-integrity; fi
   fi
+  # sinter approve itself: never from a pipe, never with a wrong digest prefix; no approval is recorded
+  fwnapp() { XDG_STATE_HOME="$FWST" "$EXE" approvals list 2> /dev/null | grep -c .; }
+  fx plan "$S/fwr.a.yaml" $FWSSH --sudo --plugin-root "$FWPR" --format json --approval-request "$S/fw03.rp.req" > /dev/null 2> "$S/fw03.rp.err"
+  RPQ=$(ls "$S/fw03.rp.req/"*.request.json 2> /dev/null | head -1); RP=none; RW=none; NAPP0=$(fwnapp)
+  if [ -n "$RPQ" ]; then
+    D16=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["content_digest"][:16])' "$RPQ" 2> /dev/null)
+    printf '%s\n' "$D16" | XDG_STATE_HOME="$FWST" "$EXE" approve "$RPQ" > "$S/fw03.rp.out" 2>&1; RP=$?
+    grep -q '^approved: ' "$S/fw03.rp.out" && RP=approved
+    [ "$RP" = 2 ] && grep -q "needs a terminal" "$S/fw03.rp.out" && RP=refused-pipe
+    FW03_PTY_ANSWER=wrong XDG_STATE_HOME="$FWST" python3 -I "$S/fw03-pty.py" "$EXE" approve "$RPQ" > "$S/fw03.rw.out" 2>&1; RW=$?
+    if tr -d '\r' < "$S/fw03.rw.out" | grep -q '^approved: '; then RW=approved
+    elif [ "$RW" != 0 ] && grep -q "not approved" "$S/fw03.rw.out"; then RW=refused-wrong; fi
+  fi
+  RPN=$([ "$(fwnapp)" = "$NAPP0" ] && echo unchanged || echo "CHANGED:$NAPP0->$(fwnapp)")
   fw_approved ra "$S/fwr.a.yaml" noapply; RA_ID=$FWA_ID; RA="plan=$FWA_PLAN,approve=$FWA_APPROVE"
   RB=none; [ -n "$RA_ID" ] && { fw_apply rb "$S/fwr.b.yaml" --approval "$RA_ID"; RB=$?; }   # the approval of a, used for b: re-plan mismatch
   RB="$RB/$(grep -c "differs from the approved plan" "$S/fw03.rb.err" 2> /dev/null)"
@@ -1214,10 +1256,10 @@ PY
   fw_approved rc "$S/fwr.c.yaml"; RC="apply=$FWA_APPLY,change=$(fwchg "$S/fw03.rc.json" acc_fw)"
   RCQ="$(fwq --zone="$FWZ" --query-source="$FWRS")/$(fwq --permanent --zone="$FWZ" --query-source="$FWRS")"
   RM=$([ "$(fw_mgmt)" = "$FW_MGMT0" ] && echo same || echo CHANGED)
-  FWR="none:$RR0/$RR0M tampered:$RTA a:$RA other:$RB/$RBQ a2:$RA2/$RAQ reuse:$RU/$RUM listed:$RL removed:$RC/$RCQ mgmt=$RM"
+  FWR="none:$RR0/$RR0M tampered:$RTA pipe:$RP wrong:$RW approvals:$RPN a:$RA other:$RB/$RBQ a2:$RA2/$RAQ reuse:$RU/$RUM listed:$RL removed:$RC/$RCQ mgmt=$RM"
   echo "FW03_RISK $FWR"
-  if [ "$FWR" = "none:2/1 tampered:refused-integrity a:plan=0,approve=0 other:5/1/1/1 a2:plan=0,approve=0,apply=0,change=changed/0/0 reuse:2/1 listed:1 removed:apply=0,change=changed/1/1 mgmt=same" ]; then
-    check risk-approved-apply ok "request, approve on a terminal, apply; refused without an approval, for an altered request, for another change and when reused"
+  if [ "$FWR" = "none:2/1 tampered:refused-integrity pipe:refused-pipe wrong:refused-wrong approvals:unchanged a:plan=0,approve=0 other:5/1/1/1 a2:plan=0,approve=0,apply=0,change=changed/0/0 reuse:2/1 listed:1 removed:apply=0,change=changed/1/1 mgmt=same" ]; then
+    check risk-approved-apply ok "request, approve on a terminal, apply; approve refuses a pipe, a wrong digest and an altered request; apply refuses no approval, another change and reuse"
   else check risk-approved-apply FAIL "$FWR"; head -c 600 "$S"/fw03.r*.err 2>/dev/null; fi
 
   # ---- fw03-reload: the plugin handler (C) after a change; a permanent-only
@@ -1260,14 +1302,17 @@ fi
 # disposable names already existed or the prerequisites failed: then nothing
 # here was created, and nothing is removed)
 if [ "$FWRAN" = yes ]; then
+  FW_OTH1=$(fw_others)
   fw03_restore
   [ -x /usr/bin/nmcli ] && sudo nmcli device set "$FWIF" managed yes > /dev/null 2>&1
   FW_SNAP1=$(fw_snap); FW_MGMT1=$(fw_mgmt)
-  echo "FW03_AFTER snap=$FW_SNAP1 mgmt=[$FW_MGMT1]"
-  if [ "$FW_SNAP1" = "$FW_SNAP0" ] && [ "$FW_MGMT1" = "$FW_MGMT0" ]; then
-    check fw03-no-residue ok "zones, /etc/firewalld and interfaces as before; management path unchanged; a new SSH session works"
-  else check fw03-no-residue FAIL "snap $FW_SNAP0 -> $FW_SNAP1 mgmt [$FW_MGMT0] -> [$FW_MGMT1]"; fi
+  echo "FW03_AFTER others_before_restore=$FW_OTH1 snap=$FW_SNAP1 mgmt=[$FW_MGMT1]"
+  if [ "$FW_OTH1" = "$FW_OTH0" ] && [ "$FW_SNAP1" = "$FW_SNAP0" ] && [ "$FW_MGMT1" = "$FW_MGMT0" ]; then
+    check fw03-no-residue ok "other zones, policies and direct rules untouched before the restore; zones, ipsets, /etc/firewalld, NetworkManager profiles and interfaces as before after it; management zone unchanged"
+  else check fw03-no-residue FAIL "others $FW_OTH0 -> $FW_OTH1 snap $FW_SNAP0 -> $FW_SNAP1 mgmt [$FW_MGMT0] -> [$FW_MGMT1]"; fi
 fi
+[ -f "$FWST/sinter/approval-ledger.jsonl" ] && echo "FW03_LEDGER $(python3 -I -c 'import json, sys
+print(" ".join(json.loads(l).get("event", "?") for l in open(sys.argv[1]) if l.strip()))' "$FWST/sinter/approval-ledger.jsonl" 2>&1)"
 rm -rf "$FWST" "$FWPR" "$S"/fw03.*.req
 # END fw03-checks
 

@@ -104,15 +104,27 @@ else
   exit 4
 fi
 sudo -u sinter sudo -n true && echo "passwordless sudo OK" || { echo "STOP passwordless sudo failed"; exit 5; }
+# BEGIN fw-prep
 # firewalld (docs/design/v1.15.0-release-and-acceptance.md §3.1): the fw03
 # checks need a running firewalld. It is installed and started here when it is
-# missing (this VM is disposable). Its default zone must allow the ssh service
-# and a new loopback SSH session must work after the start; otherwise the
-# preparation stops. The state before is logged; nothing else is changed.
+# missing (this VM is disposable). Starting it changes the filtering of the
+# management connection, so the zone of the default-route interface (the zone
+# the runner's connection uses; the default zone when the interface is in
+# none) must allow the ssh service or 22/tcp, and a new loopback SSH session
+# must work. Otherwise firewalld is put back as it was before (stopped and
+# disabled when it was not active) and the preparation stops (exit 7). The
+# state before is logged; nothing else is changed.
 FW_PRE=$(command -v firewall-cmd >/dev/null 2>&1 && echo installed || echo missing)
 FW_PREACT=$(systemctl is-active firewalld 2>/dev/null)
+FW_PREEN=$(systemctl is-enabled firewalld 2>/dev/null)
 UFW=$(command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | head -1 || echo "ufw absent")
-echo "firewalld before: $FW_PRE active=$FW_PREACT ($UFW)"
+echo "firewalld before: $FW_PRE active=$FW_PREACT enabled=$FW_PREEN ($UFW) dummy_links=$(ip -o link show type dummy 2>/dev/null | wc -l)"
+fw_stop() { # fw_stop <reason>: firewalld back to the state before, then stop the preparation
+  echo "STOP $1"
+  if [ "$FW_PREACT" != active ]; then systemctl stop firewalld >/dev/null 2>&1; fi
+  case "$FW_PREEN" in enabled) ;; *) systemctl disable firewalld >/dev/null 2>&1 ;; esac
+  echo "firewalld restored: active=$(systemctl is-active firewalld 2>/dev/null) enabled=$(systemctl is-enabled firewalld 2>/dev/null)"
+  exit 7; }
 case "$UFW" in *"Status: active"*) echo "STOP ufw is active; firewalld would conflict with it"; exit 7 ;; esac
 if [ "$FW_PRE" = missing ]; then
   case "$ID_LIKE $NAME" in
@@ -122,17 +134,24 @@ if [ "$FW_PRE" = missing ]; then
 fi
 systemctl enable --now firewalld >/dev/null 2>&1
 FW_STATE=$(firewall-cmd --state 2>&1)
-FW_DZ=$(firewall-cmd --get-default-zone 2>/dev/null)
-FW_SSH=$(firewall-cmd --zone="$FW_DZ" --query-service=ssh 2>/dev/null)
-echo "firewalld after: state=$FW_STATE default_zone=$FW_DZ ssh_service=$FW_SSH version=$(firewall-cmd --version 2>/dev/null)"
-[ "$FW_STATE" = running ] && [ "$FW_SSH" = yes ] || { echo "STOP firewalld not running or its default zone does not allow ssh"; exit 7; }
+FW_DEV=$(ip -o route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
+FW_MZ=$(firewall-cmd --get-zone-of-interface="$FW_DEV" 2>/dev/null) || FW_MZ=$(firewall-cmd --get-default-zone 2>/dev/null)
+FW_SSH=$(firewall-cmd --zone="$FW_MZ" --query-service=ssh 2>/dev/null)
+FW_P22=$(firewall-cmd --zone="$FW_MZ" --query-port=22/tcp 2>/dev/null)
+echo "firewalld after: state=$FW_STATE default_route_dev=$FW_DEV zone=$FW_MZ ssh_service=$FW_SSH port22=$FW_P22 version=$(firewall-cmd --version 2>/dev/null)"
+[ "$FW_STATE" = running ] || fw_stop "firewalld is not running"
+[ -n "$FW_DEV" ] && [ -n "$FW_MZ" ] || fw_stop "the default-route interface or its zone is unknown"
+[ "$FW_SSH" = yes ] || [ "$FW_P22" = yes ] || fw_stop "zone $FW_MZ of $FW_DEV allows neither the ssh service nor 22/tcp"
 if sudo -u sinter ssh -i /opt/sinter-acceptance/ssh/id_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/opt/sinter-acceptance/ssh/known_hosts -p 22 127.0.0.1 'echo LOOPBACK_SSH_OK' 2>&1 | grep -q LOOPBACK_SSH_OK; then
   echo "loopback ssh after firewalld OK"
 else
-  echo "STOP loopback ssh failed after firewalld start"; exit 7
+  fw_stop "loopback ssh failed after firewalld start"
 fi
+# END fw-prep
 # the fw03 checks create a dummy interface; logged here, not required here
+# (loading the dummy module may create dummy0 by itself: logged, so that the fw03 snapshot starts after it)
 if ip link add sinterprep0 type dummy >/dev/null 2>&1; then ip link del sinterprep0; echo "dummy interface OK"; else echo "dummy interface unavailable"; fi
+echo "dummy links after: $(ip -o link show type dummy 2>/dev/null | awk -F': ' '{print $2}' | tr '\n' ' ')"
 df -h / | tail -1
 echo "== target prep end $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo 0 > /tmp/prep.rc
