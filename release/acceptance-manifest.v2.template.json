@@ -1,0 +1,128 @@
+{
+  "schema": "sinter-acceptance-manifest/2",
+  "acceptance_scope": "<full or patch>",
+  "required_targets": [
+    "<target-label: full = the eight supported targets; patch = ubuntu2404, rocky9, one newer generation, the T-3 targets>"
+  ],
+  "abi": {
+    "dt_needed": [
+      "<sorted distinct DT_NEEDED library names, e.g. libc.so.6>"
+    ],
+    "max_glibc": "<e.g. GLIBC_2.34>",
+    "max_openssl": "<OPENSSL_x.y.z or none>"
+  },
+  "full_reference": {
+    "version": "<patch only: X.Y.Z of the reference Tier F release>",
+    "manifest_sha256": "<64-hex of the reference manifest>",
+    "finished_at": "<its run.finished_at>",
+    "releases_since": [
+      "<X.Y.Z published since; at most two>"
+    ]
+  },
+  "candidate": {
+    "version": "<X.Y.Z>",
+    "tag": "<vX.Y.Z>",
+    "source_commit": "<40-hex RC commit>",
+    "artifact": {
+      "filename": "<sinter-vX.Y.Z-linux-x86_64.tar.gz>",
+      "sha256": "<64-hex tarball sha256>",
+      "size_bytes": 0
+    },
+    "executable_sha256": "<64-hex sha256 of the frozen sinter executable>",
+    "build": {
+      "baseline": "<build OS and version, e.g. Rocky Linux 9.x x86_64>",
+      "rustc": "<rustc --version>",
+      "cargo": "<cargo --version>",
+      "max_glibc": "<e.g. GLIBC_2.34>"
+    }
+  },
+  "harness": {
+    "name": "<harness name>",
+    "version": "<harness version or commit>",
+    "files": [
+      {
+        "path": "<harness/relative/path>",
+        "sha256": "<64-hex>"
+      }
+    ],
+    "runner": "<runner command with <target-label> placeholders, no hostnames or IPs>",
+    "operator": "<role, e.g. release maintainer>"
+  },
+  "run": {
+    "started_at": "<RFC 3339 UTC, e.g. 2026-01-01T00:00:00Z>",
+    "finished_at": "<RFC 3339 UTC>"
+  },
+  "linux_validation": {
+    "os_name": "<NAME from /etc/os-release of the supported Linux x86_64 gate host>",
+    "os_version": "<VERSION_ID>",
+    "arch": "<x86_64>",
+    "source_commit": "<40-hex, equal to candidate.source_commit>",
+    "rustc": "<rustc --version>",
+    "cargo": "<cargo --version>",
+    "started_at": "<RFC 3339 UTC>",
+    "finished_at": "<RFC 3339 UTC, before run.started_at>",
+    "linux_only_suites": [
+      "<tests/name.rs gated by cfg(target_os = \"linux\")>"
+    ],
+    "steps": [
+      {
+        "name": "<root-fmt | root-clippy | root-test | installer-test | checker-test | gateway-fmt | gateway-clippy | gateway-test>",
+        "command": "<exact pinned command>",
+        "result": "<PASS>",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      }
+    ],
+    "verdict": "<PASS>",
+    "log": {
+      "path": "<validation/linux-gate.log>",
+      "sha256": "<64-hex>"
+    }
+  },
+  "targets": [
+    {
+      "label": "<target-label, e.g. rocky9>",
+      "os_name": "<NAME from /etc/os-release>",
+      "os_version": "<VERSION_ID or point release>",
+      "arch": "<uname -m>",
+      "image": "<public image family and version>",
+      "started_at": "<RFC 3339 UTC>",
+      "finished_at": "<RFC 3339 UTC>",
+      "artifact_sha256": "<64-hex observed on the target>",
+      "executable_sha256": "<64-hex observed on the target>",
+      "version_output": "<sinter X.Y.Z>",
+      "checks": {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "not_applicable": 0
+      },
+      "not_applicable_checks": [
+        {
+          "id": "<check id allowed by harness/applicability.json>",
+          "reason": "<reason, e.g. NM_NOT_INSTALLED>"
+        }
+      ],
+      "verdict": "<PASS or FAIL>",
+      "log": {
+        "path": "<logs/target-label.log>",
+        "sha256": "<64-hex>"
+      }
+    }
+  ],
+  "totals": {
+    "targets": 0,
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "skipped": 0,
+    "not_applicable": 0
+  },
+  "verdict": "<GO or NO-GO>",
+  "evidence_bundle": "<sinter-vX.Y.Z-acceptance-evidence.tar.gz>",
+  "sanitization": {
+    "allowed_literals": []
+  }
+}

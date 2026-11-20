@@ -148,7 +148,7 @@ record_scripts() {
            "$HERE/finalize-verdict.sh" "$HERE/collect-evidence.py" \
            "$HERE/raw-verdict.py" "$HERE/derive-expected-checks.sh" "$HERE/run-acceptance-wrapper.sh" \
            "$HERE/remote-cleanup.sh" \
-           "$H/acceptance-target.sh" "$H/target-prep.sh" "$H/sanitize.py" "$EXPECTED_IDS"; do
+           "$H/acceptance-target.sh" "$H/target-prep.sh" "$H/sanitize.py" "$EXPECTED_IDS" "$H/applicability.json"; do
     [ -f "$f" ] || continue
     b=$(basename "$f")
     cp "$f" "$RUN_DIR/scripts/$b" || { save_fail "cannot copy script $f"; return 1; }
@@ -277,6 +277,7 @@ trap on_signal INT TERM
 echo "### $VM ($LABEL) start $(ts) run_id=$RUN_ID rc_commit=$RC_COMMIT"
 [ -s "$EXPECTED_IDS" ] || save_fail "expected check ids missing"
 [ -f "$RAW_VERDICT" ] || save_fail "raw-verdict.py missing"
+[ -s "$H/applicability.json" ] || save_fail "applicability.json missing"
 echo "expected_checks=$(wc -l < "$EXPECTED_IDS" | tr -d ' ')"
 echo "== script provenance =="
 record_scripts || true
@@ -320,7 +321,7 @@ done
 if [ "$READY" != 1 ]; then echo "SSH NOT READY"; finalize "ERROR" "ssh-not-ready" "" "" "ssh-not-ready"; exit 3; fi
 RUN_START=$(ts); echo "target_started_at=$RUN_START"
 
-for f in target-prep.sh acceptance-target.sh run-acceptance-wrapper.sh remote-cleanup.sh; do
+for f in target-prep.sh acceptance-target.sh run-acceptance-wrapper.sh remote-cleanup.sh applicability.json; do
   ok=0; for i in $(seq 1 "$UP_TRIES"); do gscp "$H/$f" "$VM:/tmp/$f" >/dev/null 2>&1 && { ok=1; break; }; echo "upload $f attempt $i failed"; sleep 3; done
   [ "$ok" = 1 ] || { gpush "$H/$f" "/tmp/$f" && ok=1; }
   echo "harness $f uploaded=$ok"
@@ -406,7 +407,7 @@ if [ "$RAW_FETCHED" = 1 ]; then
     finalize "RAW_SHA_MISMATCH" "$ACC_RC" "$RMT_SHA" "$RMT_STAT" "raw log hash mismatch"; exit 1
   fi
 fi
-VERDICT=$(python3 "$RAW_VERDICT" "$RUN_DIR/raw.log" "$EXPECTED_IDS" "$RUN_START" "$ACC_RC" 2>/dev/null || true)
+VERDICT=$(python3 "$RAW_VERDICT" "$RUN_DIR/raw.log" "$EXPECTED_IDS" "$RUN_START" "$ACC_RC" "$H/applicability.json" "$LABEL" 2>/dev/null || true)
 [ -n "$VERDICT" ] || VERDICT="VERIFIER_ERROR"
 echo "verdict=$VERDICT"
 

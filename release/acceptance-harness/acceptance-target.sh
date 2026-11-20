@@ -16,7 +16,7 @@ EXP_VER=$5        # expected --version output
 WORK=/var/tmp/sinter-acceptance
 RCFILE=/tmp/acceptance.rc
 rm -f "$RCFILE"
-PASS=0; FAIL=0; SKIP=0
+PASS=0; FAIL=0; SKIP=0; NA=0
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 check() { # check <id> <ok|FAIL> [detail]
@@ -24,6 +24,21 @@ check() { # check <id> <ok|FAIL> [detail]
   else FAIL=$((FAIL+1)); echo "== check $1 FAIL"; echo "   $3"; fi
 }
 skip() { SKIP=$((SKIP+1)); echo "== check $1 SKIP"; echo "   $2"; }
+# not_applicable <id> <reason> [detail]: only for a (check, reason, label) the
+# applicability table lists and only after the proving observation was logged
+# (raw-verdict.py and the manifest checker check both again).
+not_applicable() { NA=$((NA+1)); echo "== check $1 NOT_APPLICABLE $2"; echo "   $3"; }
+na_allowed() { # na_allowed <id> <reason>: the table next to this script lists LABEL
+  python3 - "$(dirname "$0")/applicability.json" "$1" "$2" "$LABEL" <<'PY' 2>/dev/null
+import json, sys
+t, cid, reason, label = sys.argv[1:5]
+d = json.load(open(t))
+ok = d.get("schema") == "sinter-acceptance-applicability/1" and any(
+    e.get("check") == cid and e.get("reason") == reason and label in e.get("targets", [])
+    for e in d.get("entries", []))
+sys.exit(0 if ok else 1)
+PY
+}
 
 exec > "$WORK/raw.log" 2>&1
 echo "== acceptance start $(ts) label=$LABEL"
@@ -808,6 +823,207 @@ if [ "$R" -eq 0 ] && rv_none && [ ! -e "$RVD" ]; then check recipe-vars-no-resid
 else check recipe-vars-no-residue FAIL "rc=$R $(rv_bodies)"; fi
 # END recipe-vars-checks
 
+# ------------------------------------------------------------- v1.15.0
+# BEGIN v1150-checks
+# docs/design/v1.15.0-release-and-acceptance.md §3. Everything runs on
+# disposable names (sinter-acc-*) and removes them. Not part of this matrix
+# (BLOCKED in P7, see README.md): fw03-interface, fw03-source, fw03-zone,
+# fw03-reload and risk-approved-apply need firewalld 0.3.0 in the release
+# registry and the measured loopback behaviour of a reload.
+jq_chg() { # jq_chg <json> <resource id> -> its change or ERR
+  python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    r = [x for x in d.get("resources", []) if x.get("id") == sys.argv[2]]
+    print(r[0].get("change") if r else "missing")
+except Exception as e:
+    print("ERR:%s" % type(e).__name__)' "$1" "$2"
+}
+SSHOPT="--host 127.0.0.1 --port 22 --user $SSHUSER --identity $SSHKEY --known-hosts /opt/sinter-acceptance/ssh/known_hosts"
+
+# ---- systemd_timer (DESIGN §42) and service on a .timer unit
+TU=sinter-acc-timer
+cat > "$S/tm-svc.yaml" <<YAML
+version: 1
+resources:
+  - id: acc_tm_svc
+    type: file
+    with:
+      path: /etc/systemd/system/$TU.service
+      content: |
+        [Unit]
+        Description=Sinter acceptance timer target
+        [Service]
+        Type=oneshot
+        ExecStart=/bin/true
+      mode: "0644"
+YAML
+cat > "$S/tm-on.yaml" <<YAML
+version: 1
+resources:
+  - id: acc_tm
+    type: systemd_timer
+    with:
+      name: $TU
+      on_calendar: "*-*-* 03:00:00"
+      state: running
+      enabled: true
+YAML
+"$EXE" apply "$S/tm-svc.yaml" --sudo --format json > "$S/tm0.json" 2>"$S/tm0.err"; R0=$?
+"$EXE" apply "$S/tm-on.yaml" --sudo --format json > "$S/tm1.json" 2>"$S/tm1.err"; R=$?
+LS=$(systemctl show -p LoadState --value "$TU.timer" 2>&1)
+FILE_TM=$([ -f "/etc/systemd/system/$TU.timer" ] && echo present || echo absent)
+echo "TIMER_CREATE_RC=$R0/$R load=$LS file=$FILE_TM change=$(jq_chg "$S/tm1.json" acc_tm)"
+if [ "$R0" -eq 0 ] && [ "$R" -eq 0 ] && [ "$LS" = loaded ] && [ "$FILE_TM" = present ] && [ "$(jq_chg "$S/tm1.json" acc_tm)" = changed ]; then
+  check timer-create ok "unit written, manager reloaded (LoadState loaded)"
+else check timer-create FAIL "rc=$R0/$R load=$LS file=$FILE_TM"; cat "$S/tm1.err"; fi
+TA=$(systemctl is-active "$TU.timer" 2>&1); TE=$(systemctl is-enabled "$TU.timer" 2>&1)
+if [ "$TA" = active ] && [ "$TE" = enabled ]; then check timer-running ok "enabled and active"
+else check timer-running FAIL "active=$TA enabled=$TE"; fi
+"$EXE" apply "$S/tm-on.yaml" --sudo --format json > "$S/tm2.json" 2>"$S/tm2.err"; R=$?
+if [ "$R" -eq 0 ] && [ "$(jq_chg "$S/tm2.json" acc_tm)" = none ]; then check timer-idempotent ok "second apply unchanged"
+else check timer-idempotent FAIL "rc=$R change=$(jq_chg "$S/tm2.json" acc_tm)"; fi
+cat > "$S/tm-bad.yaml" <<YAML
+version: 1
+resources:
+  - id: acc_tm_bad
+    type: systemd_timer
+    with:
+      name: sinter-acc-badcal
+      on_calendar: "not a calendar 99:99"
+      state: running
+YAML
+"$EXE" plan "$S/tm-bad.yaml" --sudo --format json > "$S/tmb1.json" 2>"$S/tmb1.err"; RP=$?
+"$EXE" apply "$S/tm-bad.yaml" --sudo --format json > "$S/tmb2.json" 2>"$S/tmb2.err"; RA=$?
+BADF=$([ -e /etc/systemd/system/sinter-acc-badcal.timer ] && echo present || echo absent)
+echo "TIMER_BADCAL_RC=plan:$RP apply:$RA file=$BADF"
+if [ "$RP" -ne 0 ] && [ "$RA" -ne 0 ] && [ "$BADF" = absent ]; then check timer-calendar-invalid ok "invalid OnCalendar refused in plan ($RP) and apply ($RA), nothing written"
+else check timer-calendar-invalid FAIL "plan=$RP apply=$RA file=$BADF"; fi
+cat > "$S/tm-svc-stop.yaml" <<YAML
+version: 1
+resources:
+  - id: acc_tm_as_service
+    type: service
+    with:
+      name: $TU.timer
+      state: stopped
+      enabled: false
+YAML
+"$EXE" apply "$S/tm-svc-stop.yaml" --sudo --format json > "$S/tms.json" 2>"$S/tms.err"; R=$?
+TA=$(systemctl is-active "$TU.timer" 2>&1); TE=$(systemctl is-enabled "$TU.timer" 2>&1)
+echo "SERVICE_TIMER_RC=$R active=$TA enabled=$TE"
+if [ "$R" -eq 0 ] && [ "$TA" = inactive ] && [ "$TE" = disabled ]; then check service-timer-name ok "service manages $TU.timer (stopped, disabled)"
+else check service-timer-name FAIL "rc=$R active=$TA enabled=$TE"; fi
+cat > "$S/tm-off.yaml" <<YAML
+version: 1
+resources:
+  - id: acc_tm
+    type: systemd_timer
+    with:
+      name: $TU
+      state: absent
+  - id: acc_tm_svc
+    type: file
+    with:
+      path: /etc/systemd/system/$TU.service
+      state: absent
+YAML
+"$EXE" apply "$S/tm-off.yaml" --sudo --format json > "$S/tm3.json" 2>"$S/tm3.err"; R=$?
+LS=$(systemctl show -p LoadState --value "$TU.timer" 2>&1)
+echo "TIMER_ABSENT_RC=$R load=$LS"
+if [ "$R" -eq 0 ] && [ "$LS" = not-found ] && [ ! -e "/etc/systemd/system/$TU.timer" ]; then check timer-absent ok "removed, LoadState not-found"
+else check timer-absent FAIL "rc=$R load=$LS"; fi
+
+# ---- connection-risk control (DESIGN §43.2): an R resource without an
+# approval is refused before any contact (the host name cannot resolve).
+cat > "$S/risk-r.yaml" <<'YAML'
+version: 1
+resources:
+  - id: acc_risk_r
+    type: nm_connection
+    with:
+      name: sinter-acc-risk
+      ifname: "{{ facts.hostname }}"
+      autoconnect: false
+YAML
+"$EXE" apply "$S/risk-r.yaml" --host "$NOHOST" --format json > "$S/rr.json" 2>"$S/rr.err"; R=$?
+echo "RISK_STATIC_RC=$R"
+if [ "$R" -eq 2 ] && grep -q "need an approval" "$S/rr.err"; then check risk-static-refusal ok "R resource without approval: exit 2 before contact"
+else check risk-static-refusal FAIL "rc=$R $(head -c 300 "$S/rr.err")"; fi
+
+# ---- nm_connection (DESIGN §45): an inactive profile for an interface that
+# does not exist, over SSH to 127.0.0.1 with the declared loopback path.
+NMC=$([ -x /usr/bin/nmcli ] && echo present || echo absent)
+NMLS=$(systemctl show -p LoadState --value NetworkManager.service 2>/dev/null)
+NMAS=$(systemctl is-active NetworkManager.service 2>/dev/null)
+case "$NMLS" in not-found|"") NMSV=not-found ;; *) [ "$NMAS" = active ] && NMSV=active || NMSV=inactive ;; esac
+echo "== observe nm-presence nmcli=$NMC service=$NMSV"
+if [ "$NMC" = absent ] && [ "$NMSV" != active ] && na_allowed nm-profile-crud NM_NOT_INSTALLED; then
+  not_applicable nm-profile-crud NM_NOT_INSTALLED "nmcli is not installed on $LABEL (applicability table)"
+else
+  nm_recipe() { # nm_recipe <file> <extra with-lines>
+    printf 'version: 1\nresources:\n  - id: acc_nm\n    type: nm_connection\n    with:\n      name: sinter-acc-nm\n%s\n' "$2" > "$1"; }
+  nm_recipe "$S/nm1.yaml" '      ifname: sinteracc0
+      autoconnect: false
+      ipv4: { method: manual, addresses: [192.0.2.10/24] }
+      ipv6: { method: ignore }'
+  nm_recipe "$S/nm2.yaml" '      ifname: sinteracc0
+      autoconnect: false
+      ipv4: { method: manual, addresses: [192.0.2.10/24], dns: [192.0.2.53] }
+      ipv6: { method: ignore }'
+  nm_recipe "$S/nm3.yaml" '      state: absent'
+  NMR=""
+  for step in 1 2 2b 3; do
+    f="$S/nm${step%b}.yaml"
+    "$EXE" apply "$f" $SSHOPT --sudo --management-path loopback --format json > "$S/nm$step.json" 2>"$S/nm$step.err"; NMR="$NMR $step:$?:$(jq_chg "$S/nm$step.json" acc_nm)"
+    case "$step" in
+      1) NMS1=$(sudo nmcli -t -f connection.interface-name,connection.autoconnect,ipv4.addresses connection show sinter-acc-nm 2>&1 | tr '\n' ' ') ;;
+      2) NMS2=$(sudo nmcli -t -f ipv4.dns connection show sinter-acc-nm 2>&1 | tr '\n' ' ') ;;
+    esac
+  done
+  NMLEFT=$(sudo nmcli -t -f NAME connection show 2>/dev/null | grep -cx sinter-acc-nm)
+  echo "NM_PROFILE_STEPS=$NMR created=[$NMS1] dns=[$NMS2] left=$NMLEFT"
+  if [ "$NMR" = " 1:0:changed 2:0:changed 2b:0:none 3:0:changed" ] \
+     && printf '%s' "$NMS1" | grep -q 'sinteracc0' && printf '%s' "$NMS1" | grep -q '192.0.2.10/24' \
+     && printf '%s' "$NMS2" | grep -q '192.0.2.53' && [ "$NMLEFT" = 0 ]; then
+    check nm-profile-crud ok "created, changed, unchanged on re-apply, deleted"
+  else check nm-profile-crud FAIL "steps=$NMR created=[$NMS1] dns=[$NMS2] left=$NMLEFT"; cat "$S"/nm*.err 2>/dev/null | head -20
+    sudo nmcli connection delete id sinter-acc-nm >/dev/null 2>&1 || true; fi
+fi
+
+# ---- discover (DESIGN §46): read-only, synthetic secret excluded, audit of
+# the candidate on the unchanged host reports no drift.
+DD=/etc/sinter-acc-disc
+CAN="synthetic-sinter-acc-canary-$(date +%s)$$"
+sudo mkdir -p "$DD"
+printf 'listen = 8080\nworkers = 4\n' | sudo tee "$DD/plain.conf" >/dev/null
+printf 'db_password = %s\n' "$CAN" | sudo tee "$DD/secret.conf" >/dev/null
+sudo chmod 0644 "$DD/plain.conf" "$DD/secret.conf"
+pkgdb() { if [ -f /var/lib/dpkg/status ]; then sudo sha256sum /var/lib/dpkg/status | cut -d' ' -f1; else rpm -qa --qf '%{NAME}-%{EVR}.%{ARCH}\n' | sort | sha256sum | cut -d' ' -f1; fi; }
+etcsum() { sudo find /etc -xdev -printf '%p %y %m %U %G %s %T@\n' 2>/dev/null | sort | sha256sum | cut -d' ' -f1; }
+PK1=$(pkgdb); ET1=$(etcsum)
+mkdir -m 700 "$S/disc"
+"$EXE" discover $SSHOPT --sudo --output "$S/disc/cand.yaml" --include-path "$DD/plain.conf" --include-path "$DD/secret.conf" > "$S/disc.out" 2> "$S/disc.err"; R=$?
+PK2=$(pkgdb); ET2=$(etcsum)
+MODES="$(fmode "$S/disc/cand.yaml")/$(fmode "$S/disc/cand.yaml.discover.json")"
+LEAK=$(grep -l "$CAN" "$S/disc/cand.yaml" "$S/disc/cand.yaml.discover.json" "$S/disc.out" "$S/disc.err" 2>/dev/null | wc -l | tr -d ' ')
+EXCL=$(pyq "$S/disc/cand.yaml.discover.json" '[u["reason"] for u in d["unsupported"] if u["key"] == "/etc/sinter-acc-disc/secret.conf"]')
+PLAIN=$(grep -c 'listen = 8080' "$S/disc/cand.yaml" 2>/dev/null)
+echo "DISCOVER_RC=$R modes=$MODES leak=$LEAK excluded=$EXCL plain=$PLAIN pkgdb_same=$([ "$PK1" = "$PK2" ] && echo yes || echo no) etc_same=$([ "$ET1" = "$ET2" ] && echo yes || echo no)"
+if [ "$R" -eq 0 ] && [ "$MODES" = 600/600 ] && [ "$LEAK" = 0 ] && [ "$EXCL" = "['excluded: credential assignment']" ] \
+   && [ "$PLAIN" -ge 1 ] && [ "$PK1" = "$PK2" ] && [ "$ET1" = "$ET2" ]; then
+  check discover-readonly ok "recipe and provenance 0600; synthetic secret excluded; package database and /etc unchanged"
+else check discover-readonly FAIL "rc=$R modes=$MODES leak=$LEAK excluded=$EXCL pkgdb=$PK1/$PK2 etc=$ET1/$ET2"; head -c 600 "$S/disc.err"; fi
+"$EXE" audit "$S/disc/cand.yaml" $SSHOPT --sudo --format json > "$S/disc-audit.json" 2> "$S/disc-audit.err"; R=$?
+AST=$(pyq "$S/disc-audit.json" 'd["status"]')
+ANON=$(pyq "$S/disc-audit.json" '[r["id"] for r in d["resources"] if r["status"] not in ("PASS", "COMPLIANT", "compliant")]')
+echo "DISCOVER_AUDIT_RC=$R status=$AST not_compliant=$ANON"
+if [ "$R" -eq 0 ] && [ "$AST" = no_drift ]; then check discover-roundtrip ok "audit of the generated recipe: no drift"
+else check discover-roundtrip FAIL "rc=$R status=$AST not_compliant=$ANON"; fi
+sudo rm -rf "$DD"; rm -rf "$S/disc"
+# END v1150-checks
+
 # ------------------------------------------------------- residue cleanup
 cat > "$S/cleanup.yaml" <<'YAML'
 version: 1
@@ -829,6 +1045,6 @@ LEFT=$(sudo find /opt/sinter-acceptance/state -mindepth 1 2>/dev/null | wc -l)
 echo "CLEANUP_RC=$R leftover=$LEFT"
 if [ "$R" -eq 0 ] && [ "$LEFT" -eq 0 ]; then check no-residue ok "no managed path left behind"; else check no-residue FAIL "rc=$R leftover=$LEFT"; fi
 
-echo "== acceptance end $(ts) passed=$PASS failed=$FAIL skipped=$SKIP"
+echo "== acceptance end $(ts) passed=$PASS failed=$FAIL skipped=$SKIP not_applicable=$NA"
 if [ "$FAIL" -eq 0 ] && [ "$SKIP" -eq 0 ]; then echo 0 > "$RCFILE"; exit 0; fi
 echo 1 > "$RCFILE"; exit 1

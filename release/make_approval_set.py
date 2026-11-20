@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Assemble an Owner approval set (schema sinter-approval-set/2) and print its digest.
+"""Assemble an Owner approval set (schema sinter-approval-set/2, or /3 with the
+docs commit D) and print its digest.
 
 RELEASE.md step 13. The set binds the three acceptance assets, the collector
 that tallied the acceptance runs and every result it produced, and the
@@ -33,7 +34,12 @@ Usage:
   make_approval_set.py --collector-fragment --evidence DIR \
       --collector FILE --collector-run DIR [--collector-run DIR ...]
   make_approval_set.py <out-dir> --acceptance DIR --evidence DIR \
-      --collector FILE --collector-run DIR [--collector-run DIR ...] --rc-tree TREE
+      --collector FILE --collector-run DIR [--collector-run DIR ...] --rc-tree TREE \
+      [--docs-commit D --rc-repo DIR]
+
+With --docs-commit (schema sinter-approval-set/3, v1.15.0 step 12b/13) the set
+also holds docs-commit/D.patch (`git format-patch -1 --stdout D`) and META
+docs_commit / docs_tree; D's only parent must be the manifest's source commit.
 """
 import argparse
 import hashlib
@@ -41,12 +47,21 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 
 LIST = "APPROVAL-SET.sha256"
 META = "APPROVAL-SET-META.json"
 SCHEMA = "sinter-approval-set/2"
+SCHEMA3 = "sinter-approval-set/3"
+
+
+def git(repo, *args):
+    p = subprocess.run(["git", "-C", repo, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if p.returncode != 0:
+        die(f"git {args[0]} failed")
+    return p.stdout
 
 
 def sha(path):
@@ -136,6 +151,9 @@ def main(argv):
     ap.add_argument("--collector-run", action="append", required=True,
                     help="directory with collect.txt and summary.txt of one collector run (in order)")
     ap.add_argument("--rc-tree")
+    ap.add_argument("--docs-commit", help="the local docs commit D (schema /3)")
+    ap.add_argument("--rc-repo", help="the repository holding D (with --docs-commit)")
+    ap.add_argument("--docs-base", help="recovery (§4.5): the --no-ff merge of RC_COMMIT that D is on")
     a = ap.parse_args(argv)
     if a.out and os.path.exists(a.out):
         die(f"refusing to overwrite {a.out}")
@@ -156,6 +174,12 @@ def main(argv):
         die(f"refusing to overwrite {a.out}")
     if not re.fullmatch(r"[0-9a-f]{40}", a.rc_tree):
         die("--rc-tree must be a 40-hex tree id")
+    if bool(a.docs_commit) != bool(a.rc_repo):
+        die("--docs-commit and --rc-repo go together")
+    if a.docs_commit and not re.fullmatch(r"[0-9a-f]{40}", a.docs_commit):
+        die("--docs-commit must be a full 40-hex commit id")
+    if a.docs_base and (not a.docs_commit or not re.fullmatch(r"[0-9a-f]{40}", a.docs_base)):
+        die("--docs-base needs --docs-commit and must be a full 40-hex commit id")
     mans = [n for n in os.listdir(a.acceptance) if re.fullmatch(r"sinter-v\d+\.\d+\.\d+-acceptance-manifest\.json", n)]
     if len(mans) != 1:
         die("the acceptance directory must hold exactly one acceptance manifest")
@@ -172,10 +196,25 @@ def main(argv):
     os.makedirs(os.path.join(a.out, "acceptance"))
     for n in assets:
         shutil.copyfile(os.path.join(a.acceptance, n), os.path.join(a.out, "acceptance", n))
+    docs = None
+    if a.docs_commit:
+        parents = git(a.rc_repo, "rev-list", "--parents", "-n", "1", a.docs_commit).decode().split()
+        if a.docs_base:
+            bp = git(a.rc_repo, "rev-list", "--parents", "-n", "1", a.docs_base).decode().split()
+            if len(bp) != 3 or c["source_commit"] not in bp[1:]:
+                die("--docs-base must be a merge with two parents, one of them RC_COMMIT")
+        if parents[1:] != [a.docs_base or c["source_commit"]]:
+            die("the docs commit's only parent must be RC_COMMIT (or --docs-base)")
+        patch = git(a.rc_repo, "format-patch", "-1", "--stdout", "--no-signature", a.docs_commit)
+        tree = git(a.rc_repo, "rev-parse", a.docs_commit + "^{tree}").decode().strip()
+        os.makedirs(os.path.join(a.out, "docs-commit"))
+        with open(os.path.join(a.out, "docs-commit", "D.patch"), "wb") as f:
+            f.write(patch)
+        docs = (a.docs_commit, tree)
     cr = os.path.join(a.out, "collector-record")
     run_meta, digest = build_record(cr, a.collector, record, a.collector_run)
     meta = {
-        "schema": SCHEMA,
+        "schema": SCHEMA3 if docs else SCHEMA,
         "version": v, "tag": c["tag"],
         "rc_commit": c["source_commit"], "rc_tree": a.rc_tree,
         "artifact": c["artifact"], "executable_sha256": c["executable_sha256"],
@@ -188,6 +227,10 @@ def main(argv):
             "evidence_digest": digest,
         },
     }
+    if docs:
+        meta["docs_commit"], meta["docs_tree"] = docs
+        if a.docs_base:
+            meta["docs_base"] = a.docs_base
     with open(os.path.join(a.out, META), "w", encoding="utf-8", newline="\n") as f:
         json.dump(meta, f, indent=2, sort_keys=True)
         f.write("\n")

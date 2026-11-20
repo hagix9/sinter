@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify an Owner approval set (schema sinter-approval-set/2).
+"""Verify an Owner approval set (schema sinter-approval-set/2 or /3).
 
 RELEASE.md step 13. This complements release/check_acceptance_manifest.py; it
 does not replace it. The checker proves the three acceptance assets are
@@ -46,6 +46,19 @@ or inconsistent part makes the set invalid.
   R  (--artifact) the tarball has the recorded name, size and SHA-256
   J  (--checker, needs --artifact) the official checker passes in full mode
 
+  D  (schema /3, needs --rc-repo; v1.15.0, docs/design/v1.15.0-release-and-
+     acceptance.md §4.3) the docs commit D: META docs_commit and docs_tree are
+     full ids; D is a commit in --rc-repo with exactly one parent, rc_commit;
+     its tree is docs_tree; docs-commit/D.patch is `git format-patch -1 D` of
+     D and, applied to rc_tree in a private index, reproduces docs_tree; every
+     path D changes is in the docs allow-list; D holds
+     release/evidence/v<version>/acceptance-manifest.json byte-identical to
+     the approved manifest. Any change of D changes the set digest, so an
+     earlier approval never covers it. Recovery (§4.5, main moved before
+     17b): META docs_base names a merge commit with exactly two parents, one
+     of them rc_commit; D's only parent is then docs_base, the patch applies
+     to docs_base's tree and the allow-list is checked against docs_base.
+
 Exit: 0  set valid AND its digest equals --approved-digest
       3  set valid, no approved digest given: PENDING_OWNER_APPROVAL (never GO)
       1  set invalid, or its digest differs from --approved-digest
@@ -67,10 +80,21 @@ import tempfile
 sys.dont_write_bytecode = True  # keep the evidence directories free of caches
 
 SCHEMA = "sinter-approval-set/2"
+SCHEMA3 = "sinter-approval-set/3"
+DOCS_PATCH = "docs-commit/D.patch"
 LIST = "APPROVAL-SET.sha256"
 META = "APPROVAL-SET-META.json"
 CR = "collector-record/"
 LABELS = ["ubuntu2404", "ubuntu2604", "rocky9", "rocky10", "rhel9", "rhel10", "alma9", "alma10"]
+ALL_LABELS = list(LABELS)
+
+
+def docs_allowed(path, version):
+    """The paths the post-publish docs commit D may change (§4.3)."""
+    return (path.startswith("docs-site/") or path in ("README.md", "README.ja.md",
+            ".devcontainer/install-sinter.sh", ".github/workflows/start.yml",
+            f"release/evidence/v{version}/acceptance-manifest.json")
+            or re.fullmatch(r"examples/start/README[^/]*\.md", path) is not None)
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 VERSION = re.compile(r"^\d+\.\d+\.\d+$")
@@ -182,8 +206,13 @@ def verify(a):
     if META not in members:
         raise Fail(f"B: {META} missing")
     meta = json.loads(rd(root, META))
-    if meta.get("schema") != SCHEMA:
-        raise Fail(f"C: META schema is not {SCHEMA}")
+    if meta.get("schema") not in (SCHEMA, SCHEMA3):
+        raise Fail(f"C: META schema is not {SCHEMA} or {SCHEMA3}")
+    v3 = meta.get("schema") == SCHEMA3
+    if v3 and (not HEX40.match(str(meta.get("docs_commit", ""))) or not HEX40.match(str(meta.get("docs_tree", "")))):
+        raise Fail("C: META docs_commit / docs_tree are not full 40-hex ids")
+    if "docs_base" in meta and (not v3 or not HEX40.match(str(meta.get("docs_base", "")))):
+        raise Fail("C: META docs_base is only allowed in a /3 set, as a full 40-hex id")
     ver = meta.get("version")
     if not isinstance(ver, str) or not VERSION.match(ver):
         raise Fail("C: META version is not X.Y.Z")
@@ -207,6 +236,8 @@ def verify(a):
         if i == len(run_ids):
             rec_files.add(f"runs/{rid}/VERDICT.txt")
     want = {META} | {"acceptance/" + x for x in assets} | {CR + x for x in rec_files} | {CR + "SHA256SUMS"}
+    if v3:
+        want.add(DOCS_PATCH)
     if set(members) != want:
         raise Fail(f"B: member set differs: missing={sorted(want - set(members))} "
                    f"extra={sorted(set(members) - want)}")
@@ -216,6 +247,19 @@ def verify(a):
     bun_raw = rd(root, "acceptance/" + bun_name)
     man = json.loads(man_raw)
     c = man["candidate"]
+    # The labels this acceptance requires: the eight (schema /1, and /2 full
+    # scope) or the approved patch set (/2 patch scope).
+    global LABELS
+    LABELS = ALL_LABELS
+    if man.get("schema") == "sinter-acceptance-manifest/2":
+        rt = man.get("required_targets")
+        if not isinstance(rt, list) or not rt or not all(x in ALL_LABELS for x in rt) or len(set(rt)) != len(rt):
+            raise Fail("C: manifest required_targets is not a list of distinct target labels")
+        if man.get("acceptance_scope") not in ("full", "patch"):
+            raise Fail("C: manifest acceptance_scope is not full or patch")
+        if man.get("acceptance_scope") == "full" and sorted(rt) != sorted(ALL_LABELS):
+            raise Fail("C: a full-scope manifest must require the eight targets")
+        LABELS = [x for x in ALL_LABELS if x in rt]
     # ---- C: META vs manifest --------------------------------------------------
     v.ok(meta.get("tag") == "v" + ver, "C tag == v<version>")
     for k, mv in (("version", c.get("version")), ("tag", c.get("tag")), ("rc_commit", c.get("source_commit")),
@@ -345,10 +389,11 @@ def verify(a):
     # ---- K: logs vs manifest counts ---------------------------------------------
     for t in man.get("targets", []):
         lp = t.get("log", {}).get("path")
-        ends = re.findall(r"^== acceptance end \S+ passed=(\d+) failed=(\d+) skipped=(\d+)$",
+        ends = re.findall(r"^== acceptance end \S+ passed=(\d+) failed=(\d+) skipped=(\d+)(?: not_applicable=(\d+))?$",
                           bundle.get(lp, b"").decode("utf-8", "replace"), re.M)
         ch = t.get("checks", {})
-        v.ok(len(ends) == 1 and [int(x) for x in ends[0]] == [ch.get("passed"), ch.get("failed"), ch.get("skipped")],
+        want_k = [ch.get("passed"), ch.get("failed"), ch.get("skipped"), ch.get("not_applicable", 0)]
+        v.ok(len(ends) == 1 and [int(x) if x else 0 for x in ends[0]] == want_k,
              f"K {t.get('label')}: bundle log end line == manifest checks")
     if a.gate_log:
         with open(a.gate_log, "rb") as f:
@@ -370,6 +415,9 @@ def verify(a):
                  f"H {e.get('name')}: source_path at rc_commit == executed bytes")
         orig = git(a.rc_repo, "show", f"{rc}:release/acceptance-harness/collect-evidence.py")
         v.ok(orig is not None and orig == col_bytes, "H collector == release/acceptance-harness/collect-evidence.py at rc_commit")
+    # ---- D: the docs commit (schema /3) -------------------------------------------
+    if v3:
+        check_docs_commit(v, a, root, meta, ver, man_raw)
     # ---- I / M: recorded evidence -------------------------------------------------
     if a.evidence:
         index_matches_runs(v, a.evidence, [cr(f"runs/{r['id']}/collect.txt").decode("utf-8") for r in col["runs"]])
@@ -395,6 +443,52 @@ def verify(a):
         v.ok(p.returncode == 0 and b"(verdict GO)" in p.stdout, "J official checker full mode",
              f"exit={p.returncode} {p.stderr.decode(errors='replace').strip()[:400]}")
     return v, digest
+
+
+def check_docs_commit(v, a, root, meta, ver, man_raw):
+    if not a.rc_repo:
+        raise Fail("D: a sinter-approval-set/3 needs --rc-repo to check the docs commit")
+    d, rc = meta["docs_commit"], meta["rc_commit"]
+    typ = git(a.rc_repo, "cat-file", "-t", d)
+    if not v.ok(typ is not None and typ.strip() == b"commit", "D docs_commit is a commit in --rc-repo"):
+        return
+    base = meta.get("docs_base", rc)
+    if base != rc:
+        bp = (git(a.rc_repo, "rev-list", "--parents", "-n", "1", base) or b"").decode().split()
+        v.ok(len(bp) == 3 and rc in bp[1:], "D docs_base is a merge with two parents, one of them rc_commit",
+             str(bp[1:]))
+    parents = (git(a.rc_repo, "rev-list", "--parents", "-n", "1", d) or b"").decode().split()
+    v.ok(parents[1:] == [base], "D the docs commit has exactly one parent, rc_commit (or docs_base)", str(parents[1:]))
+    tree = git(a.rc_repo, "rev-parse", d + "^{tree}")
+    v.ok(tree is not None and tree.decode().strip() == meta.get("docs_tree"), "D docs_tree == git tree of docs_commit")
+    base_tree = meta["rc_tree"] if base == rc else (git(a.rc_repo, "rev-parse", base + "^{tree}") or b"").decode().strip()
+    patch = rd(root, DOCS_PATCH)
+    first = patch.split(b"\n", 1)[0].decode("utf-8", "replace")
+    v.ok(re.fullmatch(r"From " + d + r" Mon Sep 17 00:00:00 2001", first) is not None,
+         "D docs-commit/D.patch is format-patch output of docs_commit")
+    v.ok(len(re.findall(rb"(?m)^From [0-9a-f]{40} Mon Sep 17 00:00:00 2001$", patch)) == 1,
+         "D docs-commit/D.patch holds exactly one commit")
+    with tempfile.TemporaryDirectory(prefix="approval-set-docs-") as t:
+        idx = os.path.join(t, "index")
+        pf = os.path.join(t, "D.patch")
+        with open(pf, "wb") as f:
+            f.write(patch)
+        env = minimal_env(GIT_INDEX_FILE=idx)
+        def g(*args):
+            return subprocess.run(["git", "-C", a.rc_repo, *args], env=env, capture_output=True)
+        ok = bool(base_tree) and g("read-tree", base_tree).returncode == 0
+        ok = ok and g("apply", "--cached", "--whitespace=nowarn", pf).returncode == 0
+        w = g("write-tree") if ok else None
+        v.ok(ok and w is not None and w.returncode == 0 and w.stdout.decode().strip() == meta.get("docs_tree"),
+             "D the patch applied to the base tree reproduces docs_tree")
+    names = git(a.rc_repo, "diff", "--name-only", "-z", "--no-renames", base, d)
+    paths = [p for p in (names or b"").decode("utf-8", "replace").split("\0") if p]
+    bad = [p for p in paths if not docs_allowed(p, ver)]
+    v.ok(names is not None and paths and not bad, "D every path the docs commit changes is in the docs allow-list",
+         str(bad[:5]))
+    mp = f"release/evidence/v{ver}/acceptance-manifest.json"
+    copy = git(a.rc_repo, "show", f"{d}:{mp}")
+    v.ok(copy is not None and copy == man_raw, f"D {mp} in the docs commit == the approved acceptance manifest")
 
 
 def minimal_env(**extra):
@@ -456,6 +550,10 @@ def reproduce(v, a, root, meta, col, collector):
                 os.remove(os.path.join(ev, n))
         env = minimal_env(SINTER_RC_COMMIT=rc, SINTER_EXP_ART=meta["artifact"]["sha256"],
                           SINTER_EXP_VER="sinter " + meta["version"])
+        if LABELS != ALL_LABELS:
+            # a patch-scope set (manifest /2): the collector gates on the
+            # approved target set, never on the runs it finds
+            env.update(SINTER_ACCEPTANCE_SCOPE="patch", SINTER_P5_TARGETS=",".join(LABELS))
         p = subprocess.run([sys.executable, "-I", os.path.join(hd, "collect-evidence.py"), ev, "--write-verdict"],
                            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         v.ok(p.returncode == 0 and p.stdout == rd(root, CR + f"runs/{last_id}/collect.txt"),
@@ -542,7 +640,7 @@ def record_fields(v, ev, man):
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(description="Verify a sinter-approval-set/2 directory.")
+    ap = argparse.ArgumentParser(description="Verify a sinter-approval-set/2 or /3 directory.")
     ap.add_argument("set")
     ap.add_argument("--approved-digest", help="the APPROVAL_SET_DIGEST the Owner approved")
     ap.add_argument("--expect-rc", help="the RC_COMMIT this set must belong to")

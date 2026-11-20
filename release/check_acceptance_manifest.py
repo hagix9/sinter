@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
-"""Validate a Sinter acceptance Evidence Manifest (sinter-acceptance-manifest/1).
+"""Validate a Sinter acceptance Evidence Manifest (sinter-acceptance-manifest/1
+or /2).
 
 Usage:
   check_acceptance_manifest.py MANIFEST.json
       (--bundle-archive BUNDLE.tar.gz | --bundle DIR)
       --artifact sinter-vX.Y.Z-linux-x86_64.tar.gz
       [--sums sinter-vX.Y.Z-acceptance-SHA256SUMS] [--repo DIR]
+      [--full-reference REFERENCE-MANIFEST.json]   (schema /2, patch scope)
   check_acceptance_manifest.py --template release/acceptance-manifest.template.json
+
+Schema /2 (v1.15.0, docs/design/v1.15.0-release-and-acceptance.md §1.2, §2)
+adds acceptance_scope (full: exactly the eight targets; patch: the approved
+required_targets, checked against a full GO reference manifest given with
+--full-reference, whose bytes must hash to full_reference.manifest_sha256),
+abi, required_targets, and NOT APPLICABLE checks. Under /2 a target passes
+only with failed == 0, skipped == 0, total > 0 and every not-applicable check
+allowed by the bundled harness/applicability.json and proven by its bundled
+log; the log's end line must equal the recorded counts. Not-applicable
+checks are never counted as passed. Schema /1 is unchanged.
 
 A real manifest passes only when all of the following hold (see
 release/ACCEPTANCE_EVIDENCE.md):
@@ -50,6 +62,15 @@ import tempfile
 import zlib
 
 SCHEMA = "sinter-acceptance-manifest/1"
+SCHEMA2 = "sinter-acceptance-manifest/2"
+APPLICABILITY_PATH = "harness/applicability.json"
+APPLICABILITY_SCHEMA = "sinter-acceptance-applicability/1"
+NEWER_TARGETS = ("ubuntu2604", "rocky10", "rhel10", "alma10")
+GLIBC = re.compile(r"^GLIBC_\d+\.\d+(\.\d+)?$")
+OPENSSL = re.compile(r"^(none|OPENSSL_\d+\.\d+\.\d+[a-z]?)$")
+SONAME = re.compile(r"^[A-Za-z0-9._+-]{1,128}$")
+REFERENCE_MAX_DAYS = 60
+REFERENCE_MAX_RELEASES = 2
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
@@ -374,8 +395,14 @@ def check_ref(p, sha, where, errors, refs, prefix=None, exact=None):
 def check(doc, template, errors, refs):
     """Schema + consistency. Returns facts used by the bundle checks."""
     facts = {}
-    if req(doc, "schema", str, "$", errors) != SCHEMA:
-        errors.append("$.schema: must be " + SCHEMA)
+    schema = req(doc, "schema", str, "$", errors)
+    if schema not in (SCHEMA, SCHEMA2):
+        errors.append(f"$.schema: must be {SCHEMA} or {SCHEMA2}")
+    v2 = schema == SCHEMA2
+    facts["v2"] = v2
+    required = set(REQUIRED_TARGETS)
+    if v2:
+        required = check_scope_v2(doc, template, errors, facts)
     c = req(doc, "candidate", dict, "$", errors) or {}
     version = req(c, "version", str, "candidate", errors)
     match(version, SEMVER, "candidate.version", errors, template)
@@ -432,6 +459,10 @@ def check(doc, template, errors, refs):
     if not targets:
         errors.append("targets: must not be empty")
     sums = {"total": 0, "passed": 0, "failed": 0, "skipped": 0}
+    if v2:
+        sums["not_applicable"] = 0
+    facts["na"] = {}
+    facts["counts"] = {}
     labels = set()
     all_pass = bool(targets)
     for i, t in enumerate(targets):
@@ -455,12 +486,14 @@ def check(doc, template, errors, refs):
         match(a, HEX64, f"{w}.artifact_sha256", errors, template)
         match(e, HEX64, f"{w}.executable_sha256", errors, template)
         if not template:
-            if label in REQUIRED_TARGETS:
+            if label in REQUIRED_TARGETS and label in required:
                 want_name, want_ver = REQUIRED_TARGETS[label]
                 if os_name != want_name or not (
                     os_version == want_ver or (os_version or "").startswith(want_ver + ".")
                 ):
                     errors.append(f"{w}: os_name/os_version do not match target {label}")
+            elif label in REQUIRED_TARGETS:
+                errors.append(f"{w}.label: {label} is not a required target of this acceptance")
             elif label is not None:
                 errors.append(f"{w}.label: {label} is not a supported target")
             if arch != "x86_64":
@@ -476,14 +509,26 @@ def check(doc, template, errors, refs):
                 errors.append(f"{w}.version_output: must be 'sinter {version}'")
         ch = req(t, "checks", dict, w, errors) or {}
         vals = {k: req(ch, k, int, f"{w}.checks", errors) for k in sums}
+        na_ok = True
         if None not in vals.values():
-            if not template and vals["passed"] + vals["failed"] + vals["skipped"] != vals["total"]:
+            if v2:
+                if not template and vals["passed"] + vals["failed"] + vals["skipped"] + vals["not_applicable"] != vals["total"]:
+                    errors.append(f"{w}.checks: passed + failed + skipped + not_applicable != total")
+                na_ok = check_na_list(t, w, label, vals["not_applicable"], template, errors, facts)
+            elif not template and vals["passed"] + vals["failed"] + vals["skipped"] != vals["total"]:
                 errors.append(f"{w}.checks: passed + failed + skipped != total")
             for k in sums:
                 sums[k] += vals[k]
+            if label:
+                facts["counts"][label] = dict(vals)
         verdict = req(t, "verdict", str, w, errors)
         if not template:
-            expect = "PASS" if vals.get("failed") == 0 and (vals.get("total") or 0) > 0 else "FAIL"
+            if v2:
+                good = (vals.get("failed") == 0 and vals.get("skipped") == 0
+                        and (vals.get("total") or 0) > 0 and na_ok)
+            else:
+                good = vals.get("failed") == 0 and (vals.get("total") or 0) > 0
+            expect = "PASS" if good else "FAIL"
             if verdict != expect:
                 errors.append(f"{w}.verdict: must be {expect}")
             if verdict != "PASS":
@@ -495,7 +540,7 @@ def check(doc, template, errors, refs):
         if not template and label and LABEL.match(label):
             check_ref(lp, ls, f"{w}.log", errors, refs, exact=f"logs/{label}.log")
     if not template:
-        for label in sorted(set(REQUIRED_TARGETS) - labels):
+        for label in sorted(required - labels):
             errors.append(f"targets: required target {label} is missing")
     facts["labels"] = labels
 
@@ -508,7 +553,7 @@ def check(doc, template, errors, refs):
         for k in sums:
             if tvals.get(k) != sums[k]:
                 errors.append(f"totals.{k}: does not equal the sum over targets")
-        expect = "GO" if all_pass and sums["failed"] == 0 else "NO-GO"
+        expect = "GO" if all_pass and sums["failed"] == 0 and (not v2 or sums["skipped"] == 0) else "NO-GO"
         if verdict != expect:
             errors.append(f"$.verdict: must be {expect}")
         elif verdict != "GO":
@@ -529,6 +574,179 @@ def check(doc, template, errors, refs):
         else:
             facts["allowed"].add(lit)
     return facts
+
+
+def check_scope_v2(doc, template, errors, facts):
+    """acceptance_scope, required_targets, abi and (patch) full_reference of a
+    /2 manifest. Returns the required target set."""
+    scope = req(doc, "acceptance_scope", str, "$", errors)
+    if not template and scope not in ("full", "patch"):
+        errors.append("$.acceptance_scope: must be full or patch")
+    facts["scope"] = scope
+    rt = req(doc, "required_targets", list, "$", errors) or []
+    ok_labels = [x for x in rt if isinstance(x, str)]
+    if len(ok_labels) != len(rt) or len(set(ok_labels)) != len(ok_labels):
+        errors.append("$.required_targets: must be a list of distinct labels")
+    req_set = set(ok_labels)
+    if not template:
+        unknown = sorted(req_set - set(REQUIRED_TARGETS))
+        if unknown:
+            errors.append(f"$.required_targets: unknown target(s) {unknown}")
+        if scope == "full" and req_set != set(REQUIRED_TARGETS):
+            errors.append("$.required_targets: full scope requires exactly the eight supported targets")
+        if scope == "patch":
+            if "ubuntu2404" not in req_set or "rocky9" not in req_set:
+                errors.append("$.required_targets: patch scope requires ubuntu2404 and rocky9")
+            if not req_set & set(NEWER_TARGETS):
+                errors.append("$.required_targets: patch scope requires one of " + ", ".join(NEWER_TARGETS))
+    abi = req(doc, "abi", dict, "$", errors) or {}
+    dt = req(abi, "dt_needed", list, "abi", errors)
+    mg = req(abi, "max_glibc", str, "abi", errors)
+    mo = req(abi, "max_openssl", str, "abi", errors)
+    if not template:
+        if dt is not None and (not dt or not all(isinstance(x, str) and SONAME.match(x) for x in dt)
+                               or dt != sorted(set(dt))):
+            errors.append("abi.dt_needed: must be a non-empty sorted list of distinct library names")
+        match(mg, GLIBC, "abi.max_glibc", errors, template)
+        match(mo, OPENSSL, "abi.max_openssl", errors, template)
+    facts["abi"] = abi
+    fr = doc.get("full_reference")
+    if scope == "patch":
+        fr = req(doc, "full_reference", dict, "$", errors) or {}
+        for k in ("version", "manifest_sha256", "finished_at"):
+            req(fr, k, str, "full_reference", errors)
+        rs = req(fr, "releases_since", list, "full_reference", errors)
+        if not template:
+            match(fr.get("version"), SEMVER, "full_reference.version", errors, template)
+            match(fr.get("manifest_sha256"), HEX64, "full_reference.manifest_sha256", errors, template)
+            match(fr.get("finished_at"), RFC3339Z, "full_reference.finished_at", errors, template)
+            if rs is not None:
+                if not all(isinstance(x, str) and SEMVER.match(x) for x in rs):
+                    errors.append("full_reference.releases_since: must list X.Y.Z versions")
+                elif len(rs) > REFERENCE_MAX_RELEASES:
+                    errors.append(f"full_reference.releases_since: more than {REFERENCE_MAX_RELEASES} releases since the reference (Tier F required)")
+    elif fr is not None and not template:
+        errors.append("$.full_reference: only a patch scope names a reference")
+    facts["full_reference"] = fr if isinstance(fr, dict) else None
+    return req_set
+
+
+def check_na_list(t, w, label, count, template, errors, facts):
+    """targets[].not_applicable_checks of a /2 manifest: one {id, reason} per
+    counted not-applicable check, no repeats. Whether each is allowed and
+    proven is checked against the bundled table and log (check_na_bundle)."""
+    lst = req(t, "not_applicable_checks", list, w, errors)
+    if lst is None:
+        return False
+    seen = []
+    ok = True
+    for i, e in enumerate(lst):
+        ww = f"{w}.not_applicable_checks[{i}]"
+        cid = req(e, "id", str, ww, errors)
+        reason = req(e, "reason", str, ww, errors)
+        if cid is None or reason is None:
+            ok = False
+            continue
+        seen.append((cid, reason))
+    if not template:
+        if len(seen) != count:
+            errors.append(f"{w}.not_applicable_checks: {len(seen)} entries but checks.not_applicable is {count}")
+            ok = False
+        if len({c for c, _ in seen}) != len(seen):
+            errors.append(f"{w}.not_applicable_checks: a check is listed twice")
+            ok = False
+    if label:
+        facts["na"][label] = seen
+    return ok
+
+
+def check_na_bundle(files, facts, errors):
+    """/2: every not-applicable check is allowed by the bundled applicability
+    table and proven by the bundled log, and every log's end line equals the
+    recorded counts (NOT APPLICABLE included)."""
+    raw_table = files.get(APPLICABILITY_PATH)
+    table = None
+    if raw_table is not None:
+        try:
+            doc = json.loads(raw_table.decode("utf-8"))
+            if isinstance(doc, dict) and doc.get("schema") == APPLICABILITY_SCHEMA:
+                table = {}
+                for e in doc.get("entries") or []:
+                    table[(e["check"], e["reason"])] = set(e["targets"])
+        except (ValueError, KeyError, TypeError, UnicodeDecodeError):
+            table = None
+    if table is None:
+        errors.append(f"{APPLICABILITY_PATH}: missing or invalid (a /2 bundle carries the applicability table)")
+    for label, counts in sorted(facts["counts"].items()):
+        log = files.get(f"logs/{label}.log")
+        if log is None:
+            continue
+        text = log.decode("utf-8", "replace")
+        ends = re.findall(r"(?m)^== acceptance end \S+ passed=(\d+) failed=(\d+) skipped=(\d+)(?: not_applicable=(\d+))?\s*$", text)
+        if len(ends) != 1:
+            errors.append(f"logs/{label}.log: not exactly one end line")
+            continue
+        p, f, sk, na = (int(x) if x else 0 for x in ends[0])
+        if (p, f, sk, na) != (counts["passed"], counts["failed"], counts["skipped"], counts.get("not_applicable", 0)):
+            errors.append(f"logs/{label}.log: end line counts differ from the manifest")
+        log_na = re.findall(r"(?m)^== check (\S+) NOT_APPLICABLE (\S+)$", text)
+        if sorted(log_na) != sorted(facts["na"].get(label, [])):
+            errors.append(f"logs/{label}.log: NOT_APPLICABLE lines differ from not_applicable_checks")
+        for cid, reason in log_na:
+            if table is None or label not in table.get((cid, reason), set()):
+                errors.append(f"logs/{label}.log: NOT_APPLICABLE {cid} {reason} is not allowed for {label}")
+                continue
+            obs = re.findall(r"(?m)^== observe nm-presence nmcli=(present|absent) service=(active|inactive|not-found)$", text)
+            all_obs = re.findall(r"(?m)^== observe nm-presence.*$", text)
+            if not (reason == "NM_NOT_INSTALLED" and len(obs) == 1 and len(all_obs) == 1 and obs[0][0] == "absent"
+                    and obs[0][1] in ("inactive", "not-found")):
+                errors.append(f"logs/{label}.log: NOT_APPLICABLE {cid} {reason} is not proven by the observation line")
+            if re.search(rf"(?m)^== check {re.escape(cid)} (ok|FAIL|SKIP)$", text):
+                errors.append(f"logs/{label}.log: {cid} is both NOT_APPLICABLE and run")
+
+
+def check_full_reference(path, doc, facts, errors):
+    """A patch manifest's reference: the file's SHA-256 is recorded, it is a
+    full /2 GO manifest that passes the schema rules, its version and
+    finished_at are recorded, this run starts at most 60 days after it, and
+    the ABI is equal. The reference is never trusted for anything else."""
+    fr = facts.get("full_reference") or {}
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        errors.append(f"--full-reference: cannot read ({e.strerror or type(e).__name__})")
+        return
+    if hashlib.sha256(raw).hexdigest() != fr.get("manifest_sha256"):
+        errors.append("--full-reference: SHA-256 differs from full_reference.manifest_sha256")
+        return
+    try:
+        ref = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        errors.append("--full-reference: not valid JSON")
+        return
+    if not isinstance(ref, dict) or ref.get("schema") != SCHEMA2 or ref.get("acceptance_scope") != "full":
+        errors.append("--full-reference: not a full-scope sinter-acceptance-manifest/2")
+        return
+    rerr = []
+    check(ref, False, rerr, {})
+    if rerr:
+        errors.append("--full-reference: the reference manifest is not valid: " + rerr[0])
+    if ref.get("verdict") != "GO":
+        errors.append("--full-reference: the reference verdict is not GO")
+    if (ref.get("candidate") or {}).get("version") != fr.get("version"):
+        errors.append("--full-reference: version differs from full_reference.version")
+    rfin = (ref.get("run") or {}).get("finished_at")
+    if rfin != fr.get("finished_at"):
+        errors.append("--full-reference: finished_at differs from full_reference.finished_at")
+    start = parse_time((doc.get("run") or {}).get("started_at"))
+    end = parse_time(rfin)
+    if start is None or end is None or start < end:
+        errors.append("--full-reference: this run does not start after the reference finished")
+    elif (start - end) > datetime.timedelta(days=REFERENCE_MAX_DAYS):
+        errors.append(f"--full-reference: more than {REFERENCE_MAX_DAYS} days after the reference (Tier F required)")
+    if ref.get("abi") != facts.get("abi"):
+        errors.append("--full-reference: abi differs from the reference (Tier F required)")
 
 
 def pinned_command(name, version):
@@ -624,6 +842,15 @@ def extract_plain_members(tar, dest):
             norm = os.path.normpath(m.name)
             if (m.isdir() or m.isreg()) and not os.path.isabs(norm) and not norm.startswith(".."):
                 tf.extract(m, dest, **data_filter)
+
+
+def rc_file(repo, commit, path):
+    """The bytes of `path` at `commit`, or None."""
+    try:
+        return subprocess.run(["git", "-C", repo, "show", f"{commit}:{path}"],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
 
 
 def root_test_inventory(repo, commit):
@@ -916,6 +1143,8 @@ def check_bundle(files, manifest_raw, refs, facts, errors):
     for p in sorted(files):
         if p not in expected:
             errors.append(f"bundle:{p}: not referenced by the manifest (unlisted or hidden file)")
+    if facts.get("v2"):
+        check_na_bundle(files, facts, errors)
     gate = files.get(LINUX_GATE_LOG)
     if gate is not None:
         text = gate.decode("utf-8", "replace")
@@ -1051,6 +1280,20 @@ def run(args):
         if t is not None:
             scan(t, p, allowed, labels, errors)
 
+    if facts.get("v2") and facts.get("commit") and HEX40.match(facts["commit"]):
+        rc_table = rc_file(args.repo, facts["commit"], "release/acceptance-harness/applicability.json")
+        if rc_table is None:
+            errors.append(f"{APPLICABILITY_PATH}: cannot read release/acceptance-harness/applicability.json at candidate.source_commit")
+        elif files.get(APPLICABILITY_PATH) is not None and files[APPLICABILITY_PATH] != rc_table:
+            errors.append(f"{APPLICABILITY_PATH}: differs from the table at candidate.source_commit (tampered table?)")
+
+    if facts.get("v2") and facts.get("scope") == "patch":
+        if not args.full_reference:
+            errors.append("--full-reference: required for a patch-scope manifest")
+        else:
+            check_full_reference(args.full_reference, doc, facts, errors)
+    elif args.full_reference:
+        errors.append("--full-reference: only a patch-scope /2 manifest takes a reference")
     check_artifact(args.artifact, facts, errors)
     if args.sums:
         if not args.bundle_archive:
@@ -1070,6 +1313,8 @@ def main(argv):
     ap.add_argument("--bundle-archive", metavar="TAR_GZ", help="evidence bundle archive (inspected in memory)")
     ap.add_argument("--artifact", metavar="TAR_GZ", help="the release artifact the manifest describes")
     ap.add_argument("--sums", metavar="FILE", help="the acceptance SHA256SUMS asset")
+    ap.add_argument("--full-reference", metavar="FILE",
+                    help="schema /2 patch scope: the full-scope reference manifest (its SHA-256 must be recorded)")
     ap.add_argument("--repo", metavar="DIR", default=DEFAULT_REPO,
                     help="Sinter repository containing the candidate commit (default: this checkout)")
     args = ap.parse_args(argv)

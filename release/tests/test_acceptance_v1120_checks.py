@@ -372,8 +372,12 @@ class V1120Checks(unittest.TestCase):
         self.assertEqual(len(ORIGINAL_39), 39)
         self.assertTrue(set(ORIGINAL_39) <= set(ids))
         new = NEW["plugin-checks"] + NEW["recipe-vars-checks"]
-        self.assertEqual(set(ids) - set(ORIGINAL_39), set(new))
-        self.assertEqual(len(ids), 39 + len(new))
+        # v1.15.0 adds the v1150-checks section (test_acceptance_v1150.py).
+        v1150 = ["timer-create", "timer-idempotent", "timer-running", "timer-absent", "timer-calendar-invalid",
+                 "service-timer-name", "risk-static-refusal", "nm-profile-crud", "discover-readonly",
+                 "discover-roundtrip"]
+        self.assertEqual(set(ids) - set(ORIGINAL_39), set(new) | set(v1150))
+        self.assertEqual(len(ids), 39 + len(new) + len(v1150))
         for new_id in new:
             self.assertEqual(len(re.findall(r"check %s ok" % re.escape(new_id), text)), 1, new_id)
             self.assertEqual(len(re.findall(r"check %s FAIL" % re.escape(new_id), text)), 1, new_id)

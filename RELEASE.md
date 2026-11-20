@@ -22,38 +22,46 @@ STOP column, and every later output is discarded.
 
 ```text
  1. Source candidate fixed        SOURCE_CANDIDATE (clean, reviewed commit)
- 2. Version / metadata prepared   RC_COMMIT = SOURCE_CANDIDATE + metadata-only commit
+ 2. Version / metadata prepared   RC_COMMIT = SOURCE_CANDIDATE + metadata-only commit;
+                                  TIER_ASSESSMENT (Tier F or P, §Acceptance tier)
  3. Source validation             read-only checks on RC_COMMIT
  4. Linux validation gate         fmt / clippy / all tests / installer / checker on Linux x86_64
  5. Build artifact                one build from RC_COMMIT on Rocky Linux 9 x86_64
  6. Freeze artifact identity      filename, size, tarball SHA-256, executable SHA-256, SHA256SUMS
- 7. Target acceptance             the same frozen artifact on all 8 supported targets
+ 7. Target acceptance             the same frozen artifact on every required target
+                                  of the approved tier (Tier F: all 8 supported targets)
  8. Per-target hash re-check      tarball + executable SHA-256 observed on each target
  9. Raw logs                      one sanitized raw log per target
 10. Evidence Manifest             generated from the recorded values
 11. Evidence bundle               bundle archive + acceptance SHA256SUMS
 12. Checker PASS                  release/check_acceptance_manifest.py (full mode)
-13. Human review                  staged assets, notes, manifests, checker output
-14. Tag                           annotated tag → RC_COMMIT
+12b. Docs commit D (local only)   D = RC_COMMIT + docs-only commit, checked locally, not pushed
+13. Human review                  staged assets, notes, manifests, checker output, D
+14. Tag                           annotated tag → RC_COMMIT, tag push only (main does not move)
 15. GitHub Release                release created from the reviewed notes
 16. Assets                        exactly the reviewed, staged files
-17. Post-publish verification     download + checksum read-back, manifest copy commit
+17a. Post-publish read-back       download + checksum read-back, manifest copy in D == asset
+17b. Docs commit to main          D on a work branch → CI + Start → non-force fast-forward of main
+17c. Record                       CI, Start, advisories, docs deploy, site and /webmcp.json version
 ```
 
 | Step | Allowed changes | Output | GO condition | STOP / return to |
 |------|-----------------|--------|--------------|------------------|
 | 1 | None (select commit) | `SOURCE_CANDIDATE` | Clean tree, reviewed, pushed | — |
-| 2 | Version fields, `Cargo.lock`, `CHANGELOG.md`, README platform/version text only | `RC_COMMIT` | Diff `SOURCE_CANDIDATE..RC_COMMIT` touches release metadata only | Unexpected diff → redo 2 |
+| 2 | Version fields, `Cargo.lock`, `CHANGELOG.md`, README platform/version text only | `RC_COMMIT`, `TIER_ASSESSMENT.md` | Diff `SOURCE_CANDIDATE..RC_COMMIT` touches release metadata only; tier reviewed and approved by the Owner | Unexpected diff → redo 2; tier not approved → hold |
 | 3 | None | Source validation report | All §3 checks pass | Any failure → 1 (remediation) or 2 |
 | 4 | None | Linux gate log + recorded results | Every step PASS on the Ubuntu 24.04 x86_64 gate host (strict mode) | Any FAIL → 1; **no build, no acceptance** |
 | 5 | Nothing in repo | Built executable | Baseline, ABI and provenance checks pass | Failure → 5, or 1 if source is wrong |
 | 6 | Nothing in repo | Tarball, `SHA256SUMS`, frozen hashes | Fresh extraction reproduces the frozen executable hash | Mismatch → 5 |
-| 7–9 | None (repository and artifact read-only) | Per-target results and raw logs | All 8 targets PASS with identical hashes | Any target FAIL or hash mismatch → NO-GO, return to 1 |
+| 7–9 | None (repository and artifact read-only) | Per-target results and raw logs | Every required target of the approved tier PASS with identical hashes (Tier F: all 8) | Any target FAIL or hash mismatch → NO-GO, return to 1 |
 | 10–11 | Nothing in repo | Manifest, bundle, acceptance `SHA256SUMS` | Built only from recorded values | Missing value → 7 (re-run), never reconstruct |
 | 12 | None | Checker output `OK … (verdict GO)` | Exit 0 | FAIL → fix sanitization/assembly (10–11) or return to 7; **no tag** |
-| 13 | None | Explicit human approval | Reviewer approves the exact staged files | Any doubt → hold |
-| 14–16 | Remote refs + GitHub Release only | Tag, release, assets | §Publish read-backs pass | Partial failure → §Partial publish failure |
-| 17 | Docs-only manifest-copy commit | Read-back record | All read-backs match staging | Mismatch → incident, do not force-fix |
+| 12b | Creating the local docs commit `D` (parent `RC_COMMIT`, docs allow-list only); **not pushed** | `D`, local docs check log | Local docs checks pass; `D` touches only allow-listed paths | Failure → redo 12b (a new `D`) |
+| 13 | None (`D` stays local) | Explicit human approval of the approval set `/3` | Reviewer approves the exact staged files and `D` | Any doubt → hold; `D` changed → new approval |
+| 14–16 | Tag push + GitHub Release only; `main` is not pushed | Tag, release, assets | §Publish read-backs pass | Partial failure → §Partial publish failure |
+| 17a | None | Read-back record | All read-backs match staging; the manifest copy in `D` equals the downloaded asset | Mismatch → incident, do not push `D`, do not force-fix |
+| 17b | Push `D` to a work branch, then fast-forward `main` to `D` (no force) | `main` == `D` | Work-branch CI and Start environment pass; `origin/main` is an ancestor of `RC_COMMIT`; `D^ == RC_COMMIT` | §Failure and recovery after publication |
+| 17c | None | Post-publish record | Results recorded | Failure → fix forward with a docs-only commit |
 
 ## Invalidation rules
 
@@ -76,7 +84,17 @@ stops being valid.
 - **Linux gate FAIL → no build, no acceptance.** A macOS (or any non-Linux)
   PASS is never a substitute: Linux-only test suites are compiled out there
   and the installer tests need GNU userland.
-- **Any target FAIL → no tag.** The verdict must be `GO` on all 8 targets.
+- **Any target FAIL → no tag.** The verdict must be `GO` on every required
+  target of the approved tier (Tier F: all 8). A Tier P release lists the
+  targets it did not run as NOT RUN, never as PASS; NOT APPLICABLE is never
+  counted as PASS.
+- **No tier change without review.** The tier is the one approved at step 2.
+  Tier P is never chosen automatically or as a fallback when Tier F
+  acceptance fails or cannot run; a Tier P candidate that hits any T-1
+  trigger becomes Tier F.
+- **The docs commit `D` is bound to the approval.** Any change of `D` after
+  the step-13 approval voids the approval. `D` is never pushed to a public
+  branch before the Release exists.
 - **Checker FAIL → no tag.** Steps 13–16 require the full-mode checker to
   pass on the exact staged manifest, bundle archive, artifact, and
   acceptance `SHA256SUMS`.
@@ -118,6 +136,50 @@ Prepare Sinter v${VERSION} release
 Stage explicitly (`git add CHANGELOG.md Cargo.toml Cargo.lock README.md
 README.ja.md`), never `git add .` / `-A`; verify with
 `git diff --cached --name-only` before committing.
+
+### Acceptance tier (Tier F / Tier P)
+
+At step 2 the operator records the tier assessment with
+`release/tier_assess.py` (stdlib only; it reads the repository, the last
+release tag, the candidate executable, the reference Tier F manifest and an
+answers file, and never overwrites an existing record):
+
+```sh
+python3 release/tier_assess.py --repo <repo> --last-tag v${PREV} \
+  --source-candidate ${SOURCE_CANDIDATE} --executable <candidate sinter> \
+  --answers tier-answers.json \
+  [--reference-manifest <last Tier F manifest> --releases-since X.Y.Z,...] \
+  --run-date YYYY-MM-DD --request F|P --out <STAGING_ROOT>/tier
+```
+
+`tier-answers.json` (`sinter-tier-answers/1`) holds the answers a human must
+give with evidence: `triggers.os_or_image_change`, for each changed static
+crate `static_dependencies.<name>.reached` (`no` only with evidence; anything
+else counts as reached), and for Tier P `first_available_newer` and
+`t3_targets`. Exit 2 on any input error; nothing is assumed.
+
+It writes `TIER_ASSESSMENT.json` and `TIER_ASSESSMENT.md`: the diff, every
+T-1 trigger answered yes/no with its evidence (minor or major version, OS
+code, OS or image change, dynamic ABI — `DT_NEEDED`, highest `GLIBC_` and
+OpenSSL versions — a reached statically linked SSH, crypto or compression
+dependency update, more than 60 days or more than two releases since the
+reference Tier F release), the T-3 targets and the resulting tier and
+required targets. Tier P results only when Tier P is requested and no trigger
+applies; otherwise the result is Tier F with all eight targets. The tool
+never lowers a tier. The independent review checks the record, and the Owner
+approves the tier; the approved tier and target set are written into the R8
+p5 contract (`ACCEPTANCE_SCOPE`, `P5_TARGETS`, both part of the approval
+string) and into the manifest (`sinter-acceptance-manifest/2`,
+`acceptance_scope`, `required_targets`, `abi`, and for Tier P
+`full_reference`).
+
+- Tier F (`full`): all eight supported targets. Every minor or major
+  release is Tier F.
+- Tier P (`patch`): `ubuntu2404`, `rocky9`, the first available of
+  `ubuntu2604`, `rocky10`, `rhel10`, `alma10`, plus the T-3 targets. The
+  release notes name the reference Tier F release and its manifest SHA-256
+  and list every other supported target as NOT RUN. The supported targets
+  stay the eight.
 
 ## Step 3 — Source validation
 
@@ -461,9 +523,9 @@ never does.
 
 ## Steps 7–9 — Target acceptance of the frozen artifact
 
-Only after step 6. Run once per supported target (the eight labels
-`ubuntu2404`, `ubuntu2604`, `rocky9`, `rocky10`, `rhel9`, `rhel10`, `alma9`,
-`alma10`), on real machines (real OS, real architecture, real SSH where
+Only after step 6. Run once per required target of the approved tier (Tier
+F: the eight labels `ubuntu2404`, `ubuntu2604`, `rocky9`, `rocky10`, `rhel9`,
+`rhel10`, `alma9`, `alma10`; Tier P: the step-2 target set), on real machines (real OS, real architecture, real SSH where
 applicable), against the **exact** tarball frozen in step 6. FakeTarget/
 FakeExecutor coverage does not substitute for target acceptance.
 
@@ -505,6 +567,11 @@ without every required value, records each target's boot image, and stops a
 target on a tarball or raw-log hash mismatch, a failed preparation step or a
 failed metadata refresh.
 
+A check may be NOT APPLICABLE only for a (check, target, reason) listed in
+`release/acceptance-harness/applicability.json` and only when the raw log
+carries the fixed observation line that proves the reason; the raw verdict
+and the checker both verify it. Anything else that does not run is a FAIL.
+
 Report ends with an explicit `GO` or `NO-GO`. Do not remediate during
 acceptance — reproduce, preserve evidence, report, stop. Any target FAIL
 ends this candidate; a fix is a new candidate from step 1.
@@ -537,10 +604,35 @@ python3 release/check_acceptance_manifest.py \
   --sums sinter-v${VERSION}-acceptance-SHA256SUMS
 ```
 
+A Tier P manifest (`acceptance_scope: patch`) also needs
+`--full-reference <reference Tier F manifest>`; the checker verifies the
+reference itself (SHA-256, full GO, age, releases since, equal ABI) and never
+trusts the option alone.
+
 A checker FAIL is a STOP: **no human review, no tag.** A sensitive-content
 finding means sanitizing the logs and rebuilding the bundle (steps 9–11); a
 hash, target, or gate finding means the evidence does not support this
 candidate (return to step 7, or to step 1).
+
+## Step 12b — Docs commit `D` (local only)
+
+Only after the step-12 checker PASS. On a local branch, create one docs-only
+commit `D` whose only parent is `RC_COMMIT`: version references, WebMCP
+metadata (`docs-site/src/data/resources.json`, `build-webmcp.ts`), the
+installer and dev-container version, the `start.yml` version check, and
+`release/evidence/v${VERSION}/acceptance-manifest.json` copied byte for byte
+from the staged manifest. `D` may change only these paths (the docs
+allow-list): `docs-site/**`, `README.md`, `README.ja.md`,
+`.devcontainer/install-sinter.sh`, `.github/workflows/start.yml`,
+`examples/start/README*.md` and the manifest copy.
+
+Check `D` locally only: the documentation `check`, `webmcp:check`,
+`tutorial:check` and `build`, and the CI checks that need no Release
+(examples, public tree). Do **not** push `D` anywhere before the Release
+exists: it announces the new version, and its dev-container change starts
+`start.yml`, which downloads the Release asset and must fail before
+publication. Never use the documentation workflow's manual dispatch on a
+branch (its deploy job would publish that branch).
 
 ## Step 13 — Staging and human review
 
@@ -602,7 +694,7 @@ Publishing requires explicit human review of, in order:
 No publish until the human confirms all five. The approval covers exactly
 the staged bytes; any change to a staged file voids it.
 
-### Approval set (v1.5.0 onward; layout `sinter-approval-set/2` from v1.5.1)
+### Approval set (v1.5.0 onward; layout `sinter-approval-set/2` from v1.5.1, `/3` from v1.15.0)
 
 The approval is bound to one digest. Before review, the operator assembles
 the approval set under `evidence/approval-set/` in the staging directory with
@@ -619,8 +711,19 @@ collector-record/             the collector (collect-evidence.py), the runtime
                               order under runs/NN/ (a failed first result
                               included; the last one with VERDICT.txt), and
                               their SHA256SUMS
+docs-commit/D.patch           (/3) `git format-patch -1 --stdout D` of the docs commit
 APPROVAL-SET.sha256           canonical member list (not a member itself)
 ```
+
+From v1.15.0 the set is `sinter-approval-set/3`: `make_approval_set.py
+--docs-commit <D> --rc-repo <repo>` adds `docs-commit/D.patch` and the META
+fields `docs_commit` and `docs_tree`. `verify_approval_set.py --rc-repo`
+checks that `D` exists, its only parent is `rc_commit`, its tree is
+`docs_tree`, the patch applied to the RC tree reproduces it, every path it
+changes is in the docs allow-list, and its manifest copy is byte-identical to
+the approved acceptance manifest. A `/2` set (published releases) still
+verifies unchanged. Because the patch is a member, any change of `D` changes
+the digest: an approval of an earlier `D` never covers a new one.
 
 `APPROVAL-SET.sha256` has one `<sha256>  <path>` line per member, sorted by
 the UTF-8 bytes of the path, and nothing else; it verifies with
@@ -655,11 +758,12 @@ detect a consistently forged set. Any other exit than 3 before the approval,
 or than 0 after it, is a STOP.
 
 The Owner records the approval in writing, naming `APPROVAL_SET_DIGEST`,
-`RC_COMMIT`, the artifact SHA-256, and the SHA-256 of the staged
+`RC_COMMIT`, `D` (from v1.15.0), the artifact SHA-256, and the SHA-256 of the staged
 `SHA256SUMS`, `RELEASE_NOTES.md` and `RELEASE_MANIFEST.md`. The approval
 still covers every staged file reviewed above; the digest additionally binds
 the acceptance evidence and the collector record, so that none of them can be
-replaced after the approval. A matching digest shows which bytes were
+replaced after the approval. From v1.15.0 the approval covers the tag, the
+Release, the assets, `D` and the fast-forward of `main` to `D`. A matching digest shows which bytes were
 approved, not who approved them: that is established by the written record
 and the channel it came through. A collector's own approval token does not
 replace this record.
@@ -667,6 +771,8 @@ replace this record.
 ## Steps 14–16 — Publish (tag, GitHub Release, assets)
 
 Only after step-13 human authorization. All steps use read-back verification.
+These steps push the tag and create the Release only; `main` does not move
+until step 17b.
 
 ```sh
 # 1. Recheck fixed state
@@ -682,7 +788,7 @@ python3 <repo>/release/verify_approval_set.py evidence/approval-set --rc-repo <r
   --evidence <acceptance out> --gate-log <step-4 log> \
   --checker <repo>/release/check_acceptance_manifest.py \
   --artifact sinter-v${VERSION}-linux-x86_64.tar.gz --expect-rc ${RC_COMMIT} \
-  --approved-digest ${APPROVAL_SET_DIGEST}   # exit 0
+  --approved-digest ${APPROVAL_SET_DIGEST}   # exit 0 (a /3 set also checks D)
 (cd evidence/approval-set && sed -n 's|  acceptance/|  ../../|p' APPROVAL-SET.sha256 | shasum -a 256 -c)
                                          # staged assets == approved copies
 python3 <repo>/release/check_acceptance_manifest.py \
@@ -692,17 +798,17 @@ python3 <repo>/release/check_acceptance_manifest.py \
   --sums sinter-v${VERSION}-acceptance-SHA256SUMS   # OK … (verdict GO)
 
 # 3. Recheck remote — TAG must not exist; no unexpected divergence
+git fetch <remote>
 git ls-remote --tags <remote> | grep ${TAG}   # expect empty
-git fetch <remote> && git status -sb
+git status -sb
 
-# 4. Push main
-git push <remote> main
+# 4. (moved to step 17b: main is not pushed here)
 
-# 5–7. Step 14: annotated tag at the exact RC, verify target, push tag
+# 5–7. Step 14: annotated tag at the exact RC, verify target, push the tag only
 git tag -a ${TAG} ${RC_COMMIT} -m "Sinter ${TAG}"
 git rev-parse ${TAG}^{commit}            # MUST equal RC_COMMIT
-git push <remote> ${TAG}
-git ls-remote --tags <remote> | grep ${TAG}   # confirm points at RC_COMMIT
+git push <remote> refs/tags/${TAG}
+git ls-remote --tags <remote> | grep ${TAG}   # read back: points at RC_COMMIT (peeled ^{})
 
 # 8–10. Steps 15–16: GitHub Release with reviewed notes and the reviewed assets only
 gh release create ${TAG} \
@@ -725,9 +831,13 @@ Rules:
 - Never `--force` / `--force-with-lease` anywhere in this workflow.
 - A v0.2.0-style docs commit after the RC does **not** move the tag target —
   the tag always names the commit the staged artifacts were built from.
+- CI and advisories run on the tag push (their `on: push` has no filter);
+  their results are recorded at step 17c.
 - CLI exit codes are not proof; verify §Post-publish verification.
 
 ## Step 17 — Post-publish verification
+
+### Step 17a — Read-back
 
 Read the release back from GitHub:
 
@@ -755,9 +865,46 @@ gh release download ${TAG} -D /tmp/verify-${TAG} --clobber
        --sums sinter-v${VERSION}-acceptance-SHA256SUMS)
 ```
 
-- [ ] Commit the manifest copy to
-      `release/evidence/v${VERSION}/acceptance-manifest.json` (byte-identical
-      to the published asset) in a docs-only commit.
+- [ ] The manifest copy in `D`
+      (`git show ${D}:release/evidence/v${VERSION}/acceptance-manifest.json`)
+      is byte-identical to the downloaded acceptance manifest asset.
+
+A 17a mismatch is an incident: do not push `D`, do not force-fix.
+
+### Step 17b — Docs commit to `main`
+
+```sh
+git push <remote> ${D}:refs/heads/work/v${VERSION}-docs   # a work branch, not main
+# wait: CI and Start environment on the work branch must pass
+#       (Start can now download the Release asset)
+git fetch <remote>
+git merge-base --is-ancestor <remote>/main ${RC_COMMIT}   # exit 0, else §Failure and recovery
+test "$(git rev-parse ${D}^)" = "${RC_COMMIT}"
+git push <remote> ${D}:refs/heads/main                      # no force: one fast-forward
+git ls-remote <remote> refs/heads/main                      # read back: == D
+```
+
+The documentation workflow runs once on `main`, with matching versions.
+
+### Step 17c — Record
+
+Record the results of CI and advisories on the tag, CI, Start environment,
+advisories and the documentation deploy on `main`, and the version the site
+and `/webmcp.json` show.
+
+## Failure and recovery after publication
+
+| Failure | State | Recovery |
+|---|---|---|
+| Tag push fails | Nothing public | Read back `ls-remote`; fix and push the tag; never retag a different commit |
+| Release creation or asset upload fails | Tag public | §Partial publish failure: resume the unfinished steps; never delete or move the tag |
+| 17a mismatch | Release public, `main` unchanged | Incident; do not push `D`; no force-fix |
+| 17b work-branch CI fails | Release public, `main` unchanged | Fix forward with a new `D'` (parent `RC_COMMIT`), a new approval set and re-review of `D'`; the docs keep showing the previous version meanwhile |
+| `main` is not an ancestor of `RC_COMMIT` (moved meanwhile) | Release public | No force. Merge `RC_COMMIT` into the new `main` with `--no-ff` and put `D'` on that merge. A new approval set records it as `docs_base` (`make_approval_set.py --docs-base`; the verifier requires a merge with two parents, one of them `RC_COMMIT`, and `D'`'s only parent to be `docs_base`), and the Owner approves it before `D'` is pushed |
+| Documentation deploy fails after 17b | `main` updated | The previous site stays published; fix forward with a docs-only commit |
+
+Until 17b, `main` and the site show the previous version and the Release
+page shows the new one as Latest; nothing announces an unpublished version.
 
 ## Partial publish failure
 
@@ -782,6 +929,10 @@ Do not begin publishing when any of these hold:
 - checksum mismatch or uncertain provenance
 - inaccurate release notes
 - remote tag already exists unexpectedly
+- tier not approved, or the executed targets differ from the approved set
+- `D` changed after the approval, or `D` pushed to a public branch before
+  the Release exists
+- approval set verification not exit 0 with the approved digest
 
 Abnormalities *after* publish has started → partial-publish procedure above.
 
@@ -812,7 +963,10 @@ source validation + Linux gate → build/freeze → acceptance → checker
 → post-publish verification
 ```
 
-The fast path may automate steps, never skip or reorder them.
+The fast path may automate steps, never skip or reorder them. (The v1.15.0
+move of the `main` push from steps 14–16 to step 17b, and the new steps 12b
+and 17a–17c, are a reviewed change of this runbook, not a reordering by a
+fast path.)
 
 Prerequisites — all required:
 

@@ -1,0 +1,12 @@
+{
+  "schema": "sinter-acceptance-applicability/1",
+  "note": "DESIGN §47.3, docs/design/v1.15.0-release-and-acceptance.md §2 (Owner decision D-8). A check may be reported NOT_APPLICABLE only for a listed (check, reason, target) and only when the target's log proves the reason with the fixed observation line. NOT_APPLICABLE is never counted as passed.",
+  "entries": [
+    {
+      "check": "nm-profile-crud",
+      "reason": "NM_NOT_INSTALLED",
+      "targets": ["ubuntu2404", "ubuntu2604"],
+      "proof": "== observe nm-presence nmcli=absent service=<inactive|not-found>"
+    }
+  ]
+}

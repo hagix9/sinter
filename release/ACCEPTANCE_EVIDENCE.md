@@ -73,7 +73,7 @@ tar -czf sinter-v${VERSION}-acceptance-evidence.tar.gz sinter-v${VERSION}-accept
 
 ## Evidence Manifest
 
-The manifest is a JSON object with schema id `sinter-acceptance-manifest/1`. `release/acceptance-manifest.template.json` shows every field with placeholders.
+The manifest is a JSON object with schema id `sinter-acceptance-manifest/1` (releases up to v1.14.x) or `sinter-acceptance-manifest/2` (from v1.15.0; see below). `release/acceptance-manifest.template.json` shows every `/1` field with placeholders, `release/acceptance-manifest.v2.template.json` every `/2` field. Published `/1` manifests stay verifiable with the same checker.
 
 Top-level fields:
 
@@ -140,6 +140,29 @@ Fields for each entry in `targets`:
 - The artifact given to the checker has the recorded name, size, and SHA-256, and its `sinter-v${VERSION}-linux-x86_64/sinter` has the recorded executable SHA-256.
 - With `--sums`, the acceptance checksum file lists exactly the manifest and bundle assets, with matching hashes.
 
+## Schema `/2`: acceptance tier and NOT APPLICABLE (v1.15.0 onward)
+
+`/2` keeps every `/1` field and rule and adds:
+
+| Field | Rule |
+|---|---|
+| `acceptance_scope` | `full` (Tier F) or `patch` (Tier P), as approved at `RELEASE.md` step 2 |
+| `required_targets` | full: exactly the eight supported targets. patch: `ubuntu2404`, `rocky9`, at least one of `ubuntu2604`, `rocky10`, `rhel10`, `alma10`, plus the T-3 targets; a subset of the eight |
+| `abi` | `{dt_needed, max_glibc, max_openssl}` measured on the frozen executable: `dt_needed` a sorted list of distinct library names, `max_glibc` `GLIBC_x.y`, `max_openssl` `OPENSSL_x.y.z` or `none` |
+| `full_reference` | patch only (refused for full): `{version, manifest_sha256, finished_at, releases_since}`, with at most two `releases_since` entries |
+| `targets[].checks.not_applicable` | integer; `passed + failed + skipped + not_applicable = total` |
+| `targets[].not_applicable_checks` | one `{id, reason}` per not-applicable check |
+| `totals.not_applicable` | sum over the targets |
+
+Rules added for `/2` (enforced by the checker; any FAIL stops the release):
+- Exactly the `required_targets` are present, once each; a missing or extra target is a FAIL.
+- `skipped = 0` on every target; a target is `PASS` only with `failed = 0`, `skipped = 0`, `total > 0` and every not-applicable check allowed and proven. `verdict` is `GO` only when every required target is `PASS`.
+- NOT APPLICABLE is never counted as passed. A check is not applicable only for a (check, target, reason) listed in `release/acceptance-harness/applicability.json` (schema `sinter-acceptance-applicability/1`); the bundle carries that table as `harness/applicability.json`, byte-identical to the table at `candidate.source_commit`. In v1.15.0 the table allows one pair: `nm-profile-crud` with reason `NM_NOT_INSTALLED` on `ubuntu2404` and `ubuntu2604`.
+- The raw log proves each not-applicable check: exactly one line `== observe nm-presence nmcli=<present|absent> service=<active|inactive|not-found>` with `nmcli=absent`, and the line `== check <id> NOT_APPLICABLE <reason>`. An installed NetworkManager that is stopped (`nmcli=present`) is never NOT APPLICABLE: the check runs and fails. The log's NOT_APPLICABLE lines equal `not_applicable_checks`, and its end line `== acceptance end … passed= failed= skipped= not_applicable=` equals the recorded counts. The harness's raw verdict applies the same table and proof on the target side.
+- A patch manifest needs `--full-reference <reference manifest>`. The checker does not trust the option: the file's SHA-256 must equal `full_reference.manifest_sha256`, it must be a valid full-scope `/2` `GO` manifest with the recorded `version` and `finished_at`, this run must start after it and at most 60 days later, and its `abi` must equal this manifest's `abi`. Without a patch scope the option is refused.
+
+A Tier P release's notes name the reference Tier F release and its manifest SHA-256 and list every supported target that was not run as NOT RUN. NOT RUN targets do not appear in the manifest and are never reported as PASS.
+
 ## How raw logs are tied to the claim
 
 The chain of hashes runs as follows:
@@ -158,6 +181,7 @@ python3 release/check_acceptance_manifest.py \
   --bundle-archive sinter-v${VERSION}-acceptance-evidence.tar.gz \
   --artifact sinter-v${VERSION}-linux-x86_64.tar.gz \
   --sums sinter-v${VERSION}-acceptance-SHA256SUMS
+  # a Tier P (patch) manifest also: --full-reference <reference Tier F manifest>
 ```
 
 `--bundle <dir>` checks an already extracted bundle directory instead of the archive, with the same rules. The checker needs `git`, `cargo` and a clone of the repository that contains `candidate.source_commit`: by default the checkout it runs from, otherwise `--repo <dir>`. Exit 0 means valid and `GO`; exit 1 prints one `FAIL` line per problem; exit 2 is a usage error.
@@ -192,9 +216,10 @@ The numbers refer to the `RELEASE.md` state machine.
 
 1. **Step 4, Linux gate** — on supported Linux x86_64, at `RC_COMMIT`, run the pinned gate commands. Keep the full output as `validation/linux-gate.log` and record the `linux_validation` fields. Any FAIL stops the release before a build.
 2. **Step 6, freeze** — record the artifact name, size, and SHA-256, and the executable SHA-256.
-3. **Steps 7–9, acceptance** — run the harness against that frozen, extracted artifact on all eight targets. Re-check both hashes on each target first. Capture one raw, sanitized log per target and record the fields above as they are produced, including `image`, observed from the target's boot disk while the acceptance runs (never filled in afterwards).
+3. **Steps 7–9, acceptance** — run the harness against that frozen, extracted artifact on every required target of the approved tier (Tier F: all eight). Re-check both hashes on each target first. Capture one raw, sanitized log per target and record the fields above as they are produced, including `image`, observed from the target's boot disk while the acceptance runs (never filled in afterwards).
 4. **Steps 10–11, assemble** — generate the manifest from the recorded values only, never from memory or estimates. Build the bundle directory and archive, and write `sinter-v${VERSION}-acceptance-SHA256SUMS`.
 5. **Step 12, validate** — run the full-mode checker (above) on the exact files to be staged. It must print `OK … (verdict GO)`.
 6. **Step 13, human review** — stage the three acceptance assets with the artifact. The reviewer checks the manifest, its Linux gate record, the checker output, and `RELEASE_MANIFEST.md`. The Owner approves the approval-set digest that covers these assets (`RELEASE.md` step 13).
-7. **Steps 14–16, publish** — re-verify the approval set against the approved digest, then upload the three acceptance assets with the artifact and `SHA256SUMS`.
-8. **Step 17, post-publish** — download the acceptance assets, verify `sinter-v${VERSION}-acceptance-SHA256SUMS`, check that each download's SHA-256 equals its entry in the approved approval set, and re-run the full-mode checker on the downloads. Then commit the manifest copy to `release/evidence/v${VERSION}/` in a docs-only commit.
+7. **Step 12b, docs commit** (from v1.15.0) — the local docs commit `D` (parent `RC_COMMIT`) carries the manifest copy `release/evidence/v${VERSION}/acceptance-manifest.json`, byte-identical to the staged manifest; `D` is part of the approval set `/3` and is not pushed before the Release exists.
+8. **Steps 14–16, publish** — re-verify the approval set against the approved digest, push the tag only, then upload the three acceptance assets with the artifact and `SHA256SUMS`.
+9. **Step 17, post-publish** — 17a: download the acceptance assets, verify `sinter-v${VERSION}-acceptance-SHA256SUMS`, check that each download's SHA-256 equals its entry in the approved approval set, re-run the full-mode checker on the downloads, and check that the manifest copy in `D` is byte-identical to the downloaded manifest. 17b: push `D` to a work branch, and after CI and Start pass fast-forward `main` to `D` without force. 17c: record the results. (Up to v1.14.x the manifest copy was committed after publication; those copies are unchanged.)

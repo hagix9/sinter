@@ -2,8 +2,10 @@
 # ============================================================================
 # Sinter release acceptance — evidence collector / GO gate (RELEASE.md
 # steps 7-9). The RC commit and artifact SHA-256 come from SINTER_RC_COMMIT
-# and SINTER_EXP_ART (required); GO always requires all eight release target
-# labels (the matrix cannot be narrowed from the environment).
+# and SINTER_EXP_ART (required). GO requires all eight release target labels
+# (SINTER_ACCEPTANCE_SCOPE=full, the default); a Tier P patch release
+# (SINTER_ACCEPTANCE_SCOPE=patch) requires exactly the approved SINTER_P5_TARGETS,
+# which must include ubuntu2404, rocky9 and one newer generation.
 #
 # F2: never trust run.json's own "PASS" string. Re-derive the truth from the
 #     evidence bytes:
@@ -51,9 +53,39 @@ def required_env():
     if not re.fullmatch(r"[0-9a-f]{40}", rc) or not re.fullmatch(r"[0-9a-f]{64}", art):
         sys.stderr.write("SINTER_RC_COMMIT (40 hex) and SINTER_EXP_ART (64 hex) are required\n")
         sys.exit(64)
-    # The GO gate always requires the full release matrix; it cannot be
-    # narrowed from the environment.
-    return rc, art, list(DEFAULT_LABELS)
+    return rc, art, scope_labels(os.environ.get("SINTER_ACCEPTANCE_SCOPE", "full"),
+                                 os.environ.get("SINTER_P5_TARGETS", ""))
+
+
+NEWER = ["ubuntu2604", "rocky10", "rhel10", "alma10"]
+
+
+def scope_labels(scope, targets):
+    """The labels the GO gate requires (v1.15.0, Tier F/P). Full (the default,
+    and every minor or major release) is exactly the eight labels; a given
+    target list must name all eight. Patch (Tier P, approved at step 2) is
+    the approved list: a subset of the eight with ubuntu2404, rocky9 and at
+    least one newer generation (ubuntu2604, rocky10, rhel10, alma10).
+    Anything else stops (exit 64): the matrix is never narrowed silently."""
+    given = [t for t in targets.split(",")] if targets else []
+    def stop(msg):
+        sys.stderr.write("acceptance scope: %s\n" % msg)
+        sys.exit(64)
+    if any(t not in DEFAULT_LABELS for t in given):
+        stop("unknown target label in SINTER_P5_TARGETS")
+    if len(given) != len(set(given)):
+        stop("a target label is repeated in SINTER_P5_TARGETS")
+    if scope == "full":
+        if given and set(given) != set(DEFAULT_LABELS):
+            stop("full scope needs exactly the eight targets")
+        return list(DEFAULT_LABELS)
+    if scope == "patch":
+        if not given:
+            stop("patch scope needs SINTER_P5_TARGETS")
+        if "ubuntu2404" not in given or "rocky9" not in given or not any(t in given for t in NEWER):
+            stop("patch scope needs ubuntu2404, rocky9 and one of ubuntu2604, rocky10, rhel10, alma10")
+        return [t for t in DEFAULT_LABELS if t in given]
+    stop("SINTER_ACCEPTANCE_SCOPE must be full or patch")
 
 
 CANON_FIELDS = ["decision", "owner", "rc_commit", "artifact_sha256", "evidence_digest", "approved_at"]
@@ -112,9 +144,12 @@ def verify_raw(run_dir, label, expected_ids, run_start):
     raw = os.path.join(run_dir, "raw.log")
     if not os.path.exists(raw) or os.path.getsize(raw) == 0:
         return "NO_RAW_LOG", ""
+    # The applicability table the run executed (its recorded copy, verified by
+    # check_scripts); without it a NOT_APPLICABLE line fails the verdict.
+    table = os.path.join(run_dir, "scripts", "applicability.json")
     try:
         p = subprocess.run([sys.executable, os.path.join(HERE, "raw-verdict.py"),
-                            raw, expected_ids, run_start or "", "0"],
+                            raw, expected_ids, run_start or "", "0", table, label],
                            capture_output=True, text=True)
     except OSError as e:
         return "VERIFIER_ERROR", str(e)
