@@ -877,10 +877,13 @@ fn template_syntax_is_never_generated() {
     // The round trip refuses template syntax as a safety net.
     let mut d2 = Discovery::default();
     let mut with = BTreeMap::new();
-    with.insert("name".to_string(), s("{{ x }}"));
+    // A file content that loads (facts are known only at run time): only
+    // the safety net can refuse it.
+    with.insert("path".to_string(), s("/etc/x"));
+    with.insert("content".to_string(), s("{{ facts.hostname }}"));
     d2.resources.push(IrResource {
         id: "x".into(),
-        type_: "package".into(),
+        type_: "file".into(),
         with,
         collector: String::new(),
         source_key: String::new(),
@@ -888,6 +891,7 @@ fn template_syntax_is_never_generated() {
     });
     let e = round_trip(&render_yaml(&d2, &c), &d2, dir.path()).unwrap_err();
     assert_eq!(e.kind, crate::error::ErrorKind::Plan);
+    assert!(e.message.contains("template syntax"), "{}", e.message);
 }
 
 #[test]
@@ -940,6 +944,9 @@ fn more_credentials_and_format_characters_are_excluded() {
         0o644,
         "control",
     );
+    for ch in ["\u{feff}", "\u{e0041}", "\u{fff9}"] {
+        excluded(format!("a {ch}{CANARY}\n").as_bytes(), 0o644, "control");
+    }
     // Plain text with an URL, a path and a dollar sign stays in.
     let d = one_file(
         b"url = https://example.com/docs\npath = /usr/share/doc/README\ncost = $5\n",

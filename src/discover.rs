@@ -242,6 +242,9 @@ pub fn classify_content(b: &[u8]) -> std::result::Result<String, &'static str> {
             || ('\u{200b}'..='\u{200f}').contains(&c)
             || ('\u{202a}'..='\u{202e}').contains(&c)
             || ('\u{2060}'..='\u{206f}').contains(&c)
+            || ('\u{fff9}'..='\u{fffb}').contains(&c)
+            || ('\u{e0000}'..='\u{e007f}').contains(&c)
+            || c == '\u{feff}'
     }) {
         return Err("control characters");
     }
