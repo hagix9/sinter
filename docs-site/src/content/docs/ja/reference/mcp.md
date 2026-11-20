@@ -49,6 +49,25 @@ sinter mcp --targets-file targets.toml
 | `sinter_plan_host` | **named** SSHターゲットプロファイルに対してrecipeをplan。productionの`Mode::Plan`パスによる実ホストの読み取り専用観測。 |
 | `sinter_audit_host` | named SSHターゲットがrecipeを満たすかを、productionの`run_audit`パスで監査。`no_drift`/`drift`とリソースごとの`PASS`/`DRIFT`/`NOT_AUDITABLE`/`NOT_APPLICABLE`/`ERROR`詳細を報告。 |
 
+## ツールの引数
+
+8つのツールの入力スキーマはすべて`additionalProperties: false`を宣言して
+います。サーバがこれを強制するのは2つのhost toolだけで、ほかの6つは
+互換性のため、知らない引数を従来どおり無視します。
+
+| ツール | 引数 | 未知の引数 |
+|--------|------|------------|
+| `sinter_get_version` | なし | 無視 |
+| `sinter_classify_platform` | `os_release`（必須）、`arch`、`hostname` | 無視 |
+| `sinter_validate_manifest` | `manifest`（必須） | 無視 |
+| `sinter_inspect_manifest` | `manifest`（必須） | 無視 |
+| `sinter_plan` | `manifest`、`target`（4つのスナップショットのいずれか。必須）、`sudo`（スナップショット上でsudoを模擬。SSHなし） | 無視 |
+| `sinter_list_targets` | なし | 無視 |
+| `sinter_plan_host` | `manifest`、`target`（プロファイル名。どちらも必須） | 何かを読む・接続する前に**拒否** |
+| `sinter_audit_host` | `manifest`、`target`（プロファイル名。どちらも必須） | 何かを読む・接続する前に**拒否** |
+
+8つ以外のツール名は、何かを実行する前に拒否されます。
+
 ## Named target（`--targets-file`）
 
 `--targets-file`は管理者が所有するSSHプロファイルのTOMLレジストリを
@@ -102,15 +121,21 @@ drift次元として報告します。
 
 ## セキュリティモデル
 
-- **読み取り専用は構造的に強制されます。** host toolはmutation permitを
-  生成できない`TargetFs`上で`Mode::Plan`のengineを構築し、すべての
-  変更操作がそのpermitを要求します。`run_audit`はpermitを生成し得る
-  engineをさらに拒否します。commandリソースは実行されず
-  `NOT_AUDITABLE`と分類されます。
+- **ツールは読み取り専用で、実行時の検査が変更を防ぎます。** 変更系の
+  ツールはありません。そのうえで、host toolはmutation permitを生成できない
+  `TargetFs`上で`Mode::Plan`のengineを構築し、すべての変更操作がその
+  permitを要求します。変更を止めているのはこの実行時の検査です。
+  `run_audit`はpermitを生成し得るengineをさらに拒否します。commandリソース
+  は実行されず`NOT_AUDITABLE`と分類されます。host toolが実際に送る
+  コマンドが観測だけであることをテストで確認しています。
+- **host toolが見られる範囲。** プロファイルのSSHアカウント（プロファイルの
+  sudo設定を含む）がターゲット上で読める情報を観測します。Sinterはそれ以上
+  の制限を加えません。
 - **接続権限はサーバ側に留まります。** 呼び出し側はopaqueな名前のみで
   ターゲットを参照でき、host、port、user、known_hosts、identity file、
-  sudoをツール引数で指定・上書きできません — 予期しないパラメータは
-  その場で拒否されます。
+  sudoをツール引数で指定・上書きできません。2つのhost toolは`manifest`と
+  `target`以外の引数を拒否します。ほかのツールについては
+  [ツールの引数](#ツールの引数)を参照してください。
 - **厳格なホスト鍵検証。** プロファイルの`known_hosts`は必須です。
   未知または変更されたホスト鍵は接続失敗となります。自動登録も
   insecureなフォールバックもありません。

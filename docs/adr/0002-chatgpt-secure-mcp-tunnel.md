@@ -682,6 +682,7 @@ needed for function or safety under systemd.
 
 - Existing subcommands: `validate`, `plan`, `apply`, `audit`, `mcp`, `secrets`.
   `serve` does not collide with any of them.
+  *Later note (2026-11-20, v1.15.0 development, P6):* this list is the state when this section was written. Since then `plugin` (released in v1.12.0) and `serve` itself (released in v1.14.0) were added. The v1.15.0 development adds `approve`, `approvals` and `discover` (not released). None of them is an MCP tool.
 - Two points to settle before implementing:
   - The `mcp` help text already reads "Serve a read-only MCP … endpoint on stdio".
     With a `serve` command, that text should say "Run" instead, so that "serve"
@@ -822,6 +823,8 @@ earlier decision is rewritten silently. The decisions are the Owner's
 | F-L1: `sinter_plan` cannot plan `file` / `directory` resources | Not recorded | **Not changed** for the first release; documented as a known limitation | A comment in the existing test suite states that the snapshots intentionally do not model filesystem helpers and fail honestly, but no test asserts the failure. The first verification of this configuration classified it as a medium-severity failure and inferred, without tracing it, that a later release introduced it; but the 2026-10-05 experiment with Sinter v1.1.3 had already recorded the same failure for a `file` recipe as baseline behaviour (low severity), while `package` recipes planned. It does not affect the tunnel, and such resources can be planned with `sinter_plan_host`. The Owner decided to keep the current behaviour for the first release. | None to the read-only boundary. A change would alter the documented behaviour of the snapshots and is a separate decision. |
 | F-L2: extra arguments | Not recorded | **Not changed** for the first release; documented | Only `sinter_plan_host` and `sinter_audit_host` reject unexpected arguments; the other tools accept and ignore extra keys (observed). Low severity, no effect on the boundary; rejecting them would change what is accepted today and would need a client-compatibility check. | None. |
 | A regression test for the refusal of `password_verifier` secret references | Not recorded | **Not added** | The refusal exists in `src/mcp.rs` and was confirmed by running the built binary with a synthetic manifest; no dedicated test exists. It does not block tunnel support. | A future refactor could drop the refusal without a test noticing; this is recorded as a risk. |
+
+*Later correction (2026-11-20, v1.15.0 development, P6; the r4 row above is kept as recorded):* the row was already out of date when written. `tests/password_hash.rs` (`mcp_refuses_a_password_hash_secret_in_manifest_text`) sends a `postgresql_role` manifest with `password_verifier: { secret: … }` (and a `user` manifest with `password_hash`) to every manifest tool of the built binary and asserts the refusal; the P6 boundary tests (`src/mcp_boundary_tests.rs`) add that the host tools refuse it before connecting. The recorded risk does not apply.
 
 **Unchanged by r4:** the eight read-only tools and their exact-allowlist test;
 no apply, exec or shell tool; named targets only, with the connection details

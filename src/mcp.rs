@@ -6,11 +6,21 @@
 //! a thin adapter over existing library functions — no validation, platform,
 //! or planning rule is duplicated here.
 //!
-//! C1 is structurally read-only:
+//! The tool surface is read-only, and the host tools rely on a run-time check:
 //!   - there is no apply/execute/install/remove tool, and none may be added
-//!     without changing the registry allowlist test;
+//!     without changing the registry allowlist test (eight tools, each
+//!     annotated `readOnlyHint: true`);
 //!   - `sinter_plan` runs against a scripted in-process `FakeTarget`
 //!     (supplied facts), never SSH, never a real host;
+//!   - `sinter_plan_host` and `sinter_audit_host` build their engine with
+//!     `Mode::Plan`; the `TargetFs` of such an engine cannot produce a
+//!     mutation permit, and every mutating operation needs one. That run-time
+//!     check, not the absence of a tool alone, is what stops a change
+//!     (`run_audit` also refuses an engine that could produce a permit);
+//!     command resources are never executed. The boundary tests in
+//!     `mcp_boundary_tests.rs` check the commands actually sent;
+//!   - a host tool observes what the profile's SSH account (with its sudo
+//!     setting) can read on the target, nothing more and nothing less;
 //!   - manifest content is written to a private temporary file solely so the
 //!     existing `load_model` parser can process it, then deleted.
 //!
@@ -671,12 +681,14 @@ fn tool_plan_host(args: &Value, reg: &TargetRegistry) -> Result<Value, ToolError
         },
         verbose: false,
         fault: None,
-        fake_target: None,
+        fake_target: host_fake_target(),
     };
     let engine = Engine::new(model, opts).map_err(|e| host_error(e, &stage.canonical, profile))?;
+    observe_host_engine(&engine);
     let report = engine
         .run()
         .map_err(|e| host_error(e, &stage.canonical, profile))?;
+    observe_host_commands(&report.commands);
     // F-02: host boundary — file/template content never crosses to the
     // caller, regardless of the manifest's own sensitivity flags.
     let mut out = plan_report_json(&report, true);
@@ -703,10 +715,12 @@ fn tool_audit_host(args: &Value, reg: &TargetRegistry) -> Result<Value, ToolErro
         },
         verbose: false,
         fault: None,
-        fake_target: None,
+        fake_target: host_fake_target(),
     };
     let engine = Engine::new(model, opts).map_err(|e| host_error(e, &stage.canonical, profile))?;
+    observe_host_engine(&engine);
     let report = run_audit(engine).map_err(|e| host_error(e, &stage.canonical, profile))?;
+    observe_host_commands(&report.commands);
     let resources: Vec<Value> = report
         .resources
         .iter()
@@ -740,6 +754,36 @@ fn tool_audit_host(args: &Value, reg: &TargetRegistry) -> Result<Value, ToolErro
             "errors": s.errors,
         },
     }))
+}
+
+// Test support for the host tools (tests only). In a build, the host tools
+// always connect over SSH (`fake_target: None`) and observe nothing; the unit
+// tests substitute a scripted target and read the engine's mode, whether it
+// could produce a mutation permit, and the commands it sent.
+#[cfg(not(test))]
+fn host_fake_target() -> Option<FakeTarget> {
+    None
+}
+
+#[cfg(not(test))]
+fn observe_host_engine(_engine: &Engine) {}
+
+#[cfg(not(test))]
+fn observe_host_commands(_commands: &[crate::executor::CommandRecord]) {}
+
+#[cfg(test)]
+fn host_fake_target() -> Option<FakeTarget> {
+    boundary_tests::take_fake()
+}
+
+#[cfg(test)]
+fn observe_host_engine(engine: &Engine) {
+    boundary_tests::record_engine(engine);
+}
+
+#[cfg(test)]
+fn observe_host_commands(commands: &[crate::executor::CommandRecord]) {
+    boundary_tests::record_commands(commands);
 }
 
 // ---------------------------------------------------------------------------
@@ -1016,6 +1060,10 @@ pub fn serve(targets: TargetRegistry) -> Result<(), SinterError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "mcp_boundary_tests.rs"]
+mod boundary_tests;
 
 #[cfg(test)]
 mod tests {

@@ -48,6 +48,25 @@ shell tool. Every tool carries the MCP annotations `readOnlyHint: true`,
 | `sinter_plan_host` | Plan a recipe against a **named** SSH target profile: real-host read-only observation via the production `Mode::Plan` path. |
 | `sinter_audit_host` | Audit whether a named SSH target satisfies a recipe via the production `run_audit` path. Reports `no_drift`/`drift` with per-resource `PASS`/`DRIFT`/`NOT_AUDITABLE`/`NOT_APPLICABLE`/`ERROR` detail. |
 
+## Tool arguments
+
+Every tool's input schema declares `additionalProperties: false`. The server
+enforces that only for the two host tools; the other six ignore an argument
+they do not know, as they always have (compatibility).
+
+| Tool | Arguments | Unknown argument |
+|------|-----------|------------------|
+| `sinter_get_version` | none | ignored |
+| `sinter_classify_platform` | `os_release` (required), `arch`, `hostname` | ignored |
+| `sinter_validate_manifest` | `manifest` (required) | ignored |
+| `sinter_inspect_manifest` | `manifest` (required) | ignored |
+| `sinter_plan` | `manifest`, `target` (one of the four snapshots; required), `sudo` (models sudo on the snapshot; no SSH) | ignored |
+| `sinter_list_targets` | none | ignored |
+| `sinter_plan_host` | `manifest`, `target` (a profile name; both required) | **rejected** before anything is read or contacted |
+| `sinter_audit_host` | `manifest`, `target` (a profile name; both required) | **rejected** before anything is read or contacted |
+
+A tool name that is not one of the eight is refused before anything runs.
+
 ## Named targets (`--targets-file`)
 
 `--targets-file` points at an administrator-owned TOML registry of SSH
@@ -100,15 +119,22 @@ and the [JSON output contract](/en/reference/cli/#json-output-contract).
 
 ## Security model
 
-- **Read-only is structural.** Host tools construct the engine in
-  `Mode::Plan` on a `TargetFs` that cannot produce a mutation permit; every
-  mutating operation requires that permit. `run_audit` additionally refuses
-  any engine that could produce one. Command resources are never executed
-  and audit as `NOT_AUDITABLE`.
+- **Read-only tools, enforced at run time.** The tool surface has no
+  mutating tool. Beyond that, the host tools construct the engine in
+  `Mode::Plan` on a `TargetFs` that cannot produce a mutation permit, and
+  every mutating operation requires that permit: this run-time check is what
+  stops a change. `run_audit` additionally refuses any engine that could
+  produce one. Command resources are never executed and audit as
+  `NOT_AUDITABLE`. Tests check the commands the host tools actually send
+  (observations only).
+- **What a host tool can see.** It observes what the profile's SSH account
+  (with the profile's sudo setting) can read on the target; Sinter adds no
+  further limit to that.
 - **Connection authority stays server-side.** Callers reference targets by
   opaque name only; host, port, user, known_hosts, identity files, and sudo
-  cannot be supplied or overridden through tool arguments — unexpected
-  parameters are rejected outright.
+  cannot be supplied or overridden through tool arguments. The two host
+  tools reject any parameter other than `manifest` and `target`; see
+  [Tool arguments](#tool-arguments) for the other tools.
 - **Strict host-key verification.** The profile's `known_hosts` is
   mandatory; unknown or changed host keys fail the connection. No automatic
   enrollment, no insecure fallback.

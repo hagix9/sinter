@@ -41,6 +41,12 @@ still says "not released" and cites a guide that is not in the docs site; and
 no test asserts that `sinter_plan_host` and `sinter_audit_host` send no
 mutating command (the fake executor's log makes this testable).
 
+*Status (2026-11-20, v1.15.0 development, P6):* these points are corrected:
+the `src/mcp.rs` header, ADR 0002 (later notes in §11 and §16), the MCP
+reference (a per-tool argument table), DESIGN §41 (released in v1.14.0), the
+new guide `guides/chatgpt-tunnel`, and the boundary tests in
+`src/mcp_boundary_tests.rs`, which check the commands the host tools send.
+
 ## 3. Assets and trust boundaries
 
 Assets: the managed hosts (root through `sudo -n -u root`), the controller's

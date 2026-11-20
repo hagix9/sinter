@@ -99,6 +99,7 @@ export default defineConfig({
             { slug: 'guides/rocky-linux' },
             { slug: 'guides/rhel' },
             { slug: 'guides/almalinux' },
+            { slug: 'guides/chatgpt-tunnel' },
             { slug: 'guides/chatgpt-plugin' },
           ],
         },
