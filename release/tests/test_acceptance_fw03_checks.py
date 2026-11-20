@@ -392,7 +392,8 @@ class Fw03Checks(unittest.TestCase):
             self.assertEqual(p.returncode, 0, p.stderr)
             ok, bad = results(p.stdout)
             final = json.load(open(fwst))
-            left = sorted(os.listdir(s))
+            # the section's state lives in WORK (P7-R1 F-4) and its outputs in S: both are checked
+            left = sorted(os.listdir(s)) + sorted(x for x in os.listdir(d) if x.startswith("fw03-"))
             return ok, bad, p.stdout + p.stderr, final, left
 
     def test_the_documented_behavior_passes_every_check(self):
@@ -402,7 +403,7 @@ class Fw03Checks(unittest.TestCase):
         self.assertNotIn("sintacc", final["perm"]); self.assertNotIn("sintacc", final["rt"])
         self.assertEqual(final["links"], ["lo", "ens4"])
         self.assertEqual(final["perm"]["public"]["service"], ["ssh", "dhcpv6-client"])
-        self.assertFalse([x for x in left if x.startswith("fw03-state") or x.startswith("fw03-pr") or x.endswith(".req")], left)
+        self.assertFalse([x for x in left if x.startswith(("fw03-state", "fw03-pr", "fw03-pb")) or x.endswith(".req")], left)
 
     def test_each_defect_fails_its_check(self):
         cases = {
