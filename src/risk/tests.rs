@@ -765,11 +765,23 @@ fn path_determination_fails_closed() {
     n.ss = None;
     assert!(unknown(&n), "ss unreadable");
     // loopback only when declared
-    let lo = net_facts("127.0.0.1 40000 127.0.0.1 22", "", "", "");
+    let lo = net_facts(
+        "127.0.0.1 40000 127.0.0.1 22",
+        "0 0 127.0.0.1:22 127.0.0.1:40000\n",
+        "",
+        "",
+    );
     assert!(unknown(&lo));
     let mut lo2 = lo.clone();
     lo2.loopback_declared = true;
     assert!(matches!(path::determine(&lo2), PathState::Known(p) if p.loopback));
+    // P7-R2 (audit B-3): a declared loopback connection must be an
+    // established socket
+    let mut lo3 = lo2.clone();
+    lo3.ss = Some("0 0 127.0.0.1:22 127.0.0.1:40001\n".into());
+    assert!(unknown(&lo3), "declared loopback without its socket");
+    lo3.ss = None;
+    assert!(unknown(&lo3), "declared loopback, ss unreadable");
     let mut mixed = lo2.clone();
     mixed.ssh_connection = Some("203.0.113.9 40000 127.0.0.1 22".into());
     assert!(unknown(&mixed), "loopback server with a remote client");
@@ -1222,6 +1234,7 @@ fn declared_loopback_is_a_path_but_not_a_guarantee() {
     let _g = TableGuard::set(ENFORCED_020);
     let lo = FakeNet {
         ssh_connection: Some("127.0.0.1 40000 127.0.0.1 22".into()),
+        ss: Some("0 0 127.0.0.1:22 127.0.0.1:40000\n".into()),
         ..net(22)
     };
     let f = fw();
@@ -1235,7 +1248,8 @@ fn declared_loopback_is_a_path_but_not_a_guarantee() {
     );
     assert_eq!(r.unwrap().status, AggregateStatus::Success);
     assert_eq!(record(&l, "p").dynamic, "clear");
-    // No ss/ip observation is made for a loopback connection.
+    // No ip observation is made for a loopback connection; ss is (P7-R2,
+    // the declared connection must be an established socket).
     let t = target(&f, lo);
     let e = engine(
         s.model(&port("q", "public", "2222/tcp", "absent")).unwrap(),
@@ -1244,10 +1258,7 @@ fn declared_loopback_is_a_path_but_not_a_guarantee() {
         c,
     );
     let rep = e.run().unwrap();
-    assert!(!rep
-        .commands
-        .iter()
-        .any(|x| x.program.ends_with("/ss") || x.program.ends_with("/ip")));
+    assert!(!rep.commands.iter().any(|x| x.program.ends_with("/ip")));
 }
 
 #[test]

@@ -214,13 +214,15 @@ impl Engine {
             .as_deref()
             .and_then(super::path::parse_ssh_connection);
         if let Some((client, _, server, _)) = parsed {
+            // ss is read for a loopback connection too: a declared direct
+            // local connection must be an established socket (P7-R2).
+            n.ss = self.risk_ss_program().and_then(|ss| {
+                self.fs
+                    .risk_observe(ss, &["-Htn", "state", "established"])
+                    .ok()
+                    .and_then(|o| stdout(&o))
+            });
             if !(client.is_loopback() && server.is_loopback()) {
-                n.ss = self.risk_ss_program().and_then(|ss| {
-                    self.fs
-                        .risk_observe(ss, &["-Htn", "state", "established"])
-                        .ok()
-                        .and_then(|o| stdout(&o))
-                });
                 n.ip_addr = self
                     .fs
                     .risk_observe("/usr/sbin/ip", &["-o", "addr", "show"])
@@ -242,8 +244,7 @@ impl Engine {
         // measured firewalld version, read now (and again at the reload's turn).
         if let PathState::Known(p) = &mut state {
             if p.loopback {
-                p.loopback_reload_measured =
-                    super::path::loopback_reload_measured(self.risk_fw_version().as_deref());
+                p.loopback_reload_measured = self.risk_loopback_reload_ok();
             }
         }
         let (rt, perm) = match &state {
@@ -280,6 +281,19 @@ impl Engine {
             }
         }
         None
+    }
+
+    /// R-2 at the moment of asking: a measured firewalld version and the
+    /// measured permanent configuration (no direct rule, no passthrough,
+    /// only the policy `allow-host-ipv6`), each read fresh.
+    fn risk_loopback_reload_ok(&mut self) -> bool {
+        if !super::path::loopback_reload_measured(self.risk_fw_version().as_deref()) {
+            return false;
+        }
+        let direct = self.fw(&["--permanent", "--direct", "--get-all-rules"]);
+        let pass = self.fw(&["--permanent", "--direct", "--get-all-passthroughs"]);
+        let pols = self.fw(&["--permanent", "--get-policies"]);
+        super::path::loopback_reload_config_ok(direct.as_deref(), pass.as_deref(), pols.as_deref())
     }
 
     /// `firewall-cmd --version` read strictly (`None` when it is not exactly
@@ -1099,8 +1113,8 @@ impl Engine {
             // reload runs on this session (no new connection, no reconnect).
             PathState::Known(p) if p.loopback => {
                 let mut q = p.clone();
-                q.loopback_reload_measured = p.loopback_reload_measured
-                    && super::path::loopback_reload_measured(self.risk_fw_version().as_deref());
+                q.loopback_reload_measured =
+                    p.loopback_reload_measured && self.risk_loopback_reload_ok();
                 PathState::Known(q)
             }
             PathState::Known(p) if !p.loopback => {

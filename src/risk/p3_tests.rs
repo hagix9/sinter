@@ -1414,7 +1414,106 @@ fn r5_the_runtime_and_permanent_views_are_read_separately_and_get_priority_is_no
 fn loopback_net() -> FakeNet {
     FakeNet {
         ssh_connection: Some("127.0.0.1 40000 127.0.0.1 22".into()),
+        // both ends of the loopback session; the server side matches
+        ss: Some("0 0 127.0.0.1:22 127.0.0.1:40000\n0 0 127.0.0.1:40000 127.0.0.1:22\n".into()),
         ..net(22)
+    }
+}
+
+#[test]
+fn r2_the_reload_needs_the_measured_permanent_configuration_and_a_real_loopback_socket() {
+    // independent audit B-1, B-3 (P7-R2)
+    let s = Setup::new();
+    let body = notify_reload(&res(
+        "p",
+        "port",
+        "zone: public, port: \"9090/tcp\", state: present",
+    ));
+    type Tweak = Box<dyn Fn(&mut FakeFirewalld)>;
+    let cases: Vec<(&str, Tweak)> = vec![
+        (
+            "a permanent direct rule",
+            Box::new(|f| f.direct_rules = vec!["ipv4 filter INPUT 0 -i lo -j DROP".into()]),
+        ),
+        (
+            "a permanent passthrough",
+            Box::new(|f| f.direct_passthroughs = vec!["ipv4 -I INPUT -i lo -j DROP".into()]),
+        ),
+        (
+            "a further permanent policy",
+            Box::new(|f| f.perm_policies = vec!["admin-in".into()]),
+        ),
+        (
+            "an unreadable direct answer",
+            Box::new(|f| {
+                f.forced.push((
+                    "--get-all-rules".into(),
+                    Output {
+                        completion: Completion::Exited(2),
+                        stdout: Vec::new(),
+                        stderr: b"usage\n".to_vec(),
+                        stdout_truncated: false,
+                        stderr_truncated: false,
+                    },
+                ))
+            }),
+        ),
+    ];
+    for (name, tweak) in cases {
+        let f = fw();
+        f.lock().unwrap().version = Some("2.4.3".into());
+        tweak(&mut f.lock().unwrap());
+        let (r, l) = run(
+            s.model(&body, RELOAD).unwrap(),
+            Mode::Apply,
+            target(&f, loopback_net()),
+            loopback_ctx(),
+        );
+        assert_eq!(
+            r.unwrap().handlers_run[0].state,
+            HandlerOutcomeState::Failed,
+            "{name}: {l:?}"
+        );
+        assert_eq!(f.lock().unwrap().reloads, 0, "{name}");
+        assert!(
+            record(&l, "handler:fwreload")
+                .dynamic
+                .starts_with("unknown"),
+            "{name}: {l:?}"
+        );
+    }
+    // the declared loopback connection must be an established socket
+    for (name, ss) in [
+        (
+            "no matching socket",
+            Some("0 0 127.0.0.1:22 127.0.0.1:40001\n".to_string()),
+        ),
+        (
+            "two matching sockets",
+            Some(
+                "0 0 127.0.0.1:22 127.0.0.1:40000\n0 0 127.0.0.1:22 127.0.0.1:40000\n".to_string(),
+            ),
+        ),
+        ("ss unreadable", None),
+    ] {
+        let f = fw();
+        f.lock().unwrap().version = Some("2.4.3".into());
+        let n = FakeNet {
+            ss,
+            ..loopback_net()
+        };
+        let (r, l) = run(
+            s.model(&body, RELOAD).unwrap(),
+            Mode::Apply,
+            target(&f, n),
+            loopback_ctx(),
+        );
+        assert_eq!(
+            r.unwrap().handlers_run[0].state,
+            HandlerOutcomeState::Failed,
+            "{name}: {l:?}"
+        );
+        assert_eq!(f.lock().unwrap().reloads, 0, "{name}");
     }
 }
 
@@ -1584,9 +1683,12 @@ fn r2_the_reload_opens_no_new_connection_and_does_not_reconnect() {
 }
 
 #[test]
-fn management_path_protection_on_a_judged_rhel_path() {
-    // With R-4 and R-5 the RHEL-family path is judged; the protections of
-    // DESIGN §43 must hold there exactly as on the paths judged before.
+fn management_path_protection_on_a_path_judged_through_usr_sbin_ss() {
+    // With R-4 and R-5 a path whose ss is /usr/sbin/ss is judged; the
+    // protections of DESIGN §43 must hold there exactly as on the paths
+    // judged before. (No NetworkManager here: on a real RHEL host whose eth0
+    // NetworkManager manages, the permanent facet stays unknown, so these
+    // changes are refused there; audit B-2.)
     let s = Setup::new();
     let mk = |v: &str, reconnect: Option<bool>| {
         let f = fw();

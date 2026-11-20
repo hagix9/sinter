@@ -204,6 +204,20 @@ pub fn determine(n: &NetFacts) -> PathState {
     }
     if server.is_loopback() || client.is_loopback() {
         if server.is_loopback() && client.is_loopback() && n.loopback_declared {
+            // The declared loopback connection must be an established socket
+            // too (P7-R2): the account can set SSH_CONNECTION itself.
+            match n.ss.as_deref().map(|ss| ss_matches(ss, (server, sp), (client, cp))) {
+                Some(1) => {}
+                Some(0) => {
+                    return PathState::Unknown(
+                        "SSH_CONNECTION does not match an established socket (it may have been set by the account)".into(),
+                    )
+                }
+                Some(_) => {
+                    return PathState::Unknown("more than one socket matches SSH_CONNECTION".into())
+                }
+                None => return PathState::Unknown("ss could not be read".into()),
+            }
             return PathState::Known(MgmtPath {
                 client,
                 client_port: cp,
@@ -521,4 +535,22 @@ pub(crate) fn parse_zone_priority(
 /// connection for this firewalld (R-2): only a measured version.
 pub fn loopback_reload_measured(version: Option<&str>) -> bool {
     version.is_some_and(|v| FW_LOOPBACK_RELOAD_MEASURED.contains(&v))
+}
+
+/// The permanent configuration a reload installs must be the one the
+/// loopback measurement had (P7-R2, independent audit B-1): no permanent
+/// direct rule, no permanent passthrough, and exactly the permanent policy
+/// `allow-host-ipv6` (measured on 1.3.4, 2.1.1 and 2.3.1; the 2.4.3 image
+/// had further permanent policies whose effect is not measured, so it is
+/// refused until they are). An answer that could not be read is a refusal.
+pub fn loopback_reload_config_ok(
+    direct_rules: Option<&str>,
+    passthroughs: Option<&str>,
+    permanent_policies: Option<&str>,
+) -> bool {
+    let empty = |s: Option<&str>| s.is_some_and(|s| s.trim().is_empty());
+    let policies: Option<Vec<&str>> = permanent_policies.map(|s| s.split_whitespace().collect());
+    empty(direct_rules)
+        && empty(passthroughs)
+        && policies.as_deref() == Some(&["allow-host-ipv6"][..])
 }

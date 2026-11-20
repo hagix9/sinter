@@ -2374,6 +2374,8 @@ pub struct FakeFirewalld {
     pub perm_list_all: BTreeMap<String, String>,
     pub active_policies: Vec<String>,
     pub direct_rules: Vec<String>,
+    /// `--direct --get-all-passthroughs` lines.
+    pub direct_passthroughs: Vec<String>,
     /// service -> ports of its definition (`22/tcp`).
     pub service_ports: BTreeMap<String, Vec<String>>,
     /// service -> full `--info-service` answer (overrides `service_ports`).
@@ -2491,6 +2493,17 @@ impl FakeFirewalld {
                 let mut v = vec!["allow-host-ipv6".to_string()];
                 v.extend(self.perm_policies.iter().cloned());
                 return fw_out(0, &format!("{}\n", v.join(" ")), "");
+            }
+            ["--direct", "--get-all-passthroughs"] => {
+                return fw_out(
+                    0,
+                    &self
+                        .direct_passthroughs
+                        .iter()
+                        .map(|r| format!("{}\n", r))
+                        .collect::<String>(),
+                    "",
+                )
             }
             ["--direct", "--get-all-rules"] => {
                 return fw_out(

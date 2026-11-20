@@ -319,6 +319,9 @@ Catalogs from anyone else are not supported.
 
 Registered for v1.15.0 after the real-host measurement of 2026-11-20 (v1.15.0
 P7-R1); the bytes are those of the reviewed candidate (DESIGN §38.4, §44.3).
+The catalog's header comment, written before the measurement, still says
+that the exit codes are not measured: it is part of the attested bytes and
+is not edited; this section records the measurement.
 It keeps every operation and type of 0.2.0 and adds `firewalld.interface`
 (`zone`, `interface` of kind `ifname`, runtime and permanent), `firewalld.source`
 (`zone`, `source` of kind `cidr`, runtime and permanent), `firewalld.zone`
