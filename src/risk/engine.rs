@@ -54,6 +54,8 @@ pub(crate) struct NmRiskInput {
     /// Devices the profile concerns (its interface before and after, the
     /// device it is active on).
     pub devices: BTreeSet<String>,
+    /// NetworkManager's device types (`None`: could not be read).
+    pub device_types: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// What an `nm_connection` may do at its turn.
@@ -720,6 +722,26 @@ impl Engine {
         } else {
             let mut c = input.change.clone();
             c.routing_readable = matches!(path, PathState::Known(_));
+            // The management interfaces must be plain Ethernet (or the
+            // declared loopback): a bridge, bond, team or VLAN has lower
+            // devices whose profiles the rule cannot judge.
+            if let PathState::Known(p) = &path {
+                c.lower_unknown = match &input.device_types {
+                    None => Some("NetworkManager's device types could not be read".into()),
+                    Some(t) => p.ifaces.iter().find_map(|i| match t.get(i).map(|s| s.as_str()) {
+                        Some("ethernet") => None,
+                        Some("loopback") if p.loopback => None,
+                        Some(other) => Some(format!(
+                            "the management interface {} is a {} device, whose lower devices are not judged",
+                            i, other
+                        )),
+                        None => Some(format!(
+                            "the management interface {} is not known to NetworkManager",
+                            i
+                        )),
+                    }),
+                };
+            }
             rules::nm(&path, &c)
         };
         record.dynamic = dynamic.label().to_string();
@@ -742,6 +764,25 @@ impl Engine {
         };
         record.approved = approved;
         let mut checkpoint = None;
+        let mgmt = match &path {
+            PathState::Known(p) => Some(p.ifaces.clone()),
+            PathState::Unknown(_) => None,
+        };
+        // Whether a checkpoint could test the change (shown in plan too, so
+        // nobody approves a change apply would refuse anyway).
+        let untestable = if !input.takes_effect_now {
+            Some("the change takes effect only at a later activation or boot, so a checkpoint cannot test it now")
+        } else if input.change.ifname.is_none()
+            && (input.change.autoconnect || input.change.activates)
+        {
+            Some(
+                "a profile without an interface may take another device than the checkpoint covers",
+            )
+        } else if input.devices.is_empty() || mgmt.is_none() {
+            Some("the devices the change concerns are not known")
+        } else {
+            None
+        };
         if apply {
             if let Some(a) = &approval {
                 let listed = a["resources"]
@@ -758,19 +799,6 @@ impl Engine {
                 }
             }
             let recovery = rules::recovery_for(item.rule);
-            let mgmt = match &path {
-                PathState::Known(p) => Some(p.ifaces.clone()),
-                PathState::Unknown(_) => None,
-            };
-            let untestable = if !input.takes_effect_now {
-                Some("the change takes effect only at a later activation or boot, so a checkpoint cannot test it now")
-            } else if input.change.ifname.is_none() && input.change.autoconnect {
-                Some("a profile that autoconnects without an interface may later take another device, which a checkpoint cannot test now")
-            } else if input.devices.is_empty() || mgmt.is_none() {
-                Some("the devices the change concerns are not known")
-            } else {
-                None
-            };
             let available = untestable.is_none();
             match rules::decide(item.class, &dynamic, approved, recovery, available) {
                 rules::Decision::Proceed => {}
@@ -802,7 +830,7 @@ impl Engine {
             self.risk.earlier_change = true;
         }
         let note = format!(
-            "connection-risk class={} dynamic={} approval={}{}",
+            "connection-risk class={} dynamic={} approval={}{}{}",
             item.class.label(),
             dynamic.label(),
             if approved { "yes" } else { "no" },
@@ -810,6 +838,13 @@ impl Engine {
                 " procedure=checkpoint (recovery is not guaranteed; a NetworkManager restart, a reboot or routes outside NetworkManager are not covered)"
             } else {
                 ""
+            },
+            match (&dynamic, untestable) {
+                (Dynamic::Affects(_), Some(u)) if !apply => format!(
+                    " checkpoint=unavailable ({}; apply refuses it even with an approval)",
+                    u
+                ),
+                _ => String::new(),
             }
         );
         self.risk_push(record);

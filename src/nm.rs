@@ -46,6 +46,7 @@ pub const PROFILE_FIELDS: &[&str] = &[
     "connection.type",
     "connection.interface-name",
     "connection.autoconnect",
+    "connection.master",
     "ipv4.method",
     "ipv4.addresses",
     "ipv4.gateway",
@@ -563,6 +564,9 @@ pub struct Profile {
     pub id: String,
     pub uuid: String,
     pub type_: String,
+    /// `connection.master`: non-empty when the profile is a port of a
+    /// bridge, bond or team (its device is a lower device of another).
+    pub master: String,
     pub ifname: Option<String>,
     pub autoconnect: bool,
     pub ipv4: IpObs,
@@ -607,12 +611,13 @@ pub fn parse_profile(text: &str) -> std::result::Result<Profile, String> {
     let mut seen: BTreeMap<String, String> = BTreeMap::new();
     for l in lines(text)? {
         let f = split_terse(l)?;
-        if f.len() < 2 {
-            return Err("a profile line without a value".into());
+        // `-e yes` escapes every colon of a value (IPv6), so a line is
+        // exactly one field name and one value.
+        if f.len() != 2 {
+            return Err("a profile line that is not exactly one field and one value".into());
         }
         let key = f[0].clone();
-        // The value may hold escaped colons (IPv6): rejoin the rest.
-        let val = f[1..].join(":");
+        let val = f[1].clone();
         if !PROFILE_FIELDS.contains(&key.as_str()) {
             return Err(format!("an unexpected field {} in nmcli output", key));
         }
@@ -666,8 +671,14 @@ pub fn parse_profile(text: &str) -> std::result::Result<Profile, String> {
         } else {
             split_list(&g("ipv4.dns-search"))
         };
-        if dns_search.iter().any(|d| d.is_empty()) {
-            return Err("an empty DNS search entry".into());
+        if dns_search.iter().any(|d| {
+            d.is_empty()
+                || d.starts_with('-')
+                || !d
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        }) {
+            return Err("a DNS search entry in an unexpected form".into());
         }
         Ok(IpObs {
             method,
@@ -681,6 +692,7 @@ pub fn parse_profile(text: &str) -> std::result::Result<Profile, String> {
         id: g("connection.id"),
         uuid,
         type_: g("connection.type"),
+        master: g("connection.master"),
         ifname,
         autoconnect,
         ipv4: ip("ipv4", false)?,
@@ -790,6 +802,17 @@ pub fn parse_permissions(text: &str) -> std::result::Result<BTreeMap<String, Str
 }
 
 /// `a{su} N "<device path>" <result> …`: every device's rollback result.
+/// The rollback reply covers exactly the checkpoint's devices and reports
+/// result 0 for each.
+pub fn rollback_ok(text: &str, devices: &[String]) -> bool {
+    parse_rollback(text).is_ok_and(|m| {
+        let want: std::collections::BTreeSet<&String> = devices.iter().collect();
+        !m.is_empty()
+            && m.keys().collect::<std::collections::BTreeSet<_>>() == want
+            && m.values().all(|r| *r == 0)
+    })
+}
+
 pub fn parse_rollback(text: &str) -> std::result::Result<BTreeMap<String, u32>, String> {
     let t = busctl_tokens(text)?;
     if t.len() < 2 || t[0] != "a{su}" {
@@ -964,6 +987,12 @@ pub fn steps(spec: &NmSpec, obs: &Observed) -> std::result::Result<Steps, String
     let active = obs.active_on.is_some();
     match (spec.state, &obs.profile) {
         (NmState::Absent, None) => return Ok(out),
+        (_, Some(p)) if p.type_ != ETHERNET_SETTING => {
+            return Err(format!(
+                "the existing profile has type {:?}, not ethernet; Sinter neither changes nor removes a profile of another type",
+                p.type_
+            ))
+        }
         (NmState::Absent, Some(_)) => {
             out.delete = true;
             out.drift
@@ -1185,6 +1214,29 @@ pub fn active_argv() -> Vec<String> {
     .collect()
 }
 
+/// `-t -e yes -f DEVICE,TYPE device`: the type of every device
+/// NetworkManager knows (management interfaces must be plain Ethernet).
+pub fn devices_argv() -> Vec<String> {
+    ["-t", "-e", "yes", "-f", "DEVICE,TYPE", "device"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+pub fn parse_devices(text: &str) -> std::result::Result<BTreeMap<String, String>, String> {
+    let mut out = BTreeMap::new();
+    for l in lines(text)? {
+        let f = split_terse(l)?;
+        if f.len() != 2 || f[0].is_empty() || f[1].is_empty() {
+            return Err("a device line without exactly DEVICE and TYPE".into());
+        }
+        if out.insert(f[0].clone(), f[1].clone()).is_some() {
+            return Err("a device listed twice".into());
+        }
+    }
+    Ok(out)
+}
+
 pub fn profile_argv(uuid: &str) -> Vec<String> {
     vec![
         "-t".into(),
@@ -1238,6 +1290,7 @@ pub fn observed_summary(obs: &Observed) -> BTreeMap<String, String> {
         Some(p) => {
             m.insert("state".into(), "present".into());
             m.insert("uuid".into(), p.uuid.clone());
+            m.insert("master".into(), p.master.clone());
             m.insert("ifname".into(), p.ifname.clone().unwrap_or_default());
             m.insert("autoconnect".into(), yn(p.autoconnect));
             for (fam, o) in [("ipv4", &p.ipv4), ("ipv6", &p.ipv6)] {

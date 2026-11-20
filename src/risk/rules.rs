@@ -408,6 +408,15 @@ pub struct NmChange {
     pub addresses: Vec<String>,
     /// Whether routing could be read at all.
     pub routing_readable: bool,
+    /// The profile is activated by this change (explicitly, created, or a
+    /// changed inactive profile that autoconnects).
+    pub activates: bool,
+    /// The profile is a port of a bridge, bond or team (`connection.master`).
+    pub port: bool,
+    /// Why the devices under the management interfaces cannot be judged
+    /// (a management interface that is not plain Ethernet, or device types
+    /// that could not be read); `None` when they can.
+    pub lower_unknown: Option<String>,
 }
 
 /// The NetworkManager rule (§45.6).
@@ -422,6 +431,14 @@ pub fn nm(path: &PathState, c: &NmChange) -> Dynamic {
     if !c.routing_readable {
         return Dynamic::Unknown("routing could not be read".into());
     }
+    if let Some(why) = &c.lower_unknown {
+        return Dynamic::Unknown(why.clone());
+    }
+    if c.port {
+        return Dynamic::Unknown(
+            "the profile is a port of a bridge, bond or team, whose effect on the management path is not judged".into(),
+        );
+    }
     for i in c.ifname.iter().chain(c.ifname_before.iter()) {
         if p.ifaces.contains(i) {
             return Dynamic::Affects(format!("concerns the management interface {}", i));
@@ -430,9 +447,9 @@ pub fn nm(path: &PathState, c: &NmChange) -> Dynamic {
     if active.iter().any(|d| p.ifaces.contains(d)) {
         return Dynamic::Affects("the profile is active on a management interface".into());
     }
-    if c.ifname.is_none() && c.autoconnect {
+    if c.ifname.is_none() && (c.autoconnect || c.activates) {
         return Dynamic::Affects(
-            "autoconnect without an interface may take any Ethernet device".into(),
+            "a profile activated or autoconnecting without an interface may take any Ethernet device".into(),
         );
     }
     if p.loopback {

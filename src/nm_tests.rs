@@ -377,6 +377,17 @@ fn profile_parser_is_strict_and_normalizes() {
     assert!(parse_profile(&profile_text(&[("ipv4.addresses", "192.0.2.10/024")])).is_err());
     assert!(parse_profile(&profile_text(&[("connection.uuid", "x")])).is_err());
     assert!(parse_profile("connection.id\n").is_err());
+    // An unescaped colon in a value is not what `-e yes` prints.
+    assert!(
+        parse_profile(&profile_text(&[]).replace("ipv4.dns:\n", "ipv4.dns:192.0.2.1:x\n")).is_err()
+    );
+    assert!(parse_profile(&profile_text(&[("ipv4.dns-search", "--")])).is_err());
+    assert_eq!(
+        parse_profile(&profile_text(&[("connection.master", "br0")]))
+            .unwrap()
+            .master,
+        "br0"
+    );
 }
 
 #[test]
@@ -407,6 +418,24 @@ fn busctl_replies() {
     let r = parse_rollback("a{su} 2 \"/org/freedesktop/NetworkManager/Devices/1\" 0 \"/org/freedesktop/NetworkManager/Devices/2\" 1\n").unwrap();
     assert_eq!(r.values().copied().collect::<Vec<_>>(), [0, 1]);
     assert!(parse_rollback("a{su} 1 \"/x\" 0\n").is_err());
+    let d1 = "/org/freedesktop/NetworkManager/Devices/1".to_string();
+    let d2 = "/org/freedesktop/NetworkManager/Devices/2".to_string();
+    let one = format!("a{{su}} 1 \"{d1}\" 0\n");
+    assert!(rollback_ok(&one, std::slice::from_ref(&d1)));
+    assert!(
+        !rollback_ok(&one, &[d1.clone(), d2.clone()]),
+        "a device missing"
+    );
+    assert!(
+        !rollback_ok(&format!("a{{su}} 1 \"{d1}\" 1\n"), &[d1]),
+        "result 1"
+    );
+    assert_eq!(
+        parse_devices("eth0:ethernet\nbr0:bridge\n").unwrap()["br0"],
+        "bridge"
+    );
+    assert!(parse_devices("eth0\n").is_err());
+    assert!(parse_devices("eth0:ethernet\neth0:ethernet\n").is_err());
     assert!(busctl_tokens("o \"a\\\"b\"").unwrap()[1] == "a\"b");
     assert!(busctl_tokens("o \"unterminated").is_err());
     let intro = "NAME TYPE SIGNATURE RESULT/VALUE FLAGS\n.CheckpointCreate method aouu o -\n.CheckpointDestroy method o - -\n.CheckpointRollback method o a{su} -\n";

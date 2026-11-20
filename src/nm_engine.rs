@@ -286,6 +286,7 @@ impl Engine {
             desired: nm::desired_summary(spec),
             observed: nm::observed_summary(obs),
             steps: st.labels(),
+            device_types: None,
             change: NmChange {
                 ifname: if removes {
                     None
@@ -300,6 +301,9 @@ impl Engine {
                 sets_gateway: !removes && (gw_changed || (activates && a.gateway)),
                 addresses,
                 routing_readable: true,
+                activates: activates && !removes,
+                port: p.is_some_and(|p| !p.master.is_empty()),
+                lower_unknown: None,
             },
             takes_effect_now: st.up || ((st.down || st.delete) && obs.active_on.is_some()),
             devices,
@@ -314,7 +318,13 @@ impl Engine {
     ) -> Result<ResourceResult> {
         let sensitive = res.sensitive || res.derived_sensitive;
         let (spec, obs, st) = self.nm_compare(res, item)?;
-        let input = Self::nm_risk_input(&spec, &obs, &st);
+        let mut input = Self::nm_risk_input(&spec, &obs, &st);
+        if !st.is_empty() {
+            input.device_types = self
+                .nm_query(&nm::devices_argv(), sensitive)
+                .and_then(|t| nm::parse_devices(&t))
+                .ok();
+        }
         let verdict = self.risk_check_nm(res, input)?;
         let mut notes: Vec<String> = Vec::new();
         let changes_profile = st.create || !st.settings.is_empty();
@@ -750,6 +760,9 @@ impl Engine {
             ));
         }
         let changed = self.nm_execute(spec, before, st, permit, sensitive);
+        // A first command that failed changed nothing for certain: a
+        // verified rollback is then reported as possible, not changed.
+        let mutated = !matches!(&changed, Err(Failure::Failed(_, false)));
         let reached = changed.is_ok() && self.fs.probe_new_connection();
         let in_time = started.elapsed().as_secs() + 5 < u64::from(t);
         if reached && in_time {
@@ -771,6 +784,7 @@ impl Engine {
                 &rec,
                 sensitive,
                 "the change worked but the checkpoint could not be destroyed, so NetworkManager rolls it back at the timeout",
+                true,
             );
         }
         let why = match &changed {
@@ -792,8 +806,7 @@ impl Engine {
             );
             let ok = match &rolled {
                 Ok(o) if o.completion == Completion::Exited(0) => {
-                    nm::parse_rollback(&String::from_utf8_lossy(&o.stdout))
-                        .is_ok_and(|m| !m.is_empty() && m.values().all(|r| *r == 0))
+                    nm::rollback_ok(&String::from_utf8_lossy(&o.stdout), &paths)
                 }
                 _ => false,
             };
@@ -802,14 +815,14 @@ impl Engine {
                 return match self.nm_observe_settled(res, spec, sensitive) {
                     Some(now) if nm::same_state(before, &now) => {
                         let _ = self.risk_ledger("rollback-verified", rec.clone());
-                        Err(SinterError::apply(withheld(
+                        let e = SinterError::apply(withheld(
                             sensitive,
                             format!(
                                 "{}: {}; the checkpoint was rolled back and the previous profile and active state were verified",
                                 res.id, why
                             ),
-                        ))
-                        .changed())
+                        ));
+                        Err(if mutated { e.changed() } else { e.possible() })
                     }
                     _ => {
                         let _ = self.risk_ledger("rollback-unverified", rec.clone());
@@ -835,6 +848,7 @@ impl Engine {
                     "{}; the explicit rollback failed, so NetworkManager rolls back at the timeout",
                     why
                 ),
+                mutated,
             );
         }
         self.nm_wait_and_verify(
@@ -844,11 +858,13 @@ impl Engine {
             &rec,
             sensitive,
             &format!("{}; the original connection does not answer, so NetworkManager rolls back at the timeout", why),
+            mutated,
         )
     }
 
     /// Wait the checkpoint timeout plus 15 seconds, reconnect and verify
     /// that the previous state is back (§45.7).
+    #[allow(clippy::too_many_arguments)]
     fn nm_wait_and_verify(
         &mut self,
         res: &FrozenResource,
@@ -857,6 +873,7 @@ impl Engine {
         rec: &serde_json::Value,
         sensitive: bool,
         why: &str,
+        mutated: bool,
     ) -> Result<()> {
         let _ = self.risk_ledger("checkpoint-waiting", rec.clone());
         self.fs.wait_secs(u64::from(spec.checkpoint_timeout) + 15);
@@ -865,14 +882,14 @@ impl Engine {
             if let Some(now) = self.nm_observe_settled(res, spec, sensitive) {
                 if nm::same_state(before, &now) {
                     let _ = self.risk_ledger("rollback-verified", rec.clone());
-                    return Err(SinterError::apply(withheld(
+                    let e = SinterError::apply(withheld(
                         sensitive,
                         format!(
                             "{}: {}; after the timeout the previous profile and active state were verified",
                             res.id, why
                         ),
-                    ))
-                    .changed());
+                    ));
+                    return Err(if mutated { e.changed() } else { e.possible() });
                 }
             }
         }

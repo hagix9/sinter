@@ -803,7 +803,7 @@ fn approved_autoconnect_without_interface_is_refused() {
     );
     let (_d, c, _st) = approval_for(&rc, &body, || target(&n, net()));
     let (r, _) = run(rc.model(&body).unwrap(), Mode::Apply, target(&n, net()), c);
-    refused(&r, &n, "x", "autoconnects without an interface");
+    refused(&r, &n, "x", "may take another device");
     assert!(cps(&n).is_empty());
 }
 
@@ -1086,4 +1086,144 @@ fn a_second_connection_risk_change_in_the_same_run_is_refused() {
     assert_ne!(ex, Execution::Succeeded, "{why}");
     assert!(why.contains("earlier connection-risk change"), "{why}");
     assert_eq!(muts(&n), 1, "only the first resource changed");
+}
+
+// ---------------------------------------------------------------------------
+// independent audit 1 (B-1, B-2, B-3, N-1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn activation_without_an_interface_affects_and_is_refused_even_with_an_approval() {
+    // B-1: `up` of a profile without an interface lets NetworkManager pick a
+    // device itself (the management NIC on a one-NIC host).
+    let rc = Recipe::new();
+    let n = nm();
+    let body = nmres(
+        "x",
+        "name: x, autoconnect: false, active: true, ipv4: { method: manual, addresses: [198.51.100.20/24] }, ipv6: { method: ignore }",
+    );
+    let (dy, why) = dynamic_of(&body, &n, net());
+    assert_eq!(dy, "affects", "{why:?}");
+    assert!(why.unwrap().contains("without an interface"));
+    let (r, _) = run(
+        rc.model(&body).unwrap(),
+        Mode::Apply,
+        target(&n, net()),
+        ctx(),
+    );
+    refused(&r, &n, "x", "has no approval");
+    let (_d, c, _st) = approval_for(&rc, &body, || target(&n, net()));
+    let (r, _) = run(rc.model(&body).unwrap(), Mode::Apply, target(&n, net()), c);
+    refused(&r, &n, "x", "may take another device");
+    assert!(cps(&n).is_empty());
+}
+
+#[test]
+fn ports_and_non_ethernet_management_interfaces_are_unknown() {
+    // B-2 (a): a port profile (connection.master) is not judged.
+    let n = nm();
+    {
+        let mut g = n.lock().unwrap();
+        let mut p = FakeNm::profile("br-port", "eth1");
+        p.insert("connection.master".into(), "br0".into());
+        p.insert("ipv4.method".into(), "disabled".into());
+        p.insert("ipv6.method".into(), "ignore".into());
+        let u = g.add(p);
+        g.activate(&u, "eth1");
+    }
+    for body in [
+        nmres("p", "name: br-port, active: false"),
+        nmres("p", "name: br-port, state: absent"),
+        nmres("p", "name: br-port, ipv4: { dns: [192.0.2.53] }"),
+    ] {
+        let (dy, why) = dynamic_of(&body, &n, net());
+        assert_eq!(dy, "unknown", "{body}: {why:?}");
+        assert!(why.unwrap().contains("port of a bridge"));
+        let rc = Recipe::new();
+        let (r, _) = run(
+            rc.model(&body).unwrap(),
+            Mode::Apply,
+            target(&n, net()),
+            ctx(),
+        );
+        refused(&r, &n, "p", "unknown");
+    }
+    // B-2 (b): the management address on a bridge: every change unknown,
+    // also of a profile that looks unrelated.
+    let n = nm();
+    {
+        let mut g = n.lock().unwrap();
+        g.devices.push("br0".into());
+        g.device_types.insert("br0".into(), "bridge".into());
+    }
+    let mut f = net();
+    f.ip_addr = Some("5: br0    inet 192.0.2.10/24 brd 192.0.2.255 scope global br0\n".into());
+    f.default_route = Some("203.0.113.9 from 192.0.2.10 via 192.0.2.1 dev br0\n".into());
+    let (dy, why) = dynamic_of(&lan_dns(), &n, f.clone());
+    assert_eq!(dy, "unknown", "{why:?}");
+    assert!(why.unwrap().contains("br0 is a bridge device"));
+    let rc = Recipe::new();
+    let (r, _) = run(
+        rc.model(&lan_dns()).unwrap(),
+        Mode::Apply,
+        target(&n, f),
+        ctx(),
+    );
+    refused(&r, &n, "lan", "unknown");
+    // Device types that cannot be read: unknown.
+    let n = nm();
+    n.lock().unwrap().devices.retain(|d| d != "eth0");
+    let (dy, why) = dynamic_of(&lan_dns(), &n, net());
+    assert_eq!(dy, "unknown");
+    assert!(why.unwrap().contains("not known to NetworkManager"));
+}
+
+#[test]
+fn a_profile_of_another_type_is_never_removed() {
+    // B-3.
+    let rc = Recipe::new();
+    let n = nm();
+    {
+        let mut g = n.lock().unwrap();
+        let mut p = FakeNm::profile("bond0", "bond0");
+        p.insert("connection.type".into(), "bond".into());
+        g.add(p);
+    }
+    let body = nmres("b", "name: bond0, state: absent");
+    let (r, _) = run(
+        rc.model(&body).unwrap(),
+        Mode::Apply,
+        target(&n, net()),
+        ctx(),
+    );
+    refused(&r, &n, "b", "not ethernet");
+    let a = audit(rc.model(&body).unwrap(), target(&n, net()));
+    assert_eq!(
+        a.resources[0].status,
+        crate::audit::AuditResourceStatus::Error
+    );
+}
+
+#[test]
+fn plan_says_when_apply_would_refuse_an_approved_change() {
+    // N-1: no checkpoint can test a change that takes effect later.
+    let rc = Recipe::new();
+    let n = nm();
+    let (r, _) = run(
+        rc.model(&nmres("m", "name: mgmt, ipv4: { dns: [192.0.2.53] }"))
+            .unwrap(),
+        Mode::Plan,
+        target(&n, net()),
+        ctx(),
+    );
+    let why = outcome(&r, "m").2;
+    assert!(why.contains("checkpoint=unavailable"), "{why}");
+    // A change a checkpoint can test says nothing of the kind.
+    let (r, _) = run(
+        rc.model(&mgmt_change("")).unwrap(),
+        Mode::Plan,
+        target(&n, net()),
+        ctx(),
+    );
+    assert!(!outcome(&r, "m").2.contains("checkpoint=unavailable"));
 }

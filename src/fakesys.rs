@@ -2868,6 +2868,9 @@ pub struct FakeNm {
     pub active: Vec<(String, String, String)>,
     /// Devices NetworkManager knows (index + 1 is the D-Bus object number).
     pub devices: Vec<String>,
+    /// Device types reported by `-f DEVICE,TYPE device` (default: `lo` is
+    /// loopback, every other device ethernet).
+    pub device_types: BTreeMap<String, String>,
     pub checkpoint_api: bool,
     /// Answer for `org.freedesktop.NetworkManager.checkpoint-rollback`.
     pub permission: String,
@@ -2905,6 +2908,7 @@ impl Default for FakeNm {
             profiles: Vec::new(),
             active: Vec::new(),
             devices: vec!["eth0".into(), "eth1".into(), "lo".into()],
+            device_types: BTreeMap::new(),
             checkpoint_api: true,
             permission: "yes".into(),
             create_fails: None,
@@ -2960,6 +2964,7 @@ impl FakeNm {
         m.insert("connection.type".into(), crate::nm::ETHERNET_SETTING.into());
         m.insert("connection.interface-name".into(), ifname.into());
         m.insert("connection.autoconnect".into(), "yes".into());
+        m.insert("connection.master".into(), String::new());
         for f in [
             "ipv4.addresses",
             "ipv4.gateway",
@@ -3021,6 +3026,19 @@ impl FakeNm {
                     .devices
                     .iter()
                     .map(|d| format!("{}:connected\n", d))
+                    .collect();
+                Self::out(0, body, "")
+            }
+            ["-t", "-e", "yes", "-f", "DEVICE,TYPE", "device"] => {
+                let body: String = self
+                    .devices
+                    .iter()
+                    .map(|d| {
+                        let t = self.device_types.get(d).cloned().unwrap_or_else(|| {
+                            if d == "lo" { "loopback" } else { "ethernet" }.to_string()
+                        });
+                        format!("{}:{}\n", crate::nm::escape_terse(d), t)
+                    })
                     .collect();
                 Self::out(0, body, "")
             }
@@ -3139,7 +3157,24 @@ impl FakeNm {
                 let Some(i) = self.by_uuid(u) else {
                     return Self::out(10, String::new(), "Error: no such connection profile.");
                 };
-                let ifname = self.profiles[i]["connection.interface-name"].clone();
+                let mut ifname = self.profiles[i]["connection.interface-name"].clone();
+                if ifname.is_empty() {
+                    // Without an interface NetworkManager picks a device
+                    // itself: the first Ethernet device (the management NIC
+                    // of a one-NIC host, as the audit's scenario).
+                    ifname = self
+                        .devices
+                        .iter()
+                        .find(|d| {
+                            self.device_types
+                                .get(*d)
+                                .map(|s| s.as_str())
+                                .unwrap_or(if *d == "lo" { "loopback" } else { "ethernet" })
+                                == "ethernet"
+                        })
+                        .cloned()
+                        .unwrap_or_default();
+                }
                 if ifname.is_empty() || !self.devices.contains(&ifname) {
                     return Self::out(4, String::new(), "Error: no suitable device found.");
                 }

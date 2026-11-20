@@ -59,6 +59,7 @@ exists and, optionally, whether it is active.
 - 802.1X, Wi-Fi, VLAN, bond, bridge and every setting with a secret are not
   supported; unknown fields are a validation error.
 - Two `nm_connection` resources with the same `name` are a validation error.
+- An existing profile of another type is never changed or removed.
 
 ## Expected behavior
 
@@ -90,13 +91,17 @@ Every change is connection-risk class C (see
 interfaces and client address of the SSH connection Sinter uses, a change
 **affects** the management connection when the profile's interface (before
 or after) is a management interface, the profile is active on one, it would
-autoconnect without an interface, it is deactivated or deleted while active
+autoconnect or be activated without an interface (NetworkManager then picks
+the device), it is deactivated or deleted while active
 on one, or it can change routing for the client address: automatic
 addressing (DHCP or router advertisements), a gateway, or an address whose
 prefix contains the client address (for a created profile, or a changed
 inactive profile that autoconnects, NetworkManager may activate it by itself,
 so its addressing counts too). Only a change that is none of these is
-**clear** (for example DNS settings on a non-management profile). If the
+**clear** (for example DNS settings on a non-management profile). A port
+profile (of a bridge, bond or team) is **unknown**, and so is every change
+when a management interface is not a plain Ethernet device (a bridge, bond,
+team or VLAN). If the
 path cannot be read the result is **unknown** and the change is refused; a
 local target has no visible management connection, so every change there is
 refused.

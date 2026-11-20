@@ -1357,7 +1357,8 @@ impl TargetFs {
         let a: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let ok = match program {
             crate::nm::NMCLI => match a.as_slice() {
-                ["-t", "-e", "yes", "-f", _, "connection", "show"]
+                ["-t", "-e", "yes", "-f", "DEVICE,TYPE", "device"]
+                | ["-t", "-e", "yes", "-f", _, "connection", "show"]
                 | ["-t", "-e", "yes", "-f", _, "connection", "show", "--active"] => true,
                 ["-t", "-e", "yes", "-f", _, "connection", "show", "uuid", u] => {
                     crate::nm::valid_uuid(u)
