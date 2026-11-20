@@ -137,6 +137,58 @@ audit は systemd マネージャの同期状態も、独立したドリフト�
 
 承認は `$XDG_STATE_HOME/sinter`（無ければ `~/.local/state/sinter`）に、コントローラのアカウント専用で置かれます。間違い、古い確認、再使用は防ぎますが、同じアカウントで動くプロセスは防げません。接続が切れた後の回復は保証しません。
 
+## discover（未リリース）
+
+`sinter discover (--host H | <selector>) --output <file.yaml> [--include-path <abs path>]… [--profile packages,units,accounts,files] [--sudo] [接続オプション]`
+
+1 台のホストの状態を読み取り、**候補**のレシピを作ります。plan も apply も
+実行しません。接続は読み取り専用（変更はできない）で、候補はどこにも適用
+されません。内容を確認してから、自分で `validate`、`plan`、`audit` を実行してください。
+
+- ホストはちょうど 1 台: `--host H`、または 1 台のインベントリホストを指す
+  selector。ホストなし、複数、未知の名前はどれも exit 2（接続前）。
+- `--output` は必須。レシピと `<file>.discover.json`（provenance）を、mode 0600 の
+  新しいファイルとして書きます。どちらかのパスに既存のファイルや symlink がある
+  場合、またはディレクトリが symlink、自分の所有でない、group か others が書き込み
+  可能な場合は exit 2。上書きはしません。
+- プロファイル（既定はすべて）:
+  - `packages`: Debian 系で手動インストールされたパッケージ（`apt-mark showmanual`）。
+    Red Hat 系では、cache-only の user-installed な `dnf` 問い合わせをまだ測定して
+    いないため unsupported として報告します。`dnf` は実行せず、全パッケージ一覧で
+    代用することもありません。
+  - `units`: enabled な service と timer のユニットファイル
+    （`systemctl list-unit-files … --state=enabled`）を、`enabled: true` の `service`
+    リソースにします。preset 列があれば vendor preset と同じものは除き、なければ
+    すべて取り込んで警告を出します。テンプレート、alias、masked は unsupported。
+  - `accounts`: `/etc/login.defs` の `UID_MIN`〜`UID_MAX` / `GID_MIN`〜`GID_MAX`
+    の範囲にあるローカルユーザーとグループ（`getent -s files`）。4 つの値がすべて
+    読めなければ unsupported。`/etc/shadow` は読まず、GECOS（comment）とパスワード
+    欄は書きません。
+  - `files`: `--include-path` のパスだけ（再帰はしない）。64 KiB 以下の UTF-8
+    テキストの通常ファイルは内容つきの `file`、symlink（`link`）とディレクトリ
+    （`directory`）はメタデータだけ。
+- 秘密情報は fail closed: ファイルの内容を取り込むのは、ヒューリスティックで
+  秘密でないと積極的に判定できた場合だけ。常に除外するもの: shadow/gshadow、
+  SSH 鍵、`*.key`、`*.pem`、`*.p12`、others が読めないファイル、秘密鍵ブロック、
+  資格情報の代入（`password = …`、`token: …` など）、長い高エントロピートークン、
+  制御文字、不正な UTF-8、読み取り中にサイズ・mode・所有者・inode・時刻が変わった
+  ファイル（`dd iflag=nofollow` で読む）。除外したものはパスと理由だけを記録し、
+  内容・断片・digest はどこにも書きません。判定は誤りうるので、使う前に必ず確認してください。
+- 生成する id: `pkg-`、`svc-`、`group-`、`user-`、`file-`、`link-`、`dir-`。衝突すれば
+  `-2`、`-3`… を付けます。文字列はすべて double-quoted。先頭のコメントにホストの
+  ラベル（インベントリ名、`--host` のときは `cli-host`。アドレスは書かない）と収集時刻を記録します。
+- 生成したテキストをレシピのローダーで読み直し、収集したリソースと完全に一致
+  しなければ何も書きません（exit 4）。
+- provenance（`sinter-discover-provenance/1`）: Sinter のバージョン、ホストラベル、時刻、
+  各 collector（id、固定 argv、終了コード、ファイル内容や個人データを含まない場合だけ
+  出力の SHA-256）、各リソース（id、型、collector、source key、観測値の SHA-256。
+  ファイル内容には付けない）、unsupported（種類、キー、理由）、warnings。unsupported と
+  warnings は stderr にも出します。
+- レシピを書いたあとに provenance を書けなかった場合は、その旨をエラーで示し、
+  レシピは残します（削除も置き換えもしない）。
+- MCP のツールではありません。実機での形式（apt-mark、systemctl、getent、
+  login.defs、dd）はまだ測定していません。
+
 ## secrets
 
 ```sh

@@ -35,6 +35,8 @@ pub enum NeedOverride {
 
 #[derive(Debug, Clone)]
 pub struct FakeManager {
+    /// Vendor preset per unit for `list-unit-files` (`disabled` when absent).
+    pub presets: BTreeMap<String, String>,
     /// Complete answer to the UnitPath query; `None` serves the default.
     pub unit_path_output: Option<Output>,
     /// Disk revision per unit (absent = no unit file on disk).
@@ -206,6 +208,7 @@ impl Default for FakeManager {
             calendar_checks: 0,
             present_after_reload: BTreeMap::new(),
             net: FakeNet::default(),
+            presets: BTreeMap::new(),
         }
     }
 }
@@ -1013,6 +1016,37 @@ impl FakeFs {
                 ),
                 _ => Self::fail(&format!("sha256sum: {}: No such file or directory", p)),
             },
+            // `sinter discover` reads a regular file without following a
+            // symbolic link: `dd if=<p> iflag=nofollow bs=<n> count=1 status=none`.
+            ("dd", [ifp, "iflag=nofollow", bs, "count=1", "status=none"])
+                if ifp.starts_with("if=") && bs.starts_with("bs=") =>
+            {
+                let p = &ifp[3..];
+                let n: usize = bs[3..].parse().unwrap_or(0);
+                match self.nodes.get(p) {
+                    Some(FakeNode {
+                        kind: FakeKind::File(b),
+                        ..
+                    }) => Output {
+                        completion: Completion::Exited(0),
+                        stdout: b[..b.len().min(n)].to_vec(),
+                        stderr: Vec::new(),
+                        stdout_truncated: false,
+                        stderr_truncated: false,
+                    },
+                    Some(FakeNode {
+                        kind: FakeKind::Symlink(_),
+                        ..
+                    }) => Self::fail(&format!(
+                        "dd: failed to open '{}': Too many levels of symbolic links",
+                        p
+                    )),
+                    _ => Self::fail(&format!(
+                        "dd: failed to open '{}': No such file or directory",
+                        p
+                    )),
+                }
+            }
             ("cat", ["--", p]) => match self.nodes.get(*p) {
                 Some(FakeNode {
                     kind: FakeKind::File(b),

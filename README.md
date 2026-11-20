@@ -303,6 +303,12 @@ NetworkManager Ethernet profile, protected by connection-risk control and a
 NetworkManager checkpoint (not yet released; its real-host forms are not
 measured yet). See the resource reference.
 
+`sinter discover` (not yet released) reads one host read-only into a
+candidate recipe and a provenance file: manually installed packages, enabled
+units, local accounts and explicitly named files, with secret-looking file
+content excluded (a heuristic: review the candidate before use). It never
+plans, applies or overwrites anything.
+
 Also since v1.2.0: `sinter secrets encrypt | decrypt | list`
 encrypts secret files in the standard age format (recipients or a terminal-only
 passphrase; identities outside the repository by default). A `file` resource can

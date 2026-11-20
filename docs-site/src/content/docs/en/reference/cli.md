@@ -157,6 +157,65 @@ private to the controller account. They protect against mistakes, stale
 reviews and replay, not against a process running as the same account.
 Recovery after a cut connection is never guaranteed.
 
+## discover (not released)
+
+`sinter discover (--host H | <selector>) --output <file.yaml> [--include-path <abs path>]… [--profile packages,units,accounts,files] [--sudo] [connection options]`
+
+Reads one host's state into a **candidate** recipe. It never plans or
+applies: the connection is read-only (no mutation is possible), and the
+candidate is not applied anywhere. Review it, then run `validate`, `plan` and
+`audit` yourself.
+
+- Exactly one host: `--host H`, or a selector naming one inventory host
+  (no host, several hosts or an unknown name is exit 2, before any contact).
+- `--output` is required. The recipe and `<file>.discover.json` (provenance)
+  are written as new files with mode 0600; an existing file or symbolic link
+  at either path, or a directory that is a symbolic link, not owned by you or
+  writable by group or others, is exit 2. Nothing is ever overwritten.
+- Profiles (default: all):
+  - `packages`: manually installed packages (`apt-mark showmanual`) on the
+    Debian family. On the Red Hat family the cache-only user-installed `dnf`
+    query is not measured yet, so the profile is reported unsupported; no
+    `dnf` command runs and the full package list is never used instead.
+  - `units`: enabled service and timer unit files
+    (`systemctl list-unit-files … --state=enabled`), as `service` resources
+    with `enabled: true`. Units at their vendor preset are left out when the
+    preset column exists; otherwise all are taken in with a warning. Template,
+    alias and masked units are unsupported.
+  - `accounts`: local users and groups (`getent -s files`) within
+    `UID_MIN`–`UID_MAX` / `GID_MIN`–`GID_MAX` of `/etc/login.defs` (all four
+    must be readable, otherwise unsupported). `/etc/shadow` is never read; the
+    GECOS (comment) field and password fields are never written.
+  - `files`: only the `--include-path` paths, not walked recursively. Regular
+    files up to 64 KiB of UTF-8 text become `file` resources with their
+    content; symbolic links (`link`) and directories (`directory`) are
+    metadata only.
+- Secrets fail closed: file content is taken in only when a heuristic
+  positively classifies it as not secret. Always excluded: shadow/gshadow,
+  SSH keys, `*.key`, `*.pem`, `*.p12`, files not readable by others, private
+  key blocks, credential assignments (`password = …`, `token: …`, …), long
+  high-entropy tokens, control characters, invalid UTF-8, and a file whose
+  size, mode, owner, inode or times changed while it was read (read with
+  `dd iflag=nofollow`). Excluded items are listed with path and reason only:
+  no content, fragment or digest is written anywhere. The classifier can be
+  wrong; check every candidate before use.
+- Generated ids: `pkg-`, `svc-`, `group-`, `user-`, `file-`, `link-`, `dir-`
+  with a suffix `-2`, `-3`, … when two would collide. Every string is
+  double-quoted. A header comment names the host label (the inventory name,
+  or `cli-host` with `--host`; never an address) and the collection time.
+- The text is loaded back with the recipe loader and must give exactly the
+  collected resources; otherwise nothing is written (exit 4).
+- Provenance (`sinter-discover-provenance/1`): Sinter version, host label,
+  time, each collector (id, fixed argv, exit status, SHA-256 of its output
+  when it holds no file content or personal data), each resource (id, type,
+  collector, source key, SHA-256 of the observed value, never for file
+  content), unsupported items (kind, key, reason) and warnings. Unsupported
+  items and warnings are also printed on stderr.
+- If the provenance cannot be written after the recipe was, the error says
+  so and the recipe stays (it is never removed or replaced).
+- Not an MCP tool. Real-host forms (apt-mark, systemctl, getent, login.defs,
+  dd) are not measured yet.
+
 ## secrets
 
 ```sh

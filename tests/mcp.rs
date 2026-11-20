@@ -142,6 +142,8 @@ fn initialize_list_tools() {
     assert_eq!(tools.len(), 8);
     for t in tools {
         assert!(t["name"].is_string());
+        // `sinter discover` is not an MCP tool (DESIGN §46.1).
+        assert!(!t["name"].as_str().unwrap().contains("discover"));
         assert_eq!(t["inputSchema"]["type"], "object");
         // Every tool is explicitly annotated read-only / non-destructive /
         // closed-world (required by plugin directory review).

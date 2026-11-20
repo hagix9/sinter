@@ -4817,6 +4817,40 @@ impl FakeExecutor {
 
     fn run_systemctl(&mut self, args: &[String]) -> Output {
         let verb = args.first().map(|s| s.as_str()).unwrap_or("");
+        // `sinter discover`: enabled service and timer unit files with their
+        // vendor preset (only this exact form is modeled).
+        if verb == "list-unit-files" {
+            let want = [
+                "list-unit-files",
+                "--type=service",
+                "--type=timer",
+                "--state=enabled",
+                "--no-legend",
+                "--plain",
+                "--no-pager",
+            ];
+            if args.iter().map(|s| s.as_str()).ne(want.iter().copied()) {
+                return Self::exited(
+                    1,
+                    String::new(),
+                    "fake target: unmodeled list-unit-files".into(),
+                );
+            }
+            let mut body = String::new();
+            for (unit, (_, _, file)) in &self.target.services {
+                if file == "enabled" && (unit.ends_with(".service") || unit.ends_with(".timer")) {
+                    let preset = self
+                        .target
+                        .manager
+                        .presets
+                        .get(unit)
+                        .cloned()
+                        .unwrap_or_else(|| "disabled".into());
+                    body.push_str(&format!("{} enabled {}\n", unit, preset));
+                }
+            }
+            return Self::exited(0, body, String::new());
+        }
         if verb == "show" && args.iter().any(|a| a == "--property=UnitPath") {
             return match self.target.manager.unit_path_output.clone() {
                 Some(o) => o,

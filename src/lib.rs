@@ -3,6 +3,7 @@ pub mod audit;
 pub mod backup;
 pub mod bundle;
 pub mod diff;
+pub mod discover;
 pub mod document;
 pub mod engine;
 pub mod error;

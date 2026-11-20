@@ -107,6 +107,54 @@ enum Command {
     Approve(ApproveArgs),
     /// List approvals of this controller account and their state.
     Approvals(ApprovalsArgs),
+    /// Read one host's state into a candidate recipe (DESIGN §46). Read-only.
+    ///
+    /// Exactly one host (--host, or a selector naming one inventory host).
+    /// Collects manually installed packages (Debian family), enabled service
+    /// and timer unit files, local accounts in the login.defs UID/GID ranges
+    /// and the --include-path files, on a read-only connection, and writes
+    /// the candidate recipe and <OUTPUT>.discover.json (provenance), both
+    /// mode 0600, never over an existing file. Nothing is planned or applied;
+    /// review the candidate before use. File content is taken in only when a
+    /// heuristic classifies it as not secret; excluded items are listed with
+    /// path and reason only. Exit: 0 written, 2 invalid request, 3 connection,
+    /// 4 the candidate did not load back (nothing written).
+    Discover(DiscoverArgs),
+}
+
+#[derive(Args, Debug)]
+struct DiscoverArgs {
+    /// One inventory host: NAME, host:NAME, or a group with exactly one host.
+    #[arg(value_name = "SELECTOR")]
+    selector: Vec<String>,
+    /// One host outside any inventory (excludes a selector and --inventory).
+    #[arg(short = 'H', long)]
+    host: Option<String>,
+    /// Inventory for the selector (default: the one in the current directory).
+    #[arg(long, visible_alias = "hosts", value_name = "PATH")]
+    inventory: Option<PathBuf>,
+    #[arg(short = 'p', long)]
+    port: Option<u16>,
+    #[arg(short = 'u', long)]
+    user: Option<String>,
+    #[arg(long)]
+    known_hosts: Option<PathBuf>,
+    #[arg(short = 'i', long = "identity")]
+    identity: Vec<PathBuf>,
+    #[arg(long)]
+    no_ssh_config: bool,
+    /// Observe through sudo (needed for files only root can stat or read).
+    #[arg(long)]
+    sudo: bool,
+    /// The candidate recipe to write (must not exist).
+    #[arg(long, value_name = "FILE")]
+    output: PathBuf,
+    /// An absolute path to take in (repeatable; not walked recursively).
+    #[arg(long = "include-path", value_name = "ABS_PATH")]
+    include_path: Vec<String>,
+    /// Collectors: packages,units,accounts,files (default: all).
+    #[arg(long, value_name = "LIST")]
+    profile: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -1043,6 +1091,7 @@ fn run(cli: Cli) -> Result<u8, SinterError> {
         Command::Plugin(a) => plugin_command(a),
         Command::Approve(a) => approve_command(a),
         Command::Approvals(a) => approvals_command(a),
+        Command::Discover(a) => discover_command(a),
         Command::Serve(a) => serve_command(a),
         Command::Mcp(a) => {
             // Load once, fail closed: a missing/unreadable/malformed targets
@@ -3904,6 +3953,135 @@ fn approve_command(a: ApproveArgs) -> Result<u8, SinterError> {
 }
 
 /// `sinter approvals list`.
+/// `sinter discover` (DESIGN §46): exactly one host, a read-only engine,
+/// the candidate and its provenance written as new 0600 files.
+fn discover_command(a: DiscoverArgs) -> Result<u8, SinterError> {
+    use sinter::discover::{self, DiscoverConfig, Profile};
+    let profiles = match &a.profile {
+        Some(p) => Profile::parse_list(p)?,
+        None => Profile::all(),
+    };
+    if a.include_path.len() > discover::MAX_INCLUDE_PATHS {
+        return Err(SinterError::schema(format!(
+            "--include-path: at most {} paths",
+            discover::MAX_INCLUDE_PATHS
+        )));
+    }
+    let mut seen = BTreeSet::new();
+    for p in &a.include_path {
+        if !discover::valid_include_path(p) {
+            return Err(SinterError::schema(format!(
+                "--include-path {}: must be an absolute, normalized path of printable ASCII",
+                sanitize_line(p)
+            )));
+        }
+        if !seen.insert(p.clone()) {
+            return Err(SinterError::schema(format!(
+                "--include-path {}: given twice",
+                p
+            )));
+        }
+    }
+    if !a.include_path.is_empty() && !profiles.contains(&Profile::Files) {
+        return Err(SinterError::schema(
+            "--include-path needs the files profile",
+        ));
+    }
+    discover::check_outputs(&a.output)?;
+    let selector = selector_of(&a.selector);
+    if a.host.is_some() && (selector.is_some() || a.inventory.is_some()) {
+        return Err(SinterError::schema(
+            "discover: --host excludes a selector and --inventory: name exactly one host",
+        ));
+    }
+    let (label, req) = match (&a.host, &selector) {
+        (Some(h), None) => (
+            // The label is never an address (DESIGN §46.4).
+            "cli-host".to_string(),
+            TargetRequest {
+                label: h.clone(),
+                host: h.clone(),
+                port: a.port,
+                user: a.user.clone(),
+                known_hosts: a.known_hosts.clone(),
+                identity_files: a.identity.clone(),
+            },
+        ),
+        (None, Some(sel)) => {
+            let inv = match &a.inventory {
+                Some(p) => load_inventory(p)?,
+                None => detect_inventory_here()?,
+            };
+            let limit = sinter::inventory::parse_selector(sel)?;
+            let r =
+                sinter::inventory::resolve_with_selector(&inv, None, "discover", &limit, false)?;
+            let hosts: Vec<&str> = r.selected().collect();
+            let [name] = hosts.as_slice() else {
+                return Err(SinterError::schema(format!(
+                    "discover needs exactly one host; the selector names {}",
+                    hosts.len()
+                )));
+            };
+            let h = &inv.hosts[*name];
+            (
+                name.to_string(),
+                TargetRequest {
+                    label: name.to_string(),
+                    host: h.address.clone(),
+                    port: a.port.or(h.port),
+                    user: a.user.clone().or(h.user.clone()),
+                    known_hosts: a.known_hosts.clone().or(h.known_hosts.clone()),
+                    identity_files: if a.identity.is_empty() {
+                        h.identity_files.clone()
+                    } else {
+                        a.identity.clone()
+                    },
+                },
+            )
+        }
+        _ => {
+            return Err(SinterError::schema(
+                "discover needs exactly one host: --host H or a selector naming one inventory host",
+            ))
+        }
+    };
+    let spec = resolve_request(&req, !a.no_ssh_config)?;
+    let cfg = DiscoverConfig {
+        profiles,
+        include_paths: a.include_path.clone(),
+        host_label: label,
+        collected_at: discover::rfc3339(sinter::risk::approval::now_secs()),
+    };
+    // A plan-mode engine: its TargetFs can never produce a mutation permit.
+    let opts = RunOptions {
+        mode: Mode::Plan,
+        sudo: a.sudo,
+        target: TargetSpec { ssh: Some(spec) },
+        verbose: false,
+        fault: None,
+        fake_target: test_fake_target(),
+    };
+    let (d, p) = discover::run(opts, &cfg, &a.output)?;
+    for u in &d.unsupported {
+        eprintln!(
+            "sinter: discover: unsupported {} {}: {}",
+            u.kind,
+            sanitize_line(&u.key),
+            u.reason
+        );
+    }
+    for w in &d.warnings {
+        eprintln!("sinter: discover: warning: {}", sanitize_line(w));
+    }
+    println!(
+        "discover: {} candidate resources written to {} (provenance {}); not applied, review before use",
+        d.resources.len(),
+        sanitize_line(&p.recipe.display().to_string()),
+        sanitize_line(&p.provenance.display().to_string())
+    );
+    Ok(0)
+}
+
 fn approvals_command(a: ApprovalsArgs) -> Result<u8, SinterError> {
     match a.command {
         ApprovalsCommand::List => {

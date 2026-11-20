@@ -37,6 +37,18 @@ pub struct Stat {
     pub ctime: String,
 }
 
+/// The fixed observations of `sinter discover` (DESIGN §46.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DiscoverQuery {
+    AptMarkShowmanual,
+    ListUnitFiles,
+    GetentPasswd,
+    GetentGroup,
+    /// At most `MAX_FILE + 1` bytes of a regular file, never through a
+    /// symbolic link (`dd iflag=nofollow`).
+    Read(String),
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Xattrs {
     pub attrs: BTreeMap<String, String>,
@@ -1438,6 +1450,57 @@ impl TargetFs {
     /// Replace the connection after a checkpoint rollback wait (§45.7).
     pub(crate) fn reconnect(&mut self) -> bool {
         self.ex.reconnect()
+    }
+
+    /// A read-only observation of `sinter discover` (DESIGN §46.2). Only
+    /// these fixed argv forms exist; nothing comes from a command line or a
+    /// recipe except a checked absolute path for [`DiscoverQuery::Read`]. No
+    /// mutation permit is taken, and nothing else calls this.
+    pub(crate) fn discover_observe(&mut self, q: &DiscoverQuery) -> Result<Output> {
+        let (program, args): (&str, Vec<String>) = match q {
+            DiscoverQuery::AptMarkShowmanual => {
+                ("/usr/bin/apt-mark", vec!["showmanual".to_string()])
+            }
+            DiscoverQuery::ListUnitFiles => (
+                "/usr/bin/systemctl",
+                [
+                    "list-unit-files",
+                    "--type=service",
+                    "--type=timer",
+                    "--state=enabled",
+                    "--no-legend",
+                    "--plain",
+                    "--no-pager",
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            ),
+            DiscoverQuery::GetentPasswd => (
+                "/usr/bin/getent",
+                vec!["-s".into(), "files".into(), "passwd".into()],
+            ),
+            DiscoverQuery::GetentGroup => (
+                "/usr/bin/getent",
+                vec!["-s".into(), "files".into(), "group".into()],
+            ),
+            DiscoverQuery::Read(path) => {
+                if !crate::discover::valid_include_path(path) {
+                    return Err(SinterError::apply("internal error: not a discover path"));
+                }
+                (
+                    "/usr/bin/dd",
+                    vec![
+                        format!("if={}", path),
+                        "iflag=nofollow".into(),
+                        format!("bs={}", crate::discover::MAX_FILE + 1),
+                        "count=1".into(),
+                        "status=none".into(),
+                    ],
+                )
+            }
+        };
+        self.run_argv(program, &args)
     }
 
     /// Where a unit's definition comes from (`systemd_timer`, DESIGN §42.3):
