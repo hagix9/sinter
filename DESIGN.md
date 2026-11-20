@@ -3170,7 +3170,7 @@ No existing type, field, exit code or JSON key changes. `systemd_timer` is added
 
 43. Connection-risk control and approvals (v1.15.0)
 
-IMPLEMENTED (Core, v1.15.0 P2, not released; Owner decisions D-3, D-4 and D-12 of 2026-11-19), with the notes and deviations of §43.7. No connection-risk type is enforced in a release yet: firewalld 0.2.0 waits for Owner decision D-13, firewalld 0.3.0 (P3) is an unregistered candidate and `nm_connection` (P4, §45.10) is implemented but not released.
+IMPLEMENTED (Core, v1.15.0 P2, not released; Owner decisions D-3, D-4 and D-12 of 2026-11-19), with the notes and deviations of §43.7. No connection-risk type is enforced in a release yet: firewalld 0.2.0 waits for Owner decision D-13, firewalld 0.3.0 (P3) is registered for v1.15.0 after its real-host measurement (P7-R1, §44.7) and `nm_connection` (P4, §45.10) is implemented but not released.
 
 43.1 Purpose
 
@@ -3271,7 +3271,7 @@ Neither procedure guarantees recovery. A daemon restart, a reboot, routes or fil
 
 44. Resource Plugin Core extensions and firewalld 0.3.0 (v1.15.0)
 
-IMPLEMENTED in the Core (v1.15.0 P3, not released; D-10 of 2026-11-19), with the notes of §44.7. firewalld 0.3.0 exists as an unregistered candidate: no release can load it until it is measured on real hosts. §38 is unchanged except where this section adds to it.
+IMPLEMENTED in the Core (v1.15.0 P3, not released; D-10 of 2026-11-19), with the notes of §44.7. firewalld 0.3.0 is registered for v1.15.0 (measured on real hosts in P7-R1, the candidate's bytes unchanged). §38 is unchanged except where this section adds to it.
 
 44.1 Operand classes
 
@@ -3345,6 +3345,11 @@ With the management zone Z, port P (server port, tcp) and client address A of §
 - Reload (§44.4): at the handler's turn the permanent zone of the management connection is determined again from fresh observations; the zone's permanent configuration must allow the management port (target ACCEPT, a port, tcp, or a service whose definition allows it). Rich rules, or anything unreadable, are unknown. Only `clear` runs. `validate` warns when a plugin resource without a permanent facet notifies a plugin handler (a reload would discard its change).
 - Rich rules (D-10): **not implemented in v1.15.0.** The structured representation of §44.5 cannot be shown to be safe without measuring, on every supported firewalld version, that `--query-rich-rule` matches a Core-composed rule after firewalld's normalization and answers by exit status. That is a design condition not met, not a failure; it stays a future candidate.
 - NOT VERIFIED, needed before 0.3.0 can be registered and enforced on real hosts: every exit status of the new operations; `--change-interface` on an unbound and a bound interface; the permanent zone of a NetworkManager-managed interface; runtime and permanent sources; zone creation and deletion; the `--get-priority` query per version; `AllowZoneDrifting` per version; `--info-service` output keys per version; `--get-active-policies` (and its missing permanent form) and direct rules; the reload behaviour; `--get-zone-of-interface` for an unbound interface; and, from §43.7, `SSH_CONNECTION`, `ss` and `ip` output and the management-path decision. Until then everything that depends on them is refused (unknown), never assumed.
+- P7-R1 measurement and P7-R2 changes (2026-11-20, Owner decision: R-1, R-2, R-4 and R-5 in v1.15.0). Measured on Rocky Linux 9.8 (firewalld 1.3.4), Ubuntu 24.04 (2.1.1), Ubuntu 26.04 (2.3.1) and Rocky Linux 10.2 (2.4.3):
+  - R-1: every exit status of the 0.3.0 catalog matched; 0.3.0 is registered with the candidate's bytes (`FIRST_PARTY_CATALOGS`, the embedded bundle; the classification table already bound to that digest).
+  - R-4: `ss` is `/usr/sbin/ss` on the RHEL family and `/usr/bin/ss` on Ubuntu. The management-path check uses the first of these two fixed paths that exists (never a PATH search); it must be a regular file owned by root, executable and not writable by group or others (`stat` without following a final link). A link, another type, another owner, a writable file or an ambiguous observation leaves the path unknown; there is no fallback past an existing but untrusted file.
+  - R-5: `--zone=<z> --get-priority` is a usage error at runtime on all four versions, and with `--permanent` on 1.3.4. The zone priority is read from the zone's `--list-all` of the same view (runtime or `--permanent`): on 2.1.1, 2.3.1 and 2.4.3 exactly one `  ingress-priority: N` and one `  egress-priority: N` line (strict integers; any non-zero value makes the zone unknown, as before); on 1.3.4 no priority line at all (the version has no zone priorities). The heading must name the zone. Any other version (`firewall-cmd --version` read strictly as one `MAJOR.MINOR.PATCH` line), a missing, repeated or malformed line, or both the old and the new form is unknown. Measured fixture: the 2.4.3 runtime answer; the 1.3.4, 2.1.1 and 2.3.1 `--list-all` forms and every permanent form are re-measured in P7-R2 (NOT VERIFIED until then).
+  - R-2: on a declared loopback path a reload is `clear` only when `firewall-cmd --version` is one of the four measured versions, read when the path is determined and again at the reload's turn (a different or unmeasured answer then is unknown). Measured: established loopback sessions survived five reloads and new loopback connections succeeded once the reload returned on all four; new loopback connections made during a reload failed on 1.3.4, 2.3.1 and 2.4.3. The reload runs synchronously as one mutate operation on the run's existing session: the handler path opens no new connection and never reconnects (the runtime-first probe and the NetworkManager reconnect belong to resources, which run before the handler phase), hosts run one after another, a timeout is indeterminate and not retried. A non-loopback path keeps the permanent-configuration rule of §44.4.
 
 45. `nm_connection` resource (v1.15.0)
 

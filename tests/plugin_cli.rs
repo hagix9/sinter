@@ -292,7 +292,10 @@ fn plugin_list_without_a_root_shows_the_embedded_plugins_as_json() {
             )
         })
         .collect();
-    assert_eq!(names, ["firewalld@0.1.0", "firewalld@0.2.0"]);
+    assert_eq!(
+        names,
+        ["firewalld@0.1.0", "firewalld@0.2.0", "firewalld@0.3.0"]
+    );
     assert!(plugins
         .iter()
         .all(|p| p["available"] == true && p["installed"] == false && p["status"] == "available"));

@@ -135,6 +135,15 @@ pub struct FakeNet {
     pub reconnect_after_wait: Option<bool>,
     /// Seconds waited (recorded, never slept).
     pub waited: u64,
+    /// Reconnects attempted (NetworkManager checkpoint recovery).
+    pub reconnects: usize,
+    /// (probes, reconnects) also counted here, readable after a run (the
+    /// target itself moves into the engine).
+    pub shared_counts: Option<std::sync::Arc<std::sync::Mutex<(usize, usize)>>>,
+    /// `stat -c` answers for the `ss` candidates (R-4), by path: the record
+    /// line, or `None` for an absent file. Unset: `/usr/bin/ss` is a regular
+    /// root file 0755 and `/usr/sbin/ss` is absent (Ubuntu, measured).
+    pub ss_stat: Option<BTreeMap<String, Option<String>>>,
 }
 
 impl FakeNet {
@@ -147,6 +156,23 @@ impl FakeNet {
             stderr_truncated: false,
         }
     }
+    /// The `stat` record of an `ss` candidate, `None` when absent (R-4).
+    pub fn ss_stat_line(&self, path: &str) -> Option<String> {
+        match &self.ss_stat {
+            Some(m) => m.get(path).cloned().flatten(),
+            None => (path == "/usr/bin/ss")
+                .then(|| "regular file|755|0|0|133000|2049|1|2026-11-20 00:00:00.000000000 +0000|2026-11-20 00:00:00.000000000 +0000".to_string()),
+        }
+    }
+
+    /// The candidate a well-formed observation would choose (the fake runs
+    /// `ss` only at that path, so a wrong path is noticed).
+    pub fn ss_program(&self) -> Option<&'static str> {
+        ["/usr/bin/ss", "/usr/sbin/ss"]
+            .into_iter()
+            .find(|p| self.ss_stat_line(p).is_some())
+    }
+
     pub fn ss(&mut self, args: &[String]) -> crate::executor::Output {
         self.received.push(args.to_vec());
         match (&self.ss, args) {
@@ -2338,7 +2364,14 @@ pub struct FakeFirewalld {
     /// Zones with forward ports.
     pub forward_ports: BTreeSet<String>,
     /// zone -> priority; `None` answers `--get-priority` as an unknown option.
+    /// `--list-all` shows `ingress-priority` (this value) and
+    /// `egress-priority: 0` on a 2.x version when set, and no priority line
+    /// on 1.x (measured, R-5).
     pub priorities: Option<BTreeMap<String, i64>>,
+    /// zone -> the exact `--list-all` answer (overrides the generated one);
+    /// `perm_list_all` for `--permanent --list-all`, falling back to it.
+    pub list_all: BTreeMap<String, String>,
+    pub perm_list_all: BTreeMap<String, String>,
     pub active_policies: Vec<String>,
     pub direct_rules: Vec<String>,
     /// service -> ports of its definition (`22/tcp`).
@@ -2555,6 +2588,33 @@ impl FakeFirewalld {
             .filter(|x| *x != "--permanent")
             .collect();
         let tail = if a.len() == 2 { a[1] } else { "" };
+        if tail == "--list-all" {
+            if let Some(s) = perm.then(|| self.perm_list_all.get(&zone)).flatten() {
+                return fw_out(0, s, "");
+            }
+            if let Some(s) = self.list_all.get(&zone) {
+                return fw_out(0, s, "");
+            }
+            let v = self.version.clone().unwrap_or_else(|| "1.3.4".into());
+            let mut s = format!(
+                "{}\n  target: {}\n",
+                zone,
+                self.targets
+                    .get(&zone)
+                    .map(String::as_str)
+                    .unwrap_or("default")
+            );
+            if !v.starts_with("1.") {
+                if let Some(p) = &self.priorities {
+                    s += &format!(
+                        "  ingress-priority: {}\n  egress-priority: 0\n",
+                        p.get(&zone).copied().unwrap_or(0)
+                    );
+                }
+            }
+            s += "  interfaces: \n  sources: \n";
+            return fw_out(0, &s, "");
+        }
         if tail == "--list-sources" {
             let map = if perm {
                 self.perm_sources

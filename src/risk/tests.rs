@@ -1090,17 +1090,34 @@ fn unknown_paths_are_refused_even_with_an_approval_in_force() {
             }),
         ),
         (
-            "priority",
+            "priority (a version with zone priorities, R-5)",
             Box::new(|| net(22)),
             Box::new(|f: &mut FakeFirewalld| {
+                f.version = Some("2.4.3".into());
                 f.priorities = Some([("internal".to_string(), -5)].into_iter().collect());
             }),
         ),
         (
-            "priority not answered (any version)",
+            "priority not answered by a version that has them",
             Box::new(|| net(22)),
             Box::new(|f: &mut FakeFirewalld| {
+                f.version = Some("2.1.1".into());
                 f.priorities = None;
+            }),
+        ),
+        (
+            "an unmeasured firewalld version",
+            Box::new(|| net(22)),
+            Box::new(|f: &mut FakeFirewalld| {
+                f.version = Some("2.2.0".into());
+                f.priorities = Some(BTreeMap::new());
+            }),
+        ),
+        (
+            "a malformed version answer",
+            Box::new(|| net(22)),
+            Box::new(|f: &mut FakeFirewalld| {
+                f.version = Some("2.4.3-rc1".into());
             }),
         ),
         (

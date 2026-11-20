@@ -215,11 +215,12 @@ impl Engine {
             .and_then(super::path::parse_ssh_connection);
         if let Some((client, _, server, _)) = parsed {
             if !(client.is_loopback() && server.is_loopback()) {
-                n.ss = self
-                    .fs
-                    .risk_observe("/usr/bin/ss", &["-Htn", "state", "established"])
-                    .ok()
-                    .and_then(|o| stdout(&o));
+                n.ss = self.risk_ss_program().and_then(|ss| {
+                    self.fs
+                        .risk_observe(ss, &["-Htn", "state", "established"])
+                        .ok()
+                        .and_then(|o| stdout(&o))
+                });
                 n.ip_addr = self
                     .fs
                     .risk_observe("/usr/sbin/ip", &["-o", "addr", "show"])
@@ -233,9 +234,17 @@ impl Engine {
                     .and_then(|o| stdout(&o));
             }
         }
-        let state = super::path::determine(&n);
+        let mut state = super::path::determine(&n);
         if !firewalld {
             return state;
+        }
+        // R-2: a reload on a declared loopback path is judged only for a
+        // measured firewalld version, read now (and again at the reload's turn).
+        if let PathState::Known(p) = &mut state {
+            if p.loopback {
+                p.loopback_reload_measured =
+                    super::path::loopback_reload_measured(self.risk_fw_version().as_deref());
+            }
         }
         let (rt, perm) = match &state {
             PathState::Known(p) if !p.loopback => (
@@ -245,6 +254,39 @@ impl Engine {
             _ => (None, None),
         };
         super::path::with_zone(state, rt.as_ref(), perm.as_ref())
+    }
+
+    /// The `ss` of the target (R-4, measured: `/usr/bin/ss` on Ubuntu,
+    /// `/usr/sbin/ss` on the RHEL family). Only these two fixed paths, in
+    /// this order, never a PATH search. The first that exists must be a
+    /// regular file owned by root, executable, and not writable by group or
+    /// others (`stat` without following a final link); anything else (a
+    /// link, another type, another owner, a writable file, a failed or
+    /// ambiguous observation) stops here: the path stays unknown.
+    fn risk_ss_program(&mut self) -> Option<&'static str> {
+        use crate::targetfs::ObjKind;
+        for p in ["/usr/bin/ss", "/usr/sbin/ss"] {
+            match self.fs.inspect(p) {
+                Ok(st) if st.kind == ObjKind::Absent => continue,
+                Ok(st)
+                    if st.kind == ObjKind::File
+                        && st.uid == 0
+                        && st.mode & 0o022 == 0
+                        && st.mode & 0o111 != 0 =>
+                {
+                    return Some(p)
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// `firewall-cmd --version` read strictly (`None` when it is not exactly
+    /// one `MAJOR.MINOR.PATCH` line).
+    fn risk_fw_version(&mut self) -> Option<String> {
+        self.fw(&["--version"])
+            .and_then(|s| super::path::parse_fw_version(&s))
     }
 
     fn fw(&mut self, args: &[&str]) -> Option<String> {
@@ -283,7 +325,7 @@ impl Engine {
         let mut f = FwFacts {
             running: true,
             permanent,
-            version: self.fw(&["--version"]).map(|s| s.trim().to_string()),
+            version: self.risk_fw_version(),
             // The default zone is a permanent setting that also applies now.
             default_zone: self
                 .fw(&["--get-default-zone"])
@@ -309,14 +351,18 @@ impl Engine {
                     ok = false;
                     break;
                 };
-                // A priority must be read exactly; a version that does not
-                // answer the query is not assumed to use the default (P3:
-                // measured per version before this is relaxed).
-                let prio = self
-                    .fw_args(&with(&[&zarg, "--get-priority"]))
-                    .and_then(|s| s.trim().parse::<i64>().ok())
-                    .map(|n| Ok(Some(n)))
-                    .unwrap_or(Err(()));
+                // R-5: the priority is read from the zone's `--list-all` of
+                // the same view (runtime or `--permanent`), by the forms
+                // measured for this exact version; `--get-priority` is a
+                // usage error at runtime on every measured version. An
+                // unmeasured version or answer is unknown, never 0.
+                let prio = match (
+                    f.version.clone(),
+                    self.fw_args(&with(&[&zarg, "--list-all"])),
+                ) {
+                    (Some(v), Some(out)) => super::path::parse_zone_priority(&v, z, &out),
+                    _ => Err(()),
+                };
                 zones.push(FwZone {
                     name: z.to_string(),
                     sources: src.split_whitespace().map(str::to_string).collect(),
@@ -1049,6 +1095,14 @@ impl Engine {
             .unwrap_or_else(|| PathState::Unknown("not determined".into()));
         let mut change = FwChange::default();
         let fresh = match &path {
+            // R-2: the version is read again at the reload's turn; the
+            // reload runs on this session (no new connection, no reconnect).
+            PathState::Known(p) if p.loopback => {
+                let mut q = p.clone();
+                q.loopback_reload_measured = p.loopback_reload_measured
+                    && super::path::loopback_reload_measured(self.risk_fw_version().as_deref());
+                PathState::Known(q)
+            }
             PathState::Known(p) if !p.loopback => {
                 let ifaces = p.ifaces.clone();
                 let perm = self.risk_firewalld_facts(&ifaces, true);

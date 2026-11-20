@@ -1,10 +1,9 @@
 //! firewalld 0.3.0 and the P3 connection-risk rules (DESIGN §43, §44).
 //!
-//! The 0.3.0 catalog and plugin are the candidate files of the repository
-//! (`plugins/first-party/candidates/`), loaded through a test registry: the
-//! release's registry does not list 0.3.0 until it is measured on real
-//! hosts. The classification table in force is the production one (0.3.0 is
-//! classified and enforced there, bound to the candidate's digest).
+//! The 0.3.0 catalog and plugin are the first-party files of the repository
+//! (registered from v1.15.0 after the P7-R1 measurement), loaded through a
+//! test registry. The classification table in force is the production one
+//! (0.3.0 is classified and enforced there, bound to the same digest).
 
 use super::approval::{self, Store};
 use super::engine::{RiskContext, RiskLog};
@@ -21,9 +20,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 const CATALOG_030: &str =
-    include_str!("../../plugins/first-party/candidates/firewalld-0.3.0.catalog.toml");
+    include_str!("../../plugins/first-party/catalogs/firewalld-0.3.0.catalog.toml");
 const PLUGIN_030: &str =
-    include_str!("../../plugins/first-party/candidates/firewalld-0.3.0.plugin.toml");
+    include_str!("../../plugins/first-party/plugins/firewalld-0.3.0.plugin.toml");
 
 fn observe_ops() -> Vec<String> {
     op_ids("observe")
@@ -774,8 +773,9 @@ fn drifting_priority_and_nm_managed_interfaces_fail_closed() {
         ctx(),
     );
     refused(&r, &f, "p", "unknown");
-    // priority not answered
+    // priority not answered by a version that has zone priorities (R-5)
     let f = fw();
+    f.lock().unwrap().version = Some("2.4.3".into());
     f.lock().unwrap().priorities = None;
     let (r, _) = run(
         s.model(&body, "").unwrap(),
@@ -938,17 +938,18 @@ fn affecting_changes_without_an_exact_inverse_are_refused_even_with_approval() {
 }
 
 #[test]
-fn the_030_classification_is_bound_to_the_candidate_bytes_and_030_is_not_registered() {
+fn the_030_classification_is_bound_to_the_registered_bytes() {
     let entry = super::CATALOG_RULES
         .iter()
         .find(|c| c.id == "firewalld" && c.version == "0.3.0")
         .expect("0.3.0 is classified");
     assert_eq!(entry.sha256, approval::sha256_hex(CATALOG_030.as_bytes()));
     assert_eq!(entry.enforcement, super::Enforcement::Enforced);
-    // Not in the release's registry until measured on real hosts.
-    assert!(!crate::plugin::FIRST_PARTY_CATALOGS
+    // Registered from v1.15.0 (measured on real hosts in P7-R1), with the
+    // same digest as the classification table (R-1).
+    assert!(crate::plugin::FIRST_PARTY_CATALOGS
         .iter()
-        .any(|c| c.id == "firewalld" && c.version == "0.3.0"));
+        .any(|c| c.id == "firewalld" && c.version == "0.3.0" && c.sha256 == entry.sha256));
 }
 
 #[test]
@@ -1122,4 +1123,555 @@ fn deleting_a_zone_of_a_management_interface_affects_and_work_is_predefined() {
     );
     assert!(r.is_ok());
     assert!(record(&l, "z").dynamic.starts_with("affects"), "{l:?}");
+}
+
+// ---------------------------------------------------------------------------
+// v1.15.0 P7-R2: R-4 (ss path), R-5 (zone priority), R-2 (loopback reload),
+// and the management-path protection on a path that is now judged
+// ---------------------------------------------------------------------------
+
+/// `stat -c` records of the `ss` candidates.
+fn st(kind: &str, mode: &str, uid: u32) -> Option<String> {
+    Some(format!(
+        "{kind}|{mode}|{uid}|0|133000|2049|7|2026-11-20 00:00:00.000000000 +0000|2026-11-20 00:00:00.000000000 +0000"
+    ))
+}
+
+/// The RHEL-family layout measured in P7-R1: `ss` only at `/usr/sbin/ss`.
+fn el_net(server_port: u16) -> FakeNet {
+    let mut n = net(server_port);
+    n.ss_stat = Some(
+        [
+            ("/usr/bin/ss".to_string(), None),
+            ("/usr/sbin/ss".to_string(), st("regular file", "755", 0)),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    n
+}
+
+/// The runtime `--list-all` of zone trusted on Rocky Linux 10.2, firewalld
+/// 2.4.3 (P7-R1, measured; only the zone name and interface differ below).
+const LIST_ALL_243: &str = "trusted (default, active)\n  target: ACCEPT\n  ingress-priority: 0\n  egress-priority: 0\n  icmp-block-inversion: no\n  interfaces: eth0\n  sources: \n  services: \n  ports: \n  protocols: \n  forward: yes\n  masquerade: no\n  forward-ports: \n  source-ports: \n  icmp-blocks: \n  rich rules: \n";
+
+#[test]
+fn r4_ss_is_found_at_the_measured_paths_only_and_fails_closed() {
+    let s = Setup::new();
+    // removing 8080 from public on a 2222 connection: clear when the path is known
+    let body = res(
+        "p",
+        "port",
+        "zone: public, port: \"8080/tcp\", state: absent",
+    );
+    let ok = |n: FakeNet| {
+        let f = fw();
+        let (r, l) = run(
+            s.model(&body, "").unwrap(),
+            Mode::Apply,
+            target(&f, n.clone()),
+            ctx(),
+        );
+        (f, r, l)
+    };
+    // Ubuntu (default fake): /usr/bin/ss
+    let (_, r, l) = ok(net(2222));
+    assert_eq!(r.unwrap().status, AggregateStatus::Success, "{l:?}");
+    assert_eq!(record(&l, "p").dynamic, "clear");
+    // RHEL family: /usr/sbin/ss (R-4); before P7-R2 this was unknown
+    let (_, r, l) = ok(el_net(2222));
+    assert_eq!(r.unwrap().status, AggregateStatus::Success, "{l:?}");
+    assert_eq!(record(&l, "p").dynamic, "clear");
+    // fail closed: the first existing candidate decides; no PATH, no fallback
+    type SsFiles<'a> = Vec<(&'a str, Option<String>)>;
+    let bad: Vec<(&str, SsFiles)> = vec![
+        ("both absent", vec![]),
+        (
+            "a link at /usr/bin/ss, a good /usr/sbin/ss",
+            vec![
+                ("/usr/bin/ss", st("symbolic link", "777", 0)),
+                ("/usr/sbin/ss", st("regular file", "755", 0)),
+            ],
+        ),
+        // the kind alone refuses a link (a link's own mode is 777 on Linux; 755 pins the kind check)
+        (
+            "a link with a restrictive mode",
+            vec![("/usr/bin/ss", st("symbolic link", "755", 0))],
+        ),
+        (
+            "group-writable",
+            vec![("/usr/bin/ss", st("regular file", "775", 0))],
+        ),
+        (
+            "other-writable",
+            vec![("/usr/sbin/ss", st("regular file", "757", 0))],
+        ),
+        (
+            "not owned by root",
+            vec![("/usr/bin/ss", st("regular file", "755", 1000))],
+        ),
+        (
+            "not executable",
+            vec![("/usr/bin/ss", st("regular file", "644", 0))],
+        ),
+        (
+            "a directory",
+            vec![("/usr/bin/ss", st("directory", "755", 0))],
+        ),
+        (
+            "an unreadable stat record",
+            vec![("/usr/bin/ss", Some("garbage".to_string()))],
+        ),
+    ];
+    for (name, files) in bad {
+        let mut n = net(2222);
+        n.ss_stat = Some(files.into_iter().map(|(p, v)| (p.to_string(), v)).collect());
+        let (f, r, l) = ok(n);
+        refused(&r, &f, "p", "unknown");
+        assert!(
+            record(&l, "p")
+                .reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("ss could not be read"),
+            "{name}: {l:?}"
+        );
+    }
+}
+
+#[test]
+fn r5_zone_priority_parsers_follow_the_measured_forms() {
+    use super::path::{loopback_reload_measured, parse_fw_version, parse_zone_priority};
+    for (v, want) in [
+        ("1.3.4\n", Some("1.3.4")),
+        ("2.4.3\n", Some("2.4.3")),
+        ("2.4.3", None),
+        ("2.4.3\n\n", None),
+        ("2.4.3\r\n", None),
+        ("2.4.3-rc1\n", None),
+        ("02.4.3\n", None),
+        ("2.4\n", None),
+        ("2.4.3.1\n", None),
+        ("", None),
+        ("v2.4.3\n", None),
+    ] {
+        assert_eq!(parse_fw_version(v).as_deref(), want, "{v:?}");
+    }
+    // the measured 2.4.3 answer
+    assert_eq!(
+        parse_zone_priority("2.4.3", "trusted", LIST_ALL_243),
+        Ok(Some(0))
+    );
+    let public = LIST_ALL_243.replacen("trusted (default, active)", "public", 1);
+    for v in ["2.1.1", "2.3.1", "2.4.3"] {
+        assert_eq!(
+            parse_zone_priority(v, "public", &public),
+            Ok(Some(0)),
+            "{v}"
+        );
+    }
+    let with = |i: &str, e: &str| {
+        public
+            .replace(
+                "  ingress-priority: 0\n",
+                &format!("  ingress-priority: {i}\n"),
+            )
+            .replace(
+                "  egress-priority: 0\n",
+                &format!("  egress-priority: {e}\n"),
+            )
+    };
+    assert_eq!(
+        parse_zone_priority("2.4.3", "public", &with("-1", "0")),
+        Ok(Some(-1))
+    );
+    assert_eq!(
+        parse_zone_priority("2.4.3", "public", &with("0", "5")),
+        Ok(Some(5))
+    );
+    for bad in ["+1", "01", "-0", "x", "", "1 2", "9999999"] {
+        assert_eq!(
+            parse_zone_priority("2.4.3", "public", &with(bad, "0")),
+            Err(()),
+            "{bad:?}"
+        );
+    }
+    let missing_egress = public.replace("  egress-priority: 0\n", "");
+    let twice = public.replace(
+        "  ingress-priority: 0\n",
+        "  ingress-priority: 0\n  ingress-priority: 0\n",
+    );
+    let legacy = public.replace(
+        "  ingress-priority: 0\n",
+        "  ingress-priority: 0\n  priority: 0\n",
+    );
+    let other_indent = public.replace("  ingress-priority: 0\n", "   ingress-priority: 0\n");
+    for (name, text) in [
+        ("missing egress", &missing_egress),
+        ("twice", &twice),
+        ("legacy line", &legacy),
+        ("indent", &other_indent),
+    ] {
+        assert_eq!(
+            parse_zone_priority("2.4.3", "public", text),
+            Err(()),
+            "{name}"
+        );
+    }
+    // another zone's answer, an empty answer, an unmeasured version
+    assert_eq!(
+        parse_zone_priority("2.4.3", "public", LIST_ALL_243),
+        Err(())
+    );
+    assert_eq!(parse_zone_priority("2.4.3", "public", ""), Err(()));
+    for v in ["2.2.0", "2.0.0", "1.3.3", "3.0.0", "0.9.4"] {
+        assert_eq!(parse_zone_priority(v, "public", &public), Err(()), "{v}");
+    }
+    // 1.3.4: no zone priorities (measured); any priority line is a contradiction
+    let v1 = "public\n  target: default\n  icmp-block-inversion: no\n  interfaces: \n  sources: \n";
+    assert_eq!(parse_zone_priority("1.3.4", "public", v1), Ok(None));
+    assert_eq!(parse_zone_priority("1.3.4", "public", &public), Err(()));
+    // R-2 versions
+    for v in ["1.3.4", "2.1.1", "2.3.1", "2.4.3"] {
+        assert!(loopback_reload_measured(Some(v)), "{v}");
+    }
+    for v in [Some("2.2.0"), Some("2.4.4"), Some("1.3.4 "), None] {
+        assert!(!loopback_reload_measured(v), "{v:?}");
+    }
+}
+
+#[test]
+fn r5_the_runtime_and_permanent_views_are_read_separately_and_get_priority_is_not_used() {
+    let s = Setup::new();
+    let body = res(
+        "p",
+        "port",
+        "zone: public, port: \"8080/tcp\", state: absent",
+    );
+    // 2.4.3 with every priority 0: the path is judged (before P7-R2 it was unknown)
+    let f = fw();
+    f.lock().unwrap().version = Some("2.4.3".into());
+    let (r, l) = run(
+        s.model(&body, "").unwrap(),
+        Mode::Apply,
+        target(&f, el_net(2222)),
+        ctx(),
+    );
+    assert_eq!(r.unwrap().status, AggregateStatus::Success, "{l:?}");
+    let g = f.lock().unwrap();
+    assert!(
+        !g.received
+            .iter()
+            .any(|a| a.iter().any(|x| x == "--get-priority")),
+        "{:?}",
+        g.received
+    );
+    let rt = g
+        .received
+        .iter()
+        .any(|a| a.len() == 2 && a[0].starts_with("--zone=") && a[1] == "--list-all");
+    let pm = g
+        .received
+        .iter()
+        .any(|a| a.len() == 3 && a[0] == "--permanent" && a[2] == "--list-all");
+    assert!(rt && pm, "{:?}", g.received);
+    drop(g);
+    // a non-zero permanent priority on the management zone makes the
+    // permanent view unknown, so a reload (judged on it) is refused
+    let body_r = notify_reload(&res(
+        "p",
+        "port",
+        "zone: public, port: \"9090/tcp\", state: present",
+    ));
+    let f = fw();
+    f.lock().unwrap().version = Some("2.4.3".into());
+    f.lock().unwrap().priorities = Some(BTreeMap::new());
+    f.lock().unwrap().perm_list_all.insert(
+        "public".into(),
+        "public\n  target: default\n  ingress-priority: -1\n  egress-priority: 0\n".into(),
+    );
+    let (r, l) = run(
+        s.model(&body_r, RELOAD).unwrap(),
+        Mode::Apply,
+        target(&f, el_net(22)),
+        ctx(),
+    );
+    let rep = r.unwrap();
+    assert_eq!(
+        rep.handlers_run[0].state,
+        HandlerOutcomeState::Failed,
+        "{l:?}"
+    );
+    assert_eq!(f.lock().unwrap().reloads, 0);
+    assert!(
+        record(&l, "handler:fwreload")
+            .dynamic
+            .starts_with("unknown"),
+        "{l:?}"
+    );
+}
+
+fn loopback_net() -> FakeNet {
+    FakeNet {
+        ssh_connection: Some("127.0.0.1 40000 127.0.0.1 22".into()),
+        ..net(22)
+    }
+}
+
+fn loopback_ctx() -> RiskContext {
+    RiskContext {
+        loopback_declared: true,
+        ..ctx()
+    }
+}
+
+#[test]
+fn r2_a_loopback_reload_runs_only_for_a_measured_version_on_this_session() {
+    let s = Setup::new();
+    let body = notify_reload(&res(
+        "p",
+        "port",
+        "zone: public, port: \"9090/tcp\", state: present",
+    ));
+    for v in ["1.3.4", "2.1.1", "2.3.1", "2.4.3"] {
+        let f = fw();
+        f.lock().unwrap().version = Some(v.into());
+        let t = target(&f, loopback_net());
+        let (r, l) = run(
+            s.model(&body, RELOAD).unwrap(),
+            Mode::Apply,
+            t,
+            loopback_ctx(),
+        );
+        let rep = r.unwrap();
+        assert_eq!(
+            rep.handlers_run[0].state,
+            HandlerOutcomeState::Succeeded,
+            "{v}: {l:?}"
+        );
+        assert_eq!(f.lock().unwrap().reloads, 1, "{v}");
+        assert_eq!(record(&l, "handler:fwreload").dynamic, "clear", "{v}");
+    }
+    // refused: an unmeasured version, a malformed answer, no answer
+    for (name, v) in [
+        ("unmeasured", Some("2.2.0")),
+        ("malformed", Some("2.4.3-1")),
+        ("absent", None),
+    ] {
+        let f = fw();
+        match v {
+            Some(v) => f.lock().unwrap().version = Some(v.into()),
+            None => f.lock().unwrap().forced.push((
+                "--version".into(),
+                Output {
+                    completion: Completion::Exited(1),
+                    stdout: Vec::new(),
+                    stderr: b"Error\n".to_vec(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                },
+            )),
+        }
+        let (r, l) = run(
+            s.model(&body, RELOAD).unwrap(),
+            Mode::Apply,
+            target(&f, loopback_net()),
+            loopback_ctx(),
+        );
+        assert_eq!(
+            r.unwrap().handlers_run[0].state,
+            HandlerOutcomeState::Failed,
+            "{name}: {l:?}"
+        );
+        assert_eq!(f.lock().unwrap().reloads, 0, "{name}");
+        assert!(
+            record(&l, "handler:fwreload")
+                .dynamic
+                .starts_with("unknown"),
+            "{name}: {l:?}"
+        );
+    }
+    // a contradiction: measured when the path was determined, another
+    // version at the reload's turn
+    let f = fw();
+    f.lock().unwrap().version = Some("2.4.3".into());
+    f.lock().unwrap().forced.push((
+        "--version".into(),
+        Output {
+            completion: Completion::Exited(0),
+            stdout: b"2.4.3\n".to_vec(),
+            stderr: Vec::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        },
+    ));
+    f.lock().unwrap().forced.push((
+        "--version".into(),
+        Output {
+            completion: Completion::Exited(0),
+            stdout: b"2.9.0\n".to_vec(),
+            stderr: Vec::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        },
+    ));
+    let (r, l) = run(
+        s.model(&body, RELOAD).unwrap(),
+        Mode::Apply,
+        target(&f, loopback_net()),
+        loopback_ctx(),
+    );
+    assert_eq!(
+        r.unwrap().handlers_run[0].state,
+        HandlerOutcomeState::Failed,
+        "{l:?}"
+    );
+    assert_eq!(f.lock().unwrap().reloads, 0);
+    // undeclared loopback: unknown whatever the version
+    let f = fw();
+    f.lock().unwrap().version = Some("2.4.3".into());
+    let (r, _) = run(
+        s.model(&body, RELOAD).unwrap(),
+        Mode::Apply,
+        target(&f, loopback_net()),
+        ctx(),
+    );
+    assert_eq!(
+        r.unwrap().handlers_run[0].state,
+        HandlerOutcomeState::Failed
+    );
+    assert_eq!(f.lock().unwrap().reloads, 0);
+}
+
+#[test]
+fn r2_the_reload_opens_no_new_connection_and_does_not_reconnect() {
+    // The handler runs on the session of the run: no probe, no reconnect.
+    let s = Setup::new();
+    let body = notify_reload(&res(
+        "p",
+        "port",
+        "zone: public, port: \"9090/tcp\", state: present",
+    ));
+    let f = fw();
+    f.lock().unwrap().version = Some("2.4.3".into());
+    let mut n = loopback_net();
+    n.reconnect = Some(false);
+    n.reconnect_after_wait = Some(false);
+    let counts = Arc::new(Mutex::new((0usize, 0usize)));
+    n.shared_counts = Some(counts.clone());
+    let t = target(&f, n);
+    let e = {
+        let opts = RunOptions {
+            mode: Mode::Apply,
+            sudo: false,
+            target: TargetSpec { ssh: None },
+            verbose: false,
+            fault: None,
+            fake_target: Some(t),
+        };
+        Engine::new(s.model(&body, RELOAD).unwrap(), opts)
+            .unwrap()
+            .with_risk(loopback_ctx())
+    };
+    let rep = e.run().unwrap();
+    assert_eq!(rep.handlers_run[0].state, HandlerOutcomeState::Succeeded);
+    assert_eq!(f.lock().unwrap().reloads, 1);
+    assert_eq!(
+        *counts.lock().unwrap(),
+        (0, 0),
+        "no new connection, no reconnect"
+    );
+}
+
+#[test]
+fn management_path_protection_on_a_judged_rhel_path() {
+    // With R-4 and R-5 the RHEL-family path is judged; the protections of
+    // DESIGN §43 must hold there exactly as on the paths judged before.
+    let s = Setup::new();
+    let mk = |v: &str, reconnect: Option<bool>| {
+        let f = fw();
+        f.lock().unwrap().version = Some(v.into());
+        f.lock().unwrap().priorities = Some(BTreeMap::new());
+        let mut n = el_net(2222);
+        n.reconnect = reconnect;
+        (f.clone(), target(&f, n))
+    };
+    // moving the management interface (R, approved): no guarded procedure, refused
+    let iface = res(
+        "i",
+        "interface",
+        "zone: internal, interface: eth0, state: present",
+    );
+    let (_d, c) = approval_for(&s, &iface, "", || mk("2.4.3", Some(true)).1);
+    let (f, t) = mk("2.4.3", Some(true));
+    let (r, l) = run(s.model(&iface, "").unwrap(), Mode::Apply, t, c);
+    refused(&r, &f, "i", "affects");
+    assert!(record(&l, "i").approved);
+    // a source containing the client (R): without an approval refused at the gate
+    let src = res(
+        "s",
+        "source",
+        "zone: internal, source: 203.0.113.0/24, state: present",
+    );
+    let (f, t) = mk("2.4.3", Some(true));
+    let (r, _) = run(s.model(&src, "").unwrap(), Mode::Apply, t, ctx());
+    refused(&r, &f, "s", "approval");
+    // approved, the new connection fails: runtime restored, permanent untouched
+    let (_d, c) = approval_for(&s, &src, "", || mk("2.4.3", Some(true)).1);
+    let (f, t) = mk("2.4.3", Some(false));
+    let (r, _) = run(s.model(&src, "").unwrap(), Mode::Apply, t, c.clone());
+    let x = r.unwrap().resources[0].clone();
+    assert_eq!(x.execution, Execution::Failed, "{x:?}");
+    assert!(
+        x.reason
+            .as_deref()
+            .unwrap()
+            .contains("restored and verified"),
+        "{x:?}"
+    );
+    let g = f.lock().unwrap();
+    let rt = g.sources.get("internal").cloned().unwrap_or_default();
+    let pm = g
+        .perm_sources
+        .clone()
+        .unwrap_or_default()
+        .get("internal")
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !rt.contains(&"203.0.113.0/24".to_string()),
+        "runtime restored: {rt:?}"
+    );
+    assert!(
+        !pm.contains(&"203.0.113.0/24".to_string()),
+        "permanent untouched: {pm:?}"
+    );
+    drop(g);
+    // approved, the new connection works: runtime first, then permanent
+    let (f, t) = mk("2.4.3", Some(true));
+    let (r, l) = run(s.model(&src, "").unwrap(), Mode::Apply, t, c);
+    let rep = r.unwrap();
+    assert_eq!(
+        rep.status,
+        AggregateStatus::Success,
+        "{:?} {l:?}",
+        rep.resources
+    );
+    let order: Vec<String> = f
+        .lock()
+        .unwrap()
+        .mutations
+        .iter()
+        .map(|m| m.join(" "))
+        .collect();
+    assert!(
+        order[0].contains("--add-source") && !order[0].contains("--permanent"),
+        "{order:?}"
+    );
+    assert!(order[1].contains("--permanent"), "{order:?}");
+    // an unmeasured version on the same path: unknown, refused even approved
+    let (_d, c) = approval_for(&s, &src, "", || mk("2.4.3", Some(true)).1);
+    let (f, t) = mk("2.2.0", Some(true));
+    let (r, _) = run(s.model(&src, "").unwrap(), Mode::Apply, t, c);
+    refused(&r, &f, "s", "");
 }

@@ -244,9 +244,9 @@ pub const CATALOG_RULES: &[CatalogRules] = &[
         ops: OPS_020,
         handlers: &[],
     },
-    // firewalld 0.3.0: classified and enforced, but NOT in the first-party
-    // registry until it is measured on real hosts (DESIGN §38.4, §44.3), so
-    // no release can load it yet.
+    // firewalld 0.3.0: classified and enforced; registered in the first-party
+    // registry from v1.15.0 (measured on real hosts in P7-R1, DESIGN §38.4,
+    // §44.3), with the same digest.
     CatalogRules {
         id: "firewalld",
         version: "0.3.0",

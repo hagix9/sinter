@@ -210,7 +210,7 @@ fn snapshot(root: &Path) -> Vec<String> {
 
 #[test]
 fn the_embedded_files_are_the_repository_files_with_their_digests() {
-    assert_eq!(FIRST_PARTY_BUNDLE.len(), 2);
+    assert_eq!(FIRST_PARTY_BUNDLE.len(), 3);
     for e in FIRST_PARTY_BUNDLE {
         let p = repo(&format!("plugins/{}-{}.plugin.toml", e.id, e.version));
         let c = repo(&format!(
@@ -240,7 +240,7 @@ fn the_embedded_files_are_the_repository_files_with_their_digests() {
             (e.catalog_id, e.catalog_version)
         );
     }
-    // The four exact digests reviewed for firewalld 0.1.0 and 0.2.0.
+    // The six exact digests reviewed for firewalld 0.1.0, 0.2.0 and 0.3.0.
     let digests: Vec<(&str, &str)> = FIRST_PARTY_BUNDLE
         .iter()
         .map(|e| (e.plugin_sha256, e.catalog_sha256))
@@ -255,6 +255,10 @@ fn the_embedded_files_are_the_repository_files_with_their_digests() {
             (
                 "e5819cfe0e2c017648f628a27d0ed6e4a18ed402f3ff6de072e61a724f0aa99a",
                 "d32ac3947279ec2581a7049f9fa931d29c904c91ea2484cafaa6759fe09c3641"
+            ),
+            (
+                "df3a558edef094e7d4ca8200cc6f7d1b03d392e81b06bde12a1324f8c74ff215",
+                "1ef3c8a18d99ef7f1bf8899f18d243095a03ab52868a43d45aa8e1d1d874989d"
             ),
         ]
     );
@@ -352,8 +356,8 @@ fn list_without_a_root_shows_the_embedded_plugins_and_creates_nothing() {
     let r = f.list();
     assert_eq!(r.root, "absent");
     assert_eq!(r.exit_code(), 0);
-    assert_eq!(r.plugins.len(), 2);
-    for v in ["0.1.0", "0.2.0"] {
+    assert_eq!(r.plugins.len(), 3);
+    for v in ["0.1.0", "0.2.0", "0.3.0"] {
         let p = entry(&r, v);
         assert!(p.available);
         assert_eq!(p.installed, Some(false));
@@ -362,6 +366,10 @@ fn list_without_a_root_shows_the_embedded_plugins_and_creates_nothing() {
     assert_eq!(entry(&r, "0.1.0").mutate_total, Some(2));
     assert_eq!(entry(&r, "0.2.0").mutate_total, Some(12));
     assert_eq!(entry(&r, "0.2.0").mutate_allowed, Some(0));
+    // 0.3.0: the 12 operations of 0.2.0 plus interface (4), source (4) and
+    // zone (2) changes and the reload handler (DESIGN §44.3)
+    assert_eq!(entry(&r, "0.3.0").mutate_total, Some(23));
+    assert_eq!(entry(&r, "0.3.0").mutate_allowed, Some(0));
     assert!(!f.root.exists());
 }
 
@@ -562,8 +570,15 @@ fn symbolic_links_and_unsafe_files_are_refused() {
     std::fs::rename(f.root.join("plugins"), &real).unwrap();
     std::os::unix::fs::symlink(&real, f.root.join("plugins")).unwrap();
     let r = f.list();
+    // every installed plugin is refused; 0.3.0, embedded but not installed in
+    // this root, reads nothing from it and stays not trusted
     assert!(
-        r.plugins.iter().all(|p| p.status == "refused"),
+        r.plugins
+            .iter()
+            .all(|p| (p.installed == Some(true) && p.status == "refused")
+                || (p.version == "0.3.0"
+                    && p.installed == Some(false)
+                    && p.status == "not-trusted")),
         "{:?}",
         r.plugins
     );
@@ -604,6 +619,7 @@ fn list_orders_plugins_deterministically() {
             "aaa@1.0.0",
             "firewalld@0.1.0",
             "firewalld@0.2.0",
+            "firewalld@0.3.0",
             "firewalld@0.10.0"
         ]
     );
@@ -763,7 +779,7 @@ fn reports_serialize_to_json_with_states_only() {
     assert_eq!(l["format"], 1);
     assert_eq!(l["command"], "list");
     assert_eq!(l["root"], "absent");
-    assert_eq!(l["plugins"].as_array().unwrap().len(), 2);
+    assert_eq!(l["plugins"].as_array().unwrap().len(), 3);
     assert!(l.get("messages").is_none());
     let v = serde_json::to_value(f.verify(&[])).unwrap();
     assert_eq!(v["plugins"], serde_json::json!([]));

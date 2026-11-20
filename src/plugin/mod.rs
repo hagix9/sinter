@@ -103,6 +103,13 @@ pub const FIRST_PARTY_CATALOGS: &[FirstPartyCatalog] = &[
         version: "0.2.0",
         sha256: "d32ac3947279ec2581a7049f9fa931d29c904c91ea2484cafaa6759fe09c3641",
     },
+    // Measured on Rocky Linux 9.8 and 10.2 and Ubuntu 24.04 and 26.04
+    // (v1.15.0 P7-R1, 2026-11-20); the bytes are those of the candidate.
+    FirstPartyCatalog {
+        id: "firewalld",
+        version: "0.3.0",
+        sha256: "1ef3c8a18d99ef7f1bf8899f18d243095a03ab52868a43d45aa8e1d1d874989d",
+    },
 ];
 
 /// A plugin a recipe enables (`plugins: [{ id, version }]`, DESIGN §38.7).

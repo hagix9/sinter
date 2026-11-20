@@ -358,8 +358,9 @@ const ATTESTED_PLUGIN_SHA256: &str =
 
 #[test]
 fn the_registry_lists_exactly_the_attested_firewalld_catalogs() {
-    // Exactly two entries, each the digest of a repository file measured on
-    // real hosts: firewalld 0.1.0 (2026-11-01) and 0.2.0 (2026-11-09).
+    // Exactly three entries, each the digest of a repository file measured on
+    // real hosts: firewalld 0.1.0 (2026-11-01), 0.2.0 (2026-11-09) and 0.3.0
+    // (2026-11-20, v1.15.0 P7-R1).
     const CATALOG_020: &str =
         include_str!("../../plugins/first-party/catalogs/firewalld-0.2.0.catalog.toml");
     let entries: Vec<(&str, &str, &str)> = FIRST_PARTY_CATALOGS
@@ -374,6 +375,11 @@ fn the_registry_lists_exactly_the_attested_firewalld_catalogs() {
                 "firewalld",
                 "0.2.0",
                 "d32ac3947279ec2581a7049f9fa931d29c904c91ea2484cafaa6759fe09c3641"
+            ),
+            (
+                "firewalld",
+                "0.3.0",
+                "1ef3c8a18d99ef7f1bf8899f18d243095a03ab52868a43d45aa8e1d1d874989d"
             ),
         ]
     );
@@ -391,7 +397,8 @@ fn the_registry_lists_exactly_the_attested_firewalld_catalogs() {
         files,
         [
             "firewalld-0.1.0.catalog.toml",
-            "firewalld-0.2.0.catalog.toml"
+            "firewalld-0.2.0.catalog.toml",
+            "firewalld-0.3.0.catalog.toml"
         ]
     );
     assert_eq!(sha256_hex(CATALOG.as_bytes()), ATTESTED_CATALOG_SHA256);

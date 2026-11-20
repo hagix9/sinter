@@ -417,3 +417,108 @@ pub fn permanent_view(state: &PathState) -> PathState {
         u => u.clone(),
     }
 }
+
+// ---------------------------------------------------------------------------
+// firewalld versions and zone priorities measured on real hosts (v1.15.0
+// P7-R1, 2026-11-20: Rocky Linux 9.8 firewalld 1.3.4, Ubuntu 24.04 2.1.1,
+// Ubuntu 26.04 2.3.1, Rocky Linux 10.2 2.4.3). Every other version or answer
+// is unknown, never assumed.
+// ---------------------------------------------------------------------------
+
+/// The measured version without zone priorities: `--get-priority` is a usage
+/// error with and without `--permanent`.
+pub const FW_NO_ZONE_PRIORITY: &[&str] = &["1.3.4"];
+/// The measured versions with zone priorities: the runtime `--get-priority`
+/// is a usage error, so both views read `ingress-priority` and
+/// `egress-priority` from `--list-all`.
+pub const FW_ZONE_PRIORITY_LIST_ALL: &[&str] = &["2.1.1", "2.3.1", "2.4.3"];
+/// The versions on which a reload was measured to keep established loopback
+/// sessions and to accept new loopback connections once it returned (new
+/// connections during the reload failed on 1.3.4, 2.3.1 and 2.4.3; R-2).
+pub const FW_LOOPBACK_RELOAD_MEASURED: &[&str] = &["1.3.4", "2.1.1", "2.3.1", "2.4.3"];
+
+/// `firewall-cmd --version`: exactly one line `MAJOR.MINOR.PATCH` (decimal,
+/// at most three digits each, no leading zero) and its newline; anything
+/// else (empty, extra lines, a suffix such as `-rc1`, a carriage return) is
+/// not a version.
+pub fn parse_fw_version(stdout: &str) -> Option<String> {
+    let line = stdout.strip_suffix('\n')?;
+    let parts: Vec<&str> = line.split('.').collect();
+    let ok = parts.len() == 3
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.len() <= 3
+                && p.bytes().all(|b| b.is_ascii_digit())
+                && (p.len() == 1 || !p.starts_with('0'))
+        });
+    ok.then(|| line.to_string())
+}
+
+/// A strict decimal integer (an optional `-`, no leading zero, no `+`).
+fn strict_int(s: &str) -> Option<i64> {
+    let digits = s.strip_prefix('-').unwrap_or(s);
+    if digits.is_empty()
+        || digits.len() > 6
+        || !digits.bytes().all(|b| b.is_ascii_digit())
+        || (digits.len() > 1 && digits.starts_with('0'))
+        || s == "-0"
+    {
+        return None;
+    }
+    s.parse().ok()
+}
+
+/// The priority of `zone` from its `--list-all` answer (runtime or
+/// permanent, as asked) for a measured `version` (R-5). `Ok(None)`: the
+/// version has no zone priorities (and the answer shows none); `Ok(Some(n))`:
+/// 0 when both the ingress and the egress priority are 0, otherwise a
+/// non-zero one (which the zone decision treats as unknown); `Err`: an
+/// unmeasured version, an answer for another zone, a missing, repeated or
+/// malformed priority line, or both the old and the new form.
+pub(crate) fn parse_zone_priority(
+    version: &str,
+    zone: &str,
+    list_all: &str,
+) -> Result<Option<i64>, ()> {
+    let mut lines = list_all.lines();
+    // The heading names the zone: `public`, `public (active)`,
+    // `trusted (default, active)`.
+    let head = lines.find(|l| !l.trim().is_empty()).ok_or(())?;
+    if head.starts_with(' ') || head.split_whitespace().next() != Some(zone) {
+        return Err(());
+    }
+    let (mut ingress, mut egress, mut legacy) = (Vec::new(), Vec::new(), 0usize);
+    for l in list_all.lines() {
+        if let Some(v) = l.strip_prefix("  ingress-priority: ") {
+            ingress.push(v);
+        } else if let Some(v) = l.strip_prefix("  egress-priority: ") {
+            egress.push(v);
+        } else if l.trim_start().starts_with("priority:")
+            || l.trim_start().starts_with("ingress-priority")
+            || l.trim_start().starts_with("egress-priority")
+        {
+            legacy += 1;
+        }
+    }
+    if FW_NO_ZONE_PRIORITY.contains(&version) {
+        return if ingress.is_empty() && egress.is_empty() && legacy == 0 {
+            Ok(None)
+        } else {
+            Err(())
+        };
+    }
+    if !FW_ZONE_PRIORITY_LIST_ALL.contains(&version) || legacy != 0 {
+        return Err(());
+    }
+    let (&[i], &[e]) = (ingress.as_slice(), egress.as_slice()) else {
+        return Err(());
+    };
+    let (i, e) = (strict_int(i).ok_or(())?, strict_int(e).ok_or(())?);
+    Ok(Some(if i != 0 { i } else { e }))
+}
+
+/// Whether a reload on a declared loopback path keeps the management
+/// connection for this firewalld (R-2): only a measured version.
+pub fn loopback_reload_measured(version: Option<&str>) -> bool {
+    version.is_some_and(|v| FW_LOOPBACK_RELOAD_MEASURED.contains(&v))
+}

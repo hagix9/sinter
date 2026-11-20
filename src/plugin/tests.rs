@@ -307,11 +307,11 @@ fn an_operation_the_owner_did_not_list_loads_but_stays_disabled() {
 
 #[test]
 fn the_production_registry_admits_only_the_exact_attested_bytes() {
-    // The release registry lists two catalogs (firewalld 0.1.0 and 0.2.0).
+    // The release registry lists three catalogs (firewalld 0.1.0, 0.2.0 and 0.3.0).
     // The fixture catalog has the same operations as 0.1.0 but different
     // bytes, so even pinned by the Owner it is refused: the registry is
     // matched by digest.
-    assert_eq!(FIRST_PARTY_CATALOGS.len(), 2);
+    assert_eq!(FIRST_PARTY_CATALOGS.len(), 3);
     assert!(FIRST_PARTY_CATALOGS
         .iter()
         .all(|f| f.sha256 != sha256_hex(CATALOG.as_bytes())));

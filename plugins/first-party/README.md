@@ -17,12 +17,15 @@ and a new registry entry.
 | `plugins/firewalld-0.1.0.plugin.toml` | `47f33f171d239103cbb97450d17b57c857ce22436620ddf809fdd2be94948544` |
 | `catalogs/firewalld-0.2.0.catalog.toml` | `d32ac3947279ec2581a7049f9fa931d29c904c91ea2484cafaa6759fe09c3641` |
 | `plugins/firewalld-0.2.0.plugin.toml` | `e5819cfe0e2c017648f628a27d0ed6e4a18ed402f3ff6de072e61a724f0aa99a` |
+| `catalogs/firewalld-0.3.0.catalog.toml` | `1ef3c8a18d99ef7f1bf8899f18d243095a03ab52868a43d45aa8e1d1d874989d` |
+| `plugins/firewalld-0.3.0.plugin.toml` | `df3a558edef094e7d4ca8200cc6f7d1b03d392e81b06bde12a1324f8c74ff215` |
 
-The registry has two entries, firewalld 0.1.0 and firewalld 0.2.0. Both can
+The registry has three entries, firewalld 0.1.0, 0.2.0 and 0.3.0. They can
 be pinned in the same trust file; a recipe enables one of them (each plugin
 id at most once per run). firewalld 0.1.0 is registered in the source tree for
 v1.9.0 and available from that release (published 2026-11-04). firewalld
-0.2.0 is available from Sinter v1.12.0 (published 2026-11-12).
+0.2.0 is available from Sinter v1.12.0 (published 2026-11-12). firewalld
+0.3.0 is registered in the source tree for v1.15.0 (not released yet).
 These files are kept in the source repository. Their exact bytes are also
 embedded in the `sinter` executable, which `sinter plugin list` and
 `sinter plugin verify` compare with a plugin root; they are not separate
@@ -312,23 +315,44 @@ Sinter cannot prove that an observe operation is read-only on the host; the
 classification above rests on the measurements listed here (DESIGN §38.13).
 Catalogs from anyone else are not supported.
 
-## Candidate: firewalld 0.3.0 (not registered)
+## firewalld 0.3.0
 
-`candidates/` holds firewalld 0.3.0, which is **not** in the release's
-registry and cannot be used by a released Sinter: it has not been measured on
-real hosts (DESIGN §38.4, §44.3). The registry test does not look at this
-directory.
-
-| File | SHA-256 |
-|---|---|
-| `candidates/firewalld-0.3.0.catalog.toml` | `1ef3c8a18d99ef7f1bf8899f18d243095a03ab52868a43d45aa8e1d1d874989d` |
-| `candidates/firewalld-0.3.0.plugin.toml` | `df3a558edef094e7d4ca8200cc6f7d1b03d392e81b06bde12a1324f8c74ff215` |
-
+Registered for v1.15.0 after the real-host measurement of 2026-11-20 (v1.15.0
+P7-R1); the bytes are those of the reviewed candidate (DESIGN §38.4, §44.3).
 It keeps every operation and type of 0.2.0 and adds `firewalld.interface`
 (`zone`, `interface` of kind `ifname`, runtime and permanent), `firewalld.source`
 (`zone`, `source` of kind `cidr`, runtime and permanent), `firewalld.zone`
 (permanent only; the predefined zones cannot be deleted) and the handler
 operation `reload` for a `plugin` handler (never `--complete-reload`). Every
-change is judged by the connection-risk control (DESIGN §43, §44.6) before
-it runs. The exit codes are firewall-cmd's documented convention and are not
-measured; neither is any behaviour listed in DESIGN §44.7.
+change is judged by the connection-risk control (DESIGN §43, §44.6) before it
+runs: interface and source changes and zone deletion need an approval.
+
+### Confirmed on real hosts (2026-11-20)
+
+| OS | firewalld |
+|---|---|
+| Rocky Linux 9.8 | 1.3.4 |
+| Rocky Linux 10.2 | 2.4.3 |
+| Ubuntu 24.04 | 2.1.1 |
+| Ubuntu 26.04 | 2.3.1 |
+
+On each of them, in disposable zones with a dummy interface and
+documentation networks: every exit status the catalog lists (queries 0 yes,
+1 no; changes 0; an unknown zone 112; an unknown service 101; not root 253);
+`--change-interface` on an unbound and a bound interface; sources at runtime
+and permanent; a permanent zone exists at runtime only after a reload, and
+deleting it leaves `<zone>.xml.old`; a reload makes the runtime
+configuration the permanent one. The exit statuses the catalog does not list
+(26 for creating an existing zone, 17 for removing an unbound interface, 30
+for removing a missing source) are errors. Through Sinter with these bytes,
+the release acceptance checks `fw03-zone`, `fw03-interface`, `fw03-source`,
+`risk-approved-apply` and `fw03-no-residue` passed on all four.
+
+### Not confirmed
+
+- Other OS or firewalld versions; RHEL and AlmaLinux are tested by the release
+  acceptance. The connection-risk control judges the zone priority and a
+  reload on a declared loopback path only for the four versions above
+  (DESIGN §44.7).
+- The guarded runtime-first procedure on a real management path (DESIGN
+  §43.6) after the v1.15.0 P7-R2 changes.

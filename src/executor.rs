@@ -502,6 +502,9 @@ impl Executor {
             Executor::Ssh(s) => s.probe_new_connection(),
             Executor::Fake(f) => {
                 f.target.manager.net.probes += 1;
+                if let Some(c) = &f.target.manager.net.shared_counts {
+                    c.lock().unwrap_or_else(|e| e.into_inner()).0 += 1;
+                }
                 f.target.manager.net.reconnect.unwrap_or(false)
             }
         }
@@ -544,7 +547,13 @@ impl Executor {
         match self {
             Executor::Local(_) => false,
             Executor::Ssh(s) => s.reconnect(),
-            Executor::Fake(f) => f.target.manager.net.reconnect_after_wait.unwrap_or(false),
+            Executor::Fake(f) => {
+                f.target.manager.net.reconnects += 1;
+                if let Some(c) = &f.target.manager.net.shared_counts {
+                    c.lock().unwrap_or_else(|e| e.into_inner()).1 += 1;
+                }
+                f.target.manager.net.reconnect_after_wait.unwrap_or(false)
+            }
         }
     }
 
@@ -3907,7 +3916,9 @@ impl FakeExecutor {
             "dpkg-query" => self.run_dpkg_query(&req.args),
             "dnf" | "apt-get" => self.run_manager(&prog, &req.args),
             "systemctl" => self.run_systemctl(&req.args),
-            "ss" if req.program == "/usr/bin/ss" => self.target.manager.net.ss(&req.args),
+            "ss" if self.target.manager.net.ss_program() == Some(req.program.as_str()) => {
+                self.target.manager.net.ss(&req.args)
+            }
             // A missing nmcli answers like env does for a missing program.
             "nmcli"
                 if req.program == "/usr/bin/nmcli"
@@ -4384,6 +4395,23 @@ impl FakeExecutor {
     /// 0700 and is owned by the effective execution identity. Any other
     /// stat shape is an unmodeled filesystem query and fails honestly.
     fn run_stat(&mut self, args: &[String]) -> Output {
+        // The `ss` candidates of the management-path check (R-4).
+        if let Some(path) = args
+            .last()
+            .filter(|p| *p == "/usr/bin/ss" || *p == "/usr/sbin/ss")
+        {
+            return match self.target.manager.net.ss_stat_line(path) {
+                Some(line) => Self::exited(0, format!("{}\n", line), String::new()),
+                None => Self::exited(
+                    1,
+                    String::new(),
+                    format!(
+                        "/usr/bin/stat: cannot statx '{}': No such file or directory\n",
+                        path
+                    ),
+                ),
+            };
+        }
         let is_snap_verify = args.iter().any(|a| a == "%a %u")
             && args.last().map(|p| p == FAKE_SNAP).unwrap_or(false);
         if is_snap_verify {
@@ -4690,6 +4718,15 @@ impl FakeExecutor {
             return None;
         }
         if prog == "cat" && req.args.iter().any(|a| a == "/etc/os-release") {
+            return None;
+        }
+        // The `ss` candidates belong to the scripted network (R-4).
+        if prog == "stat"
+            && req
+                .args
+                .last()
+                .is_some_and(|p| p == "/usr/bin/ss" || p == "/usr/sbin/ss")
+        {
             return None;
         }
         let (uid, gid) = if let Some(ids) = self.identity_override {

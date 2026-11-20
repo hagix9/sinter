@@ -1344,7 +1344,11 @@ impl TargetFs {
     pub(crate) fn risk_observe(&mut self, program: &str, args: &[&str]) -> Result<Output> {
         if !matches!(
             program,
-            "/usr/bin/ss" | "/usr/sbin/ip" | "/usr/bin/firewall-cmd" | "/usr/bin/nmcli"
+            "/usr/bin/ss"
+                | "/usr/sbin/ss"
+                | "/usr/sbin/ip"
+                | "/usr/bin/firewall-cmd"
+                | "/usr/bin/nmcli"
         ) {
             return Err(SinterError::apply(format!(
                 "internal error: {} is not a management-path observation",

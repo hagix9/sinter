@@ -58,6 +58,16 @@ pub const FIRST_PARTY_BUNDLE: &[EmbeddedPlugin] = &[
         catalog_sha256: "d32ac3947279ec2581a7049f9fa931d29c904c91ea2484cafaa6759fe09c3641",
         catalog: first_party_file!("catalogs/firewalld-0.2.0.catalog.toml"),
     },
+    EmbeddedPlugin {
+        id: "firewalld",
+        version: "0.3.0",
+        plugin_sha256: "df3a558edef094e7d4ca8200cc6f7d1b03d392e81b06bde12a1324f8c74ff215",
+        plugin: first_party_file!("plugins/firewalld-0.3.0.plugin.toml"),
+        catalog_id: "firewalld",
+        catalog_version: "0.3.0",
+        catalog_sha256: "1ef3c8a18d99ef7f1bf8899f18d243095a03ab52868a43d45aa8e1d1d874989d",
+        catalog: first_party_file!("catalogs/firewalld-0.3.0.catalog.toml"),
+    },
 ];
 
 /// The embedded plugin with this id and version, if this Sinter has one.
