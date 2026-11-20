@@ -12,6 +12,11 @@ executable-sha256
 file-create-ok
 file-idempotent
 file-update-ok
+fw03-interface
+fw03-no-residue
+fw03-reload
+fw03-source
+fw03-zone
 linkage-resolved
 nm-profile-crud
 no-residue
@@ -54,6 +59,7 @@ recipe-vars-per-recipe
 recipe-vars-refuse-vars-file
 recipe-vars-shown-no-foreign-warning
 recipe-vars-untrusted-file-refused
+risk-approved-apply
 risk-static-refusal
 secret-delivered
 secret-redaction

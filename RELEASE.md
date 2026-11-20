@@ -949,10 +949,10 @@ Do not begin publishing when any of these hold:
   approved tier
 - a `/2` manifest whose approval set is not `/3` (the docs commit `D` is
   always part of the approval from v1.15.0)
-- the publish-time approval of the matrix: from v1.15.0 the release matrix
-  does not run `sinter approve` on a real target (`risk-approved-apply` is
-  BLOCKED); the Owner states in writing whether that is accepted for the
-  release
+- any of `fw03-zone`, `fw03-interface`, `fw03-source`, `fw03-reload`,
+  `risk-approved-apply`, `fw03-no-residue` not PASS on a target: from v1.15.0
+  the matrix runs `sinter approve` and firewalld 0.3.0 on every target, and
+  the Owner does not accept a release without them (decision of 2026-11-20)
 - `D` changed after the approval, or `D` pushed to a public branch before
   the Release exists
 - approval set verification not exit 0 with the approved digest

@@ -105,7 +105,8 @@ def plugin_cmd():
         out({"plugins": [
             {"id": "firewalld", "version": "0.1.0", "available": True, "installed": False, "status": "available"},
             {"id": "firewalld", "version": "0.2.0", "available": True, "installed": bool(inst),
-             "status": "installed" if inst else "available"}]}, 0)
+             "status": "installed" if inst else "available"},
+            {"id": "firewalld", "version": "0.3.0", "available": True, "installed": False, "status": "available"}]}, 0)
     if sub == "verify":
         if unsafe(root): sys.exit(2)
         if not os.path.isdir(root):
@@ -375,7 +376,10 @@ class V1120Checks(unittest.TestCase):
         # v1.15.0 adds the v1150-checks section (test_acceptance_v1150.py).
         v1150 = ["timer-create", "timer-idempotent", "timer-running", "timer-absent", "timer-calendar-invalid",
                  "service-timer-name", "risk-static-refusal", "nm-profile-crud", "discover-readonly",
-                 "discover-roundtrip"]
+                 "discover-roundtrip",
+                 # P7-R1: the fw03-checks section (test_acceptance_fw03_checks.py)
+                 "fw03-zone", "fw03-interface", "fw03-source", "fw03-reload", "risk-approved-apply",
+                 "fw03-no-residue"]
         self.assertEqual(set(ids) - set(ORIGINAL_39), set(new) | set(v1150))
         self.assertEqual(len(ids), 39 + len(new) + len(v1150))
         for new_id in new:

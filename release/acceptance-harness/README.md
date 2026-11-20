@@ -65,7 +65,7 @@ if any of the run's identifiers would remain.
 ## Checks
 
 `acceptance-target.sh` defines the checks; `derive-expected-checks.sh`
-writes their ids to `expected-check-ids.txt` (60 from v1.12.0, 70 from
+writes their ids to `expected-check-ids.txt` (60 from v1.12.0, 76 from
 v1.15.0). Each prints one `== check <id> ok|FAIL` line, or
 `== check <id> NOT_APPLICABLE <reason>` (below). From v1.12.0 two sections cover the plugin
 commands (`plugin-checks`: list, verify, install, remove and the partial mutate
@@ -86,12 +86,22 @@ files with a synthetic credential under `/etc/sinter-acc-disc`; the package
 database and `/etc` digests are unchanged, the credential never appears, and an
 audit of the generated recipe reports no drift). Everything is removed again.
 
-Not in v1.15.0 (BLOCKED, see `docs/design/v1.15.0-release-and-acceptance.md`
-§3): `fw03-interface`, `fw03-source`, `fw03-zone`, `fw03-reload` and
-`risk-approved-apply`. The firewalld 0.3.0 plugin is an unregistered
-candidate that the release binary cannot load, and the loopback behaviour of
-a firewalld reload on the management path is not measured; these checks are
-not built on assumptions.
+From v1.15.0 P7-R1 the `fw03-checks` section runs firewalld 0.3.0 on
+disposable objects (zone `sintacc`, dummy interface `sintacc0`, RFC 5737
+networks) over SSH to 127.0.0.1 with the declared loopback management path:
+`fw03-zone`, `fw03-interface`, `fw03-source`, `fw03-reload`,
+`risk-approved-apply` (approval request, `sinter approve` on a
+pseudo-terminal, apply; refused without an approval, for an altered request,
+for another change and when reused) and `fw03-no-residue`. `target-prep.sh`
+installs and starts firewalld where it is missing and stops unless its default
+zone allows ssh and a new loopback SSH session works. The VM's management path
+is observed after every change; whatever happens, the section removes what it
+created and compares the firewall with its state before. It never removes a
+zone or interface that existed before it started. A missing prerequisite
+(firewalld not running, firewalld 0.3.0 not in the sinter under test) fails
+all six checks; they are never SKIP or NOT APPLICABLE. They pass only after
+firewalld 0.3.0 is registered and the reload rule on a loopback path is
+measured (`docs/design/v1.15.0-release-and-acceptance.md` §3.2).
 
 NOT APPLICABLE: `applicability.json` lists the only allowed
 (check, reason, targets) entries; in v1.15.0 `nm-profile-crud` with
@@ -107,6 +117,8 @@ Tests: `python3 -m unittest discover -s release/tests`
 (`test_acceptance_harness.py` drives these scripts against a fake `gcloud`;
 `test_acceptance_v1150.py` covers the v1.15.0 raw verdict, NOT APPLICABLE,
 the target set and the new check section statically;
+`test_acceptance_fw03_checks.py` runs the firewalld section against a fake
+`sinter`, `firewall-cmd`, `ip` and `ssh` with one defect at a time;
 `test_acceptance_v190_checks.py` and `test_acceptance_v1120_checks.py` run the
 check sections against a fake `sinter` with one defect at a time, and the
 plugin section against a built binary when `SINTER_ACCEPTANCE_REAL_BIN` is set).

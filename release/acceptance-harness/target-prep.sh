@@ -2,7 +2,8 @@
 # Prepares one disposable acceptance target: the prerequisites RELEASE.md
 # lists for a supported target (systemd, OpenSSH server, /bin/sh, attr) plus a
 # dedicated non-root acceptance user with passwordless sudo -n and an SSH key
-# pair for the loopback SSH check. Idempotent.
+# pair for the loopback SSH check, and a running firewalld whose default zone
+# allows ssh (v1.15.0 fw03 checks). Idempotent.
 set -u
 LOG=/tmp/target-prep.log
 exec >> "$LOG" 2>&1
@@ -103,6 +104,35 @@ else
   exit 4
 fi
 sudo -u sinter sudo -n true && echo "passwordless sudo OK" || { echo "STOP passwordless sudo failed"; exit 5; }
+# firewalld (docs/design/v1.15.0-release-and-acceptance.md §3.1): the fw03
+# checks need a running firewalld. It is installed and started here when it is
+# missing (this VM is disposable). Its default zone must allow the ssh service
+# and a new loopback SSH session must work after the start; otherwise the
+# preparation stops. The state before is logged; nothing else is changed.
+FW_PRE=$(command -v firewall-cmd >/dev/null 2>&1 && echo installed || echo missing)
+FW_PREACT=$(systemctl is-active firewalld 2>/dev/null)
+UFW=$(command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | head -1 || echo "ufw absent")
+echo "firewalld before: $FW_PRE active=$FW_PREACT ($UFW)"
+case "$UFW" in *"Status: active"*) echo "STOP ufw is active; firewalld would conflict with it"; exit 7 ;; esac
+if [ "$FW_PRE" = missing ]; then
+  case "$ID_LIKE $NAME" in
+    *debian*|*ubuntu*|*Ubuntu*) apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq firewalld ;;
+    *) dnf install -y -q firewalld ;;
+  esac
+fi
+systemctl enable --now firewalld >/dev/null 2>&1
+FW_STATE=$(firewall-cmd --state 2>&1)
+FW_DZ=$(firewall-cmd --get-default-zone 2>/dev/null)
+FW_SSH=$(firewall-cmd --zone="$FW_DZ" --query-service=ssh 2>/dev/null)
+echo "firewalld after: state=$FW_STATE default_zone=$FW_DZ ssh_service=$FW_SSH version=$(firewall-cmd --version 2>/dev/null)"
+[ "$FW_STATE" = running ] && [ "$FW_SSH" = yes ] || { echo "STOP firewalld not running or its default zone does not allow ssh"; exit 7; }
+if sudo -u sinter ssh -i /opt/sinter-acceptance/ssh/id_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/opt/sinter-acceptance/ssh/known_hosts -p 22 127.0.0.1 'echo LOOPBACK_SSH_OK' 2>&1 | grep -q LOOPBACK_SSH_OK; then
+  echo "loopback ssh after firewalld OK"
+else
+  echo "STOP loopback ssh failed after firewalld start"; exit 7
+fi
+# the fw03 checks create a dummy interface; logged here, not required here
+if ip link add sinterprep0 type dummy >/dev/null 2>&1; then ip link del sinterprep0; echo "dummy interface OK"; else echo "dummy interface unavailable"; fi
 df -h / | tail -1
 echo "== target prep end $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo 0 > /tmp/prep.rc

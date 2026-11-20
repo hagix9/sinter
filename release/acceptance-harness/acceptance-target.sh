@@ -599,8 +599,9 @@ echo "PLUGIN_DEFAULT_ROOT_BEFORE=$DEF_BEFORE"
 "$EXE" plugin list --plugin-root "$PR" --json > "$S/pl1.json" 2> "$S/pl1.err"; R=$?
 V=$(pyq "$S/pl1.json" '[(p["version"], p["available"], p["installed"], p["status"]) for p in d["plugins"] if p["id"] == "firewalld"]')
 echo "PLUGIN_LIST_ABSENT_RC=$R $V"
-if [ "$R" -eq 0 ] && [ "$V" = "[('0.1.0', True, False, 'available'), ('0.2.0', True, False, 'available')]" ] && [ ! -e "$PR" ]; then
-  check plugin-list-available ok "firewalld 0.1.0 and 0.2.0 embedded, not installed; nothing created"
+# v1.15.0 registers firewalld 0.3.0 (P7-R1, after its real-host measurement).
+if [ "$R" -eq 0 ] && [ "$V" = "[('0.1.0', True, False, 'available'), ('0.2.0', True, False, 'available'), ('0.3.0', True, False, 'available')]" ] && [ ! -e "$PR" ]; then
+  check plugin-list-available ok "firewalld 0.1.0, 0.2.0 and 0.3.0 embedded, not installed; nothing created"
 else check plugin-list-available FAIL "rc=$R $V root=$([ -e "$PR" ] && echo created || echo absent)"; fi
 
 "$EXE" plugin verify --plugin-root "$PR" --json > "$S/pv1.json" 2> "$S/pv1.err"; R=$?
@@ -638,7 +639,7 @@ V=$(pyq "$S/pv2.json" '(d["ok"], d["plugins"][0]["status"], d["plugins"][0]["req
 "$EXE" plugin list --plugin-root "$PR" --json > "$S/pl2.json" 2> "$S/pl2.err"; R2=$?
 V2=$(pyq "$S/pl2.json" '[(p["version"], p["installed"], p["status"]) for p in d["plugins"] if p["id"] == "firewalld"]')
 echo "PLUGIN_VERIFY_INSTALLED_RC=$R $V LIST_RC=$R2 $V2"
-if [ "$R" -eq 0 ] && [ "$V" = "(True, 'ok', [], 12, ['pass'])" ] && [ "$R2" -eq 0 ] && [ "$V2" = "[('0.1.0', False, 'available'), ('0.2.0', True, 'installed')]" ]; then
+if [ "$R" -eq 0 ] && [ "$V" = "(True, 'ok', [], 12, ['pass'])" ] && [ "$R2" -eq 0 ] && [ "$V2" = "[('0.1.0', False, 'available'), ('0.2.0', True, 'installed'), ('0.3.0', False, 'available')]" ]; then
   check plugin-verify-installed ok "every verify check passes; 12 mutate operations stay not allowed; list shows installed"
 else check plugin-verify-installed FAIL "rc=$R $V list_rc=$R2 $V2"; fi
 
@@ -826,10 +827,8 @@ else check recipe-vars-no-residue FAIL "rc=$R $(rv_bodies)"; fi
 # ------------------------------------------------------------- v1.15.0
 # BEGIN v1150-checks
 # docs/design/v1.15.0-release-and-acceptance.md §3. Everything runs on
-# disposable names (sinter-acc-*) and removes them. Not part of this matrix
-# (BLOCKED in P7, see README.md): fw03-interface, fw03-source, fw03-zone,
-# fw03-reload and risk-approved-apply need firewalld 0.3.0 in the release
-# registry and the measured loopback behaviour of a reload.
+# disposable names (sinter-acc-*) and removes them. The firewalld 0.3.0
+# checks (fw03-*, risk-approved-apply) are the next section, fw03-checks.
 jq_chg() { # jq_chg <json> <resource id> -> its change or ERR
   python3 -c '
 import json, sys
@@ -1023,6 +1022,254 @@ if [ "$R" -eq 0 ] && [ "$AST" = no_drift ]; then check discover-roundtrip ok "au
 else check discover-roundtrip FAIL "rc=$R status=$AST not_compliant=$ANON"; fi
 sudo rm -rf "$DD"; rm -rf "$S/disc"
 # END v1150-checks
+
+# ------------------------------------------------- v1.15.0 firewalld 0.3.0
+# BEGIN fw03-checks
+# docs/design/v1.15.0-release-and-acceptance.md §3 and §3.1 (P7-R1):
+# firewalld 0.3.0 on a disposable zone (sintacc), a dummy interface
+# (sintacc0) and documentation networks (RFC 5737), runtime and permanent,
+# over SSH to 127.0.0.1 with the declared loopback management path, the R
+# resources through the approval flow (DESIGN §43.4). The VM's own management
+# connection (its default-route interface and that interface's zone) is never
+# named by a recipe; it is observed before and after every change, and a new
+# SSH session is opened after every change. Whatever the results, fw03_restore
+# removes every disposable object with firewall-cmd and ip at the end, and
+# fw03-no-residue compares the firewall with its state before the section.
+# Nothing here is ever SKIP or NOT_APPLICABLE: a missing prerequisite (no
+# running firewalld, no firewalld 0.3.0 in this sinter) fails every check.
+FWZ=sintacc; FWIF=sintacc0; FWSRC=198.51.100.0/24; FWRS=192.0.2.0/24; FWRS2=203.0.113.0/24
+FWP=8472/tcp; FWPP=8471/tcp
+FWETC=/etc/firewalld
+FWKH=/opt/sinter-acceptance/ssh/known_hosts
+FWST="$S/fw03-state"; FWPR="$S/fw03-pr"
+FWSSH="--host 127.0.0.1 --port 22 --user $SSHUSER --identity $SSHKEY --known-hosts $FWKH --management-path loopback"
+FWIDS="fw03-zone fw03-interface fw03-source fw03-reload risk-approved-apply fw03-no-residue"
+rm -rf "$FWST" "$FWPR"; mkdir -m 700 "$FWST"
+fx() { XDG_STATE_HOME="$FWST" "$EXE" "$@"; }   # sinter with this section's own approval store
+fwq() { sudo firewall-cmd "$@" > /dev/null 2>&1; echo $?; }   # exit status of a direct firewall-cmd
+fwj() { # fwj <json file> <python expression over d> -> the value or ERR:<type>
+  python3 -c 'import json, sys
+try:
+    d = json.load(open(sys.argv[1])); print(eval(sys.argv[2]))
+except Exception as e:
+    print("ERR:%s" % type(e).__name__)' "$1" "$2"; }
+fwchg() { fwj "$1" "[r.get('change') for r in d.get('resources', []) if r.get('id') == '$2'][0]"; }
+fw_mgmt() { # the VM's management path as one line: a new SSH session, the default-route device, its zone and that zone's configuration
+  local s dev z
+  s=$(ssh -i "$SSHKEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$FWKH" \
+        -o ConnectTimeout=20 -p 22 "$SSHUSER@127.0.0.1" /usr/bin/true > /dev/null 2>&1 && echo ok || echo FAIL)
+  dev=$(ip -o route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
+  z=$(sudo firewall-cmd --get-zone-of-interface="$dev" 2>/dev/null) || z=$(sudo firewall-cmd --get-default-zone 2>/dev/null)
+  echo "ssh=$s dev=${dev:-none} zone=${z:-none} cfg=$({ sudo firewall-cmd --get-default-zone; sudo firewall-cmd --zone="$z" --list-all; \
+    sudo firewall-cmd --permanent --zone="$z" --list-all; } 2>&1 | sha256sum | cut -c1-16)"; }
+fw_snap() { # zones (runtime, permanent), every file under /etc/firewalld, the dummy interface
+  { sudo firewall-cmd --get-zones; sudo firewall-cmd --permanent --get-zones; sudo find "$FWETC" -type f -exec sha256sum {} + | sort
+    ip -o link show "$FWIF" 2>&1 | cut -d' ' -f2; } 2>&1 | sha256sum | cut -c1-16; }
+fw_apply() { # fw_apply <tag> <recipe> [args]: apply without an approval
+  local t=$1 f=$2; shift 2
+  fx apply "$f" $FWSSH --sudo --plugin-root "$FWPR" --format json "$@" > "$S/fw03.$t.json" 2> "$S/fw03.$t.err"; }
+fw_approved() { # fw_approved <tag> <recipe> [noapply]: plan with a request, approve on a pseudo-terminal, apply with that approval
+  local t=$1 f=$2 req
+  FWA_ID=; FWA_APPROVE=none; FWA_APPLY=none
+  fx plan "$f" $FWSSH --sudo --plugin-root "$FWPR" --format json --approval-request "$S/fw03.$t.req" > "$S/fw03.$t.plan.json" 2> "$S/fw03.$t.plan.err"; FWA_PLAN=$?
+  req=$(ls "$S/fw03.$t.req/"*.request.json 2> /dev/null)
+  [ "$FWA_PLAN" -eq 0 ] && [ "$(printf '%s\n' "$req" | grep -c .)" = 1 ] || return 0
+  FWA_REQ=$req
+  XDG_STATE_HOME="$FWST" python3 -I "$S/fw03-pty.py" "$EXE" approve "$req" > "$S/fw03.$t.approve.out" 2>&1; FWA_APPROVE=$?
+  FWA_ID=$(tr -d '\r' < "$S/fw03.$t.approve.out" | sed -n 's/^approved: \([0-9a-f]\{32\}\)$/\1/p')
+  [ -n "$FWA_ID" ] && [ "${3:-}" != noapply ] || return 0
+  fw_apply "$t" "$f" --approval "$FWA_ID"; FWA_APPLY=$?; }
+fw_recipe() { # fw_recipe <file> <type> <with> [extra lines]
+  printf 'version: 1\nplugins:\n  - { id: firewalld, version: 0.3.0 }\nresources:\n  - id: acc_fw\n    type: firewalld.%s\n    with: { %s }\n%s' "$2" "$3" "${4:-}" > "$1"; }
+# sinter approve needs a terminal on stdin and stdout: this drives it through a
+# pseudo-terminal and types the digest prefix it shows (a terminal is not proof
+# that a person approved, DESIGN §43.4). No digest shown: a wrong answer.
+cat > "$S/fw03-pty.py" <<'PY'
+import os, pty, re, select, signal, sys, time
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv(sys.argv[1], sys.argv[1:])
+buf, sent, end = b"", False, time.time() + 120
+while time.time() < end:
+    r, _, _ = select.select([fd], [], [], 1)
+    if fd not in r:
+        continue
+    try:
+        chunk = os.read(fd, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    buf += chunk
+    if not sent and b"to approve: " in buf:
+        m = re.search(rb"content digest: ([0-9a-f]{64})", buf)
+        os.write(fd, (m.group(1)[:16] if m else b"0" * 16) + b"\n")
+        sent = True
+else:
+    os.kill(pid, signal.SIGKILL)
+_, st = os.waitpid(pid, 0)
+sys.stdout.write(buf.decode("utf-8", "replace"))
+sys.exit(os.WEXITSTATUS(st) if os.WIFEXITED(st) else 125)
+PY
+fw03_restore() { # removes every disposable object directly, whatever Sinter did
+  local w
+  for w in "" --permanent; do
+    sudo firewall-cmd $w --zone="$FWZ" --remove-interface="$FWIF" > /dev/null 2>&1
+    for src in "$FWSRC" "$FWRS" "$FWRS2"; do sudo firewall-cmd $w --zone="$FWZ" --remove-source="$src" > /dev/null 2>&1; done
+  done
+  sudo firewall-cmd --permanent --delete-zone="$FWZ" > /dev/null 2>&1
+  sudo rm -f "$FWETC/zones/$FWZ.xml" "$FWETC/zones/$FWZ.xml.old"
+  sudo firewall-cmd --reload > /dev/null 2>&1
+  sudo ip link del "$FWIF" > /dev/null 2>&1
+  echo "FW03_RESTORE zone_perm=$(fwq --permanent --info-zone="$FWZ") zone_rt=$(fwq --info-zone="$FWZ") link=$(ip -o link show "$FWIF" > /dev/null 2>&1 && echo present || echo absent)"; }
+
+FWC=$(command -v firewall-cmd > /dev/null 2>&1 && echo present || echo absent)
+FWSTATE=$(sudo firewall-cmd --state 2>/dev/null || echo not-running)
+"$EXE" plugin list --json > "$S/fw03.list.json" 2> "$S/fw03.list.err"
+FW030=$(fwj "$S/fw03.list.json" "'embedded' if any(p['id'] == 'firewalld' and p['version'] == '0.3.0' and p['available'] for p in d['plugins']) else 'absent'")
+echo "== observe fw03-presence firewall-cmd=$FWC state=$FWSTATE plugin030=$FW030"
+FW_SNAP0=""; FW_MGMT0=""; FWRAN=no
+if [ "$FWC" = present ] && [ "$FWSTATE" = running ] && [ "$FW030" = embedded ]; then
+  FW_SNAP0=$(fw_snap); FW_MGMT0=$(fw_mgmt)
+  echo "FW03_BEFORE snap=$FW_SNAP0 mgmt=[$FW_MGMT0]"
+  case "$FW_MGMT0" in ssh=ok\ *) ;; *) FW030=mgmt-unusable ;; esac
+  if [ -n "$(sudo firewall-cmd --permanent --get-zones 2>/dev/null | tr ' ' '\n' | grep -x "$FWZ")" ] || ip -o link show "$FWIF" > /dev/null 2>&1; then
+    FW030=disposable-names-in-use; fi
+fi
+if [ "$FWC" != present ] || [ "$FWSTATE" != running ] || [ "$FW030" != embedded ]; then
+  for id in $FWIDS; do check "$id" FAIL "prerequisite: firewall-cmd=$FWC state=$FWSTATE plugin030=$FW030"; done
+else
+  FWRAN=yes
+  fx plugin install firewalld@0.3.0 --yes --plugin-root "$FWPR" --allow-mutate-for firewalld.zone --allow-mutate-for firewalld.interface \
+    --allow-mutate-for firewalld.source --allow-mutate-for firewalld.port --allow-mutate reload --json < /dev/null > "$S/fw03.pi.json" 2> "$S/fw03.pi.err"
+  FWPI=$?
+  sudo ip link add "$FWIF" type dummy > /dev/null 2>&1; FWDL=$?
+  # NetworkManager may hold a device's permanent zone (DESIGN §44.7): the
+  # dummy device is set unmanaged so that the rule can judge its binding.
+  FWNM=absent; if [ -x /usr/bin/nmcli ]; then sudo nmcli device set "$FWIF" managed no > /dev/null 2>&1 && FWNM=unmanaged || FWNM=FAIL; fi
+  echo "FW03_PREP install=$FWPI dummy=$FWDL nm=$FWNM"
+
+  # ---- fw03-zone, part 1: a permanent zone (N: no approval), idempotent
+  fw_recipe "$S/fwz1.yaml" zone "zone: $FWZ, state: present"
+  fw_apply z1 "$S/fwz1.yaml"; FZ1=$?
+  fw_apply z2 "$S/fwz1.yaml"; FZ2=$?
+  FZP=$(fwq --permanent --info-zone="$FWZ")
+  # a new zone exists at runtime only after a reload (DESIGN §44.3): made here
+  # directly, so the interface and source checks do not depend on fw03-reload
+  FZR0=$(fwq --reload); FZR=$(fwq --info-zone="$FWZ"); FZM=$(fw_mgmt)
+  FWZ_A="z1=$FZ1:$(fwchg "$S/fw03.z1.json" acc_fw) z2=$FZ2:$(fwchg "$S/fw03.z2.json" acc_fw) perm=$FZP reload=$FZR0 runtime=$FZR mgmt=$([ "$FZM" = "$FW_MGMT0" ] && echo same || echo "CHANGED[$FZM]")"
+  echo "FW03_ZONE_CREATE $FWZ_A"
+
+  # ---- fw03-interface and fw03-source (R: every run needs an approval)
+  fw_rr() { # fw_rr <name> <type> <field> <value> -> one line: present, again, absent; runtime and permanent queries; management path
+    local n=$1 ty=$2 fld=$3 v=$4 out="" st k=0
+    for st in present present absent; do
+      k=$((k + 1))
+      fw_recipe "$S/fw$n.$k.yaml" "$ty" "zone: $FWZ, $fld: $v, state: $st"
+      fw_approved "$n$k" "$S/fw$n.$k.yaml"
+      out="$out $st:plan=$FWA_PLAN,approve=$FWA_APPROVE,apply=$FWA_APPLY,change=$(fwchg "$S/fw03.$n$k.json" acc_fw)"
+      out="$out,rt=$(fwq --zone="$FWZ" --query-$fld="$v"),perm=$(fwq --permanent --zone="$FWZ" --query-$fld="$v"),mgmt=$([ "$(fw_mgmt)" = "$FW_MGMT0" ] && echo same || echo CHANGED)"
+    done
+    echo "$out"; }
+  FWI=$(fw_rr i interface interface "$FWIF"); echo "FW03_INTERFACE$FWI"
+  if [ "$FWZ_A" = "z1=0:changed z2=0:none perm=0 reload=0 runtime=0 mgmt=same" ] && [ "$FWNM" != FAIL ] && [ "$FWDL" -eq 0 ] \
+     && [ "$FWI" = " present:plan=0,approve=0,apply=0,change=changed,rt=0,perm=0,mgmt=same present:plan=0,approve=0,apply=0,change=none,rt=0,perm=0,mgmt=same absent:plan=0,approve=0,apply=0,change=changed,rt=1,perm=1,mgmt=same" ]; then
+    check fw03-interface ok "dummy $FWIF bound to $FWZ (runtime and permanent), unchanged on re-apply, unbound; each run approved; management path unchanged"
+  else check fw03-interface FAIL "dummy=$FWDL nm=$FWNM steps=$FWI"; head -c 600 "$S"/fw03.i.*.err 2>/dev/null; fi
+  FWS=$(fw_rr s source source "$FWSRC"); echo "FW03_SOURCE$FWS"
+  if [ "$FWZ_A" = "z1=0:changed z2=0:none perm=0 reload=0 runtime=0 mgmt=same" ] \
+     && [ "$FWS" = " present:plan=0,approve=0,apply=0,change=changed,rt=0,perm=0,mgmt=same present:plan=0,approve=0,apply=0,change=none,rt=0,perm=0,mgmt=same absent:plan=0,approve=0,apply=0,change=changed,rt=1,perm=1,mgmt=same" ]; then
+    check fw03-source ok "$FWSRC bound to $FWZ (runtime and permanent), unchanged on re-apply, removed; each run approved; management path unchanged"
+  else check fw03-source FAIL "steps=$FWS"; head -c 600 "$S"/fw03.s.*.err 2>/dev/null; fi
+
+  # ---- risk-approved-apply: the approval binds the reviewed change; it is
+  # spent before contact, never reused, and does not cover another change
+  fw_recipe "$S/fwr.a.yaml" source "zone: $FWZ, source: $FWRS, state: present"
+  fw_recipe "$S/fwr.b.yaml" source "zone: $FWZ, source: $FWRS2, state: present"
+  fw_recipe "$S/fwr.c.yaml" source "zone: $FWZ, source: $FWRS, state: absent"
+  fw_apply r0 "$S/fwr.a.yaml"; RR0=$?                       # no approval: exit 2 before contact
+  RR0M=$(grep -c "need an approval" "$S/fw03.r0.err")
+  fx plan "$S/fwr.a.yaml" $FWSSH --sudo --plugin-root "$FWPR" --format json --approval-request "$S/fw03.rt.req" > /dev/null 2> "$S/fw03.rt.err"
+  RT=$(ls "$S/fw03.rt.req/"*.request.json 2> /dev/null | head -1); RTA=none
+  if [ -n "$RT" ]; then                                       # an altered request is refused by approve (HMAC)
+    python3 - "$RT" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["created_at"] = (d["created_at"] + 1) if isinstance(d.get("created_at"), int) else 1
+open(p, "w").write(json.dumps(d))
+PY
+    XDG_STATE_HOME="$FWST" python3 -I "$S/fw03-pty.py" "$EXE" approve "$RT" > "$S/fw03.rt.approve.out" 2>&1; RTA=$?
+    if tr -d '\r' < "$S/fw03.rt.approve.out" | grep -q '^approved: '; then RTA=approved
+    elif [ "$RTA" != 0 ] && grep -q "fails its integrity check" "$S/fw03.rt.approve.out"; then RTA=refused-integrity; fi
+  fi
+  fw_approved ra "$S/fwr.a.yaml" noapply; RA_ID=$FWA_ID; RA="plan=$FWA_PLAN,approve=$FWA_APPROVE"
+  RB=none; [ -n "$RA_ID" ] && { fw_apply rb "$S/fwr.b.yaml" --approval "$RA_ID"; RB=$?; }   # the approval of a, used for b: re-plan mismatch
+  RB="$RB/$(grep -c "differs from the approved plan" "$S/fw03.rb.err" 2> /dev/null)"
+  RBQ="$(fwq --zone="$FWZ" --query-source="$FWRS2")/$(fwq --permanent --zone="$FWZ" --query-source="$FWRS2")"
+  fw_approved ra2 "$S/fwr.a.yaml"; RA2_ID=$FWA_ID; RA2="plan=$FWA_PLAN,approve=$FWA_APPROVE,apply=$FWA_APPLY,change=$(fwchg "$S/fw03.ra2.json" acc_fw)"
+  RAQ="$(fwq --zone="$FWZ" --query-source="$FWRS")/$(fwq --permanent --zone="$FWZ" --query-source="$FWRS")"
+  RU=none; [ -n "$RA2_ID" ] && { fw_apply ru "$S/fwr.a.yaml" --approval "$RA2_ID"; RU=$?; }  # the same approval again
+  RUM=$(grep -c "has already been used" "$S/fw03.ru.err" 2> /dev/null)
+  FWLH=127.0.0.1   # the host label of the approvals: the target address in FWSSH
+  RL=$(XDG_STATE_HOME="$FWST" "$EXE" approvals list 2> /dev/null | grep -c "^$RA2_ID host=$FWLH used$")
+  fw_approved rc "$S/fwr.c.yaml"; RC="apply=$FWA_APPLY,change=$(fwchg "$S/fw03.rc.json" acc_fw)"
+  RCQ="$(fwq --zone="$FWZ" --query-source="$FWRS")/$(fwq --permanent --zone="$FWZ" --query-source="$FWRS")"
+  RM=$([ "$(fw_mgmt)" = "$FW_MGMT0" ] && echo same || echo CHANGED)
+  FWR="none:$RR0/$RR0M tampered:$RTA a:$RA other:$RB/$RBQ a2:$RA2/$RAQ reuse:$RU/$RUM listed:$RL removed:$RC/$RCQ mgmt=$RM"
+  echo "FW03_RISK $FWR"
+  if [ "$FWR" = "none:2/1 tampered:refused-integrity a:plan=0,approve=0 other:5/1/1/1 a2:plan=0,approve=0,apply=0,change=changed/0/0 reuse:2/1 listed:1 removed:apply=0,change=changed/1/1 mgmt=same" ]; then
+    check risk-approved-apply ok "request, approve on a terminal, apply; refused without an approval, for an altered request, for another change and when reused"
+  else check risk-approved-apply FAIL "$FWR"; head -c 600 "$S"/fw03.r*.err 2>/dev/null; fi
+
+  # ---- fw03-reload: the plugin handler (C) after a change; a permanent-only
+  # port added directly before shows that the reload ran
+  FWRL0=$(fwq --permanent --zone="$FWZ" --add-port="$FWPP")
+  fw_recipe "$S/fwl.yaml" port "zone: $FWZ, port: $FWP, state: present" "    notify: [acc_fw_reload]
+handlers:
+  - id: acc_fw_reload
+    type: plugin
+    plugin: firewalld
+    op: reload
+"
+  fw_apply l1 "$S/fwl.yaml"; FL1=$?
+  FL1H=$(fwj "$S/fw03.l1.json" "[(h['state'], 'firewalld' in (h.get('provenance') or '') and '0.3.0' in (h.get('provenance') or '')) for h in d['handlers'] if h['id'] == 'acc_fw_reload']")
+  FLQ="$(fwq --zone="$FWZ" --query-port="$FWP")/$(fwq --permanent --zone="$FWZ" --query-port="$FWP")/$(fwq --zone="$FWZ" --query-port="$FWPP")"
+  FLM=$([ "$(fw_mgmt)" = "$FW_MGMT0" ] && echo same || echo CHANGED)
+  fw_apply l2 "$S/fwl.yaml"; FL2=$?
+  FL2H=$(fwj "$S/fw03.l2.json" "[h['state'] for h in d['handlers'] if h['id'] == 'acc_fw_reload']")
+  for w in "" --permanent; do sudo firewall-cmd $w --zone="$FWZ" --remove-port="$FWP" > /dev/null 2>&1; sudo firewall-cmd $w --zone="$FWZ" --remove-port="$FWPP" > /dev/null 2>&1; done
+  FWL="prep=$FWRL0 l1=$FL1:$(fwchg "$S/fw03.l1.json" acc_fw):$FL1H ports=$FLQ mgmt=$FLM l2=$FL2:$(fwchg "$S/fw03.l2.json" acc_fw):$FL2H"
+  echo "FW03_RELOAD $FWL"
+  if [ "$FWL" = "prep=0 l1=0:changed:[('Succeeded', True)] ports=0/0/0 mgmt=same l2=0:none:[]" ]; then
+    check fw03-reload ok "the reload handler ran after the change (a permanent-only port became active), with plugin provenance; not run when nothing changed; management path unchanged"
+  else check fw03-reload FAIL "$FWL"; head -c 600 "$S"/fw03.l*.err 2>/dev/null; fi
+
+  # ---- fw03-zone, part 2: deleting the zone is R (approval); gone after a reload
+  fw_recipe "$S/fwz3.yaml" zone "zone: $FWZ, state: absent"
+  fw_approved z3 "$S/fwz3.yaml"
+  FZ3="apply=$FWA_APPLY,change=$(fwchg "$S/fw03.z3.json" acc_fw)"
+  FZ3P=$(fwq --permanent --info-zone="$FWZ"); FZ3R0=$(fwq --reload); FZ3R=$(fwq --info-zone="$FWZ")
+  FZ3M=$([ "$(fw_mgmt)" = "$FW_MGMT0" ] && echo same || echo CHANGED)
+  echo "FW03_ZONE_DELETE $FZ3 perm=$FZ3P reload=$FZ3R0 runtime=$FZ3R mgmt=$FZ3M"
+  if [ "$FWZ_A" = "z1=0:changed z2=0:none perm=0 reload=0 runtime=0 mgmt=same" ] && [ "$FZ3" = "apply=0,change=changed" ] \
+     && [ "$FZ3P" != 0 ] && [ "$FZ3R0" = 0 ] && [ "$FZ3R" != 0 ] && [ "$FZ3M" = same ]; then
+    check fw03-zone ok "zone $FWZ created (permanent, unchanged on re-apply), deleted with an approval, gone at runtime after a reload"
+  else check fw03-zone FAIL "create: $FWZ_A delete: $FZ3 perm=$FZ3P reload=$FZ3R0 runtime=$FZ3R mgmt=$FZ3M"; fi
+fi
+
+# ---- restore and compare (always after the checks ran; never when the
+# disposable names already existed or the prerequisites failed: then nothing
+# here was created, and nothing is removed)
+if [ "$FWRAN" = yes ]; then
+  fw03_restore
+  [ -x /usr/bin/nmcli ] && sudo nmcli device set "$FWIF" managed yes > /dev/null 2>&1
+  FW_SNAP1=$(fw_snap); FW_MGMT1=$(fw_mgmt)
+  echo "FW03_AFTER snap=$FW_SNAP1 mgmt=[$FW_MGMT1]"
+  if [ "$FW_SNAP1" = "$FW_SNAP0" ] && [ "$FW_MGMT1" = "$FW_MGMT0" ]; then
+    check fw03-no-residue ok "zones, /etc/firewalld and interfaces as before; management path unchanged; a new SSH session works"
+  else check fw03-no-residue FAIL "snap $FW_SNAP0 -> $FW_SNAP1 mgmt [$FW_MGMT0] -> [$FW_MGMT1]"; fi
+fi
+rm -rf "$FWST" "$FWPR" "$S"/fw03.*.req
+# END fw03-checks
 
 # ------------------------------------------------------- residue cleanup
 cat > "$S/cleanup.yaml" <<'YAML'

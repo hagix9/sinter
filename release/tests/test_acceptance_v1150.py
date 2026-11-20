@@ -37,7 +37,9 @@ LABELS = ["ubuntu2404", "ubuntu2604", "rocky9", "rocky10", "rhel9", "rhel10", "a
 NEW_CHECKS = ["timer-create", "timer-idempotent", "timer-running", "timer-absent", "timer-calendar-invalid",
               "service-timer-name", "risk-static-refusal", "nm-profile-crud", "discover-readonly",
               "discover-roundtrip"]
-BLOCKED_CHECKS = ["fw03-interface", "fw03-source", "fw03-zone", "fw03-reload", "risk-approved-apply"]
+# P7-R1: the checks BLOCKED in P7 are built (fw03-checks section), plus fw03-no-residue
+FW03_CHECKS = ["fw03-interface", "fw03-source", "fw03-zone", "fw03-reload", "risk-approved-apply",
+               "fw03-no-residue"]
 
 
 def H(b):
@@ -248,11 +250,9 @@ class HarnessStatic(unittest.TestCase):
                                 os.path.join(HARNESS, "acceptance-target.sh"), out], capture_output=True, text=True)
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertEqual(rd(out), rd(IDS_PATH))
-        self.assertEqual(len(IDS), 70)
-        for c in NEW_CHECKS:
+        self.assertEqual(len(IDS), 76)
+        for c in NEW_CHECKS + FW03_CHECKS:
             self.assertIn(c, IDS)
-        for c in BLOCKED_CHECKS:
-            self.assertNotIn(c, IDS, "a BLOCKED check must not be in the matrix")
 
     def test_shell_syntax(self):
         for n in sorted(os.listdir(HARNESS)):
