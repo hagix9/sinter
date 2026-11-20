@@ -1227,3 +1227,35 @@ fn plan_says_when_apply_would_refuse_an_approved_change() {
     );
     assert!(!outcome(&r, "m").2.contains("checkpoint=unavailable"));
 }
+
+#[test]
+fn unreadable_device_types_are_unknown() {
+    // R-1 (re-audit): the device type list cannot be read.
+    let n = nm();
+    n.lock()
+        .unwrap()
+        .raw
+        .insert("devices".into(), "eth0\n".into());
+    let (dy, why) = dynamic_of(&lan_dns(), &n, net());
+    assert_eq!(dy, "unknown");
+    assert!(why.unwrap().contains("device types could not be read"));
+}
+
+#[test]
+fn a_rollback_after_a_first_command_that_failed_is_not_reported_as_changed() {
+    // N-6: the first command failed, so nothing changed for certain.
+    let rc = Recipe::new();
+    let n = nm();
+    let body = mgmt_change("");
+    let (_d, c, _st) = approval_for(&rc, &body, || target(&n, net()));
+    n.lock()
+        .unwrap()
+        .fail_verb
+        .insert("modify".into(), (2, "Error: invalid property".into()));
+    let (r, _) = run(rc.model(&body).unwrap(), Mode::Apply, target(&n, net()), c);
+    let (ex, ch, why) = outcome(&r, "m");
+    assert_eq!(ex, Execution::Failed, "{why}");
+    assert_ne!(ch, Change::Changed, "{why}");
+    assert!(why.contains("rolled back"), "{why}");
+    assert_eq!(cps(&n), ["create", "rollback"]);
+}

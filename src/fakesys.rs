@@ -2882,7 +2882,7 @@ pub struct FakeNm {
     /// `delete`): (exit, stderr).
     pub fail_verb: BTreeMap<String, (i32, String)>,
     /// Raw stdout served instead of the modeled answer, by query
-    /// (`list`, `active`, `profile`).
+    /// (`list`, `active`, `profile`, `devices`).
     pub raw: BTreeMap<String, String>,
     /// Open checkpoint: (path, devices, snapshot of profiles and active).
     #[allow(clippy::type_complexity)]
@@ -3030,6 +3030,9 @@ impl FakeNm {
                 Self::out(0, body, "")
             }
             ["-t", "-e", "yes", "-f", "DEVICE,TYPE", "device"] => {
+                if let Some(r) = self.raw.get("devices") {
+                    return Self::out(0, r.clone(), "");
+                }
                 let body: String = self
                     .devices
                     .iter()
