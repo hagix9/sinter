@@ -82,6 +82,8 @@ def scope_labels(scope, targets):
     if scope == "patch":
         if not given:
             stop("patch scope needs SINTER_P5_TARGETS")
+        if set(given) == set(DEFAULT_LABELS):
+            stop("patch scope never names all eight targets (that is full scope)")
         if "ubuntu2404" not in given or "rocky9" not in given or not any(t in given for t in NEWER):
             stop("patch scope needs ubuntu2404, rocky9 and one of ubuntu2604, rocky10, rhel10, alma10")
         return [t for t in DEFAULT_LABELS if t in given]

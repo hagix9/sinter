@@ -147,8 +147,8 @@ Fields for each entry in `targets`:
 | Field | Rule |
 |---|---|
 | `acceptance_scope` | `full` (Tier F) or `patch` (Tier P), as approved at `RELEASE.md` step 2 |
-| `required_targets` | full: exactly the eight supported targets. patch: `ubuntu2404`, `rocky9`, at least one of `ubuntu2604`, `rocky10`, `rhel10`, `alma10`, plus the T-3 targets; a subset of the eight |
-| `abi` | `{dt_needed, max_glibc, max_openssl}` measured on the frozen executable: `dt_needed` a sorted list of distinct library names, `max_glibc` `GLIBC_x.y`, `max_openssl` `OPENSSL_x.y.z` or `none` |
+| `required_targets` | full: exactly the eight supported targets. patch (never all eight): `ubuntu2404`, `rocky9`, at least one of `ubuntu2604`, `rocky10`, `rhel10`, `alma10`, plus the T-3 targets; a subset of the eight |
+| `abi` | `{dt_needed, max_glibc, max_openssl}` measured on the frozen executable: `dt_needed` a sorted list of distinct library names, `max_glibc` `GLIBC_x.y`, `max_openssl` `OPENSSL_x.y.z` or `none`; the checker measures it again from the executable in `--artifact` and fails on any difference |
 | `full_reference` | patch only (refused for full): `{version, manifest_sha256, finished_at, releases_since}`, with at most two `releases_since` entries |
 | `targets[].checks.not_applicable` | integer; `passed + failed + skipped + not_applicable = total` |
 | `targets[].not_applicable_checks` | one `{id, reason}` per not-applicable check |

@@ -49,33 +49,21 @@ NEWER = ["ubuntu2604", "rocky10", "rhel10", "alma10"]
 MAX_DAYS = 60
 MAX_RELEASES = 2
 
-# T-1: code whose change makes a release Tier F (platform detection, package
-# and service handling and their parsing, SSH and its algorithm lists, sudo,
-# the assembly of target commands). Matched against every changed path; a
-# match cannot be answered away.
+# T-1: code whose change makes a release Tier F. Fail closed: every change
+# to the shipped code (src/, the embedded plugins, the build script and cargo
+# configuration) counts as OS-related unless the path is listed in
+# NON_OS_CODE. A match cannot be answered away. NON_OS_CODE starts empty: a
+# path is added only by a reviewed change that shows the module never takes
+# part in platform detection, package or service handling or their parsing,
+# SSH and its algorithm lists, sudo, or the assembly of target commands or
+# scripts.
 OS_CODE = [
-    r"^src/platform\.rs$",
-    r"^src/facts\.rs$",
-    r"^src/resources\.rs$",
-    r"^src/manager\.rs$",
-    r"^src/targetfs\.rs$",
-    r"^src/executor\.rs$",
-    r"^src/sshconfig\.rs$",
-    r"^src/accounts\.rs$",
-    r"^src/package_progress\.rs$",
-    r"^src/fakepkg\.rs$",
-    r"^src/pgrole\.rs$",
-    r"^src/timer\.rs$",
-    r"^src/timer_engine\.rs$",
-    r"^src/nm\.rs$",
-    r"^src/nm_engine\.rs$",
-    r"^src/discover\.rs$",
-    r"^src/risk/",
-    r"^src/plugin/",
+    r"^src/",
     r"^plugins/",
     r"^build\.rs$",
     r"^\.cargo/",
 ]
+NON_OS_CODE = []
 # T-1: the supported OS or image set.
 PLATFORM_DOCS = [r"^README\.md$", r"^docs-site/src/content/docs/[a-z]+/compatibility/platforms\.md$"]
 # Statically linked SSH, crypto and compression crates.
@@ -130,9 +118,24 @@ def vtuple(s):
 
 
 def elf_abi(path):
+    """elf_abi_bytes of the file at `path`."""
+    with open(path, "rb") as f:
+        return elf_abi_bytes(f.read())
+
+
+def elf_abi_bytes(data):
+    try:
+        return _elf_abi_bytes(data)
+    except (struct.error, IndexError, ValueError) as e:
+        raise Bad(f"the ELF file is not readable ({type(e).__name__})")
+
+
+def _elf_abi_bytes(data):
     """DT_NEEDED and the highest GLIBC_/OPENSSL_ version needs of an ELF64
-    little-endian executable, read from its section headers."""
-    data = open(path, "rb").read()
+    little-endian executable, read from its section headers. Raises Bad on
+    anything it cannot read (fail closed)."""
+    if len(data) < 64:
+        raise Bad("the executable is not a 64-bit little-endian ELF file")
     if data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
         raise Bad("the executable is not a 64-bit little-endian ELF file")
     shoff, = struct.unpack_from("<Q", data, 0x28)
@@ -181,7 +184,9 @@ def elf_abi(path):
         raise Bad("the executable has no DT_NEEDED entry (not a dynamically linked executable?)")
 
     def top(prefix):
-        vs = [v for v in versions if re.fullmatch(prefix + r"\d+(\.\d+)*[a-z]?", v)]
+        # OpenSSL 1.1 spells its versions OPENSSL_1_1_0[a-z]; normalise to dots
+        norm = [prefix + v[len(prefix):].replace("_", ".") for v in versions if v.startswith(prefix)]
+        vs = [v for v in norm if re.fullmatch(re.escape(prefix) + r"\d+(\.\d+)*[a-z]?", v)]
         return max(vs, key=vtuple) if vs else None
     return {"dt_needed": sorted(set(needed)), "max_glibc": top("GLIBC_") or "none",
             "max_openssl": top("OPENSSL_") or "none"}
@@ -267,7 +272,8 @@ def main(argv):
         else:
             kind = "patch"
         paths = [p for p in git(a.repo, "diff", "--name-only", tag_commit, a.source_candidate).splitlines() if p]
-        os_paths = [p for p in paths if any(re.search(rx, p) for rx in OS_CODE)]
+        os_paths = [p for p in paths if any(re.search(rx, p) for rx in OS_CODE)
+                    and not any(re.search(rx, p) for rx in NON_OS_CODE)]
         doc_paths = [p for p in paths if any(re.search(rx, p) for rx in PLATFORM_DOCS)]
         old_lock = lock_versions(git(a.repo, "show", f"{tag_commit}:Cargo.lock"))
         new_lock = lock_versions(git(a.repo, "show", f"{a.source_candidate}:Cargo.lock"))

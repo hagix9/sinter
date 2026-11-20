@@ -335,7 +335,8 @@ class CollectorScope(unittest.TestCase):
         for scope, targets in (("full", "ubuntu2404,rocky9,ubuntu2604"), ("full", ",".join(LABELS[:7])),
                                ("patch", ""), ("patch", "ubuntu2404,ubuntu2604"), ("patch", "rocky9,rocky10"),
                                ("patch", "ubuntu2404,rocky9,rhel9"), ("patch", "ubuntu2404,rocky9,rocky10,rocky10"),
-                               ("patch", "ubuntu2404,rocky9,debian12"), ("partial", "ubuntu2404"), ("", "")):
+                               ("patch", "ubuntu2404,rocky9,debian12"), ("patch", ",".join(LABELS)),
+                               ("partial", "ubuntu2404"), ("", "")):
             with self.subTest(scope=scope, targets=targets):
                 self.refused(scope, targets)
 
@@ -368,8 +369,11 @@ def tearDownModule():
 
 
 class V2Evidence(tcam.Evidence):
-    def __init__(self, tmp, targets=None, na=(), observe=None):
+    def __init__(self, tmp, targets=None, na=(), observe=None, exe=None):
         super().__init__(tmp)
+        # /2: the checker measures abi on this executable (a synthetic ELF)
+        self.exe = exe if exe is not None else elf(["libc.so.6", "libm.so.6", "libgcc_s.so.1"],
+                                                   {"libc.so.6": ["GLIBC_2.17", "GLIBC_2.34"]})
         self.targets = list(targets or LABELS)
         self.na = set(na)
         self.observe = observe or {}
@@ -627,6 +631,15 @@ class ManifestV2(V2Base):
         self.assertReject(self.check_v2(lambda d: d.update(full_reference=fr), full_reference=path),
                           "only a patch scope names a reference")
 
+    def test_abi_is_measured_on_the_frozen_executable(self):
+        other = dict(ABI, max_glibc="GLIBC_2.28")
+        self.assertReject(self.check_v2(lambda d: d.update(abi=other)),
+                          "abi: differs from the ABI measured on the frozen executable")
+        self.assertReject(self.check_v2(lambda d: d.update(abi=dict(ABI, dt_needed=["libc.so.6", "libm.so.6"]))),
+                          "abi: differs from the ABI measured")
+        self.ev = V2Evidence(self.tmp, na=("ubuntu2404",), exe=b"synthetic sinter executable\n")
+        self.assertReject(self.check_v2(), "the executable's ABI cannot be measured")
+
 
 class ManifestV2Patch(V2Base):
     def test_patch_scope_with_a_valid_reference_passes(self):
@@ -636,6 +649,16 @@ class ManifestV2Patch(V2Base):
 
     def test_patch_scope_needs_the_reference_file(self):
         self.assertReject(self.check_patch(use_ref=False), "--full-reference: required for a patch-scope manifest")
+
+    def test_copying_the_reference_abi_does_not_hide_a_changed_executable(self):
+        changed = dict(ABI, max_glibc="GLIBC_2.38")
+        self.assertReject(self.check_patch(ref_mutate=lambda d: d.update(abi=changed),
+                                           mutate_doc=lambda d: d.update(abi=changed)),
+                          "abi: differs from the ABI measured on the frozen executable")
+
+    def test_patch_scope_never_names_all_eight(self):
+        self.assertReject(self.check_patch(mutate_doc=lambda d: d.update(required_targets=list(LABELS))),
+                          "a patch scope never names all eight targets")
 
     def test_reference_option_is_not_trusted(self):
         self.assertReject(self.check_patch(lambda fr: fr.update(manifest_sha256="0" * 64)),
@@ -830,6 +853,22 @@ class TierAssess(unittest.TestCase):
         self.assertEqual(res["acceptance_scope"], "patch")
         self.assertEqual(res["required_targets"], ["ubuntu2404", "ubuntu2604", "rocky9"])
         self.assertEqual(res["reasons_for_tier_f"], [])
+
+    def test_every_shipped_code_path_is_tier_f(self):
+        for path in ("src/package_removal/dnf.rs", "src/package_progress/apt.rs",
+                     "src/resources/exact_removal/rpm.rs", "src/fsbackup.sh", "src/fsstage.sh", "src/cli.rs",
+                     "plugins/first-party/x.toml", "build.rs", ".cargo/config.toml"):
+            with self.subTest(path):
+                c = commit_on(self.repo, [self.docs_only], {path: "// changed\n"}, path)
+                p, res, _ = self.assess(c)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertEqual(res["tier"], "F", path)
+                self.assertIn(path, " ".join(res["reasons_for_tier_f"]))
+
+    def test_tests_and_release_tooling_do_not_force_tier_f(self):
+        c = commit_on(self.repo, [self.docs_only], {"tests/cli.rs": "// t\n", "release/x.py": "# r\n"}, "t")
+        p, res, _ = self.assess(c)
+        self.assertEqual(res["tier"], "P", res["reasons_for_tier_f"])
 
     def test_t3_targets_are_added(self):
         p, res, _ = self.assess(self.docs_only, answers=self.answers(first_available_newer="rhel10",
@@ -1064,9 +1103,45 @@ class ApprovalSetV3(unittest.TestCase):
         self.forge(meta=lambda m: m.update(schema="sinter-approval-set/2"))
         self.assertInvalid(self.verify())
 
+    def test_a_v2_manifest_needs_a_v3_set(self):
+        work = tempfile.mkdtemp(prefix="v2man-", dir=self._t.name)
+        s2 = os.path.join(work, "set")
+        shutil.copytree(self.f.set, s2)
+        old, self.f.set = self.f.set, s2
+        try:
+            def to_v2(files):
+                m = json.loads(files["acceptance-manifest.json"])
+                m.update(schema="sinter-acceptance-manifest/2", acceptance_scope="full", required_targets=LABELS)
+                files["acceptance-manifest.json"] = (json.dumps(m, indent=2) + "\n").encode()
+            self.f.rebuild_bundle(to_v2)
+            self.f.relist()
+        finally:
+            self.f.set = old
+        p = self.verify(s2, rc_repo=False)
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn("C a sinter-acceptance-manifest/2 needs a sinter-approval-set/3 (with D)", p.stdout + p.stderr)
+        acc = tempfile.mkdtemp(prefix="acc-", dir=self._t.name)
+        for n in os.listdir(os.path.join(s2, "acceptance")):
+            shutil.copyfile(os.path.join(s2, "acceptance", n), os.path.join(acc, n))
+        out = os.path.join(self._t.name, "refused-v2-set")
+        p = subprocess.run([sys.executable, MAKE, out, "--acceptance", acc, "--evidence", self.f.evidence,
+                            "--collector", os.path.join(self.f.repo, "release/acceptance-harness/collect-evidence.py"),
+                            *sum((["--collector-run", r] for r in self.f.collector_runs), []),
+                            "--rc-tree", self.f.tree], capture_output=True, text=True)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("needs the docs commit D", p.stderr)
+
     def test_recovery_on_a_merge_base(self):
-        other = commit_on(self.f.repo, [], {"OTHER": "main moved\n"}, "main moved")
-        merge = commit_on(self.f.repo, [other, self.f.rc], {}, "Merge RC", base_tree=self.f.tree)
+        other = commit_on(self.f.repo, [self.f.rc], {"OTHER": "main moved\n"}, "main moved")
+        clean = git(self.f.repo, "merge-tree", "--write-tree", other, self.f.rc).splitlines()[0]
+        merge = commit_on(self.f.repo, [other, self.f.rc], {}, "Merge RC", base_tree=clean)
+        # a merge that drops main's change is not the clean merge of its parents
+        lossy = commit_on(self.f.repo, [other, self.f.rc], {}, "Merge RC (lossy)", base_tree=self.f.tree)
+        dl = commit_on(self.f.repo, [lossy], self.docs, "docs on lossy merge")
+        self.assertNotEqual(self.make(dl, base=lossy, expect_ok=False).returncode, 0)
+        self.forge(d=dl, meta=lambda m: m.update(docs_base=lossy))
+        self.assertInvalid(self.verify(), "D docs_base's tree is the clean merge of its two parents")
+        self.setUp()
         d = commit_on(self.f.repo, [merge], self.docs, "docs on merge")
         s, _ = self.make(d, base=merge)
         p = self.verify(s)

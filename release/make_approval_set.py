@@ -184,7 +184,10 @@ def main(argv):
     if len(mans) != 1:
         die("the acceptance directory must hold exactly one acceptance manifest")
     with open(os.path.join(a.acceptance, mans[0]), encoding="utf-8") as f:
-        c = json.load(f)["candidate"]
+        man = json.load(f)
+    c = man["candidate"]
+    if man.get("schema") == "sinter-acceptance-manifest/2" and not a.docs_commit:
+        die("a sinter-acceptance-manifest/2 needs the docs commit D (--docs-commit, --rc-repo): schema /3")
     v = c["version"]
     if mans[0] != f"sinter-v{v}-acceptance-manifest.json":
         die("the manifest file name and candidate.version disagree")
@@ -203,6 +206,9 @@ def main(argv):
             bp = git(a.rc_repo, "rev-list", "--parents", "-n", "1", a.docs_base).decode().split()
             if len(bp) != 3 or c["source_commit"] not in bp[1:]:
                 die("--docs-base must be a merge with two parents, one of them RC_COMMIT")
+            mt = git(a.rc_repo, "merge-tree", "--write-tree", bp[1], bp[2]).split(b"\n", 1)[0].strip()
+            if mt != git(a.rc_repo, "rev-parse", a.docs_base + "^{tree}").strip():
+                die("--docs-base's tree is not the clean merge of its two parents")
         if parents[1:] != [a.docs_base or c["source_commit"]]:
             die("the docs commit's only parent must be RC_COMMIT (or --docs-base)")
         patch = git(a.rc_repo, "format-patch", "-1", "--stdout", "--no-signature", a.docs_commit)

@@ -449,6 +449,15 @@ and `ld-linux-x86-64.so.2`, with `OPENSSL_3.0.0` and no RPATH/RUNPATH.
 Unexpected dependencies or unresolved linkage are a STOP pending review.
 Do not strip, patch, or otherwise alter the frozen bytes.
 
+From v1.15.0, the step-2 tier assessment is provisional: right after the
+freeze and before any acceptance, run `release/tier_assess.py` again with
+`--executable` naming the **frozen** executable and a new `--out`. The
+manifest's `abi` is this measured value (the checker measures it again from
+the artifact and fails a `/2` manifest whose `abi` differs). If the frozen
+executable's ABI differs from the reference, or the result is otherwise no
+longer the approved tier, the release is Tier F: a Tier P approval never
+covers a frozen artifact it was not assessed on.
+
 Package one canonical archive, record its SHA-256, and prove a fresh
 extraction has the frozen executable SHA. Build validation (source/ABI/hash/
 smoke) is distinct from runtime acceptance: steps 7–9 execute that exact
@@ -874,6 +883,11 @@ A 17a mismatch is an incident: do not push `D`, do not force-fix.
 ### Step 17b — Docs commit to `main`
 
 ```sh
+# the D being pushed is the approved one: re-verify the set first (exit 0)
+python3 <repo>/release/verify_approval_set.py evidence/approval-set --rc-repo <repo> \
+  --expect-rc ${RC_COMMIT} --approved-digest ${APPROVAL_SET_DIGEST}
+test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["docs_commit"])' \
+  evidence/approval-set/APPROVAL-SET-META.json)" = "${D}"
 git push <remote> ${D}:refs/heads/work/v${VERSION}-docs   # a work branch, not main
 # wait: CI and Start environment on the work branch must pass
 #       (Start can now download the Release asset)
@@ -908,7 +922,8 @@ page shows the new one as Latest; nothing announces an unpublished version.
 
 ## Partial publish failure
 
-Steps 4–11 can partially succeed (e.g. tag pushed but release creation fails).
+Steps 14–17 can partially succeed (e.g. tag pushed but release creation
+fails, or the Release exists and `D` is not yet on `main`).
 
 - **Do not blindly retry the whole workflow.**
 - Read back remote state first: `git ls-remote`, `gh release view`.
@@ -930,6 +945,14 @@ Do not begin publishing when any of these hold:
 - inaccurate release notes
 - remote tag already exists unexpectedly
 - tier not approved, or the executed targets differ from the approved set
+- the tier assessment of the frozen executable (Steps 5–6) differs from the
+  approved tier
+- a `/2` manifest whose approval set is not `/3` (the docs commit `D` is
+  always part of the approval from v1.15.0)
+- the publish-time approval of the matrix: from v1.15.0 the release matrix
+  does not run `sinter approve` on a real target (`risk-approved-apply` is
+  BLOCKED); the Owner states in writing whether that is accepted for the
+  release
 - `D` changed after the approval, or `D` pushed to a public branch before
   the Release exists
 - approval set verification not exit 0 with the approved digest

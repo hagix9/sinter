@@ -595,6 +595,8 @@ def check_scope_v2(doc, template, errors, facts):
         if scope == "full" and req_set != set(REQUIRED_TARGETS):
             errors.append("$.required_targets: full scope requires exactly the eight supported targets")
         if scope == "patch":
+            if req_set == set(REQUIRED_TARGETS):
+                errors.append("$.required_targets: a patch scope never names all eight targets (that is full scope)")
             if "ubuntu2404" not in req_set or "rocky9" not in req_set:
                 errors.append("$.required_targets: patch scope requires ubuntu2404 and rocky9")
             if not req_set & set(NEWER_TARGETS):
@@ -1189,6 +1191,31 @@ def check_artifact(path, facts, errors):
         raise Invalid(f"--artifact: not a readable .tar.gz ({type(e).__name__})")
     if hashlib.sha256(data).hexdigest() != facts["exe_sha"]:
         errors.append("--artifact: executable sha256 differs from candidate.executable_sha256")
+        return
+    if facts.get("v2"):
+        # /2: the recorded abi is measured again from the frozen executable;
+        # a declared value alone is never trusted.
+        try:
+            measured = measure_abi(data)
+        except Exception as e:  # noqa: BLE001 - any failure fails closed
+            errors.append(f"--artifact: the executable's ABI cannot be measured ({e})")
+            return
+        if measured != facts.get("abi"):
+            errors.append("abi: differs from the ABI measured on the frozen executable "
+                          f"(measured {json.dumps(measured, sort_keys=True)})")
+
+
+def measure_abi(data):
+    """DT_NEEDED and highest GLIBC_/OPENSSL_ needs of the executable, with the
+    parser of release/tier_assess.py (kept next to this checker)."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tier_assess.py")
+    spec = importlib.util.spec_from_file_location("sinter_tier_assess", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("release/tier_assess.py is missing next to the checker")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.elf_abi_bytes(data)
 
 
 def check_sums(path, manifest_raw, archive, facts, errors):

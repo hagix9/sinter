@@ -56,8 +56,9 @@ or inconsistent part makes the set invalid.
      the approved manifest. Any change of D changes the set digest, so an
      earlier approval never covers it. Recovery (§4.5, main moved before
      17b): META docs_base names a merge commit with exactly two parents, one
-     of them rc_commit; D's only parent is then docs_base, the patch applies
-     to docs_base's tree and the allow-list is checked against docs_base.
+     of them rc_commit, whose tree is the clean merge of its parents (git
+     merge-tree); D's only parent is then docs_base, the patch applies to
+     docs_base's tree and the allow-list is checked against docs_base.
 
 Exit: 0  set valid AND its digest equals --approved-digest
       3  set valid, no approved digest given: PENDING_OWNER_APPROVAL (never GO)
@@ -260,6 +261,8 @@ def verify(a):
         if man.get("acceptance_scope") == "full" and sorted(rt) != sorted(ALL_LABELS):
             raise Fail("C: a full-scope manifest must require the eight targets")
         LABELS = [x for x in ALL_LABELS if x in rt]
+        # From v1.15.0 the docs commit D is part of the approval (§4.3).
+        v.ok(meta.get("schema") == SCHEMA3, "C a sinter-acceptance-manifest/2 needs a sinter-approval-set/3 (with D)")
     # ---- C: META vs manifest --------------------------------------------------
     v.ok(meta.get("tag") == "v" + ver, "C tag == v<version>")
     for k, mv in (("version", c.get("version")), ("tag", c.get("tag")), ("rc_commit", c.get("source_commit")),
@@ -455,8 +458,14 @@ def check_docs_commit(v, a, root, meta, ver, man_raw):
     base = meta.get("docs_base", rc)
     if base != rc:
         bp = (git(a.rc_repo, "rev-list", "--parents", "-n", "1", base) or b"").decode().split()
-        v.ok(len(bp) == 3 and rc in bp[1:], "D docs_base is a merge with two parents, one of them rc_commit",
-             str(bp[1:]))
+        if v.ok(len(bp) == 3 and rc in bp[1:], "D docs_base is a merge with two parents, one of them rc_commit",
+                str(bp[1:])):
+            # the merge must be the clean merge of its parents: it carries
+            # main's and the RC's changes and nothing else
+            mt = git(a.rc_repo, "merge-tree", "--write-tree", bp[1], bp[2])
+            bt = git(a.rc_repo, "rev-parse", base + "^{tree}")
+            v.ok(mt is not None and bt is not None and mt.split(b"\n", 1)[0].strip() == bt.strip(),
+                 "D docs_base's tree is the clean merge of its two parents (git merge-tree)")
     parents = (git(a.rc_repo, "rev-list", "--parents", "-n", "1", d) or b"").decode().split()
     v.ok(parents[1:] == [base], "D the docs commit has exactly one parent, rc_commit (or docs_base)", str(parents[1:]))
     tree = git(a.rc_repo, "rev-parse", d + "^{tree}")
