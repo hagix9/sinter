@@ -1891,6 +1891,25 @@ fn f7_an_unbound_management_interface_is_read_as_measured() {
             },
         ),
         ("both streams", unbound("x\n", "no zone\n")),
+        ("no newline", unbound("", "no zone")),
+        (
+            "stderr truncated",
+            Output {
+                stderr_truncated: true,
+                ..unbound("", "no zone\n")
+            },
+        ),
+        (
+            "stdout truncated",
+            Output {
+                stdout_truncated: true,
+                ..unbound("", "no zone\n")
+            },
+        ),
+        (
+            "sudo noise",
+            unbound("", "sudo: unable to resolve host x\nno zone\n"),
+        ),
     ] {
         let (f, r, l) = go(o);
         refused(&r, &f, "p", "unknown");
