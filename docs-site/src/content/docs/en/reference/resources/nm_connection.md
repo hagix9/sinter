@@ -4,8 +4,11 @@ description: Declare one NetworkManager Ethernet connection profile, with manage
 ---
 
 :::caution[Not released]
-`nm_connection` is implemented for v1.15.0 but not released. The
-`nmcli` and D-Bus forms it uses are not yet measured on real hosts; until
+`nm_connection` is implemented for v1.15.0 but not released. A first
+real-host measurement (Rocky Linux 9.8 and 10.2) found two defects, now
+fixed: checkpoint creation was refused by NetworkManager, and profiles with
+IPv6 values could not be read. Activation, deactivation, the checkpoint and
+its rollback with the fixed code are not yet measured on real hosts; until
 they are, anything Sinter cannot read exactly is refused, never assumed.
 :::
 
@@ -66,9 +69,12 @@ exists and, optionally, whether it is active.
 - Precheck: `NetworkManager.service` is active and `/usr/bin/nmcli` exists;
   otherwise the resource fails naming the missing component. Sinter never
   installs or starts NetworkManager.
-- Observation uses terse, escaped `nmcli` output with fixed field lists and
-  is parsed strictly: a missing, repeated or unknown field, an unknown value
-  or a profile in transition is an error, never drift. Two profiles with the
+- Observation uses terse `nmcli` output with fixed field lists and is
+  parsed strictly: a missing, repeated or unknown field, an unknown value
+  or a profile in transition is an error, never drift. A settings line is
+  read as the field name up to the first colon and the value after it (as
+  NetworkManager prints IPv6 values, without escaping their colons); a value
+  with a backslash or a control character is refused. Two profiles with the
   name are an error.
 - Changes use fixed argv (`nmcli connection add|modify|up|down|delete`),
   never a shell, and the UUID Sinter observed, so a profile renamed or
@@ -114,7 +120,9 @@ NetworkManager checkpoint:
    unavailable or refused (for example by polkit) fails the resource before
    any change.
 2. A checkpoint is created for the management devices and the profile's
-   device with the rollback timeout `checkpoint_timeout`.
+   device (never for all devices) with the rollback timeout
+   `checkpoint_timeout`; a profile created inside it is removed by its
+   rollback.
 3. The change is applied, then a new SSH connection (full host-key check,
    `/usr/bin/true`) is opened.
 4. Success destroys the checkpoint (the change stays) and verifies it.

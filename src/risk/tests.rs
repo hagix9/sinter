@@ -3,7 +3,7 @@
 //!
 //! Engine tests use the firewalld 0.2.0 first-party catalog and plugin byte
 //! for byte. In production its control is not in force (Owner decision D-13
-//! pending); tests that need it enforced install a classification table for
+//! of 2026-11-21); tests that need it enforced install a classification table for
 //! their own thread only (`test_table`), which is compiled into tests alone.
 
 use super::approval::{self, Store};
@@ -1312,7 +1312,7 @@ fn not_enforced_020_runs_as_before_and_says_so() {
     assert_eq!(
         rep.status,
         AggregateStatus::Success,
-        "unchanged v1.14 behaviour while D-13 is pending"
+        "unchanged v1.14.1 behaviour (Owner decision D-13)"
     );
     assert_eq!(record(&l, "p").dynamic, "not-enforced");
     let res = &rep.resources[0];

@@ -576,11 +576,11 @@ impl Engine {
         if let Enforcement::PendingOwner(d) = item.enforcement {
             record.dynamic = "not-enforced".into();
             record.reason = Some(format!(
-                "connection-risk control for {} is not in force (Owner decision {} pending)",
+                "connection-risk control for {} is not in force (Owner decision {}: behaviour as in v1.14.1; use firewalld 0.3.0 for changes that could cut the management connection)",
                 item.source, d
             ));
             let note = format!(
-                "connection-risk class={} not enforced ({}: Owner decision {} pending)",
+                "connection-risk class={} not enforced ({}: Owner decision {}, behaviour as in v1.14.1)",
                 item.class.label(),
                 item.source,
                 d

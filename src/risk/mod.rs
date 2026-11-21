@@ -58,8 +58,10 @@ impl RiskClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Enforcement {
     Enforced,
-    /// Classified, but the new control is not in force until the Owner
-    /// decides (firewalld 0.2.0: decision D-13). Plan reports the class.
+    /// Classified, but the control is not in force by Owner decision
+    /// (firewalld 0.2.0: decision D-13 of 2026-11-21, behaviour as in
+    /// v1.14.1; enforcement is a firewalld 0.3.0 feature). Plan reports the
+    /// class. The variant name is historical.
     PendingOwner(&'static str),
 }
 
