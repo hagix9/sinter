@@ -327,9 +327,10 @@ pub(crate) fn profile_text(over: &[(&str, &str)]) -> String {
     for (k, v) in over {
         m.insert(k, v.to_string());
     }
+    // The measured form: the colons of a value are not escaped.
     PROFILE_FIELDS
         .iter()
-        .map(|f| format!("{}:{}\n", f, escape_terse(&m[f])))
+        .map(|f| format!("{}:{}\n", f, m[f]))
         .collect()
 }
 
@@ -377,7 +378,7 @@ fn profile_parser_is_strict_and_normalizes() {
     assert!(parse_profile(&profile_text(&[("ipv4.addresses", "192.0.2.10/024")])).is_err());
     assert!(parse_profile(&profile_text(&[("connection.uuid", "x")])).is_err());
     assert!(parse_profile("connection.id\n").is_err());
-    // An unescaped colon in a value is not what `-e yes` prints.
+    // A value that is not an address after the first colon.
     assert!(
         parse_profile(&profile_text(&[]).replace("ipv4.dns:\n", "ipv4.dns:192.0.2.1:x\n")).is_err()
     );
@@ -624,7 +625,266 @@ fn argv_is_fixed() {
             "1",
             "/org/freedesktop/NetworkManager/Devices/1",
             "90",
-            "6"
+            "2"
         ]
     );
+}
+
+// ---------------------------------------------------------------------------
+// P8-R2 real-host regressions (F-1, F-2)
+// ---------------------------------------------------------------------------
+
+/// `-t -e yes -f <PROFILE_FIELDS> connection show uuid <uuid>` as measured
+/// on Rocky 9.8 (NetworkManager 1.54.3) in P8-R2 for the profile Sinter
+/// created in B1 (verbatim; Rocky 10.2 / 1.56.0 printed the same lines with
+/// another UUID). The colons of the IPv6 value are not escaped.
+const MEASURED_B1_PROFILE: &str = "connection.id:sinter-nm-test
+connection.uuid:40a2e191-90c9-4ca1-a946-5dad2f5d4d32
+connection.type:802-3-ethernet
+connection.interface-name:eth1
+connection.autoconnect:no
+connection.master:
+ipv4.method:manual
+ipv4.addresses:192.0.2.30/24
+ipv4.gateway:
+ipv4.dns:
+ipv4.dns-search:
+ipv6.method:manual
+ipv6.addresses:2001:db8::30/64
+ipv6.gateway:
+ipv6.dns:
+";
+
+/// The loopback profile of the same capture (`ipv6.addresses:::1/128`: the
+/// value itself starts with colons).
+const MEASURED_LO_PROFILE: &str = "connection.id:lo
+connection.uuid:908b9032-b925-4c98-bd06-86cd2a6f41c1
+connection.type:loopback
+connection.interface-name:lo
+connection.autoconnect:yes
+connection.master:
+ipv4.method:manual
+ipv4.addresses:127.0.0.1/8
+ipv4.gateway:
+ipv4.dns:
+ipv4.dns-search:
+ipv6.method:manual
+ipv6.addresses:::1/128
+ipv6.gateway:
+ipv6.dns:
+";
+
+#[test]
+fn f2_measured_real_host_profiles_are_read() {
+    let p = parse_profile(MEASURED_B1_PROFILE).unwrap();
+    assert_eq!(p.id, "sinter-nm-test");
+    assert_eq!(p.uuid, "40a2e191-90c9-4ca1-a946-5dad2f5d4d32");
+    assert_eq!(p.type_, ETHERNET_SETTING);
+    assert_eq!(p.ifname.as_deref(), Some("eth1"));
+    assert!(!p.autoconnect);
+    assert_eq!(p.ipv4.method, "manual");
+    assert_eq!(p.ipv4.addresses, ["192.0.2.30/24"]);
+    assert_eq!(p.ipv6.method, "manual");
+    assert_eq!(p.ipv6.addresses, ["2001:db8::30/64"]);
+    assert_eq!(p.ipv6.gateway, "");
+    assert!(p.ipv6.dns.is_empty());
+    let lo = parse_profile(MEASURED_LO_PROFILE).unwrap();
+    assert_eq!(lo.ipv6.addresses, ["::1/128"]);
+    assert_eq!(lo.type_, "loopback");
+}
+
+#[test]
+fn f2_a_profile_line_is_split_at_its_first_colon_only() {
+    let p = parse_profile(&profile_text(&[
+        ("connection.id", "db:net"),
+        ("ipv6.method", "manual"),
+        ("ipv6.addresses", "2001:db8::30/64"),
+        ("ipv6.gateway", "2001:db8::1"),
+        ("ipv6.dns", "2001:db8::53"),
+    ]))
+    .unwrap();
+    assert_eq!(p.id, "db:net");
+    assert_eq!(p.ipv6.addresses, ["2001:db8::30/64"]);
+    assert_eq!(p.ipv6.gateway, "2001:db8::1");
+    assert_eq!(p.ipv6.dns, ["2001:db8::53"]);
+    // Normalized to the canonical text, as before.
+    let q = parse_profile(&profile_text(&[
+        ("ipv6.method", "manual"),
+        ("ipv6.addresses", "2001:0db8:0:0::30/64"),
+    ]))
+    .unwrap();
+    assert_eq!(q.ipv6.addresses, ["2001:db8::30/64"]);
+}
+
+#[test]
+fn f2_unmeasured_or_malformed_profile_lines_fail_closed() {
+    let ok = profile_text(&[
+        ("ipv6.method", "manual"),
+        ("ipv6.addresses", "2001:db8::30/64"),
+    ]);
+    assert!(parse_profile(&ok).is_ok());
+    let with = |from: &str, to: &str| {
+        assert_eq!(ok.matches(from).count(), 1, "{from}");
+        ok.replacen(from, to, 1)
+    };
+    // The escaping of a backslash (and whether `\:` would ever appear) is not
+    // measured: any backslash in a value is refused, not interpreted.
+    for bad in [
+        r"ipv6.addresses:2001\:db8\:\:30/64",
+        r"ipv6.addresses:2001:db8::30/64\\",
+    ] {
+        let t = with("ipv6.addresses:2001:db8::30/64", bad);
+        assert!(
+            parse_profile(&t).unwrap_err().contains("backslash"),
+            "{bad}"
+        );
+    }
+    assert!(
+        parse_profile(&with("connection.id:lan", r"connection.id:a\b"))
+            .unwrap_err()
+            .contains("backslash")
+    );
+    // Control characters (tab, carriage return, DEL) in a value.
+    for c in ['\t', '\r', '\u{7f}'] {
+        let t = with("connection.id:lan", &format!("connection.id:la{c}n"));
+        assert!(parse_profile(&t).unwrap_err().contains("control"), "{c:?}");
+    }
+    // A line without a field name, an empty, unknown, case-changed or padded
+    // field name.
+    for bad in [
+        "connection.id lan",
+        ":lan",
+        "Connection.id:lan",
+        "connection.id :lan",
+        " connection.id:lan",
+        "connection.name:lan",
+    ] {
+        let t = with("connection.id:lan", bad);
+        assert!(parse_profile(&t).is_err(), "{bad}");
+    }
+    // A repeated field (two profiles) even when the values differ only after
+    // the first colon.
+    let t = format!("{ok}ipv6.addresses:2001:db8::31/64\n");
+    assert!(parse_profile(&t).unwrap_err().contains("more than once"));
+    // Truncated output: a missing last field, a cut address or prefix.
+    let cut: String = ok
+        .lines()
+        .take(PROFILE_FIELDS.len() - 1)
+        .map(|l| format!("{l}\n"))
+        .collect();
+    assert!(parse_profile(&cut).unwrap_err().contains("missing"));
+    for bad in [
+        "ipv6.addresses:2001:db8::30/",
+        "ipv6.addresses:2001:db8::30",
+        "ipv6.addresses:2001:db8:",
+        "ipv6.addresses:2001:db8::30/129",
+        "ipv6.addresses:192.0.2.30/24",
+    ] {
+        let t = with("ipv6.addresses:2001:db8::30/64", bad);
+        assert!(parse_profile(&t).is_err(), "{bad}");
+    }
+    // Multiple values: only the comma form is read; another separator is not
+    // guessed (each entry must be one address).
+    for bad in [
+        "ipv4.dns:192.0.2.53;198.51.100.53",
+        "ipv4.dns:192.0.2.53 198.51.100.53",
+        "ipv4.dns:192.0.2.53,,198.51.100.53",
+        "ipv4.dns:192.0.2.53,",
+    ] {
+        let t = with("ipv4.dns:\n", &format!("{bad}\n"));
+        assert!(parse_profile(&t).is_err(), "{bad}");
+    }
+    for bad in [
+        "ipv6.dns:2001:db8::53;2001:db8::54",
+        "ipv6.dns:2001:db8::53 2001:db8::54",
+    ] {
+        let t = with("ipv6.dns:\n", &format!("{bad}\n"));
+        assert!(parse_profile(&t).is_err(), "{bad}");
+    }
+    // Not UTF-8 never reaches the parser: the engine refuses it
+    // (`stdout_ok`), tested with the engine.
+}
+
+#[test]
+fn f1_checkpoint_flags_are_delete_new_connections_only() {
+    assert_eq!(CHECKPOINT_FLAGS, 0x2);
+    assert_eq!(
+        CHECKPOINT_FLAGS & 0x4,
+        0,
+        "never DISCONNECT_NEW_DEVICES with a device list"
+    );
+    assert_eq!(CHECKPOINT_FLAGS & 0x1, 0, "never DESTROY_ALL");
+    assert_eq!(CHECKPOINT_FLAGS & 0x8, 0, "never ALLOW_OVERLAPPING");
+    let devs = vec!["/org/freedesktop/NetworkManager/Devices/2".to_string()];
+    let a = checkpoint_create_argv(&devs, 30);
+    assert_eq!(
+        a[6..],
+        [
+            "aouu",
+            "1",
+            "/org/freedesktop/NetworkManager/Devices/2",
+            "30",
+            "2"
+        ]
+    );
+}
+
+#[test]
+fn f1_fake_networkmanager_models_the_measured_flag_restriction() {
+    use crate::executor::Completion;
+    use crate::fakesys::FakeNm;
+    let dev = "/org/freedesktop/NetworkManager/Devices/1".to_string();
+    let create = |f: &mut FakeNm, devs: &[String], flags: &str| {
+        let mut a = vec!["aouu".to_string(), devs.len().to_string()];
+        a.extend(devs.iter().cloned());
+        a.push("60".into());
+        a.push(flags.into());
+        f.run(BUSCTL, &call_argv("CheckpointCreate", &a))
+    };
+    // flags 6 with a device: refused as measured, no checkpoint.
+    let mut f = FakeNm::default();
+    let o = create(&mut f, std::slice::from_ref(&dev), "6");
+    assert_eq!(o.completion, Completion::Exited(1));
+    assert!(String::from_utf8_lossy(&o.stderr)
+        .contains("the DISCONNECT_NEW_DEVICES flag can only be used with an empty device list"));
+    assert!(f.checkpoint.is_none());
+    // flags 6 with no device: NetworkManager's rule allows it (Sinter never
+    // sends it: an empty list would cover every device).
+    let mut f = FakeNm::default();
+    assert_eq!(create(&mut f, &[], "6").completion, Completion::Exited(0));
+    // flags 2 with a device: accepted.
+    let mut f = FakeNm::default();
+    assert_eq!(
+        create(
+            &mut f,
+            std::slice::from_ref(&dev),
+            &CHECKPOINT_FLAGS.to_string()
+        )
+        .completion,
+        Completion::Exited(0)
+    );
+    assert_eq!(f.checkpoint.as_ref().unwrap().1, std::slice::from_ref(&dev));
+    // A malformed flag or timeout is refused.
+    let mut f = FakeNm::default();
+    assert_eq!(
+        create(&mut f, std::slice::from_ref(&dev), "x").completion,
+        Completion::Exited(1)
+    );
+}
+
+#[test]
+fn f1_fake_rollback_removes_new_profiles_only_with_delete_new_connections() {
+    use crate::fakesys::FakeNm;
+    let dev = "/org/freedesktop/NetworkManager/Devices/2".to_string();
+    for (flags, kept) in [(CHECKPOINT_FLAGS, false), (0u32, true)] {
+        let mut f = FakeNm::default();
+        let mut a = vec!["aouu".to_string(), "1".into(), dev.clone(), "60".into()];
+        a.push(flags.to_string());
+        let o = f.run(BUSCTL, &call_argv("CheckpointCreate", &a));
+        let cp =
+            parse_object_reply(&String::from_utf8_lossy(&o.stdout), valid_checkpoint_path).unwrap();
+        f.add(FakeNm::profile("new", "eth1"));
+        f.run(BUSCTL, &call_argv("CheckpointRollback", &["o".into(), cp]));
+        assert_eq!(f.find("new").is_some(), kept, "flags {flags}");
+    }
 }

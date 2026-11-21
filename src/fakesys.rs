@@ -3029,6 +3029,8 @@ pub struct FakeNm {
         Vec<BTreeMap<String, String>>,
         Vec<(String, String, String)>,
     )>,
+    /// Flags of the open checkpoint (`CheckpointCreate`'s last argument).
+    pub checkpoint_flags: u32,
     next_uuid: u32,
     next_checkpoint: u32,
     /// Profile-changing nmcli invocations served, in order.
@@ -3054,6 +3056,7 @@ impl Default for FakeNm {
             fail_verb: BTreeMap::new(),
             raw: BTreeMap::new(),
             checkpoint: None,
+            checkpoint_flags: 0,
             next_uuid: 1,
             next_checkpoint: 1,
             mutations: Vec::new(),
@@ -3141,10 +3144,35 @@ impl FakeNm {
     /// back (NetworkManager's own behaviour).
     pub fn expire(&mut self) {
         if let Some((_, _, profiles, active)) = self.checkpoint.take() {
-            self.profiles = profiles;
-            self.active = active;
+            self.restore(profiles, active);
             self.checkpoint_calls.push("expired".into());
         }
+    }
+
+    /// Roll back to a checkpoint's snapshot. A profile added after the
+    /// checkpoint is removed only with DELETE_NEW_CONNECTIONS (0x2);
+    /// without it NetworkManager keeps it.
+    fn restore(
+        &mut self,
+        profiles: Vec<BTreeMap<String, String>>,
+        active: Vec<(String, String, String)>,
+    ) {
+        let kept: Vec<BTreeMap<String, String>> = if self.checkpoint_flags & 0x2 == 0 {
+            self.profiles
+                .iter()
+                .filter(|p| {
+                    !profiles
+                        .iter()
+                        .any(|q| q["connection.uuid"] == p["connection.uuid"])
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.profiles = profiles;
+        self.profiles.extend(kept);
+        self.active = active;
     }
 
     fn by_uuid(&mut self, u: &str) -> Option<usize> {
@@ -3233,10 +3261,13 @@ impl FakeNm {
                 let Some(i) = self.by_uuid(u) else {
                     return Self::out(10, String::new(), "Error: no such connection profile.");
                 };
+                // The measured form (P8-R2, NetworkManager 1.54.3 and
+                // 1.56.0): one `field:value` line per setting, the colons of
+                // a value NOT escaped (`ipv6.addresses:2001:db8::30/64`).
                 let p = &self.profiles[i];
                 let body: String = crate::nm::PROFILE_FIELDS
                     .iter()
-                    .map(|f| format!("{}:{}\n", f, crate::nm::escape_terse(&p[*f])))
+                    .map(|f| format!("{}:{}\n", f, p[*f]))
                     .collect();
                 Self::out(0, body, "")
             }
@@ -3395,9 +3426,23 @@ impl FakeNm {
                     return Self::out(c, String::new(), &e);
                 }
                 let n: usize = n.parse().unwrap_or(usize::MAX);
-                if rest.len() != n + 2 || self.checkpoint.is_some() {
+                if rest.len() != n.saturating_add(2) || self.checkpoint.is_some() {
                     return Self::out(1, String::new(), "Call failed: checkpoint conflict");
                 }
+                let (Ok(_timeout), Ok(flags)) = (rest[n].parse::<u32>(), rest[n + 1].parse::<u32>())
+                else {
+                    return Self::out(1, String::new(), "Failed to create bus message: Invalid argument");
+                };
+                // NetworkManager's restriction, measured on Rocky 9.8 (1.54.3)
+                // and Rocky 10.2 (1.56.0) in P8-R2.
+                if flags & 0x4 != 0 && n > 0 {
+                    return Self::out(
+                        1,
+                        String::new(),
+                        "Call failed: the DISCONNECT_NEW_DEVICES flag can only be used with an empty device list",
+                    );
+                }
+                self.checkpoint_flags = flags;
                 let devs: Vec<String> = rest[..n].iter().map(|s| s.to_string()).collect();
                 let p = format!(
                     "/org/freedesktop/NetworkManager/Checkpoint/{}",
@@ -3437,8 +3482,7 @@ impl FakeNm {
                     FakeRollback::Fails => Self::out(1, String::new(), "Call failed: rollback"),
                     mode => {
                         if mode == FakeRollback::Works {
-                            self.profiles = profiles;
-                            self.active = active;
+                            self.restore(profiles, active);
                         }
                         self.checkpoint = None;
                         let mut t = format!("a{{su}} {}", devs.len());

@@ -441,7 +441,7 @@ fn prechecks_and_strict_observation() {
         .iter()
         .map(|f| {
             let v = n.lock().unwrap().find("lan").unwrap()[*f].clone();
-            format!("{}:{}\n", f, crate::nm::escape_terse(&v))
+            format!("{}:{}\n", f, v)
         })
         .collect::<String>()
         + "802-1x.identity:x\n";
@@ -453,7 +453,7 @@ fn prechecks_and_strict_observation() {
         target(&n, net()),
         ctx(),
     );
-    refused(&r, &n, "lan", "unexpected field 802-1x.identity");
+    refused(&r, &n, "lan", "unexpected field \"802-1x.identity\"");
     // A bad escape in the list.
     let n = nm();
     n.lock()
@@ -1258,4 +1258,342 @@ fn a_rollback_after_a_first_command_that_failed_is_not_reported_as_changed() {
     assert_ne!(ch, Change::Changed, "{why}");
     assert!(why.contains("rolled back"), "{why}");
     assert_eq!(cps(&n), ["create", "rollback"]);
+}
+
+// ---------------------------------------------------------------------------
+// P8-R2 real-host regressions (F-1 checkpoint flags, F-2 IPv6 profile form)
+// ---------------------------------------------------------------------------
+
+/// `nm()` with IPv6 settings on the management profile, so that every read
+/// of it (observation, verification, the read after a rollback) contains
+/// values with colons, as NetworkManager prints them unescaped.
+fn nm_v6() -> Arc<Mutex<FakeNm>> {
+    let n = nm();
+    {
+        let mut g = n.lock().unwrap();
+        let p = g
+            .profiles
+            .iter_mut()
+            .find(|p| p["connection.id"] == "mgmt")
+            .unwrap();
+        p.insert("ipv6.method".into(), "manual".into());
+        p.insert("ipv6.addresses".into(), "2001:db8:1::10/64".into());
+        p.insert("ipv6.gateway".into(), "2001:db8:1::1".into());
+        p.insert("ipv6.dns".into(), "2001:db8:1::53".into());
+    }
+    n
+}
+
+/// The approved management change of these tests: a new IPv6 gateway on the
+/// active management profile (it affects the management path).
+fn mgmt_v6_change(extra: &str) -> String {
+    nmres(
+        "m",
+        &format!(
+            "name: mgmt, active: true, ipv6: {{ method: manual, addresses: [\"2001:db8:1::10/64\"], gateway: \"2001:db8:1::fe\" }}{}",
+            extra
+        ),
+    )
+}
+
+fn create_args(n: &Arc<Mutex<FakeNm>>) -> Vec<String> {
+    n.lock()
+        .unwrap()
+        .received
+        .iter()
+        .find(|(_, a)| a.iter().any(|x| x == "CheckpointCreate"))
+        .map(|(_, a)| a.clone())
+        .unwrap_or_default()
+}
+
+#[test]
+fn f2_ipv6_profile_is_created_activated_verified_and_then_unchanged() {
+    // P8-R2 B1: the profile was created and activated, but its IPv6 value
+    // could not be read back (exit 6).
+    let rc = Recipe::new();
+    let n = nm();
+    let body = nmres(
+        "b1",
+        "name: sinter-nm-test, ifname: eth1, autoconnect: false, active: true, ipv4: { method: manual, addresses: [198.51.100.30/24] }, ipv6: { method: manual, addresses: [\"2001:db8::30/64\"] }",
+    );
+    let (r, l) = run(
+        rc.model(&body).unwrap(),
+        Mode::Apply,
+        target(&n, net()),
+        ctx(),
+    );
+    let (ex, ch, why) = outcome(&r, "b1");
+    assert_eq!(
+        (ex, ch),
+        (Execution::Succeeded, Change::Changed),
+        "{why} {l:?}"
+    );
+    {
+        let g = n.lock().unwrap();
+        let p = g.find("sinter-nm-test").unwrap();
+        assert_eq!(p["ipv6.addresses"], "2001:db8::30/64");
+        assert!(g
+            .active
+            .iter()
+            .any(|(u, d, _)| *u == p["connection.uuid"] && d == "eth1"));
+    }
+    assert!(cps(&n).is_empty(), "the test interface needs no checkpoint");
+    let (r, _) = run(
+        rc.model(&body).unwrap(),
+        Mode::Apply,
+        target(&n, net()),
+        ctx(),
+    );
+    assert_eq!(outcome(&r, "b1").1, Change::None, "{:?}", outcome(&r, "b1"));
+    // Deactivate, then delete: both verified, nothing left.
+    let down = nmres(
+        "b1",
+        "name: sinter-nm-test, ifname: eth1, autoconnect: false, active: false, ipv4: { method: manual, addresses: [198.51.100.30/24] }, ipv6: { method: manual, addresses: [\"2001:db8::30/64\"] }",
+    );
+    let (r, _) = run(
+        rc.model(&down).unwrap(),
+        Mode::Apply,
+        target(&n, net()),
+        ctx(),
+    );
+    assert_eq!(
+        outcome(&r, "b1").1,
+        Change::Changed,
+        "{:?}",
+        outcome(&r, "b1")
+    );
+    let gone = nmres("b1", "name: sinter-nm-test, state: absent");
+    let (r, _) = run(
+        rc.model(&gone).unwrap(),
+        Mode::Apply,
+        target(&n, net()),
+        ctx(),
+    );
+    assert_eq!(
+        outcome(&r, "b1").1,
+        Change::Changed,
+        "{:?}",
+        outcome(&r, "b1")
+    );
+    assert!(n.lock().unwrap().find("sinter-nm-test").is_none());
+}
+
+#[test]
+fn f2_ipv6_addresses_and_dns_are_changed_and_read_back() {
+    let rc = Recipe::new();
+    let n = nm();
+    let body = nmres(
+        "lan",
+        "name: lan, ipv6: { method: manual, addresses: [\"2001:db8::10/64\"], dns: [\"2001:db8::53\", \"2001:db8::54\"] }",
+    );
+    let (r, l) = run(
+        rc.model(&body).unwrap(),
+        Mode::Apply,
+        target(&n, net()),
+        ctx(),
+    );
+    let (ex, ch, why) = outcome(&r, "lan");
+    assert_eq!(
+        (ex, ch),
+        (Execution::Succeeded, Change::Changed),
+        "{why} {l:?}"
+    );
+    let (r, _) = run(
+        rc.model(&body).unwrap(),
+        Mode::Apply,
+        target(&n, net()),
+        ctx(),
+    );
+    assert_eq!(
+        outcome(&r, "lan").1,
+        Change::None,
+        "{:?}",
+        outcome(&r, "lan")
+    );
+}
+
+#[test]
+fn f2_a_profile_value_with_a_backslash_is_refused_before_any_change() {
+    let rc = Recipe::new();
+    let n = nm();
+    let p = n.lock().unwrap().find("lan").unwrap().clone();
+    let text: String = crate::nm::PROFILE_FIELDS
+        .iter()
+        .map(|f| {
+            let v = if *f == "connection.id" {
+                "l\\:an".to_string()
+            } else {
+                p[*f].clone()
+            };
+            format!("{}:{}\n", f, v)
+        })
+        .collect();
+    n.lock().unwrap().raw.insert("profile".into(), text);
+    let (r, _) = run(
+        rc.model(&lan_dns()).unwrap(),
+        Mode::Apply,
+        target(&n, net()),
+        ctx(),
+    );
+    let (ex, ch, why) = outcome(&r, "lan");
+    assert_ne!(ex, Execution::Succeeded, "{why}");
+    assert_eq!(ch, Change::None);
+    assert!(why.contains("backslash"), "{why}");
+    assert_eq!(muts(&n), 0);
+}
+
+#[test]
+fn f1_approved_change_runs_in_a_checkpoint_with_flags_2_on_the_named_device_only() {
+    // P8-R2 M-CP/B5: flags 6 with a device list was refused by
+    // NetworkManager, so every checkpointed change was refused.
+    let rc = Recipe::new();
+    let n = nm_v6();
+    let body = mgmt_v6_change("");
+    let (_d, c, st) = approval_for(&rc, &body, || target(&n, net()));
+    let (r, l) = run(rc.model(&body).unwrap(), Mode::Apply, target(&n, net()), c);
+    let (ex, ch, why) = outcome(&r, "m");
+    assert_eq!(
+        (ex, ch),
+        (Execution::Succeeded, Change::Changed),
+        "{why} {l:?}"
+    );
+    assert_eq!(cps(&n), ["create", "destroy"]);
+    let a = create_args(&n);
+    assert_eq!(
+        a[6..],
+        [
+            "aouu",
+            "1",
+            "/org/freedesktop/NetworkManager/Devices/1",
+            "90",
+            "2"
+        ],
+        "exactly the management device, never an empty (all-device) list"
+    );
+    assert_eq!(n.lock().unwrap().checkpoint_flags, 2);
+    assert_eq!(
+        n.lock().unwrap().find("mgmt").unwrap()["ipv6.gateway"],
+        "2001:db8:1::fe"
+    );
+    let ev = ledger_events(&st);
+    assert!(ev.contains(&"checkpoint-destroyed".to_string()), "{ev:?}");
+    // Observed again: unchanged, no checkpoint and no approval needed.
+    let (r, _) = run(
+        rc.model(&body).unwrap(),
+        Mode::Apply,
+        target(&n, net()),
+        ctx(),
+    );
+    assert_eq!(outcome(&r, "m").1, Change::None, "{:?}", outcome(&r, "m"));
+    assert_eq!(cps(&n), ["create", "destroy"]);
+}
+
+#[test]
+fn f1_f2_checkpointed_ipv6_change_rollbacks_are_verified_and_classified() {
+    // (rollback mode, NetworkManager timeout reached, expected execution,
+    // expected checkpoint calls, profiles restored).
+    for (mode, want, calls, restored) in [
+        (
+            FakeRollback::Works,
+            Execution::Failed,
+            vec!["create", "rollback"],
+            true,
+        ),
+        (
+            FakeRollback::Fails,
+            Execution::Failed,
+            vec!["create", "rollback", "expired"],
+            true,
+        ),
+        (
+            FakeRollback::Noop,
+            Execution::Indeterminate,
+            vec!["create", "rollback"],
+            false,
+        ),
+    ] {
+        let rc = Recipe::new();
+        let n = nm_v6();
+        let before = n.lock().unwrap().profiles.clone();
+        let body = mgmt_v6_change(", checkpoint_timeout: 30");
+        let (_d, c, st) = approval_for(&rc, &body, || target(&n, net()));
+        n.lock().unwrap().rollback = mode;
+        let (r, _) = run(
+            rc.model(&body).unwrap(),
+            Mode::Apply,
+            target(&n, failing_probe(&n)),
+            c,
+        );
+        let (ex, _, why) = outcome(&r, "m");
+        // Never Succeeded: exit 5 (Failed) after a verified rollback, exit 6
+        // (Indeterminate) when the previous state could not be verified.
+        assert_eq!(ex, want, "{mode:?}: {why}");
+        assert_eq!(cps(&n), calls, "{mode:?}");
+        assert_eq!(n.lock().unwrap().profiles == before, restored, "{mode:?}");
+        assert_eq!(create_args(&n).last().map(|s| s.as_str()), Some("2"));
+        let ev = ledger_events(&st);
+        if restored {
+            assert!(
+                ev.contains(&"rollback-verified".to_string()),
+                "{mode:?}: {ev:?}"
+            );
+            assert!(why.contains("previous profile"), "{mode:?}: {why}");
+        } else {
+            assert!(
+                ev.contains(&"rollback-unverified".to_string()),
+                "{mode:?}: {ev:?}"
+            );
+        }
+        assert!(
+            n.lock().unwrap().checkpoint.is_none(),
+            "{mode:?}: no checkpoint left"
+        );
+    }
+}
+
+#[test]
+fn f1_a_profile_created_inside_the_checkpoint_is_removed_by_the_rollback() {
+    // A new profile on the management device, activated (affects): the
+    // rollback removes it only because of DELETE_NEW_CONNECTIONS (0x2).
+    let rc = Recipe::new();
+    let n = nm_v6();
+    let before = n.lock().unwrap().profiles.clone();
+    let body = nmres(
+        "c1",
+        "name: sinter-nm-c1, ifname: eth0, autoconnect: false, active: true, ipv4: { method: auto }, ipv6: { method: manual, addresses: [\"2001:db8:1::20/64\"] }",
+    );
+    let (_d, c, st) = approval_for(&rc, &body, || target(&n, net()));
+    let (r, l) = run(
+        rc.model(&body).unwrap(),
+        Mode::Apply,
+        target(&n, failing_probe(&n)),
+        c,
+    );
+    let (ex, _, why) = outcome(&r, "c1");
+    assert_eq!(ex, Execution::Failed, "{why} {l:?}");
+    assert_eq!(cps(&n), ["create", "rollback"]);
+    assert!(
+        n.lock().unwrap().find("sinter-nm-c1").is_none(),
+        "removed by the rollback"
+    );
+    assert_eq!(n.lock().unwrap().profiles, before);
+    assert!(ledger_events(&st).contains(&"rollback-verified".to_string()));
+}
+
+#[test]
+fn f1_networkmanager_refusing_the_checkpoint_changes_nothing() {
+    let rc = Recipe::new();
+    let n = nm_v6();
+    let before = n.lock().unwrap().profiles.clone();
+    let body = mgmt_v6_change("");
+    let (_d, c, st) = approval_for(&rc, &body, || target(&n, net()));
+    n.lock().unwrap().create_fails = Some((
+        1,
+        "Call failed: the DISCONNECT_NEW_DEVICES flag can only be used with an empty device list"
+            .into(),
+    ));
+    let (r, _) = run(rc.model(&body).unwrap(), Mode::Apply, target(&n, net()), c);
+    refused(&r, &n, "m", "creating the checkpoint was refused");
+    assert_eq!(n.lock().unwrap().profiles, before);
+    assert!(ledger_events(&st).contains(&"checkpoint-refused".to_string()));
 }

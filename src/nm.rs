@@ -4,10 +4,14 @@
 //! observes and changes (`src/nm_engine.rs`).
 //!
 //! Every answer is parsed exactly: a missing, repeated or unexpected field,
-//! an unknown value or an escape sequence other than `\:` and `\\` is an
-//! error, never drift. The forms are the documented ones of `nmcli` and
-//! `busctl`; that every supported target answers exactly so is NOT VERIFIED
-//! until measured (DESIGN §45.10), and anything else fails closed.
+//! an unknown value or an escape sequence other than `\:` and `\\` (in the
+//! tabular lists) is an error, never drift. The profile settings
+//! (`parse_profile`) use the form measured on Rocky 9.8 and Rocky 10.2 in
+//! P8-R2 (DESIGN §45.10): one `field:value` line per setting, the colons of
+//! a value not escaped; a backslash in a value is refused because its
+//! escaping is not measured. Every other form is the documented one of
+//! `nmcli` and `busctl`, NOT VERIFIED until measured, and anything else
+//! fails closed.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -61,10 +65,15 @@ pub const PROFILE_FIELDS: &[&str] = &[
 /// `connection.type` of an Ethernet profile as NetworkManager stores it.
 pub const ETHERNET_SETTING: &str = "802-3-ethernet";
 
-/// Checkpoint creation flags: DELETE_NEW_CONNECTIONS (0x2) and
-/// DISCONNECT_NEW_DEVICES (0x4). Never DESTROY_ALL: another checkpoint is
-/// left alone (an overlapping one makes creation fail, so nothing changes).
-pub const CHECKPOINT_FLAGS: u32 = 0x2 | 0x4;
+/// Checkpoint creation flags: DELETE_NEW_CONNECTIONS (0x2) only, so a
+/// profile created inside the checkpoint is removed by its rollback.
+/// DISCONNECT_NEW_DEVICES (0x4) is never set: NetworkManager accepts it only
+/// with an empty device list (measured in P8-R2: "the
+/// DISCONNECT_NEW_DEVICES flag can only be used with an empty device list"),
+/// and an empty list would put every device in the checkpoint. Never
+/// DESTROY_ALL (0x1) or ALLOW_OVERLAPPING (0x8): another checkpoint is left
+/// alone and an overlapping one makes creation fail, so nothing changes.
+pub const CHECKPOINT_FLAGS: u32 = 0x2;
 
 pub const DEFAULT_CHECKPOINT_TIMEOUT: u32 = 90;
 
@@ -605,22 +614,44 @@ fn norm_addr(s: &str, v6: bool) -> std::result::Result<String, String> {
     Ok(ip.to_string())
 }
 
+/// One line of `-t -e yes -f <fields> connection show uuid <uuid>`: the
+/// field name before the first colon, the value after it, as is.
+///
+/// Measured in P8-R2 (NetworkManager 1.54.3 and 1.56.0): this output does
+/// NOT escape the colons of a value (`ipv6.addresses:2001:db8::30/64`,
+/// `ipv6.addresses:::1/128`), unlike the tabular lists. No field name
+/// contains a colon, so the first colon ends the name. Whether and how a
+/// backslash in a value is escaped is not measured: a value with a backslash
+/// is refused rather than interpreted, as is a control character.
+fn profile_line(l: &str) -> std::result::Result<(&str, &str), String> {
+    let (key, val) = l
+        .split_once(':')
+        .ok_or_else(|| "a profile line without a field name and a colon".to_string())?;
+    if !PROFILE_FIELDS.contains(&key) {
+        return Err(format!("an unexpected field {:?} in nmcli output", key));
+    }
+    if val.chars().any(|c| c.is_control()) {
+        return Err(format!(
+            "a control character in the value of {} in nmcli output",
+            key
+        ));
+    }
+    if val.contains('\\') {
+        return Err(format!(
+            "a backslash in the value of {} in nmcli output (its escaping is not measured)",
+            key
+        ));
+    }
+    Ok((key, val))
+}
+
 /// Parse `-f <PROFILE_FIELDS> connection show uuid <uuid>`: every field
 /// exactly once, nothing else.
 pub fn parse_profile(text: &str) -> std::result::Result<Profile, String> {
     let mut seen: BTreeMap<String, String> = BTreeMap::new();
     for l in lines(text)? {
-        let f = split_terse(l)?;
-        // `-e yes` escapes every colon of a value (IPv6), so a line is
-        // exactly one field name and one value.
-        if f.len() != 2 {
-            return Err("a profile line that is not exactly one field and one value".into());
-        }
-        let key = f[0].clone();
-        let val = f[1].clone();
-        if !PROFILE_FIELDS.contains(&key.as_str()) {
-            return Err(format!("an unexpected field {} in nmcli output", key));
-        }
+        let (key, val) = profile_line(l)?;
+        let (key, val) = (key.to_string(), val.to_string());
         if seen.insert(key.clone(), val).is_some() {
             return Err(format!(
                 "the field {} appears more than once (two profiles?)",
