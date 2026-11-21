@@ -2142,3 +2142,108 @@ fn r3_a_failed_or_lost_reload_is_never_reported_as_success() {
         assert_eq!(st, want, "{name}");
     }
 }
+
+#[test]
+fn r3_the_fixtures_are_the_measured_bytes() {
+    // SHA-256 of each fixture as cut from the P7-R2 capture-forms evidence
+    // (independent audit NB-3: the product and the fake read the same files,
+    // so an edited fixture would not be noticed otherwise)
+    for (name, text, want) in [
+        (
+            "1.3.4 list-all",
+            include_str!("fixtures/firewalld-1.3.4-list-all.txt"),
+            "b4b3c894cab10c326b3261a5c76afc94764cfd6a25924a885fde00465af39091",
+        ),
+        (
+            "2.1.1 list-all",
+            include_str!("fixtures/firewalld-2.1.1-list-all.txt"),
+            "953f6831b158100dfbd92f59ea7124d954f690b063c9ae4565fc0c72eba98af1",
+        ),
+        (
+            "2.3.1 list-all",
+            include_str!("fixtures/firewalld-2.3.1-list-all.txt"),
+            "68e10ad11a44f624e1a079898a922365316446a29fd0c3a7ac5e0221d845e8c0",
+        ),
+        (
+            "2.4.3 list-all",
+            include_str!("fixtures/firewalld-2.4.3-list-all.txt"),
+            "ab18704c501ceed59eb1680a2a4624653ddc06abb97ca2ffd54f611d4b4fcbd5",
+        ),
+        (
+            "1.3.4 allow-host-ipv6",
+            include_str!("fixtures/firewalld-1.3.4-policy-allow-host-ipv6.txt"),
+            "6a9453a54055ed01e8bec3ec2bba8e7717de7953dbe3ee4c94927917f5aabad2",
+        ),
+        (
+            "2.1.1 allow-host-ipv6",
+            include_str!("fixtures/firewalld-2.1.1-policy-allow-host-ipv6.txt"),
+            "cd7191b72b745919f6a672470fcbe07cfb81775f8c1f8a032477305e4253552f",
+        ),
+        (
+            "2.3.1 allow-host-ipv6",
+            include_str!("fixtures/firewalld-2.3.1-policy-allow-host-ipv6.txt"),
+            "5951f76e641bdcbaabce4e58bcc29e291b1732e1fa5262cc103f625c54cf2a4d",
+        ),
+        (
+            "2.4.3 allow-host-ipv6",
+            include_str!("fixtures/firewalld-2.4.3-policy-allow-host-ipv6.txt"),
+            "14f2fe3da3d3c05616406ab5c7e4897f6716ceee25d711cb54fe7123440e9c9e",
+        ),
+        (
+            "2.4.3 gateway policies",
+            include_str!("fixtures/firewalld-2.4.3-policies-gateway.txt"),
+            "6183320405485d671e21d0c07c14a704297478bc74831309ea268457af96d22d",
+        ),
+    ] {
+        assert_eq!(approval::sha256_hex(text.as_bytes()), want, "{name}");
+    }
+}
+
+#[test]
+fn r3_a_policy_changed_before_the_reload_or_a_bad_policy_list_is_refused() {
+    let gw = measured_gateway_policies();
+    let (name, def) = gw[0].clone();
+    // positive control: the same forced answer only once, then the measured
+    // definition again: the reload runs
+    let f = el10_fw(&gw);
+    f.lock().unwrap().forced.push((
+        format!("--info-policy={name}"),
+        Output {
+            completion: Completion::Exited(0),
+            stdout: def.clone().into_bytes(),
+            stderr: Vec::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        },
+    ));
+    assert_eq!(reload_on_loopback(&f).0, HandlerOutcomeState::Succeeded);
+    // disabled when the path is determined, enabled at the reload's turn
+    let f = el10_fw(&gw);
+    let answer = |d: String| Output {
+        completion: Completion::Exited(0),
+        stdout: d.into_bytes(),
+        stderr: Vec::new(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+    };
+    f.lock()
+        .unwrap()
+        .forced
+        .push((format!("--info-policy={name}"), answer(def.clone())));
+    f.lock().unwrap().forced.push((
+        format!("--info-policy={name}"),
+        answer(def.replace("  disable: yes\n", "  disable: no\n")),
+    ));
+    let (st, dynamic, reloads) = reload_on_loopback(&f);
+    assert_eq!((st, reloads), (HandlerOutcomeState::Failed, 0), "{dynamic}");
+    // a policy named twice, and a name that is not an identifier
+    for (case, extra) in [
+        ("a repeated policy", gw[0].0.clone()),
+        ("an unsafe name", "-x".to_string()),
+    ] {
+        let f = el10_fw(&gw);
+        f.lock().unwrap().perm_policies.push(extra.clone());
+        let (st, _, reloads) = reload_on_loopback(&f);
+        assert_eq!((st, reloads), (HandlerOutcomeState::Failed, 0), "{case}");
+    }
+}

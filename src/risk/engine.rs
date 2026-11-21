@@ -283,9 +283,10 @@ impl Engine {
         None
     }
 
-    /// R-2 at the moment of asking: a measured firewalld version and the
-    /// measured permanent configuration (no direct rule, no passthrough,
-    /// only the policy `allow-host-ipv6`), each read fresh.
+    /// R-2 at the moment of asking: a measured firewalld version and a
+    /// permanent configuration the measurement covered (no direct rule, no
+    /// passthrough, the measured `allow-host-ipv6`, further policies only
+    /// when disabled on 2.4.3; P7-R3), each read fresh.
     fn risk_loopback_reload_ok(&mut self) -> bool {
         let Some(version) = self.risk_fw_version() else {
             return false;

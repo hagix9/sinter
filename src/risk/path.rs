@@ -537,12 +537,13 @@ pub fn loopback_reload_measured(version: Option<&str>) -> bool {
     version.is_some_and(|v| FW_LOOPBACK_RELOAD_MEASURED.contains(&v))
 }
 
-/// The permanent configuration a reload installs must be the one the
-/// loopback measurement had (P7-R2, independent audit B-1): no permanent
-/// direct rule, no permanent passthrough, and exactly the permanent policy
-/// `allow-host-ipv6` (measured on 1.3.4, 2.1.1 and 2.3.1; the 2.4.3 image
-/// had further permanent policies whose effect is not measured, so it is
-/// refused until they are). An answer that could not be read is a refusal.
+/// The permanent configuration a reload installs must be one the loopback
+/// measurement covered (P7-R2 audit B-1, P7-R3): no permanent direct rule,
+/// no permanent passthrough, `allow-host-ipv6` with the definition measured
+/// for the version, and any further permanent policy disabled by its own
+/// definition on 2.4.3 (the Rocky Linux 10.2 image's gateway-* policies).
+/// An answer that could not be read, an enabled further policy or another
+/// version's further policy is a refusal.
 pub fn loopback_reload_config_ok(
     version: &str,
     direct_rules: Option<&str>,
