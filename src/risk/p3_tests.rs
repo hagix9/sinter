@@ -1919,3 +1919,226 @@ fn f7_an_unbound_management_interface_is_read_as_measured() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// P7-R3: further permanent policies on the loopback reload path (EL10)
+// ---------------------------------------------------------------------------
+
+/// The measured definitions of the Rocky Linux 10.2 gateway-* policies.
+fn measured_gateway_policies() -> Vec<(String, String)> {
+    let text = include_str!("fixtures/firewalld-2.4.3-policies-gateway.txt");
+    let text = text.split_once('\n').unwrap().1;
+    text.split("=== ")
+        .skip(1)
+        .map(|p| {
+            let (name, body) = p.split_once('\n').unwrap();
+            (name.to_string(), body.to_string())
+        })
+        .collect()
+}
+
+fn el10_fw(defs: &[(String, String)]) -> Arc<Mutex<FakeFirewalld>> {
+    let f = fw();
+    {
+        let mut g = f.lock().unwrap();
+        g.version = Some("2.4.3".into());
+        for (n, d) in defs {
+            g.perm_policies.push(n.clone());
+            g.policy_info.insert(n.clone(), d.clone());
+        }
+    }
+    f
+}
+
+fn reload_on_loopback(f: &Arc<Mutex<FakeFirewalld>>) -> (HandlerOutcomeState, String, usize) {
+    let s = Setup::new();
+    let body = notify_reload(&res(
+        "p",
+        "port",
+        "zone: public, port: \"9090/tcp\", state: present",
+    ));
+    let (r, l) = run(
+        s.model(&body, RELOAD).unwrap(),
+        Mode::Apply,
+        target(f, loopback_net()),
+        loopback_ctx(),
+    );
+    let st = r.unwrap().handlers_run[0].state;
+    (
+        st,
+        record(&l, "handler:fwreload").dynamic.clone(),
+        f.lock().unwrap().reloads,
+    )
+}
+
+#[test]
+fn r3_policy_definition_checks_follow_the_measured_forms() {
+    use super::path::{policy_disabled, same_policy_definition};
+    let gw = measured_gateway_policies();
+    assert_eq!(gw.len(), 5);
+    for (name, def) in &gw {
+        assert!(policy_disabled(name, def), "{name}");
+        assert!(
+            !policy_disabled("other", def),
+            "{name}: heading must name the policy"
+        );
+        assert!(
+            !policy_disabled(name, &def.replace("  disable: yes\n", "  disable: no\n")),
+            "{name}"
+        );
+        assert!(
+            !policy_disabled(name, &def.replace("  disable: yes\n", "")),
+            "{name}: no disable line"
+        );
+        assert!(
+            !policy_disabled(
+                name,
+                &def.replace("  disable: yes\n", "  disable: yes\n  disable: no\n")
+            ),
+            "{name}: two disable lines"
+        );
+        assert!(
+            !policy_disabled(name, &def.replace("  disable: yes\n", "   disable: yes\n")),
+            "{name}: indent"
+        );
+    }
+    // allow-host-ipv6: the heading may carry " (active)"; every other byte must be equal
+    let m = include_str!("fixtures/firewalld-1.3.4-policy-allow-host-ipv6.txt");
+    let plain = m.replacen("allow-host-ipv6 (active)\n", "allow-host-ipv6\n", 1);
+    assert!(same_policy_definition(m, m));
+    assert!(same_policy_definition(m, &plain));
+    for (name, changed) in [
+        (
+            "priority",
+            m.replace("  priority: -15000\n", "  priority: -1\n"),
+        ),
+        (
+            "target",
+            m.replace("  target: CONTINUE\n", "  target: DROP\n"),
+        ),
+        (
+            "ingress",
+            m.replace("  ingress-zones: ANY\n", "  ingress-zones: public\n"),
+        ),
+        (
+            "egress",
+            m.replace("  egress-zones: HOST\n", "  egress-zones: ANY\n"),
+        ),
+        ("a rich rule", format!("{m}\trule family=\"ipv4\" reject\n")),
+        (
+            "another policy",
+            m.replacen("allow-host-ipv6", "allow-host-ipv7", 1),
+        ),
+        ("empty", String::new()),
+    ] {
+        assert!(!same_policy_definition(m, &changed), "{name}");
+    }
+}
+
+#[test]
+fn r3_disabled_further_policies_let_a_measured_loopback_reload_run() {
+    // the measured Rocky Linux 10.2 configuration: five disabled gateway-* policies
+    let f = el10_fw(&measured_gateway_policies());
+    let (st, dynamic, reloads) = reload_on_loopback(&f);
+    assert_eq!(
+        (st, dynamic.as_str(), reloads),
+        (HandlerOutcomeState::Succeeded, "clear", 1)
+    );
+    // a runtime state that differs from the permanent one does not matter:
+    // the reload installs the permanent configuration
+    let f = el10_fw(&measured_gateway_policies());
+    f.lock().unwrap().active_policies = vec!["gateway-lan-to-HOST".into()];
+    assert_eq!(reload_on_loopback(&f).0, HandlerOutcomeState::Succeeded);
+}
+
+#[test]
+fn r3_enabled_unknown_or_altered_policies_keep_the_reload_unknown() {
+    let gw = measured_gateway_policies();
+    let enabled = |i: usize| {
+        let mut d = gw.clone();
+        d[i].1 = d[i].1.replace("  disable: yes\n", "  disable: no\n");
+        d
+    };
+    let dropper = vec![(
+        "lo-drop".to_string(),
+        "lo-drop\n  disable: no\n  priority: -30000\n  target: DROP\n  ingress-zones: ANY\n  egress-zones: HOST\n".to_string(),
+    )];
+    let cases: Vec<(&str, Arc<Mutex<FakeFirewalld>>)> = vec![
+        ("one gateway policy enabled", el10_fw(&enabled(1))),
+        ("a policy that drops traffic to the host", el10_fw(&dropper)),
+        ("a disabled policy without a readable definition", {
+            let f = el10_fw(&gw);
+            f.lock().unwrap().policy_info.remove("gateway-dmz-to-HOST");
+            f
+        }),
+        ("allow-host-ipv6 altered", {
+            let f = el10_fw(&gw);
+            let m = include_str!("fixtures/firewalld-2.4.3-policy-allow-host-ipv6.txt");
+            f.lock().unwrap().policy_info.insert(
+                "allow-host-ipv6".into(),
+                m.replace("  target: CONTINUE\n", "  target: DROP\n"),
+            );
+            f
+        }),
+        ("a malformed definition", {
+            let f = el10_fw(&gw);
+            f.lock().unwrap().policy_info.insert(
+                "gateway-lan-to-work".into(),
+                "gateway-lan-to-work\n  disable: yes\n  disable: no\n".into(),
+            );
+            f
+        }),
+        (
+            "disabled policies on a version whose disable is not measured",
+            {
+                let f = el10_fw(&gw);
+                f.lock().unwrap().version = Some("2.3.1".into());
+                f
+            },
+        ),
+        ("a permanent direct rule besides", {
+            let f = el10_fw(&gw);
+            f.lock().unwrap().direct_rules = vec!["ipv4 filter INPUT 0 -i lo -j DROP".into()];
+            f
+        }),
+    ];
+    for (name, f) in cases {
+        let (st, dynamic, reloads) = reload_on_loopback(&f);
+        assert_eq!(st, HandlerOutcomeState::Failed, "{name}");
+        assert!(dynamic.starts_with("unknown"), "{name}: {dynamic}");
+        assert_eq!(reloads, 0, "{name}");
+    }
+}
+
+#[test]
+fn r3_a_failed_or_lost_reload_is_never_reported_as_success() {
+    for (name, completion, want) in [
+        (
+            "the reload fails",
+            Completion::Exited(1),
+            HandlerOutcomeState::Failed,
+        ),
+        (
+            "the connection is lost during the reload",
+            Completion::Indeterminate {
+                started: true,
+                reason: "connection lost".into(),
+            },
+            HandlerOutcomeState::Indeterminate,
+        ),
+    ] {
+        let f = el10_fw(&measured_gateway_policies());
+        f.lock().unwrap().forced.push((
+            "--reload".into(),
+            Output {
+                completion,
+                stdout: Vec::new(),
+                stderr: b"Error\n".to_vec(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+            },
+        ));
+        let (st, _, _) = reload_on_loopback(&f);
+        assert_eq!(st, want, "{name}");
+    }
+}

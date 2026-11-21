@@ -9,7 +9,7 @@
 //! connection is a path only when the administrator declared a direct local
 //! connection. Everything else Sinter cannot establish is unknown.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 use super::rules::{canonical, cidr_contains};
@@ -544,13 +544,96 @@ pub fn loopback_reload_measured(version: Option<&str>) -> bool {
 /// had further permanent policies whose effect is not measured, so it is
 /// refused until they are). An answer that could not be read is a refusal.
 pub fn loopback_reload_config_ok(
+    version: &str,
     direct_rules: Option<&str>,
     passthroughs: Option<&str>,
     permanent_policies: Option<&str>,
+    policy_definitions: &BTreeMap<String, Option<String>>,
 ) -> bool {
     let empty = |s: Option<&str>| s.is_some_and(|s| s.trim().is_empty());
-    let policies: Option<Vec<&str>> = permanent_policies.map(|s| s.split_whitespace().collect());
-    empty(direct_rules)
-        && empty(passthroughs)
-        && policies.as_deref() == Some(&["allow-host-ipv6"][..])
+    let Some(policies) = permanent_policies.map(|s| s.split_whitespace().collect::<Vec<&str>>())
+    else {
+        return false;
+    };
+    let unique: BTreeSet<&str> = policies.iter().copied().collect();
+    if !empty(direct_rules)
+        || !empty(passthroughs)
+        || unique.len() != policies.len()
+        || !unique.contains("allow-host-ipv6")
+        || policy_definitions.len() != unique.len()
+    {
+        return false;
+    }
+    unique.iter().all(|name| {
+        let Some(Some(def)) = policy_definitions.get(*name) else {
+            return false;
+        };
+        if *name == "allow-host-ipv6" {
+            // the measured definition of this version, byte for byte
+            allow_host_ipv6_measured(version).is_some_and(|m| same_policy_definition(m, def))
+        } else {
+            // P7-R3: a further policy counts only when its permanent
+            // definition disables it (`disable: yes`), on a version whose
+            // disabled policies were measured not to be applied and not to
+            // affect a reload on the loopback path (2.4.3: the Rocky Linux
+            // 10.2 image's gateway-* policies, P7-R1 and P7-R2). Its name is
+            // never a reason; an enabled or unreadable policy is unknown.
+            FW_POLICY_DISABLE_MEASURED.contains(&version) && policy_disabled(name, def)
+        }
+    })
+}
+
+/// The versions on which a policy's `disable: yes` was measured (P7-R2:
+/// `--get-active-policies` listed only `allow-host-ipv6` while five further
+/// permanent policies were disabled, and P7-R1 measured loopback sessions
+/// across reloads with them present).
+pub const FW_POLICY_DISABLE_MEASURED: &[&str] = &["2.4.3"];
+
+/// The permanent `--info-policy=allow-host-ipv6` answer measured per version.
+fn allow_host_ipv6_measured(version: &str) -> Option<&'static str> {
+    match version {
+        "1.3.4" => Some(include_str!(
+            "fixtures/firewalld-1.3.4-policy-allow-host-ipv6.txt"
+        )),
+        "2.1.1" => Some(include_str!(
+            "fixtures/firewalld-2.1.1-policy-allow-host-ipv6.txt"
+        )),
+        "2.3.1" => Some(include_str!(
+            "fixtures/firewalld-2.3.1-policy-allow-host-ipv6.txt"
+        )),
+        "2.4.3" => Some(include_str!(
+            "fixtures/firewalld-2.4.3-policy-allow-host-ipv6.txt"
+        )),
+        _ => None,
+    }
+}
+
+/// The heading of an `--info-policy` answer: the name, optionally followed
+/// by ` (active)` (1.3.4 prints it in the permanent view too).
+fn policy_heading(def: &str) -> Option<(&str, &str)> {
+    let (head, rest) = def.split_once('\n')?;
+    let name = head.strip_suffix(" (active)").unwrap_or(head);
+    Some((name, rest))
+}
+
+/// Two definitions are the same when their headings name the same policy
+/// and every following byte is equal.
+pub(crate) fn same_policy_definition(measured: &str, observed: &str) -> bool {
+    match (policy_heading(measured), policy_heading(observed)) {
+        (Some((a, ra)), Some((b, rb))) => a == b && ra == rb,
+        _ => false,
+    }
+}
+
+/// A policy definition that names `name` and has exactly one `disable`
+/// line, `  disable: yes`.
+pub(crate) fn policy_disabled(name: &str, def: &str) -> bool {
+    let Some((head, rest)) = def.split_once('\n') else {
+        return false;
+    };
+    let disables: Vec<&str> = rest
+        .lines()
+        .filter(|l| l.trim_start().starts_with("disable"))
+        .collect();
+    head == name && disables == ["  disable: yes"]
 }

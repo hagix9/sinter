@@ -1,0 +1,76 @@
+# firewall-cmd --permanent --info-policy=<p> for the further permanent policies of Rocky Linux 10.2 (firewalld 2.4.3), measured P7-R2 2026-11-20; '=== <policy>' separates the answers
+=== gateway-dmz-to-HOST
+gateway-dmz-to-HOST
+  disable: yes
+  priority: 1000
+  target: CONTINUE
+  ingress-zones: dmz
+  egress-zones: HOST
+  services: dhcp dns
+  ports: 
+  protocols: 
+  masquerade: no
+  forward-ports: 
+  source-ports: 
+  icmp-blocks: 
+  rich rules: 
+=== gateway-lan-to-HOST
+gateway-lan-to-HOST
+  disable: yes
+  priority: 1000
+  target: CONTINUE
+  ingress-zones: internal home trusted
+  egress-zones: HOST
+  services: dhcp dns ssh
+  ports: 
+  protocols: 
+  masquerade: no
+  forward-ports: 
+  source-ports: 
+  icmp-blocks: 
+  rich rules: 
+=== gateway-lan-to-work
+gateway-lan-to-work
+  disable: yes
+  priority: 1000
+  target: ACCEPT
+  ingress-zones: internal home trusted
+  egress-zones: work
+  services: ftp tftp
+  ports: 
+  protocols: 
+  masquerade: no
+  forward-ports: 
+  source-ports: 
+  icmp-blocks: 
+  rich rules: 
+=== gateway-lan-to-world
+gateway-lan-to-world
+  disable: yes
+  priority: 1000
+  target: ACCEPT
+  ingress-zones: internal home trusted
+  egress-zones: external public
+  services: ftp tftp
+  ports: 
+  protocols: 
+  masquerade: no
+  forward-ports: 
+  source-ports: 
+  icmp-blocks: 
+  rich rules: 
+=== gateway-world-to-HOST
+gateway-world-to-HOST
+  disable: yes
+  priority: 1000
+  target: CONTINUE
+  ingress-zones: external public
+  egress-zones: HOST
+  services: dhcpv6-client
+  ports: 
+  protocols: 
+  masquerade: no
+  forward-ports: 
+  source-ports: 
+  icmp-blocks: 
+  rich rules: 

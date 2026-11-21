@@ -1,0 +1,17 @@
+allow-host-ipv6
+  priority: -15000
+  target: CONTINUE
+  ingress-zones: ANY
+  egress-zones: HOST
+  services: 
+  ports: 
+  protocols: 
+  masquerade: no
+  forward-ports: 
+  source-ports: 
+  icmp-blocks: 
+  rich rules: 
+	rule family="ipv6" icmp-type name="neighbour-advertisement" accept
+	rule family="ipv6" icmp-type name="neighbour-solicitation" accept
+	rule family="ipv6" icmp-type name="router-advertisement" accept
+	rule family="ipv6" icmp-type name="redirect" accept

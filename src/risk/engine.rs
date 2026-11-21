@@ -287,13 +287,33 @@ impl Engine {
     /// measured permanent configuration (no direct rule, no passthrough,
     /// only the policy `allow-host-ipv6`), each read fresh.
     fn risk_loopback_reload_ok(&mut self) -> bool {
-        if !super::path::loopback_reload_measured(self.risk_fw_version().as_deref()) {
+        let Some(version) = self.risk_fw_version() else {
+            return false;
+        };
+        if !super::path::loopback_reload_measured(Some(&version)) {
             return false;
         }
         let direct = self.fw(&["--permanent", "--direct", "--get-all-rules"]);
         let pass = self.fw(&["--permanent", "--direct", "--get-all-passthroughs"]);
         let pols = self.fw(&["--permanent", "--get-policies"]);
-        super::path::loopback_reload_config_ok(direct.as_deref(), pass.as_deref(), pols.as_deref())
+        // every permanent policy's definition, read fresh (P7-R3)
+        let mut defs = std::collections::BTreeMap::new();
+        if let Some(p) = &pols {
+            for name in p.split_whitespace() {
+                if !safe_name(name) {
+                    return false;
+                }
+                let arg = format!("--info-policy={}", name);
+                defs.insert(name.to_string(), self.fw(&["--permanent", &arg]));
+            }
+        }
+        super::path::loopback_reload_config_ok(
+            &version,
+            direct.as_deref(),
+            pass.as_deref(),
+            pols.as_deref(),
+            &defs,
+        )
     }
 
     /// `firewall-cmd --version` read strictly (`None` when it is not exactly

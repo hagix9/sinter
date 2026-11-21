@@ -1,0 +1,3 @@
+# Measured firewall-cmd output kept byte for byte: empty fields end in a space
+# (for example "  interfaces: "), so whitespace checks do not apply here.
+*.txt -whitespace

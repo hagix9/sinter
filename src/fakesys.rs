@@ -2376,6 +2376,10 @@ pub struct FakeFirewalld {
     pub direct_rules: Vec<String>,
     /// `--direct --get-all-passthroughs` lines.
     pub direct_passthroughs: Vec<String>,
+    /// policy -> exact `--permanent --info-policy=` answer. Unset for
+    /// `allow-host-ipv6`: the measured answer of `version` (P7-R3); unset for
+    /// another policy: an error.
+    pub policy_info: BTreeMap<String, String>,
     /// service -> ports of its definition (`22/tcp`).
     pub service_ports: BTreeMap<String, Vec<String>>,
     /// service -> full `--info-service` answer (overrides `service_ports`).
@@ -2488,6 +2492,31 @@ impl FakeFirewalld {
                     z.extend(self.perm_only_zones.iter().cloned());
                 }
                 return fw_out(0, &format!("{}\n", z.join(" ")), "");
+            }
+            [a] if perm && a.starts_with("--info-policy=") => {
+                let name = &a["--info-policy=".len()..];
+                if let Some(s) = self.policy_info.get(name) {
+                    return fw_out(0, s, "");
+                }
+                if name == "allow-host-ipv6" {
+                    let v = self.version.clone().unwrap_or_else(|| "1.3.4".into());
+                    let s = match v.as_str() {
+                        "2.1.1" => {
+                            include_str!("risk/fixtures/firewalld-2.1.1-policy-allow-host-ipv6.txt")
+                        }
+                        "2.3.1" => {
+                            include_str!("risk/fixtures/firewalld-2.3.1-policy-allow-host-ipv6.txt")
+                        }
+                        "2.4.3" => {
+                            include_str!("risk/fixtures/firewalld-2.4.3-policy-allow-host-ipv6.txt")
+                        }
+                        _ => {
+                            include_str!("risk/fixtures/firewalld-1.3.4-policy-allow-host-ipv6.txt")
+                        }
+                    };
+                    return fw_out(0, s, "");
+                }
+                return fw_out(2, "", "Error: INVALID_POLICY\n");
             }
             ["--get-policies"] if perm => {
                 let mut v = vec!["allow-host-ipv6".to_string()];

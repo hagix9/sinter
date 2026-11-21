@@ -357,5 +357,7 @@ the release acceptance checks `fw03-zone`, `fw03-interface`, `fw03-source`,
   acceptance. The connection-risk control judges the zone priority and a
   reload on a declared loopback path only for the four versions above
   (DESIGN §44.7).
-- The guarded runtime-first procedure on a real management path (DESIGN
-  §43.6) after the v1.15.0 P7-R2 changes.
+- With a management interface that NetworkManager manages (the Rocky Linux
+  images), every change with a permanent facet on a real management path is
+  refused as unknown: the permanent zone may be held by NetworkManager, which
+  Sinter does not read in v1.15.0 (known limit, DESIGN §44.7).
