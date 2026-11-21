@@ -133,8 +133,10 @@ needs one only if it is found on the management path, **N** never does.
 After connecting, Sinter finds the interfaces and the firewalld zone that
 carry its own connection; when it cannot determine them, the change is
 refused, with or without an approval. No release enforces a connection-risk
-type yet (firewalld 0.2.0 waits for an Owner decision; firewalld 0.3.0 and
-`nm_connection` come later), so ordinary runs are unchanged.
+type yet. firewalld 0.2.0 is not enforced in v1.15.0 (Owner decision D-13: it
+behaves as in v1.14.1; use firewalld 0.3.0 for changes that could cut the SSH
+connection; this does not mean 0.2.0 changes are safe); firewalld 0.3.0 and
+`nm_connection` come later, so ordinary runs are unchanged.
 
 - `sinter plan <recipe> --approval-request <dir>` writes
   `<dir>/<host>.request.json` for each host.

@@ -121,8 +121,9 @@ NetworkManager checkpoint:
    any change.
 2. A checkpoint is created for the management devices and the profile's
    device (never for all devices) with the rollback timeout
-   `checkpoint_timeout`; a profile created inside it is removed by its
-   rollback.
+   `checkpoint_timeout`; a rollback removes the profiles created while the
+   checkpoint exists (NetworkManager does this for the whole host, so a profile
+   another tool creates in that time may be removed too).
 3. The change is applied, then a new SSH connection (full host-key check,
    `/usr/bin/true`) is opened.
 4. Success destroys the checkpoint (the change stays) and verifies it.

@@ -127,7 +127,7 @@ audit は systemd マネージャの同期状態も、独立したドリフト�
 
 ## 接続リスクの承認（approve、approvals）
 
-変更によっては、Sinter が使う SSH 接続を切ることがあります（firewalld の zone、source、interface、reload、NetworkManager のプロファイル）。こうした型のリソースは接続の前に分類されます。**R** は常に承認が必要、**C** は管理経路に当たる場合だけ承認が必要、**N** は不要です。接続の後、Sinter は自分の接続を運ぶ interface と firewalld の zone を調べます。判定できなければ、承認の有無にかかわらず変更を拒否します。接続リスクの型を強制するリリースはまだありません（firewalld 0.2.0 は Owner の判断待ち、firewalld 0.3.0 と `nm_connection` はこの後）。通常の実行は変わりません。
+変更によっては、Sinter が使う SSH 接続を切ることがあります（firewalld の zone、source、interface、reload、NetworkManager のプロファイル）。こうした型のリソースは接続の前に分類されます。**R** は常に承認が必要、**C** は管理経路に当たる場合だけ承認が必要、**N** は不要です。接続の後、Sinter は自分の接続を運ぶ interface と firewalld の zone を調べます。判定できなければ、承認の有無にかかわらず変更を拒否します。接続リスクの型を強制するリリースはまだありません。firewalld 0.2.0 は v1.15.0 では強制しません（Owner 判断 D-13: v1.14.1 と同じ動作。SSH 接続を切りうる変更には firewalld 0.3.0 を使ってください。0.2.0 の変更が安全という意味ではありません）。firewalld 0.3.0 と `nm_connection` はこの後です。通常の実行は変わりません。
 
 - `sinter plan <recipe> --approval-request <dir>` は、ホストごとに `<dir>/<host>.request.json` を書きます。
 - `sinter approve <request> [--expires <分>]` は、端末に要求を表示し、内容の digest の先頭 16 桁を入力させます。要求 1 つにつき承認を 1 つ書き（既定 30 分、最大 24 時間）、その id を表示します。端末が無ければ拒否します。
