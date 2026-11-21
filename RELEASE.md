@@ -146,7 +146,7 @@ answers file, and never overwrites an existing record):
 
 ```sh
 python3 release/tier_assess.py --repo <repo> --last-tag v${PREV} \
-  --source-candidate ${SOURCE_CANDIDATE} --executable <candidate sinter> \
+  --source-candidate ${RC_COMMIT} --executable <candidate sinter> \
   --answers tier-answers.json \
   [--reference-manifest <last Tier F manifest> --releases-since X.Y.Z,...] \
   --run-date YYYY-MM-DD --request F|P --out <STAGING_ROOT>/tier
@@ -157,6 +157,10 @@ give with evidence: `triggers.os_or_image_change`, for each changed static
 crate `static_dependencies.<name>.reached` (`no` only with evidence; anything
 else counts as reached), and for Tier P `first_available_newer` and
 `t3_targets`. Exit 2 on any input error; nothing is assumed.
+
+`--source-candidate` names the commit that raises the version (`RC_COMMIT`;
+the diff is taken from the last release tag to it): the tool refuses a commit
+that does not raise the version (exit 2).
 
 It writes `TIER_ASSESSMENT.json` and `TIER_ASSESSMENT.md`: the diff, every
 T-1 trigger answered yes/no with its evidence (minor or major version, OS
