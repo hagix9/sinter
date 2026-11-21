@@ -349,14 +349,19 @@ configuration the permanent one. The exit statuses the catalog does not list
 (26 for creating an existing zone, 17 for removing an unbound interface, 30
 for removing a missing source) are errors. Through Sinter with these bytes,
 the release acceptance checks `fw03-zone`, `fw03-interface`, `fw03-source`,
-`risk-approved-apply` and `fw03-no-residue` passed on all four.
+`risk-approved-apply` and `fw03-no-residue` passed on all four. In the
+P7-R3 re-measurement of 2026-11-21 (the same four images and versions), with
+the measured-configuration reload rule of DESIGN §44.7 (R-2), `fw03-reload`
+passed on all four too, Rocky Linux 10.2 included.
 
 ### Not confirmed
 
 - Other OS or firewalld versions; RHEL and AlmaLinux are tested by the release
   acceptance. The connection-risk control judges the zone priority and a
   reload on a declared loopback path only for the four versions above
-  (DESIGN §44.7).
+  (DESIGN §44.7). Further disabled permanent policies are accepted for that
+  reload only on firewalld 2.4.3, where they were measured; on any other
+  version, or with an enabled policy, the reload is refused as unknown.
 - With a management interface that NetworkManager manages (the Rocky Linux
   images), every change with a permanent facet on a real management path is
   refused as unknown: the permanent zone may be held by NetworkManager, which
