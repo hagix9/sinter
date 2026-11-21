@@ -99,15 +99,17 @@ fn interpolated(v: &Value) -> bool {
     matches!(v, Value::Str(s) if crate::expressions::has_interpolation(s))
 }
 
-/// `name`: 1–64 bytes of printable ASCII, no leading or trailing space, not
-/// starting with `-`.
+/// `name`: 1–64 bytes of printable ASCII without `\`, no leading or trailing
+/// space, not starting with `-`. A backslash is refused because the profile
+/// settings refuse it when read back (`profile_line`: its escaping is not
+/// measured); a created profile could not be verified.
 pub fn valid_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
         && !s.starts_with('-')
         && !s.starts_with(' ')
         && !s.ends_with(' ')
-        && s.bytes().all(|b| (0x20..0x7f).contains(&b))
+        && s.bytes().all(|b| (0x20..0x7f).contains(&b) && b != b'\\')
 }
 
 /// A DNS name of RFC 1123 labels (lower case, at most 253 bytes, no
@@ -204,7 +206,7 @@ impl NmSpec {
             Some(_) => {
                 return Err(bad(
                     ctx,
-                    "name must be 1-64 bytes of printable ASCII, not starting with - and without leading or trailing space",
+                    "name must be 1-64 bytes of printable ASCII without a backslash, not starting with - and without leading or trailing space",
                 ))
             }
             None => return Err(bad(ctx, "requires name")),

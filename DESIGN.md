@@ -3366,7 +3366,7 @@ IMPLEMENTED (v1.15.0 P4, not released; Owner decisions D-2, D-11 and D-12 of 202
 
 | Field | Type | Profile setting |
 |---|---|---|
-| `name` | required, static, 1–64 bytes printable, not starting with `-` | `connection.id` (exactly one profile may have it; two are a failure) |
+| `name` | required, static, 1–64 bytes printable, not starting with `-`, no `\` (P8-R3: a backslash is not measured in the settings output) | `connection.id` (exactly one profile may have it; two are a failure) |
 | `type` | `ethernet` (only value in v1.15.0) | `connection.type` |
 | `ifname` | ifname | `connection.interface-name` |
 | `autoconnect` | boolean | `connection.autoconnect` |

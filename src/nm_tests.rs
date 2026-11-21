@@ -888,3 +888,15 @@ fn f1_fake_rollback_removes_new_profiles_only_with_delete_new_connections() {
         assert_eq!(f.find("new").is_some(), kept, "flags {flags}");
     }
 }
+
+#[test]
+fn f2_a_name_with_a_backslash_is_refused_at_validation() {
+    // The settings output refuses a backslash (not measured), so a profile
+    // created with one could never be verified: refused before contact.
+    assert!(!valid_name(r"a\b"));
+    assert!(valid_name("db:net"));
+    let mut m = BTreeMap::new();
+    m.insert("name".to_string(), Value::Str(r"lan\1".into()));
+    let e = NmSpec::check(&m, "r", false).unwrap_err();
+    assert!(e.message.contains("without a backslash"), "{}", e.message);
+}

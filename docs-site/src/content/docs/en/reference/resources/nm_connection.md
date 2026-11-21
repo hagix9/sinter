@@ -39,7 +39,7 @@ exists and, optionally, whether it is active.
 
 | Parameter | Required | Type | Default | Description |
 |-----------|----------|------|---------|-------------|
-| `name` | yes | static string | — | `connection.id`: 1–64 bytes of printable ASCII, not starting with `-`, no leading or trailing space. Exactly one profile may have it. |
+| `name` | yes | static string | — | `connection.id`: 1–64 bytes of printable ASCII without `\`, not starting with `-`, no leading or trailing space. Exactly one profile may have it. |
 | `type` | no | string | `ethernet` | Only `ethernet` in v1.15.0. |
 | `ifname` | no | string | — | `connection.interface-name` (1–15 bytes, `[A-Za-z0-9_.-]`). |
 | `autoconnect` | no | boolean | — | `connection.autoconnect`. |
