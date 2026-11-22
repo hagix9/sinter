@@ -388,7 +388,8 @@ baseline (Rocky Linux 9 x86_64, glibc 2.34) and then extracted and executed,
 byte-identical, on every supported Linux x86_64 target before release. This
 is justified — not assumed — by evidence: the Rocky-9-built binary requires
 no glibc symbol newer than `GLIBC_2.34`, needs only
-`libssl.so.3`/`libcrypto.so.3`/`libgcc_s.so.1`/`libc.so.6` (no RPATH), and
+`libssl.so.3`/`libcrypto.so.3`/`libgcc_s.so.1`/`libm.so.6`/`libc.so.6` (no
+RPATH; `libm.so.6`, part of glibc, from v1.15.0), and
 the exact same bytes were verified to run on Ubuntu 24.04, Ubuntu 26.04,
 Rocky Linux 9, and Rocky Linux 10. Never substitute: no macOS binary shipped
 as a Linux artifact, no rename-based target spoofing, no stale or
@@ -448,8 +449,10 @@ Do not substitute Ubuntu 24/26 or Rocky 10 builds.
 
 Immediately freeze the executable SHA-256. Record ELF headers/interpreter,
 all symbol-version requirements, DT_NEEDED, and RPATH/RUNPATH. Expected native
-interfaces are `libssl.so.3`, `libcrypto.so.3`, `libgcc_s.so.1`, `libc.so.6`,
-and `ld-linux-x86-64.so.2`, with `OPENSSL_3.0.0` and no RPATH/RUNPATH.
+interfaces are `libssl.so.3`, `libcrypto.so.3`, `libgcc_s.so.1`, `libm.so.6`,
+`libc.so.6`, and `ld-linux-x86-64.so.2`, with `OPENSSL_3.0.0` and no
+RPATH/RUNPATH. `libm.so.6` is part of glibc; it is expected from v1.15.0
+(`sinter discover` computes a Shannon entropy with `f64::log2`).
 Unexpected dependencies or unresolved linkage are a STOP pending review.
 Do not strip, patch, or otherwise alter the frozen bytes.
 
