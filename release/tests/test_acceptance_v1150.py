@@ -262,14 +262,81 @@ class HarnessStatic(unittest.TestCase):
                     self.assertEqual(p.returncode, 0, p.stderr)
 
     def test_harness_sha256sums_cover_every_file(self):
-        listed = {}
-        for line in rd(os.path.join(HARNESS, "SHA256SUMS"), "r").splitlines():
-            h, n = line.split("  ", 1)
-            listed[n] = h
-        files = sorted(n for n in os.listdir(HARNESS) if n != "SHA256SUMS" and not n.startswith("."))
-        self.assertEqual(sorted(listed), files)
-        for n in files:
-            self.assertEqual(listed[n], H(rd(os.path.join(HARNESS, n))), n)
+        self.assertEqual(harness_sums_problems(HARNESS), [])
+
+
+def harness_sums_problems(d):
+    """The SHA256SUMS of a harness directory against its entries: every entry but SHA256SUMS and dot files must be
+    listed (a directory such as __pycache__ is an unlisted entry too), every listed file must exist and match, and
+    every line must be `<64 hex>  <name>` with a name listed once.  Returns the problems (empty when consistent)."""
+    problems, listed = [], {}
+    for i, line in enumerate(rd(os.path.join(d, "SHA256SUMS"), "r").splitlines(), 1):
+        m = re.fullmatch(r"([0-9a-f]{64})  ([^/\s][^/]*)", line)
+        if not m:
+            problems.append("SHA256SUMS line %d is malformed" % i)
+            continue
+        if m.group(2) in listed:
+            problems.append("%s is listed twice" % m.group(2))
+        listed[m.group(2)] = m.group(1)
+    entries = sorted(n for n in os.listdir(d) if n != "SHA256SUMS" and not n.startswith("."))
+    for n in entries:
+        if n not in listed:
+            problems.append("%s is not listed" % n)
+    for n in sorted(listed):
+        p = os.path.join(d, n)
+        if not os.path.isfile(p) or os.path.islink(p):
+            problems.append("%s is missing" % n)
+        elif listed[n] != H(rd(p)):
+            problems.append("%s does not match" % n)
+    return problems
+
+
+class HarnessSumsCheck(unittest.TestCase):
+    """The cover check itself still detects every kind of drift (P8-R7: it must not be weakened to pass CI)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="sums-")
+        self.d = os.path.join(self.tmp, "h")
+        os.makedirs(self.d)
+        for n, b in (("a.sh", b"echo a\n"), ("b.py", b"print(1)\n")):
+            wr(os.path.join(self.d, n), b)
+        self.write_sums()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def write_sums(self, extra=""):
+        names = sorted(n for n in os.listdir(self.d) if n != "SHA256SUMS")
+        wr(os.path.join(self.d, "SHA256SUMS"),
+           "".join("%s  %s\n" % (H(rd(os.path.join(self.d, n))), n) for n in names) + extra)
+
+    def test_consistent(self):
+        self.assertEqual(harness_sums_problems(self.d), [])
+
+    def test_unlisted_regular_file(self):
+        wr(os.path.join(self.d, "extra.txt"), b"x")
+        self.assertEqual(harness_sums_problems(self.d), ["extra.txt is not listed"])
+
+    def test_pycache_directory_is_unlisted(self):
+        wr(os.path.join(self.d, "__pycache__", "b.cpython-312.pyc"), b"\0")
+        self.assertEqual(harness_sums_problems(self.d), ["__pycache__ is not listed"])
+
+    def test_modified_file(self):
+        wr(os.path.join(self.d, "a.sh"), b"echo changed\n")
+        self.assertEqual(harness_sums_problems(self.d), ["a.sh does not match"])
+
+    def test_missing_file(self):
+        os.remove(os.path.join(self.d, "b.py"))
+        self.assertEqual(harness_sums_problems(self.d), ["b.py is missing"])
+
+    def test_malformed_and_duplicate_lines(self):
+        self.write_sums(extra="nothex  a.sh\n%s  a.sh\n" % H(b"echo a\n"))
+        self.assertEqual(harness_sums_problems(self.d), ["SHA256SUMS line 3 is malformed", "a.sh is listed twice"])
+
+    def test_listed_directory_is_missing(self):
+        self.write_sums(extra="%s  sub\n" % H(b""))
+        os.makedirs(os.path.join(self.d, "sub"))
+        self.assertEqual(harness_sums_problems(self.d), ["sub is missing"])
 
     def test_table_allows_only_the_nm_check(self):
         doc = json.loads(rd(TABLE_PATH, "r"))
@@ -298,10 +365,34 @@ class HarnessStatic(unittest.TestCase):
 
 
 def load_collector():
+    """Import the harness collector in place (its HERE must stay the harness directory) without writing a bytecode
+    cache: an in-place __pycache__ would be an unlisted entry of the hash-pinned harness directory (P8-R7, CI run
+    44967562055).  Only this import is affected; the process setting is restored."""
     spec = importlib.util.spec_from_file_location("collect_evidence_v1150", os.path.join(HARNESS, "collect-evidence.py"))
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    old = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.dont_write_bytecode = old
     return mod
+
+
+class CollectorImportLeavesHarnessClean(unittest.TestCase):
+    """Regression for CI run 44967562055: importing the collector with bytecode writing on and no cache prefix
+    leaves the harness directory exactly as it was."""
+
+    def test_import_writes_nothing_into_the_harness(self):
+        before = sorted(os.listdir(HARNESS))
+        old_flag, old_prefix = sys.dont_write_bytecode, sys.pycache_prefix
+        sys.dont_write_bytecode, sys.pycache_prefix = False, None
+        try:
+            load_collector()
+        finally:
+            sys.dont_write_bytecode, sys.pycache_prefix = old_flag, old_prefix
+        self.assertEqual(sorted(os.listdir(HARNESS)), before)
+        self.assertEqual(harness_sums_problems(HARNESS), [])
 
 
 class CollectorScope(unittest.TestCase):
