@@ -2,6 +2,78 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [1.15.0] - 2026-11-21
+
+### Added
+
+- **`systemd_timer` resource**: manages one system timer unit,
+  `/etc/systemd/system/<name>.timer` (`on_calendar`, `on_boot_sec`, `on_unit_active_sec`,
+  `persistent`, `accuracy_sec`, `randomized_delay_sec`, `unit`, `description`), whether it is
+  `enabled`, and `state` `running`, `stopped` or `absent` (stop, disable, remove the unit file).
+  The unit file is generated deterministically, a changed file triggers the daemon-reload, and an
+  invalid `OnCalendar` expression fails in plan and apply without a change. Template units (`@`)
+  and the `--user` manager are not supported.
+- **Connection-risk control and approvals.** Changes that can cut the SSH connection Sinter manages
+  a host through are classified before contact: R (always needs an approval), C (needs one when the
+  change is on the management path) or N. After contact Sinter determines the management path
+  (`SSH_CONNECTION`, the interfaces and routes, the firewalld zone) and judges each C or R resource
+  at its turn as `clear`, `affects` or `unknown`; `unknown` is always refused, and on a local target
+  every C or R resource is refused. New: `plan --approval-request`, `sinter approve` (reads a
+  request and records a single-use approval bound to the plan digest; it needs a terminal, which is
+  not proof that a person approved), `apply --approval`, `sinter approvals list`, and
+  `--management-path loopback` (plan and apply) with the inventory host field `management_path:
+  loopback` for a connection Sinter makes to the same host. Where an exact inverse exists, an
+  approved change on the path runs runtime first and a new SSH connection is opened before the
+  permanent change follows; recovery is never guaranteed.
+- **firewalld 0.3.0** (first-party catalog and plugin, registered): adds `firewalld.interface`,
+  `firewalld.source` and `firewalld.zone` to the service, port, port range and protocol types, and
+  a `reload` operation used as a `plugin` handler (a new handler type). Interface and source changes
+  and zone removal are R; service, port and protocol removals and the reload are C. The exit codes
+  were measured on Rocky Linux 9.8 (firewalld 1.3.4), Rocky Linux 10.2 (2.4.3), Ubuntu 24.04
+  (2.1.1) and Ubuntu 26.04 (2.3.1). A reload on a declared loopback path is accepted only for those
+  four versions and only with the measured permanent configuration (on 2.4.3 further policies are
+  accepted when they are disabled).
+- **`nm_connection` resource**: one NetworkManager Ethernet connection profile (name, interface,
+  autoconnect, IPv4 and IPv6 method, addresses, gateway, DNS, `state`, `active`), changed through
+  fixed `nmcli` commands and identified by UUID. Every change is a connection-risk change (C); an
+  approved change that takes effect now and affects the management path runs inside a
+  NetworkManager checkpoint with rollback (flag `DELETE_NEW_CONNECTIONS`, for the management and
+  the profile's devices; a rollback also removes other profiles created on the host meanwhile). A real-host measurement before release (Rocky Linux 9.8 with
+  NetworkManager 1.54.3, Rocky Linux 10.2 with 1.56.0) found that NetworkManager refused the
+  checkpoint flags first used and that profile settings with IPv6 values could not be read; both
+  are fixed (the settings are read as NetworkManager prints them, without escaped colons). The
+  release acceptance creates, changes and deletes an inactive profile; activation, deactivation,
+  the checkpoint and its rollback with the fixed code are not part of the release acceptance and
+  have not been verified on a real host.
+- **`sinter discover`**: reads one host without changing it and writes a reviewable recipe and a
+  provenance file (`<output>.discover.json`, mode 0600, never overwritten) from four collectors:
+  manually installed packages (Debian family only), enabled services and timers, local users and
+  groups within the `UID_MIN`–`UID_MAX` and `GID_MIN`–`GID_MAX` ranges of `/etc/login.defs`, and files named with `--include-path` (secret-looking files and
+  content are excluded and listed). It is not an MCP tool and never runs plan or apply.
+
+### Changed
+
+- Plan and apply print the connection-risk class of firewalld 0.2.0 resources as a note; the
+  control is not enforced for firewalld 0.2.0 in this release, which behaves as in v1.14.1 (a
+  0.2.0 removal of a service, port or protocol on the management path is neither refused nor
+  approved). Use firewalld 0.3.0 for changes that could cut the SSH connection; this is not a
+  statement that firewalld 0.2.0 changes are safe. firewalld 0.1.0 resources are all N.
+- A recipe using `systemd_timer`, `nm_connection`, a `plugin` handler or firewalld 0.3.0, and an
+  inventory using `management_path`, is refused by older Sinter versions. No existing recipe
+  field, JSON key or exit code changes meaning; the MCP tool list stays at eight tools.
+- The Linux x86_64 binary now also needs `libm.so.6` (part of glibc; `sinter discover` uses it).
+  The highest required glibc symbol stays `GLIBC_2.34`, so the supported targets do not change.
+
+### Known limitations
+
+- With a NetworkManager-managed management interface (the Rocky Linux images), every firewalld
+  change with a permanent facet on a real management path, and a reload judged on that path's
+  permanent configuration, is refused as unknown (`connection.zone` is not read).
+- firewalld rich rules are not supported; DNF repository and module management is not included.
+- `nm_connection` refuses a profile name with a backslash and a NetworkManager profile whose
+  settings contain one, and reads two or more values of a field only when NetworkManager separates
+  them with commas; both forms are not yet measured on a real host, so anything else fails closed.
+
 ## [1.14.1] - 2026-11-18
 
 ### Fixed
