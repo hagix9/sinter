@@ -28,6 +28,16 @@
 #     RUN_ID area stops the run; the real /var/tmp/sinter-acceptance is left
 #     untouched (a private mount namespace redirects the frozen script's writes).
 # Frozen acceptance-target.sh is UNCHANGED. No GO here.
+# C1 (v1.15.0 R8 revision 11.5): the remote cleanup ssh is retried only for a
+#     transport failure that its stderr identifies (fixed allow-list, rc 255),
+#     or the driver's own ssh timeout (rc 142), at most CLEANUP_MAX_ATTEMPTS
+#     times within CLEANUP_TOTAL_SEC; an authentication, host-key or key-file
+#     error, any other exit code and an unidentified rc 255 stop at once
+#     (CLEANUP_FAILED). The fixed values are not configurable. Host key checking,
+#     the ssh command and remote-cleanup.sh (the target validation) are unchanged.
+#     rc 142 is retried without reading stderr: a connection timeout and a
+#     remote command that hung cannot be told apart; the repeated command is
+#     idempotent and its target is validated again (a design limit).
 # ============================================================================
 set -u
 
@@ -110,6 +120,10 @@ REMOTE_MKDIR=0
 CLEANUP_NOTE=""
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+now_s() { date +%s; }
+# C1: fixed bounds of the remote cleanup retry (not read from the environment)
+readonly CLEANUP_MAX_ATTEMPTS=4 CLEANUP_TOTAL_SEC=600
+readonly CLEANUP_WAIT_1=10 CLEANUP_WAIT_2=20 CLEANUP_WAIT_3=40
 if ! : > "$RUN_DIR/driver.log"; then echo "cannot create driver.log" >&2; exit 70; fi
 exec > "$RUN_DIR/driver.log" 2>&1
 
@@ -128,6 +142,30 @@ gssh_long() { tmo "$PREP_TMO" "$GCLOUD" compute ssh "$VM" --project="$PROJ" --zo
 gscp()   { tmo "$SCP_TMO" "$GCLOUD" compute scp --project="$PROJ" --zone="$ZONE" --quiet --tunnel-through-iap "$@"; }
 gpush()  { tmo "$SCP_TMO" "$GCLOUD" compute ssh "$VM" --project="$PROJ" --zone="$ZONE" --quiet --tunnel-through-iap --command "cat > $2" < "$1" 2>/dev/null; }
 gstatus(){ "$GCLOUD" compute instances describe "$VM" --project="$PROJ" --zone="$ZONE" --format="get(status)" 2>/dev/null; }
+# C1: the cleanup ssh is the same command as gssh (same strict host-key options from the harness HOME); only its stderr is kept, in a
+# private temporary file, for the classification below (never copied into the evidence).
+gssh_err() { tmo "$SSH_TMO" "$GCLOUD" compute ssh "$VM" --project="$PROJ" --zone="$ZONE" --quiet --tunnel-through-iap --command "$1" </dev/null 2>"$2"; }
+# classify_ssh RC ERRFILE: prints "<CLASS> <RULE>"; CLASS is TRANSIENT or TIMEOUT (may be retried) or FATAL (never retried).
+# A host-key, authentication or key-file message is FATAL whatever the exit code; rc 255 is TRANSIENT only when the stderr names a
+# known transport failure; rc 142 (SIGALRM of tmo) is TIMEOUT; anything else is FATAL (unidentified).
+classify_ssh() {
+  local rc="$1" e="$2" p
+  for p in "Host key verification failed" "REMOTE HOST IDENTIFICATION HAS CHANGED" "POSSIBLE DNS SPOOFING" "Offending " \
+           "host key is known for" "Host key for " "no matching host key type" "key_verify failed" "HOSTKEY" \
+           "incorrect signature" "error in libcrypto" "Permanently added" "Bad server host key" "signature verification failed"; do
+    grep -qF -- "$p" "$e" 2>/dev/null && { echo "FATAL host-key"; return; }; done
+  for p in "Permission denied" "Too many authentication failures" "Authentication failed" "authenticating user" "invalid user" \
+           "Load key" "invalid format" "no such identity" "4033" "not authorized" "Not authorized"; do
+    grep -qF -- "$p" "$e" 2>/dev/null && { echo "FATAL auth"; return; }; done
+  if [ "$rc" = 142 ]; then echo "TIMEOUT ssh-timeout"; return; fi
+  if [ "$rc" = 255 ]; then
+    for p in "kex_exchange_identification" "ssh_exchange_identification" "Connection reset by peer" "Connection timed out" \
+             "Connection refused" "Broken pipe" "closed by remote host" "Connection closed by UNKNOWN port" "4003" "failed to connect to backend"; do
+      grep -qF -- "$p" "$e" 2>/dev/null && { echo "TRANSIENT transport"; return; }; done
+    echo "FATAL unidentified-255"; return
+  fi
+  echo "FATAL rc-$rc"
+}
 
 fetch_raw() {
   [ -n "$VM" ] || return 1
@@ -201,9 +239,24 @@ do_cleanup() {
   if [ "$REMOTE_MKDIR" = 1 ]; then
     local allow=0; [ "$RAW_FETCHED" = 1 ] && allow=1
     local out rc state tmp_rc dir_rc exists
-    out=$(gssh "sudo bash /tmp/remote-cleanup.sh '$REMOTE_WORK' '$RUN_ID' $allow"); rc=$?
+    # C1: bounded retry of the transport only; the command, its target and its validation are the same on every attempt
+    local k=1 t0 el w cls rule ef
+    t0=$(now_s)
+    while :; do
+      ef=$(mktemp "${TMPDIR:-/tmp}/sinter-cleanup-err.XXXXXX") || { rc=70; out=""; cls=FATAL; rule=no-tempfile; echo "cleanup ssh attempt $k: no temporary file"; break; }
+      out=$(gssh_err "sudo bash /tmp/remote-cleanup.sh '$REMOTE_WORK' '$RUN_ID' $allow" "$ef"); rc=$?
+      el=$(( $(now_s) - t0 ))
+      if [ "$rc" -eq 0 ]; then rm -f "$ef"; echo "cleanup ssh attempt $k: rc=0 elapsed=${el}s"; [ -n "$out" ] || { cls=FATAL; rule=no-output; }; break; fi
+      read -r cls rule <<< "$(classify_ssh "$rc" "$ef")"; rm -f "$ef"
+      echo "cleanup ssh attempt $k: rc=$rc class=$cls rule=$rule elapsed=${el}s"
+      [ "$cls" = TRANSIENT ] || [ "$cls" = TIMEOUT ] || break
+      [ "$k" -lt "$CLEANUP_MAX_ATTEMPTS" ] || { rule="$rule,attempts-exhausted"; break; }
+      case "$k" in 1) w=$CLEANUP_WAIT_1 ;; 2) w=$CLEANUP_WAIT_2 ;; *) w=$CLEANUP_WAIT_3 ;; esac
+      [ $(( el + w + SSH_TMO )) -le "$CLEANUP_TOTAL_SEC" ] || { rule="$rule,time-limit"; break; }
+      sleep "$w"; k=$((k + 1))
+    done
     if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
-      ok=0; CLEANUP_NOTE="remote cleanup ssh failed (rc=$rc)"
+      ok=0; CLEANUP_NOTE="remote cleanup ssh failed (rc=$rc class=${cls:-FATAL} rule=${rule:-} attempts=$k)"
     else
       state=$(printf '%s\n' "$out" | sed -n 's/^STATE=//p' | tail -1)
       tmp_rc=$(printf '%s\n' "$out" | sed -n 's/^TMP_RC=//p' | tail -1)
