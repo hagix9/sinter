@@ -3,23 +3,24 @@ title: Resource Plugins
 description: データのみの Resource Plugins、プラグインルート、sinter plugin コマンド、公式 firewalld プラグイン。
 ---
 
-*v1.9.0 から利用できます。`sinter plugin` コマンド、firewalld 0.2.0、mutate の部分許可は v1.12.0 からです。*
+*v1.9.0 から利用できます。`sinter plugin` コマンド、firewalld 0.2.0、mutate の部分許可は v1.12.0 から、firewalld 0.3.0 と `plugin` handler は v1.15.0 からです。*
 
 Resource Plugin は、`<plugin>.<name>` という名前のリソースタイプをデータとして追加します。
 プラグインのコードが Sinter の中で動くことはありません。プラグインが実行できるプログラムは
 すべて capability catalog から来ます。catalog には、固定のプログラム、オペランドを検査する
 引数テンプレート、各終了ステータスの意味が記載されています。
 
-Sinter v1.14.1 は、公式プラグインを 2 つ（それぞれの catalog とともに）持っています。
+Sinter v1.15.0 は、公式プラグインを 3 つ（それぞれの catalog とともに）持っています。
 
 | プラグイン | リソースタイプ | リリース |
 |------------|----------------|----------|
 | `firewalld` 0.1.0 | `firewalld.service`（present のみ） | v1.9.0 以降 |
 | `firewalld` 0.2.0 | `firewalld.service`、`firewalld.port`、`firewalld.port_range`、`firewalld.protocol` | v1.12.0 以降 |
+| `firewalld` 0.3.0 | 0.2.0 のタイプと `firewalld.interface`、`firewalld.source`、`firewalld.zone`、handler の操作 `reload` | v1.15.0 以降 |
 
 他者の catalog には対応していません。catalog は、この Sinter に組み込まれたレビュー済みの
 公式 catalog である場合にだけ使われ、それ以外は pin してあっても拒否されます。v1.12.0 より前の
-リリースは firewalld 0.2.0 を拒否します。
+リリースは firewalld 0.2.0 を、v1.15.0 より前のリリースは firewalld 0.3.0 を拒否します。
 
 `plugins:` のないレシピの動作はこれまでと同じで、プラグインルートは読みません。
 
@@ -172,9 +173,9 @@ catalog が observe と分類した操作が、ホスト上で読み取り専用
 firewalld は「no」と答えるためです。ポートを閉じるには、`firewalld.port` で 1 つずつ指定して
 ください。
 
-## firewalld 0.3.0（候補、まだ使えない）
+## firewalld 0.3.0
 
-firewalld 0.3.0 は開発済みですが、**登録していません**。実機で測定するまで、どのリリースもインストールも使用もできません。0.2.0 のすべてを引き継ぎ、`firewalld.interface`（zone の interface）、`firewalld.source`（zone のネットワーク。`198.51.100.0/24` のような正規の CIDR）、`firewalld.zone`（permanent の zone。既定の zone は削除できない）と、handler の操作 `reload` を加えます。
+firewalld 0.3.0 は v1.15.0 から使えます。0.2.0 のすべてを引き継ぎ、`firewalld.interface`（zone の interface）、`firewalld.source`（zone のネットワーク。`198.51.100.0/24` のような正規の CIDR）、`firewalld.zone`（permanent の zone。既定の zone は削除できない）と、handler の操作 `reload` を加えます。
 
 ```yaml
 handlers:
@@ -196,12 +197,16 @@ firewalld 0.1.0 と 0.2.0 は、次のシステムの実機で測定し、Sinter
 | Rocky Linux 10.2 | 2.4.3 |
 | Ubuntu 24.04 | 2.1.1 |
 
+firewalld 0.3.0 の終了コードは、同じ 3 つのシステムと Ubuntu 26.04（firewalld 2.3.1）で測定しました。
+
 検証していないこと:
 
 - ほかの OS と firewalld の版。Sinter は版を確認しません。
-- 8 ラベルの[リリース受入](/ja/compatibility/platforms/)は、ファイアウォールを変更しません。
-  v1.12.0 からは `sinter plugin` のコマンドと、mutate の許可がない場合の `plan` と `apply` の
-  拒否を確認しますが、firewalld の変更は確認しません。
+- 8 ラベルの[リリース受入](/ja/compatibility/platforms/)は、v1.12.0 から `sinter plugin` の
+  コマンドと、mutate の許可がない場合の `plan` と `apply` の拒否を確認します。v1.15.0 からは、
+  宣言した loopback の管理経路で、使い捨ての対象（zone、ダミーの interface、source のネットワーク、
+  reload の handler）にだけ firewalld 0.3.0 を実行します。firewalld 0.1.0 と 0.2.0 の変更と、
+  実際の管理経路での変更は行いません。
 - 実機での Sinter 自身のタイムアウト（結果が分からない変更で、indeterminate として報告されます）。
   テストでだけ確認しています。
 - ハードリンクのないファイルシステムのコントローラーへのインストール（その場合 install は

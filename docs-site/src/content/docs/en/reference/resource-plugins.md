@@ -4,24 +4,25 @@ description: Data-only Resource Plugins, the plugin root, the sinter plugin comm
 ---
 
 *Available from v1.9.0. The `sinter plugin` commands, firewalld 0.2.0 and partial
-mutate permission are new in v1.12.0.*
+mutate permission are new in v1.12.0; firewalld 0.3.0 and the `plugin` handler are new in v1.15.0.*
 
 A Resource Plugin adds resource types named `<plugin>.<name>`, as data. No code
 from a plugin runs in Sinter. Every program a plugin can run comes from a
 capability catalog that lists fixed programs, argument templates with checked
 operands, and the meaning of each exit status.
 
-Sinter v1.14.1 carries two first-party plugins, each with its catalog:
+Sinter v1.15.0 carries three first-party plugins, each with its catalog:
 
 | Plugin | Resource types | Releases |
 |--------|----------------|----------|
 | `firewalld` 0.1.0 | `firewalld.service` (present only) | v1.9.0 and later |
 | `firewalld` 0.2.0 | `firewalld.service`, `firewalld.port`, `firewalld.port_range`, `firewalld.protocol` | v1.12.0 and later |
+| `firewalld` 0.3.0 | the 0.2.0 types and `firewalld.interface`, `firewalld.source`, `firewalld.zone`; handler operation `reload` | v1.15.0 and later |
 
 Catalogs from anyone else are not supported: a catalog is used only when it is one
 of the reviewed first-party catalogs compiled into this Sinter, and any other
 catalog is refused, even when it is pinned. A release before v1.12.0 refuses
-firewalld 0.2.0.
+firewalld 0.2.0, and a release before v1.15.0 refuses firewalld 0.3.0.
 
 A recipe without `plugins:` behaves as before, and the plugin root is not read.
 
@@ -183,10 +184,9 @@ the connection Sinter itself uses. A port range has no `absent`: firewalld answe
 "no" for a range that is only partly allowed, so close ports one by one with
 `firewalld.port`.
 
-## firewalld 0.3.0 (candidate, not available)
+## firewalld 0.3.0
 
-firewalld 0.3.0 is developed but **not registered**: no release can install
-or use it until it has been measured on real hosts. It keeps everything of
+firewalld 0.3.0 is available from v1.15.0. It keeps everything of
 0.2.0 and adds `firewalld.interface` (an interface in a zone),
 `firewalld.source` (a network in a zone, canonical CIDR such as
 `198.51.100.0/24`), `firewalld.zone` (a permanent zone; predefined zones
@@ -220,12 +220,18 @@ these systems:
 | Rocky Linux 10.2 | 2.4.3 |
 | Ubuntu 24.04 | 2.1.1 |
 
+The exit codes of firewalld 0.3.0 were measured on the same three systems and on
+Ubuntu 26.04 (firewalld 2.3.1).
+
 Not verified:
 
 - Other OS and firewalld versions. Sinter does not check the version.
-- The eight-label [release acceptance](/en/compatibility/platforms/) does not change
-  a firewall. From v1.12.0 it checks the `sinter plugin` commands and the refusal
-  of `plan` and `apply` without a mutate permission, not firewalld changes.
+- The eight-label [release acceptance](/en/compatibility/platforms/) checks, from
+  v1.12.0, the `sinter plugin` commands and the refusal of `plan` and `apply`
+  without a mutate permission. From v1.15.0 it also runs firewalld 0.3.0 on
+  disposable objects only (a zone, a dummy interface, a source network, the
+  reload handler) over a declared loopback management path. It makes no
+  firewalld 0.1.0 or 0.2.0 change and no change on a real management path.
 - Sinter's own timeout on a real host (a mutation whose outcome is unknown, reported
   as indeterminate). It is covered by tests only.
 - Installing plugins on controllers whose file systems have no hard links (install

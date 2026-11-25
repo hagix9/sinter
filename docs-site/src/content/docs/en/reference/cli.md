@@ -21,7 +21,7 @@ See [Core MCP](/en/reference/mcp/) for the `mcp` subcommand and `--targets-file`
 subcommand, and [Resource Plugins](/en/reference/resource-plugins/#install-a-plugin) for
 `sinter plugin list`, `verify`, `install` and `remove` (from v1.12.0).
 
-`sinter --version` prints the version (e.g. `sinter 1.14.1`).
+`sinter --version` prints the version (e.g. `sinter 1.15.0`).
 
 ## validate
 
@@ -132,11 +132,11 @@ types are classified before contact: **R** always needs an approval, **C**
 needs one only if it is found on the management path, **N** never does.
 After connecting, Sinter finds the interfaces and the firewalld zone that
 carry its own connection; when it cannot determine them, the change is
-refused, with or without an approval. No release enforces a connection-risk
-type yet. firewalld 0.2.0 is not enforced in v1.15.0 (Owner decision D-13: it
+refused, with or without an approval. From v1.15.0 the control is enforced for
+firewalld 0.3.0 and `nm_connection`. firewalld 0.2.0 is not enforced in v1.15.0 (Owner decision D-13: it
 behaves as in v1.14.1; use firewalld 0.3.0 for changes that could cut the SSH
-connection; this does not mean 0.2.0 changes are safe); firewalld 0.3.0 and
-`nm_connection` come later, so ordinary runs are unchanged.
+connection; this does not mean 0.2.0 changes are safe), so runs without those
+types are unchanged.
 
 - `sinter plan <recipe> --approval-request <dir>` writes
   `<dir>/<host>.request.json` for each host.
@@ -159,7 +159,7 @@ private to the controller account. They protect against mistakes, stale
 reviews and replay, not against a process running as the same account.
 Recovery after a cut connection is never guaranteed.
 
-## discover (not released)
+## discover (since v1.15.0)
 
 `sinter discover (--host H | <selector>) --output <file.yaml> [--include-path <abs path>]… [--profile packages,units,accounts,files] [--sudo] [connection options]`
 

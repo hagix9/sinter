@@ -3,9 +3,11 @@ title: リソース
 description: リソースモデル — 共通フィールド、順序、依存関係、通知。
 ---
 
-リソースは目的の状態の単位です。v1.14.1 では 10 の組み込みタイプが実装されて
+リソースは目的の状態の単位です。v1.15.0 では 12 の組み込みタイプが実装されて
 います: `file`、`directory`、`link`、`template`、`command`、`package`、
-`service`、ローカル Linux アカウントを扱う
+`service`、v1.15.0 で加わった
+[`systemd_timer`](/ja/reference/resources/systemd_timer/) と
+[`nm_connection`](/ja/reference/resources/nm_connection/)、ローカル Linux アカウントを扱う
 [`group`](/ja/reference/resources/group/) と
 [`user`](/ja/reference/resources/user/)、ローカルの PostgreSQL サーバーを扱う
 [`postgresql_role`](/ja/reference/resources/postgresql_role/) です。v1.9.0 からは、

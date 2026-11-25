@@ -3,8 +3,9 @@ title: nm_connection
 description: NetworkManager の Ethernet 接続プロファイルを 1 つ宣言する。管理経路の保護と NetworkManager チェックポイントつき。
 ---
 
-:::caution[未リリース]
-`nm_connection` は v1.15.0 向けに実装済みですが、まだリリースされていません。
+:::caution[v1.15.0 で追加、一部未検証]
+`nm_connection` は v1.15.0 から使えます。リリース受入で確認しているのは、
+非活性のプロファイルの作成・変更・削除だけです。
 最初の実機測定(Rocky Linux 9.8 と 10.2)で見つかった 2 件の不具合は修正済みです。
 NetworkManager がチェックポイントの作成を拒否する点と、IPv6 の値を含むプロファイルを
 読み取れない点です。修正後のコードでの活性化・非活性化・チェックポイントとその

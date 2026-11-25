@@ -3,8 +3,9 @@ title: nm_connection
 description: Declare one NetworkManager Ethernet connection profile, with management-path protection and a NetworkManager checkpoint.
 ---
 
-:::caution[Not released]
-`nm_connection` is implemented for v1.15.0 but not released. A first
+:::caution[New in v1.15.0, partly unverified]
+`nm_connection` is available from v1.15.0. The release acceptance creates,
+changes and deletes an inactive profile only. A first
 real-host measurement (Rocky Linux 9.8 and 10.2) found two defects, now
 fixed: checkpoint creation was refused by NetworkManager, and profiles with
 IPv6 values could not be read. Activation, deactivation, the checkpoint and

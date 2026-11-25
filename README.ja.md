@@ -10,7 +10,7 @@
 
 [![GitHub Codespaces で開く](https://github.com/codespaces/badge.svg)](https://codespaces.new/hagix9/sinter?quickstart=1)
 
-ブラウザ上の使い捨て Ubuntu コンテナで Sinter v1.14.1 を試せます。ローカルへの
+ブラウザ上の使い捨て Ubuntu コンテナで Sinter v1.15.0 を試せます。ローカルへの
 インストール、SSH、サーバーは不要です。[スタートガイド](examples/start/README.ja.md)を参照してください。
 
 Sinterは、Itamaeに着想を得た軽量なエージェントレス構成管理ツールです。
@@ -85,16 +85,16 @@ embedded scriptingは依然として実装対象に含めません。
 
 ## インストール
 
-Sinter **v1.14.1** は現在のリリースです。対応するすべての Linux x86_64 プラットフォーム
+Sinter **v1.15.0** は現在のリリースです。対応するすべての Linux x86_64 プラットフォーム
 ライン（Ubuntu、Rocky Linux、RHEL 9 / 10、AlmaLinux 9 / 10）向けに、
-1つの `sinter-v1.14.1-linux-x86_64.tar.gz` アーティファクトとして公開しています。
+1つの `sinter-v1.15.0-linux-x86_64.tar.gz` アーティファクトとして公開しています。
 
 ```sh
 curl -fsSL https://sinter.fulltrust.co.jp/install.sh | sh
 $HOME/.local/bin/sinter --version
 ```
 
-受入検証したpoint release（v1.14.1 リリース成果物）は Ubuntu 24.04、
+受入検証したpoint release（v1.15.0 リリース成果物）は Ubuntu 24.04、
 Ubuntu 26.04、Rocky Linux 9.8、Rocky Linux 10.2、RHEL 9.8、
 RHEL 10.2、AlmaLinux 9.8、AlmaLinux 10.2（すべてx86_64）です。
 他の各point releaseを個別に受入検証したという意味ではありません。
@@ -247,7 +247,7 @@ sinter apply nginx.yaml --inventory hosts.yaml
   キーは拡張子を除いたレシピのファイル名です。記載のないレシピは既定値のままです。`vars_files` や
   `--vars-file` との併用は拒否します。`recipe_vars` がなければ何も変わりません。
 - v1.12.0 から: `sinter plugin list`、`verify`、`install`、`remove` で、この Sinter が持つ公式の
-  Resource Plugins（firewalld 0.1.0 と 0.2.0）をプラグインルートで管理できます。何もダウンロードしません。
+  Resource Plugins（firewalld 0.1.0 と 0.2.0、v1.15.0 からは 0.3.0 も）をプラグインルートで管理できます。何もダウンロードしません。
   インストールは、名前を指定しない限り mutate 操作を許可しません（`--allow-mutate`、`--allow-mutate-for`）。
   observe だけの trust エントリでは、`plan` と `apply` はターゲットに接続する前に拒否され、`audit` は使えます。
   [Resource Plugins](docs-site/src/content/docs/ja/reference/resource-plugins.md) を参照してください。
@@ -290,7 +290,7 @@ v1.2.0以降、ローカルアカウント用の`group`と`user`の2種類があ
 宣言順と`depends_on`による順序、ローカルデータベースのみ、番号の振り直しなし、補助グループは
 追加のみ、`absent`は`-r` / `-f`なし、という契約です。v1.5.1 では
 `postgresql_role` が加わります。`systemd_timer` は systemd タイマーのユニットと有効化を
-管理します（未リリース）。リソースリファレンスを
+管理します（v1.15.0 から）。リソースリファレンスを
 参照してください。
 
 また、v1.2.0以降は`sinter secrets encrypt | decrypt | list`があり、
@@ -407,16 +407,17 @@ Oracle Linux、Rocky Linux 8。dnf ターゲットでは、小さな VM で 1 �
 
 v1.0.0 以降の各リリースは、公開前にリリース成果物そのものを8つの対応
 ターゲットで受入検証し、その受入証跡（manifest、raw log、チェックサム）を
-リリースと一緒に公開します。Sinter v1.14.1 のリリースは、Linux x86_64
+リリースと一緒に公開します。Sinter v1.15.0 のリリースは、Linux x86_64
 検証ゲートを通過した後、リリース成果物そのもの
-（`sinter-v1.14.1-linux-x86_64.tar.gz`）を8台の実x86_64 Linuxホストで
+（`sinter-v1.15.0-linux-x86_64.tar.gz`）を8台の実x86_64 Linuxホストで
 受入検証しました — [インストール](#インストール)に記載のpoint releaseです。
 各ホストでtarballと展開したバイナリがバイト単位で同一（SHA-256）であることを
 確認し、リリースの受入シナリオ（成果物同一性、プラットフォーム検出、SSHコマンド実行、
 `package` のinstall/removeとネイティブ検証・冪等性、パッケージの進捗出力、`file`、`service`、`command` の
-guard、変更前失敗、機密の秘匿、`audit`（strict と default の audit policy を含む）、plugin コマンド（`list`、`verify`、`install`、`remove`、その拒否と partial mutate のゲート）、`recipe_vars`、残留物なしの確認）を実行して、
-**480チェックが通過、失敗0、スキップ0（ターゲットあたり60）** でした（[v1.14.1 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.14.1)と[manifest](release/evidence/v1.14.1/acceptance-manifest.json)参照）。
-リリース受入は firewalld 0.2.0 plugin の install、verify、remove を行いますが、実際の firewalld に規則は適用しません。また、v1.14.0 で追加された `sinter serve` と、v1.11.0 で追加された機能（ディレクトリ名による bundle、`recipe_paths` 以下の recipe 検索、`inventory.*` の名前）と v1.10.0 で追加された機能（selector、inventory の自動検出、project file、複数の variables file、backup store、partial run）は実行していません（[v1.14.1 のリリースノート](https://github.com/hagix9/sinter/releases/tag/v1.14.1)参照）。
+guard、変更前失敗、機密の秘匿、`audit`（strict と default の audit policy を含む）、plugin コマンド（`list`、`verify`、`install`、`remove`、その拒否と partial mutate のゲート）、`recipe_vars`、`systemd_timer`、接続リスクによる拒否と承認つきの apply、使い捨ての対象への firewalld 0.3.0、非活性の `nm_connection` プロファイル、`sinter discover`、残留物なしの確認）を実行して、
+**608チェックのうち606が通過、失敗0、スキップ0、対象外2（ターゲットあたり76。`nm_connection` のチェックは、NetworkManager が入っていない Ubuntu の2ターゲットでは対象外）** でした（[v1.15.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.15.0)と[manifest](release/evidence/v1.15.0/acceptance-manifest.json)参照）。
+リリース受入は、宣言した loopback の管理経路で、使い捨ての対象（zone、ダミーの interface、source のネットワーク）にだけ firewalld 0.3.0 を適用します。firewalld 0.2.0 plugin は install、verify、remove を行いますが、その規則は適用しません。また、`nm_connection` の活性化・非活性化と NetworkManager のチェックポイント、v1.14.0 で追加された `sinter serve` と、v1.11.0 で追加された機能（ディレクトリ名による bundle、`recipe_paths` 以下の recipe 検索、`inventory.*` の名前）と v1.10.0 で追加された機能（selector、inventory の自動検出、project file、複数の variables file、backup store、partial run）は実行していません（[v1.15.0 のリリースノート](https://github.com/hagix9/sinter/releases/tag/v1.15.0)参照）。
+Sinter v1.14.1 も以前の同じ8台での受入検証（480チェック、失敗0。[v1.14.1 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.14.1)と[manifest](release/evidence/v1.14.1/acceptance-manifest.json)）を通過しています。
 Sinter v1.14.0 も以前の同じ8台での受入検証（480チェック、失敗0。[v1.14.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.14.0)と[manifest](release/evidence/v1.14.0/acceptance-manifest.json)）を通過しています。
 Sinter v1.13.0 も以前の同じ8台での受入検証（480チェック、失敗0。[v1.13.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.13.0)と[manifest](release/evidence/v1.13.0/acceptance-manifest.json)）を通過しています。
 Sinter v1.12.0 も以前の同じ8台での受入検証（480チェック、失敗0。[v1.12.0 の受入証跡](https://github.com/hagix9/sinter/releases/tag/v1.12.0)と[manifest](release/evidence/v1.12.0/acceptance-manifest.json)）を通過しています。
