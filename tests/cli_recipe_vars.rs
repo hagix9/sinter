@@ -751,3 +751,92 @@ fn a_sensitive_variable_cannot_be_set_and_its_value_never_shows() {
     );
     assert!(!all(&o).contains(CANARY), "{}", all(&o));
 }
+
+/// Nested bundles (DESIGN §19.3): a key names a recipe by its full label, or
+/// by a file stem one recipe of the run alone has; a shared stem, a nested
+/// bundle's label and two keys for one recipe are refused.
+#[test]
+fn recipe_vars_meet_the_recipes_of_a_nested_bundle_by_label_or_unique_stem() {
+    let f = Fx::new();
+    f.mkdir("work/base");
+    f.write(
+        "work/base/bundle.yaml",
+        "version: 1\nrecipes:\n  - ../recipes/05_ssh.yaml\n  - ../recipes/10_firewall.yaml\n",
+    );
+    f.write(
+        "work/nested.yaml",
+        "version: 1\nrecipes:\n  - base\n  - recipes/20_web.yaml\n",
+    );
+    // The keys of PROJECT are stems: unique here, so they match.
+    let o = f.run(&["validate", "nested.yaml"]);
+    code(&o, 0, "stems");
+    let out = text(&o.stdout);
+    for line in [
+        "vars: recipe base/05_ssh: ",
+        "vars: recipe base/10_firewall: ",
+        "vars: recipe 20_web: ",
+    ] {
+        assert!(out.contains(line), "{line}: {out}");
+    }
+    // The full label matches too.
+    f.write(
+        "work/sinter.yaml",
+        "version: 1\nrecipe_vars:\n  base/05_ssh: [vars/ssh_key.yaml]\n  base/10_firewall: [vars/firewall.yaml]\n  20_web: [vars/common.yaml, vars/web.yaml]\n",
+    );
+    let o = f.run(&["validate", "nested.yaml"]);
+    code(&o, 0, "full labels");
+    assert!(
+        text(&o.stdout)
+            .lines()
+            .any(|l| l.starts_with("vars: recipe base/10_firewall: ")
+                && l.ends_with("/vars/firewall.yaml")),
+        "{}",
+        all(&o)
+    );
+    // Without its file, the firewall's required variable stops the run: the
+    // file reached it and nothing else did.
+    f.write(
+        "work/sinter.yaml",
+        "version: 1\nrecipe_vars:\n  base/05_ssh: [vars/ssh_key.yaml]\n  20_web: [vars/common.yaml, vars/web.yaml]\n",
+    );
+    let o = f.run(&["validate", "nested.yaml"]);
+    code(&o, 2, "firewall without its file");
+    assert!(all(&o).contains("fw_port"), "{}", all(&o));
+    for (body, want) in [
+        (
+            "version: 1\nrecipe_vars:\n  10_firewall: [vars/firewall.yaml]\n  base/10_firewall: [vars/firewall.yaml]\n",
+            "recipe_vars: 10_firewall and base/10_firewall both name recipe base/10_firewall",
+        ),
+        (
+            "version: 1\nrecipe_vars:\n  base: [vars/firewall.yaml]\n",
+            "recipe_vars: base is a nested bundle of this run",
+        ),
+    ] {
+        f.write("work/sinter.yaml", body);
+        let o = f.run(&["validate", "nested.yaml"]);
+        code(&o, 2, want);
+        assert!(all(&o).contains(want), "{want}: {}", all(&o));
+    }
+    // A stem two recipes share is refused with both labels.
+    f.mkdir("work/edge");
+    f.write("work/edge/05_ssh.yaml", SSH);
+    f.write(
+        "work/edge/bundle.yaml",
+        "version: 1\nrecipes: [05_ssh.yaml]\n",
+    );
+    f.write(
+        "work/nested.yaml",
+        "version: 1\nrecipes:\n  - base\n  - edge\n  - recipes/20_web.yaml\n",
+    );
+    f.write("work/sinter.yaml", PROJECT);
+    let o = f.run(&["validate", "nested.yaml"]);
+    code(&o, 2, "shared stem");
+    assert!(
+        all(&o).contains(
+            "recipe_vars: 05_ssh is the file name of several recipes of this run; name each by its full label: base/05_ssh, edge/05_ssh"
+        ),
+        "{}",
+        all(&o)
+    );
+    assert_eq!(f.ssh_calls(), 0);
+}

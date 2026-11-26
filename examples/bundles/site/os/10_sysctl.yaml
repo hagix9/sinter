@@ -1,0 +1,9 @@
+# A kernel parameter, persisted under /etc/sysctl.d and set at run time.
+version: 1
+
+resources:
+  - id: swappiness
+    type: sysctl
+    with:
+      name: vm.swappiness
+      value: 10

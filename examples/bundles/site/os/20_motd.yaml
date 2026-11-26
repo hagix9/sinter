@@ -1,0 +1,11 @@
+version: 1
+
+resources:
+  - id: motd
+    type: file
+    with:
+      path: /etc/motd
+      content: "This host is managed by Sinter (examples/bundles/site).\n"
+      owner: root
+      group: root
+      mode: "0644"

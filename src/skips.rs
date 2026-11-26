@@ -137,29 +137,55 @@ fn is_handler(u: &UnitView<'_>, name: &str) -> bool {
     u.models.iter().any(|m| m.handler_index.contains_key(name))
 }
 
-fn unit_by_label(units: &[UnitView<'_>], label: &str, option: &str) -> Result<Option<usize>> {
-    let hits: Vec<usize> = units
-        .iter()
-        .enumerate()
-        .filter(|(_, u)| u.label == label)
-        .map(|(i, _)| i)
-        .collect();
-    match hits.len() {
-        0 => Ok(None),
-        1 => Ok(Some(hits[0])),
-        n => Err(SinterError::schema(format!(
-            "{option}: {} recipes of this bundle are named {label}; rename a file to tell them apart",
-            n
+/// Which recipes of the run `name` means (DESIGN §19.3): its full label, the
+/// label of a nested bundle (every recipe below it, `--skip-recipe` only), or
+/// a file stem that one recipe alone has. Ambiguity is refused.
+fn units_by_label(
+    units: &[UnitView<'_>],
+    name: &str,
+    option: &str,
+    bundles: bool,
+) -> Result<Vec<usize>> {
+    use crate::bundle::{match_label, LabelMatch};
+    let labels: Vec<&str> = units.iter().map(|u| u.label).collect();
+    let shown = sanitize_line(name);
+    let list = |hits: &[usize]| {
+        hits.iter()
+            .map(|i| sanitize_line(units[*i].label))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match match_label(&labels, name) {
+        LabelMatch::None => Ok(Vec::new()),
+        LabelMatch::Unit(i) => Ok(vec![i]),
+        LabelMatch::Bundle(hits) if bundles => Ok(hits),
+        LabelMatch::Bundle(_) => Ok(Vec::new()),
+        LabelMatch::SameLabel(hits) => Err(SinterError::schema(format!(
+            "{option}: {} recipes of this bundle are named {shown}; rename a file to tell them apart",
+            hits.len()
+        ))),
+        LabelMatch::SharedStem(hits) => Err(SinterError::schema(format!(
+            "{option}: {shown} is the file name of several recipes of this run; say which by its full label: {}",
+            list(&hits)
+        ))),
+        // The recipe part of `recipe/id` names a recipe, never a bundle.
+        LabelMatch::UnitAndBundle(hits) if !bundles && hits.len() == 1 => Ok(hits),
+        LabelMatch::UnitAndBundle(_) => Err(SinterError::schema(format!(
+            "{option}: {shown} is both a recipe and a nested bundle of this run; rename one of them"
         ))),
     }
 }
 
-/// `recipe/id` when `recipe` is a recipe of the run.
+/// `recipe/id` when `recipe` is a recipe of the run. A label may itself hold
+/// `/` (a recipe of a nested bundle) and an id never does, so the name is
+/// split at its last `/`.
 fn qualified<'n>(units: &[UnitView<'_>], name: &'n str) -> Result<Option<(usize, &'n str)>> {
-    let Some((label, rest)) = name.split_once('/') else {
+    let Some((label, rest)) = name.rsplit_once('/') else {
         return Ok(None);
     };
-    Ok(unit_by_label(units, label, "--skip-resource")?.map(|i| (i, rest)))
+    Ok(units_by_label(units, label, "--skip-resource", false)?
+        .first()
+        .map(|i| (*i, rest)))
 }
 
 impl SkipPlan {
@@ -174,9 +200,13 @@ impl SkipPlan {
             })
             .collect();
         for name in &request.recipes {
-            match unit_by_label(units, name, "--skip-recipe")? {
-                Some(i) => out[i].whole = true,
-                None => {
+            match units_by_label(units, name, "--skip-recipe", true)?.as_slice() {
+                hits @ [_, ..] => {
+                    for i in hits {
+                        out[*i].whole = true;
+                    }
+                }
+                [] => {
                     let known: Vec<&str> = units.iter().map(|u| u.label).collect();
                     return Err(SinterError::schema(format!(
                         "--skip-recipe {}: this run has no such recipe (it has: {})",
@@ -553,6 +583,91 @@ mod tests {
         let (_d, m) = recipe();
         let p = SkipPlan::build(&req(&[], &["b"]), &[view("r", &m)]).unwrap();
         assert!(p.refusal().is_none());
+    }
+
+    #[test]
+    fn recipes_of_nested_bundles_are_named_by_label_unique_stem_or_bundle() {
+        let (_d, m) = recipe();
+        let units = [
+            view("pg/03_package", &m),
+            view("web/03_package", &m),
+            view("os/net/10_hosts", &m),
+            view("os/05_base", &m),
+            view("app", &m),
+        ];
+        // A stem two recipes share is refused, with the full labels.
+        let e = SkipPlan::build(&req(&["03_package"], &[]), &units).unwrap_err();
+        assert!(
+            e.message
+                .contains("say which by its full label: pg/03_package, web/03_package"),
+            "{}",
+            e.message
+        );
+        // The full label names one.
+        let p = SkipPlan::build(&req(&["pg/03_package"], &[]), &units).unwrap();
+        assert_eq!(
+            (0..5).map(|i| p.runs(i)).collect::<Vec<_>>(),
+            [false, true, true, true, true]
+        );
+        // A unique stem names its recipe.
+        let p = SkipPlan::build(&req(&["10_hosts"], &[]), &units).unwrap();
+        assert!(!p.runs(2) && p.runs(3));
+        // A nested bundle's label excludes every recipe below it.
+        let p = SkipPlan::build(&req(&["os"], &[]), &units).unwrap();
+        assert_eq!(
+            (0..5).map(|i| p.runs(i)).collect::<Vec<_>>(),
+            [true, true, false, false, true]
+        );
+        assert_eq!(p.excluded_count(), (2, 6));
+        let p = SkipPlan::build(&req(&["os/net"], &[]), &units).unwrap();
+        assert!(!p.runs(2) && p.runs(3));
+        // A middle part alone is no name.
+        let e = SkipPlan::build(&req(&["net"], &[]), &units).unwrap_err();
+        assert!(e.message.contains("no such recipe"), "{}", e.message);
+        // A top-level recipe `os` next to the nested bundle `os`: as a
+        // recipe name it is refused, as the recipe of `os/id` it is the recipe.
+        let both = [view("os", &m), view("os/05_base", &m)];
+        let e = SkipPlan::build(&req(&["os"], &[]), &both).unwrap_err();
+        assert!(
+            e.message.contains("both a recipe and a nested bundle"),
+            "{}",
+            e.message
+        );
+        let p = SkipPlan::build(&req(&[], &["os/c"]), &both).unwrap();
+        assert_eq!(p.filter(0, m.clone()).resources.len(), 2);
+        assert_eq!(p.filter(1, m.clone()).resources.len(), 3);
+    }
+
+    #[test]
+    fn a_resource_of_a_nested_recipe_is_split_at_the_last_slash() {
+        let (_d, m) = recipe();
+        let units = [view("pg/03_package", &m), view("web/03_package", &m)];
+        let p = SkipPlan::build(&req(&[], &["pg/03_package/c"]), &units).unwrap();
+        let ids = |i: usize| -> Vec<String> {
+            p.filter(i, m.clone())
+                .resources
+                .iter()
+                .map(|r| r.id.clone())
+                .collect()
+        };
+        assert_eq!(ids(0), ["a", "b"]);
+        assert_eq!(ids(1), ["a", "b", "c"]);
+        // The plain id is in both recipes: say which.
+        let e = SkipPlan::build(&req(&[], &["c"]), &units).unwrap_err();
+        assert!(
+            e.message.contains("pg/03_package/c, web/03_package/c"),
+            "{}",
+            e.message
+        );
+        // A shared stem is ambiguous here too; a bundle is not a recipe.
+        let e = SkipPlan::build(&req(&[], &["03_package/c"]), &units).unwrap_err();
+        assert!(e.message.contains("full label"), "{}", e.message);
+        let e = SkipPlan::build(&req(&[], &["pg/c"]), &units).unwrap_err();
+        assert!(e.message.contains("no recipe of this run"), "{}", e.message);
+        // A unique stem names its recipe.
+        let units = [view("pg/03_package", &m), view("app", &m)];
+        let p = SkipPlan::build(&req(&[], &["03_package/c"]), &units).unwrap();
+        assert_eq!(p.excluded_count(), (0, 1));
     }
 
     #[test]

@@ -425,3 +425,62 @@ fn a_file_that_runs_a_validate_program_keeps_every_backup() {
     assert_eq!(partial.backups.len(), 3);
     assert!(partial.backups_skipped.is_empty());
 }
+
+/// A recipe of a nested bundle (DESIGN §19.3) is excluded from by its full
+/// label, `--skip-resource app/r/b` split at the last `/`, and its declared
+/// backups follow what runs exactly as in a flat bundle.
+#[test]
+fn a_partial_run_inside_a_nested_bundle_takes_only_the_backups_it_needs() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(d.path().join("app")).unwrap();
+    std::fs::write(d.path().join("app/r.yaml"), BACKUPS).unwrap();
+    std::fs::write(
+        d.path().join("app/bundle.yaml"),
+        "version: 1\nname: app\nrecipes: [r.yaml]\n",
+    )
+    .unwrap();
+    std::fs::write(d.path().join("r.yaml"), BACKUPS).unwrap();
+    let site = d.path().join("site.yaml");
+    std::fs::write(&site, "version: 1\nrecipes: [r.yaml, app]\n").unwrap();
+    let source = sinter::bundle::load_source(&site).unwrap();
+    let units = source.units();
+    let labels: Vec<&str> = units.iter().map(|u| u.label.as_str()).collect();
+    assert_eq!(labels, ["r", "app/r"]);
+    let views: Vec<UnitView<'_>> = units
+        .iter()
+        .map(|u| UnitView {
+            label: &u.label,
+            unfrozen: false,
+            models: vec![&u.model],
+        })
+        .collect();
+    let request = SkipRequest {
+        recipes: Vec::new(),
+        resources: vec!["app/r/b".to_string()],
+    };
+    let plan = SkipPlan::build(&request, &views).unwrap();
+    assert!(plan.refusal().is_none());
+    // The top-level recipe of the same stem is untouched.
+    let top = plan.filter(0, units[0].model.clone());
+    assert_eq!(top.backups, units[0].model.backups);
+    assert!(top.backups_skipped.is_empty());
+    let nested = plan.filter(1, units[1].model.clone());
+    assert_eq!(nested.backups, ["/etc/app/a", "/etc/app/dir"]);
+    assert_eq!(nested.backups_skipped, ["/srv/gone/b"]);
+    let r = run_on(Mode::Apply, nested, backup_target()).unwrap();
+    assert_eq!(
+        statuses(&r),
+        [
+            ("/etc/app/a".to_string(), BackupStatus::BackedUp),
+            ("/etc/app/dir".to_string(), BackupStatus::BackedUp),
+            ("/srv/gone/b".to_string(), BackupStatus::Skipped),
+        ]
+    );
+    // `r` is the full label of the top-level recipe, so it never means app/r.
+    let request = SkipRequest {
+        recipes: vec!["r".to_string()],
+        resources: Vec::new(),
+    };
+    let plan = SkipPlan::build(&request, &views).unwrap();
+    assert!(!plan.runs(0) && plan.runs(1));
+}

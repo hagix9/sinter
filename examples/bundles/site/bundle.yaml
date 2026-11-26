@@ -1,0 +1,26 @@
+# A whole host as one nested bundle: an OS base (a bundle directory), the
+# PostgreSQL bundle next to this one, and a last recipe of this bundle. The
+# nested bundles are expanded where they are listed, before anything runs,
+# into one ordered list of recipes:
+#
+#   os/10_sysctl, os/20_motd,
+#   postgresql-pgdg17/01_repository ... postgresql-pgdg17/07_service,
+#   90_backup
+#
+# Every entry is relative to the bundle file that lists it. The whole list is
+# planned, applied and audited as one bundle, so a later recipe sees what an
+# earlier one plans, across the sub-bundles too:
+#
+#   sinter validate examples/bundles/site/bundle.yaml
+#   sinter plan  examples/bundles/site/bundle.yaml --host <host> --sudo
+#   sinter audit examples/bundles/site/bundle.yaml --host <host> --sudo    # drift, exit 7
+#   sinter apply examples/bundles/site/bundle.yaml --host <host> --sudo
+#
+# Leave a sub-bundle out with --skip-recipe os (every recipe below it), or one
+# recipe with --skip-recipe os/20_motd.
+version: 1
+name: site
+recipes:
+  - os
+  - ../postgresql-pgdg17/bundle.yaml
+  - 90_backup.yaml

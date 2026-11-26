@@ -52,6 +52,8 @@ fn every_example_recipe_loads() {
         "multihost",
         "recipes",
         "bundles/postgresql-pgdg17",
+        "bundles/site",
+        "bundles/site/os",
     ] {
         for e in std::fs::read_dir(dir.join(sub)).unwrap() {
             let p = e.unwrap().path();
@@ -71,6 +73,23 @@ fn every_example_recipe_loads() {
         }
     }
     assert!(loaded >= 12, "loaded {loaded} recipes");
+    // The nested example bundle expands as its comment says.
+    let sinter::bundle::Source::Bundle(b) =
+        sinter::bundle::load_source(&dir.join("bundles/site/bundle.yaml")).unwrap()
+    else {
+        panic!("bundles/site is a bundle")
+    };
+    let labels: Vec<&str> = b.recipes.iter().map(|u| u.label.as_str()).collect();
+    assert_eq!(labels.len(), 10, "{labels:?}");
+    assert_eq!(
+        &labels[..3],
+        [
+            "os/10_sysctl",
+            "os/20_motd",
+            "postgresql-pgdg17/01_repository"
+        ]
+    );
+    assert_eq!(labels[9], "90_backup");
 }
 
 /// The new v1.5.1 recipes use the features they document.

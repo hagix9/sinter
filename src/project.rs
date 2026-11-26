@@ -395,10 +395,12 @@ pub(crate) fn parse_project(
             }
             let mut out = std::collections::BTreeMap::new();
             for (name, files) in m {
-                if !crate::document::valid_name(name) {
+                // A recipe of a nested bundle is named by its full label
+                // (`postgresql/03_package`; DESIGN §19.3): every part a name.
+                if name.len() > 1024 || !name.split('/').all(crate::document::valid_name) {
                     return Err(bad(
                         path,
-                        "recipe_vars: a key must be a recipe name (its file name without the extension: [A-Za-z0-9._-], starting alphanumeric, at most 64 characters)",
+                        "recipe_vars: a key must be a recipe name (its label: its file name without the extension, after the names of the nested bundles it is in, joined by /; each part [A-Za-z0-9._-], starting alphanumeric, at most 64 characters)",
                     ));
                 }
                 let field = format!("recipe_vars.{name}");
@@ -810,8 +812,17 @@ mod tests {
                 "version: 1\nrecipe_vars: {web: [a.yaml, ./a.yaml]}\n",
                 "more than once",
             ),
+            // A nested bundle's recipe is named `a/b`; an empty or bad part is not.
             (
-                "version: 1\nrecipe_vars: {\"a/b\": [v.yaml]}\n",
+                "version: 1\nrecipe_vars: {\"a//b\": [v.yaml]}\n",
+                "a key must be a recipe name",
+            ),
+            (
+                "version: 1\nrecipe_vars: {\"/a\": [v.yaml]}\n",
+                "a key must be a recipe name",
+            ),
+            (
+                "version: 1\nrecipe_vars: {\"a/_b\": [v.yaml]}\n",
                 "a key must be a recipe name",
             ),
             (

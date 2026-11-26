@@ -380,7 +380,7 @@ fn invalid_bundles_fail_validation() {
         "version: 1\nrecipes: [a.yaml, ./a.yaml]\n",
         "version: 1\nrecipes: [broken.yaml]\n",
         "version: 1\nrecipes: []\n",
-        "version: 1\nrecipes: [b.yaml]\n", // lists itself: bundles do not nest
+        "version: 1\nrecipes: [b.yaml]\n", // lists itself: a cycle
     ] {
         let b = f.write("b.yaml", body);
         let o = f.run(&["validate", &b]);
@@ -1221,5 +1221,323 @@ fn missing_script_fails_under_strict_mode() {
         "script(1) unavailable",
         &[("PATH", "/nonexistent")],
         &[],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// nested bundles (DESIGN §19.3)
+// ---------------------------------------------------------------------------
+
+impl Fx {
+    fn mkdir(&self, name: &str) {
+        std::fs::create_dir_all(self.path(name)).unwrap();
+    }
+}
+
+/// site.yaml -> [common.yaml, os (bundle directory) -> [base.yaml,
+/// net/bundle.yaml -> [hosts.yaml]], ../shared app bundle file].
+fn nested_site(f: &Fx) -> String {
+    f.mkdir("site/os/net");
+    f.mkdir("shared");
+    f.recipe("site/common.yaml", "targets:\n  groups: [linux]\n");
+    f.recipe("site/os/base.yaml", "targets:\n  groups: [linux]\n");
+    f.recipe("site/os/net/hosts.yaml", "targets:\n  hosts: [db01]\n");
+    f.write(
+        "site/os/net/bundle.yaml",
+        "version: 1\nname: net\nrecipes: [hosts.yaml]\n",
+    );
+    f.write(
+        "site/os/bundle.yaml",
+        "version: 1\nrecipes: [base.yaml, net/bundle.yaml]\n",
+    );
+    f.recipe("shared/nginx.yaml", WEB);
+    f.write(
+        "shared/app.yaml",
+        "version: 1\nname: app\nrecipes: [nginx.yaml]\n",
+    );
+    f.write(
+        "site/site.yaml",
+        "version: 1\nname: site\nrecipes: [common.yaml, os, ../shared/app.yaml]\n",
+    )
+}
+
+#[test]
+fn a_nested_bundle_resolves_each_recipe_against_its_own_targets() {
+    let f = Fx::new();
+    let b = nested_site(&f);
+    let inv = f.inventory();
+    let o = f.run(&[
+        "plan",
+        &b,
+        "--hosts",
+        &inv,
+        "--no-ssh-config",
+        "--format",
+        "json",
+    ]);
+    let v = json(&o);
+    let ex: Vec<_> = executions(&v)
+        .into_iter()
+        .map(|(r, t, _)| format!("{r}@{t}"))
+        .collect();
+    // Recipe-major in the expanded order, hosts in name order.
+    assert_eq!(
+        ex,
+        vec![
+            "common@db01",
+            "common@web01",
+            "common@web02",
+            "os/base@db01",
+            "os/base@web01",
+            "os/base@web02",
+            "os/net/hosts@db01",
+            "app/nginx@web01",
+            "app/nginx@web02",
+        ]
+    );
+    assert_eq!(v["bundle"]["name"], "site");
+    let units: Vec<(String, String, serde_json::Value)> = v["bundle"]["recipes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| {
+            (
+                u["recipe"].as_str().unwrap().to_string(),
+                u["path"].as_str().unwrap().to_string(),
+                u["bundle"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        units,
+        vec![
+            (
+                "common".into(),
+                "common.yaml".into(),
+                serde_json::Value::Null
+            ),
+            ("os/base".into(), "os/base.yaml".into(), "os".into()),
+            (
+                "os/net/hosts".into(),
+                "os/net/hosts.yaml".into(),
+                "os/net".into()
+            ),
+            // Outside the top bundle's directory: the full canonical path.
+            (
+                "app/nginx".into(),
+                std::fs::canonicalize(f.path("shared/nginx.yaml"))
+                    .unwrap()
+                    .display()
+                    .to_string(),
+                "app".into()
+            ),
+        ]
+    );
+    let res = v["resolution"].as_array().unwrap();
+    assert_eq!(res.len(), 4);
+    assert_eq!(res[2]["recipe"], "os/net/hosts");
+    assert_eq!(res[2]["bundle"], "os/net");
+    assert!(res[0]["bundle"].is_null());
+    // Text: the full label in the resolution and the execution headers.
+    let o = f.run(&["plan", &b, "--hosts", &inv, "--no-ssh-config"]);
+    let out = stdout(&o);
+    assert!(out.contains("recipe os/net/hosts ("), "{out}");
+    assert!(out.contains("== os/net/hosts @ db01 ("), "{out}");
+}
+
+#[test]
+fn a_flat_bundle_keeps_every_json_key_and_only_gains_new_ones() {
+    let f = Fx::new();
+    f.recipe("common.yaml", "targets:\n  groups: [linux]\n");
+    f.recipe("nginx.yaml", WEB);
+    let b = f.write(
+        "stack.yaml",
+        "version: 1\nname: stack\nrecipes: [common.yaml, nginx.yaml]\n",
+    );
+    let inv = f.inventory();
+    let o = f.run(&[
+        "plan",
+        &b,
+        "--hosts",
+        &inv,
+        "--no-ssh-config",
+        "--format",
+        "json",
+    ]);
+    let v = json(&o);
+    let keys =
+        |o: &serde_json::Value| -> Vec<String> { o.as_object().unwrap().keys().cloned().collect() };
+    // The keys of before, with their values, and the added ones.
+    assert_eq!(keys(&v["bundle"]), ["name", "path", "recipes"]);
+    assert_eq!(v["bundle"]["name"], "stack");
+    assert_eq!(v["bundle"]["path"], b.as_str());
+    assert_eq!(
+        v["bundle"]["recipes"],
+        serde_json::json!([
+            { "recipe": "common", "path": "common.yaml", "bundle": null },
+            { "recipe": "nginx", "path": "nginx.yaml", "bundle": null },
+        ])
+    );
+    for (i, (label, file)) in [("common", "common.yaml"), ("nginx", "nginx.yaml")]
+        .iter()
+        .enumerate()
+    {
+        let r = &v["resolution"][i];
+        assert_eq!(keys(r), ["bundle", "hosts", "path", "recipe"]);
+        assert_eq!(r["recipe"], *label);
+        assert_eq!(r["path"], f.path(file).display().to_string());
+        assert!(r["bundle"].is_null());
+    }
+    let e = &v["executions"][0];
+    assert_eq!(e["recipe"], "common");
+    assert!(e.get("bundle").is_none());
+    // Validate: the established keys, plus `bundle` per recipe.
+    let o = f.run(&["validate", &b, "--format", "json"]);
+    let v = json(&o);
+    assert!(v.get("nested_bundles").is_none());
+    let r = &v["recipes"][0];
+    assert_eq!(
+        keys(r),
+        [
+            "bundle",
+            "handlers",
+            "path",
+            "recipe",
+            "resources",
+            "targets",
+            "vars"
+        ]
+    );
+    assert_eq!(r["path"], f.path("common.yaml").display().to_string());
+    assert!(r["bundle"].is_null());
+}
+
+#[test]
+fn validate_of_a_nested_bundle_checks_and_lists_the_whole_expansion() {
+    let f = Fx::new();
+    let b = nested_site(&f);
+    let o = f.run(&["validate", &b]);
+    assert_eq!(o.status.code(), Some(0), "{o:?}");
+    let out = stdout(&o);
+    assert!(
+        out.starts_with("ok: bundle site: 4 recipe(s) from 3 nested bundle(s)\n"),
+        "{out}"
+    );
+    for l in ["common", "os/base", "os/net/hosts", "app/nginx"] {
+        assert!(
+            out.contains(&format!("  ok  {l}: 1 resource(s)")),
+            "{l}: {out}"
+        );
+    }
+    let v = json(&f.run(&["validate", &b, "--format", "json"]));
+    assert_eq!(v["resources"], 4);
+    let nested: Vec<&str> = v["nested_bundles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["bundle"].as_str().unwrap())
+        .collect();
+    assert_eq!(nested, ["os", "os/net", "app"]);
+    assert_eq!(v["recipes"][2]["bundle"], "os/net");
+    // A broken recipe deep down fails the whole expansion; nothing runs.
+    f.write("site/os/net/hosts.yaml", "version: 1\nbogus: 1\n");
+    let o = f.run(&["validate", &b]);
+    assert_eq!(o.status.code(), Some(2), "{o:?}");
+    // A cycle is exit 2 with the chain.
+    f.write(
+        "site/os/net/bundle.yaml",
+        "version: 1\nname: net\nrecipes: [../../site.yaml]\n",
+    );
+    let o = f.run(&["validate", &b]);
+    assert_eq!(o.status.code(), Some(2), "{o:?}");
+    assert!(
+        stderr(&o).contains("site.yaml -> os/bundle.yaml -> os/net/bundle.yaml -> site.yaml"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn two_recipes_of_one_file_name_in_two_sub_bundles_are_told_apart_by_label() {
+    let f = Fx::new();
+    f.mkdir("pg");
+    f.mkdir("web");
+    let pkg = |name: &str| {
+        format!(
+            "version: 1\ntargets:\n  groups: [linux]\nresources:\n  - id: pkg\n    type: package\n    with: {{ name: {name}, state: present }}\n  - id: other\n    type: command\n    with: {{ program: /bin/true }}\n"
+        )
+    };
+    f.write("pg/03_package.yaml", &pkg("postgresql-server"));
+    f.write("web/03_package.yaml", &pkg("nginx"));
+    f.write("pg/bundle.yaml", "version: 1\nrecipes: [03_package.yaml]\n");
+    f.write(
+        "web/bundle.yaml",
+        "version: 1\nrecipes: [03_package.yaml]\n",
+    );
+    let b = f.write("site.yaml", "version: 1\nrecipes: [pg, web]\n");
+    // Both run, under different labels.
+    let o = f.run(&["validate", &b]);
+    assert_eq!(o.status.code(), Some(0), "{o:?}");
+    assert!(stdout(&o).contains("  ok  pg/03_package: 2 resource(s)"));
+    assert!(stdout(&o).contains("  ok  web/03_package: 2 resource(s)"));
+    // A bare stem both share is refused, with both labels.
+    let o = f.run(&["validate", &b, "--skip-recipe", "03_package"]);
+    assert_eq!(o.status.code(), Some(2), "{o:?}");
+    assert!(
+        stderr(&o).contains("say which by its full label: pg/03_package, web/03_package"),
+        "{}",
+        stderr(&o)
+    );
+    // The full label works.
+    let o = f.run(&["validate", &b, "--skip-recipe", "pg/03_package"]);
+    assert_eq!(o.status.code(), Some(0), "{o:?}");
+    let out = stdout(&o);
+    assert!(out.contains("pg/03_package/*"), "{out}");
+    assert!(out.contains("  web/03_package/pkg\n"), "{out}");
+    // A sub-bundle's label excludes every recipe below it.
+    let o = f.run(&["validate", &b, "--skip-recipe", "web"]);
+    assert_eq!(o.status.code(), Some(0), "{o:?}");
+    let out = stdout(&o);
+    assert!(out.contains("web/03_package/*"), "{out}");
+    assert!(out.contains("  pg/03_package/pkg\n"), "{out}");
+    // A resource of one of them, split at the last `/`.
+    let o = f.run(&["validate", &b, "--skip-resource", "pg/03_package/pkg"]);
+    assert_eq!(o.status.code(), Some(0), "{o:?}");
+    let out = stdout(&o);
+    assert!(out.contains("Excluded:\n  pg/03_package/pkg "), "{out}");
+    assert!(out.contains("  web/03_package/pkg\n"), "{out}");
+    // `pkg` alone is in both.
+    let o = f.run(&["validate", &b, "--skip-resource", "pkg"]);
+    assert_eq!(o.status.code(), Some(2), "{o:?}");
+    assert!(
+        stderr(&o).contains("pg/03_package/pkg, web/03_package/pkg"),
+        "{}",
+        stderr(&o)
+    );
+    // With an inventory, the plan runs both labels on every linux host,
+    // and the excluded sub-bundle has no execution.
+    let inv = f.inventory();
+    let o = f.run(&[
+        "plan",
+        &b,
+        "--hosts",
+        &inv,
+        "--no-ssh-config",
+        "--format",
+        "json",
+        "--skip-recipe",
+        "web",
+    ]);
+    let ex: Vec<String> = executions(&json(&o))
+        .into_iter()
+        .map(|(r, t, _)| format!("{r}@{t}"))
+        .collect();
+    assert_eq!(
+        ex,
+        [
+            "pg/03_package@db01",
+            "pg/03_package@web01",
+            "pg/03_package@web02"
+        ]
     );
 }

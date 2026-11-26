@@ -1,0 +1,7 @@
+# The OS base of examples/bundles/site, a bundle directory of its own: it can
+# also be run alone (sinter plan examples/bundles/site/os/bundle.yaml ...).
+version: 1
+name: os
+recipes:
+  - 10_sysctl.yaml
+  - 20_motd.yaml

@@ -866,6 +866,9 @@ fn skip_gate(
         for u in source.units() {
             check_resolved_file(exec.resolved.recipe_via, &u.path)?;
         }
+        for b in source.nested() {
+            check_resolved_file(exec.resolved.recipe_via, &b.path)?;
+        }
     }
     let request = SkipRequest {
         recipes: exec.skip_recipe.clone(),
@@ -1923,6 +1926,7 @@ fn print_validate(
                     let mut rec = serde_json::json!({
                         "recipe": u.label,
                         "path": u.path.display().to_string(),
+                        "bundle": sinter::bundle::label_bundle(&u.label),
                         "resources": r,
                         "handlers": h,
                         "vars": v,
@@ -1961,6 +1965,16 @@ fn print_validate(
                 "bundle": b.name,
                 "recipes": recipes,
             });
+            if !b.nested.is_empty() {
+                doc["nested_bundles"] = serde_json::json!(b
+                    .nested
+                    .iter()
+                    .map(|n| serde_json::json!({
+                        "bundle": n.label,
+                        "path": n.path.display().to_string(),
+                    }))
+                    .collect::<Vec<_>>());
+            }
             add_variables(&mut doc, vars, limit);
             add_run_extras(&mut doc, &a.recipe, &a.exec);
             println!("{}", serde_json::to_string_pretty(&doc).unwrap());
@@ -1978,8 +1992,13 @@ fn print_validate(
                     );
                 }
             }
+            let nested = if b.nested.is_empty() {
+                String::new()
+            } else {
+                format!(" from {} nested bundle(s)", b.nested.len())
+            };
             println!(
-                "{}: bundle {}: {} recipe(s)",
+                "{}: bundle {}: {} recipe(s){nested}",
                 style::status("ok", color),
                 sanitize_line(&b.name),
                 b.recipes.len()
@@ -2591,8 +2610,10 @@ fn vars_files_in_effect(exec: &ExecOpts) -> Vec<String> {
 }
 
 /// Match the project file's `recipe_vars` to the recipes of this run (DESIGN
-/// §40.5): a recipe by its label, as `--skip-recipe` names it, and two recipes
-/// of one label that `recipe_vars` names are refused rather than guessed at.
+/// §40.5): a recipe by its label, as `--skip-recipe` names it (its full label,
+/// or a file stem that one recipe of the run alone has; DESIGN §19.3), and two
+/// recipes of one label, a shared stem, a nested bundle's label and two keys
+/// naming one recipe are refused rather than guessed at.
 /// Only the files of the recipes this run has are checked and read, each once;
 /// a recipe that is not listed gets none. Every problem of every file is
 /// reported at once, and no message carries a value.
@@ -2602,18 +2623,56 @@ fn recipe_vars_files(
     exec: &ExecOpts,
     format: OutputFormat,
 ) -> Result<Vec<sinter::varsfile::VarsFile>, SinterError> {
+    use sinter::bundle::{match_label, LabelMatch};
     use sinter::varsfile::{load_vars_file, merge_vars_files, Problems, VarsFile};
-    for label in rv.keys() {
-        let n = units.iter().filter(|u| &u.label == label).count();
-        if n > 1 {
+    // Per unit, the key of `recipe_vars` that names it.
+    let labels: Vec<&str> = units.iter().map(|u| u.label.as_str()).collect();
+    let mut key_of: Vec<Option<&String>> = vec![None; units.len()];
+    for key in rv.keys() {
+        let list = |hits: &[usize]| {
+            hits.iter()
+                .map(|i| labels[*i])
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let i = match match_label(&labels, key) {
+            LabelMatch::None => continue,
+            LabelMatch::Unit(i) => i,
+            LabelMatch::SameLabel(hits) => {
+                return Err(SinterError::schema(format!(
+                    "recipe_vars: {} recipes of this run are named {key}; rename a file to tell them apart",
+                    hits.len()
+                )))
+            }
+            LabelMatch::SharedStem(hits) => {
+                return Err(SinterError::schema(format!(
+                    "recipe_vars: {key} is the file name of several recipes of this run; name each by its full label: {}",
+                    list(&hits)
+                )))
+            }
+            LabelMatch::Bundle(hits) => {
+                return Err(SinterError::schema(format!(
+                    "recipe_vars: {key} is a nested bundle of this run, which has no variables of its own; list the files under each of its recipes: {}",
+                    list(&hits)
+                )))
+            }
+            LabelMatch::UnitAndBundle(_) => {
+                return Err(SinterError::schema(format!(
+                    "recipe_vars: {key} is both a recipe and a nested bundle of this run; rename one of them"
+                )))
+            }
+        };
+        if let Some(other) = key_of[i] {
             return Err(SinterError::schema(format!(
-                "recipe_vars: {n} recipes of this run are named {label}; rename a file to tell them apart"
+                "recipe_vars: {other} and {key} both name recipe {}; keep one key",
+                labels[i]
             )));
         }
+        key_of[i] = Some(key);
     }
     let mut loaded: Vec<(PathBuf, VarsFile)> = Vec::new();
     let mut problems = Vec::new();
-    for files in units.iter().filter_map(|u| rv.get(&u.label)) {
+    for files in key_of.iter().flatten().filter_map(|k| rv.get(*k)) {
         for path in files {
             if loaded.iter().any(|(p, _)| p == path) {
                 continue;
@@ -2633,8 +2692,8 @@ fn recipe_vars_files(
     }
     let mut used = Vec::with_capacity(units.len());
     let mut out = Vec::with_capacity(units.len());
-    for u in units {
-        let files = rv.get(&u.label).cloned().unwrap_or_default();
+    for (u, key) in units.iter().zip(&key_of) {
+        let files = key.and_then(|k| rv.get(k)).cloned().unwrap_or_default();
         let parts: Vec<VarsFile> = files
             .iter()
             .filter_map(|p| loaded.iter().find(|(q, _)| q == p).map(|(_, f)| f.clone()))
@@ -2647,7 +2706,7 @@ fn recipe_vars_files(
             format!(
                 "vars: none for recipe {} ({})",
                 u.label,
-                if rv.contains_key(&u.label) {
+                if key.is_some() {
                     "recipe_vars lists no file"
                 } else {
                     "not listed in recipe_vars"
@@ -3398,6 +3457,21 @@ fn print_resolution(
     println!();
 }
 
+/// Every recipe of a bundle's expansion, in run order (DESIGN §19.3): its
+/// label, its path relative to the top bundle's directory and the label of
+/// the nested bundle it came from (`null` at the top level).
+fn bundle_units_json(b: &sinter::bundle::Bundle) -> serde_json::Value {
+    serde_json::json!(b
+        .recipes
+        .iter()
+        .map(|u| serde_json::json!({
+            "recipe": u.label,
+            "path": u.rel_path,
+            "bundle": sinter::bundle::label_bundle(&u.label),
+        }))
+        .collect::<Vec<_>>())
+}
+
 /// Backup run id for one execution: the invocation id, suffixed with the
 /// recipe position and name when several recipes run, so each recipe gets
 /// its own run directory on a host.
@@ -3747,6 +3821,7 @@ fn run_executions(
                     let mut rec = serde_json::json!({
                         "recipe": u.label,
                         "path": u.path.display().to_string(),
+                        "bundle": sinter::bundle::label_bundle(&u.label),
                         "hosts": r.hosts.iter().map(|h| {
                             let mut o = serde_json::json!({
                                 "name": h.name,
@@ -3773,6 +3848,7 @@ fn run_executions(
             Source::Bundle(b) => serde_json::json!({
                 "name": b.name,
                 "path": b.path.display().to_string(),
+                "recipes": bundle_units_json(b),
             }),
             Source::Recipe(_) => serde_json::Value::Null,
         };
@@ -4990,6 +5066,120 @@ mod tests {
             hosts(),
         );
         assert_eq!(code.unwrap(), 7);
+    }
+
+    /// A fresh Rocky 9 host for the shipped `site` example: what the
+    /// PostgreSQL bundle needs, plus the OS base's sysctl directory.
+    fn fresh_site_host() -> FakeTarget {
+        let mut t = FakeTarget::rocky9()
+            .with_fake_fs()
+            .as_root()
+            .with_sysctl(&[("vm.swappiness", "60")])
+            .with_fs_dir("/etc")
+            .with_fs_dir("/etc/sysctl.d")
+            .with_fs_dir("/etc/pki")
+            .with_fs_dir("/etc/pki/rpm-gpg")
+            .with_fs_dir("/etc/yum.repos.d")
+            .with_fs_dir("/etc/dnf")
+            .with_fs_dir("/etc/dnf/modules.d")
+            .with_fs_dir("/usr")
+            .with_fs_dir("/usr/bin")
+            .with_fs_dir("/var")
+            .with_fs_dir("/var/lib");
+        t.fs.as_mut()
+            .unwrap()
+            .put_symlink("/usr/bin/dnf", "dnf-3", 0, 0);
+        t
+    }
+
+    fn site_example() -> String {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/bundles/site/bundle.yaml")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// The shipped nested bundle (an OS base sub-bundle, the PostgreSQL
+    /// bundle, a last recipe of its own) is one flat run: plan carries what
+    /// one sub-bundle creates into the next and into the top bundle's own
+    /// recipe, the audit of a fresh host is drift, and apply runs the
+    /// recipes in the expanded order.
+    #[test]
+    fn a_nested_bundle_plans_audits_and_applies_as_one_flat_bundle() {
+        let bundle = site_example();
+        let hosts = || (0..10).map(|_| fresh_site_host()).collect::<Vec<_>>();
+        let (code, rows) = drive_results(
+            Phase::Plan,
+            &[&bundle, "--sudo", "--format", "json"],
+            hosts(),
+        );
+        assert_eq!(code.unwrap(), 0, "{rows:?}");
+        let order: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "os/10_sysctl@localhost:swappiness",
+                "os/20_motd@localhost:motd",
+                "postgresql-pgdg17/01_repository@localhost:pgdg_key",
+                "postgresql-pgdg17/01_repository@localhost:pgdg_common",
+                "postgresql-pgdg17/01_repository@localhost:pgdg17",
+                "postgresql-pgdg17/02_module@localhost:pg_module_off",
+                "postgresql-pgdg17/03_package@localhost:pg_pkg",
+                "postgresql-pgdg17/04_initdb@localhost:pg_initdb",
+                "postgresql-pgdg17/05_directory@localhost:pg_confd",
+                "postgresql-pgdg17/06_config@localhost:pg_conf",
+                "postgresql-pgdg17/06_config@localhost:pg_hba",
+                "postgresql-pgdg17/07_service@localhost:pg_service",
+                "90_backup@localhost:pg_backup_dir",
+            ]
+        );
+        for id in [
+            "os/10_sysctl@localhost:swappiness",
+            "os/20_motd@localhost:motd",
+            "postgresql-pgdg17/03_package@localhost:pg_pkg",
+        ] {
+            assert!(!result(&rows, id).1, "{id}: {:?}", result(&rows, id));
+        }
+        // Inside the PostgreSQL sub-bundle, as when it runs alone ...
+        let d = result(&rows, "postgresql-pgdg17/05_directory@localhost:pg_confd");
+        assert!(d.1, "{d:?}");
+        // ... and across its boundary: the top bundle's last recipe needs
+        // the account the sub-bundle's package creates.
+        let b = result(&rows, "90_backup@localhost:pg_backup_dir");
+        assert!(b.1, "{b:?}");
+        assert!(b.2.contains("recipe postgresql-pgdg17/03_package"), "{b:?}");
+        let w = wiring(ProgressMode::Disabled);
+        let code = drive(
+            Phase::Audit,
+            &[&bundle, "--sudo", "--format", "json"],
+            &w,
+            hosts(),
+        );
+        assert_eq!(code.unwrap(), 7);
+        // Apply: every recipe in the expanded order (each fresh fake host
+        // stands for the same host; what a recipe needs that an earlier one
+        // creates is not there, so only the order is asserted).
+        let (_, rows) = drive_results(
+            Phase::Apply,
+            &[&bundle, "--sudo", "--format", "json"],
+            hosts(),
+        );
+        let recipes: Vec<&str> =
+            rows.iter()
+                .map(|r| r.0.split('@').next().unwrap())
+                .fold(Vec::new(), |mut v, l| {
+                    if v.last() != Some(&l) {
+                        v.push(l);
+                    }
+                    v
+                });
+        assert_eq!(recipes.first().copied(), Some("os/10_sysctl"), "{rows:?}");
+        assert_eq!(recipes.get(1).copied(), Some("os/20_motd"), "{rows:?}");
+        assert_eq!(
+            recipes.get(2).copied(),
+            Some("postgresql-pgdg17/01_repository"),
+            "{rows:?}"
+        );
     }
 
     // ---- Declared backups in a partial run of a bundle (DESIGN §49.6) -----
@@ -7313,10 +7503,33 @@ mod tests {
             .map(|i| RecipeUnit {
                 label: format!("r{i}"),
                 path: PathBuf::from(format!("r{i}.yaml")),
+                rel_path: format!("r{i}.yaml"),
                 model: tagged("display"),
                 unfrozen: false,
             })
             .collect()
+    }
+
+    /// Labels of nested bundles hold `/`, which a run directory name does
+    /// not: two labels that read the same once sanitised still get two run
+    /// directories, since the recipe's position is part of the name.
+    #[test]
+    fn two_labels_that_sanitise_alike_get_two_backup_run_directories() {
+        let mut u = units(3);
+        u[0].label = "pg/03_package".into();
+        u[1].label = "pg_03_package".into();
+        u[2].label = "os/net/10_hosts".into();
+        let ids: Vec<String> = (0..3).map(|i| backup_id("run1", &u, i)).collect();
+        assert_eq!(
+            ids,
+            [
+                "run1-01-pg_03_package",
+                "run1-02-pg_03_package",
+                "run1-03-os_net_10_hosts"
+            ]
+        );
+        // One recipe alone keeps the plain run id, as before.
+        assert_eq!(backup_id("run1", &u[..1], 0), "run1");
     }
 
     const PLAN: &[(usize, &str)] = &[(0, "web01"), (0, "web02"), (1, "web01"), (1, "web02")];

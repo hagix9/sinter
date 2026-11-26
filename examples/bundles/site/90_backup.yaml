@@ -1,0 +1,12 @@
+# A directory for database dumps, owned by the account the package of the
+# PostgreSQL sub-bundle creates: on a fresh host, plan decides it at apply.
+version: 1
+
+resources:
+  - id: pg_backup_dir
+    type: directory
+    with:
+      path: /var/lib/pgsql/17/backups
+      owner: postgres
+      group: postgres
+      mode: "0700"

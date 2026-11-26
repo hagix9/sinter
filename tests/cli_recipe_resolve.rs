@@ -824,3 +824,35 @@ fn json_output_keeps_its_keys() {
         assert!(d["resolved"].get(k).is_some(), "{k}");
     }
 }
+
+// Nested bundles (DESIGN §19.3): a bundle directory found by name may list
+// another bundle directory by its name; every nested bundle file is held to
+// the §40.1 file rules like a member, and by its path it is not.
+#[test]
+fn a_nested_bundle_of_a_found_bundle_is_held_to_the_file_rules() {
+    let f = Fx::project();
+    f.bundle("work/recipes/common/site/os");
+    f.write(
+        "work/recipes/common/site/bundle.yaml",
+        "version: 1\nrecipes: [os]\n",
+    );
+    let o = f.run(&["validate", "site"]);
+    code(&o, 0, "nested");
+    assert!(
+        text(&o.stdout).contains("  ok  os/packages: 1 resource(s)"),
+        "{}",
+        text(&o.stdout)
+    );
+    set_mode(&f.path("work/recipes/common/site/os/bundle.yaml"), 0o664);
+    refused(
+        &f.run(&["validate", "site"]),
+        &["os/bundle.yaml", "writable by group or others"],
+        "nested bundle file",
+    );
+    code(
+        &f.run(&["validate", "recipes/common/site/bundle.yaml"]),
+        0,
+        "by path",
+    );
+    nothing_contacted(&f);
+}
