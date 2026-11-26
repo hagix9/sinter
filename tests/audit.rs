@@ -2221,11 +2221,14 @@ fn audit_template_unknown_register_in_when_is_not_auditable() {
 #[test]
 fn audit_template_genuine_render_error_is_error() {
     let dir = controller_dir("audit-tmpl-err");
-    write_recipe(&dir, "t.tmpl", "value={{ vars.nope }}\n");
+    // A declared variable that cannot be rendered (a list is not a scalar).
+    // An UNDECLARED variable is refused when the recipe is loaded
+    // (tests/template_undefined_vars.rs), so it never reaches audit.
+    write_recipe(&dir, "t.tmpl", "value={{ vars.items }}\n");
     let recipe = write_recipe(
         &dir,
         "r.yaml",
-        "version: 1\nresources:\n  - id: t\n    type: template\n    with:\n      path: /opt/out\n      source: t.tmpl\n",
+        "version: 1\nvars:\n  items:\n    value: [a, b]\nresources:\n  - id: t\n    type: template\n    with:\n      path: /opt/out\n      source: t.tmpl\n",
     );
     let r = audit_fake(&recipe, FakeTarget::ubuntu2404());
     let t = afind(&r, "t");

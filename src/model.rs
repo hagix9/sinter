@@ -2746,6 +2746,43 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                     }
                 }
             }
+                        // A template body may only name what the recipe
+                        // declares: a variable of the recipe, or a key of
+                        // this resource's `vars` map. Checked here, before
+                        // any host is contacted, instead of when the body
+                        // is rendered in plan or apply.
+                        let mut var_refs = BTreeSet::new();
+                        let mut template_refs = BTreeSet::new();
+                        collect_template_refs(&expr, &mut var_refs, &mut template_refs);
+                        let template_keys: BTreeSet<&str> = match fr.with.get("vars") {
+                            Some(Value::Map(m)) => m.keys().map(|k| k.as_str()).collect(),
+                            _ => BTreeSet::new(),
+                        };
+                        let missing = var_refs
+                            .iter()
+                            .find(|n| !vars.contains_key(n.as_str()))
+                            .map(|n| format!("vars.{}", n))
+                            .or_else(|| {
+                                template_refs
+                                    .iter()
+                                    .find(|n| !template_keys.contains(n.as_str()))
+                                    .map(|n| format!("template.{}", n))
+                            });
+                        if let Some(name) = missing {
+                            return Err(SinterError::schema(if template_sensitive {
+                                format!(
+                                    "{}: template references an undefined variable (value redacted)",
+                                    resource_ctx
+                                )
+                            } else {
+                                format!(
+                                    "{}: template {} references the undefined variable {}",
+                                    resource_ctx,
+                                    src.display(),
+                                    name
+                                )
+                            }));
+                        }
 
             // Full conservative static sensitivity: explicit flag, any sensitive
             // variable referenced by interpolated fields, or a sensitive variable in
@@ -2914,6 +2951,24 @@ fn detect_dependency_cycle(resources: &[(&str, &[String])]) -> Result<()> {
         for d in resources[i].1 {
             let di = *index.get(d.as_str()).ok_or_else(|| {
                 SinterError::schema(format!("{}: unknown dependency {}", resources[i].0, d))
+/// The `vars.<name>` and `template.<name>` references of an expression.
+fn collect_template_refs(e: &Expr, vars: &mut BTreeSet<String>, template: &mut BTreeSet<String>) {
+    match e {
+        Expr::Or(a, b) | Expr::And(a, b) | Expr::Cmp(a, _, b) => {
+            collect_template_refs(a, vars, template);
+            collect_template_refs(b, vars, template);
+        }
+        Expr::Not(a) => collect_template_refs(a, vars, template),
+        Expr::Var(name) => {
+            vars.insert(name.clone());
+        }
+        Expr::TemplateVar(name) => {
+            template.insert(name.clone());
+        }
+        _ => {}
+    }
+}
+
             })?;
             match marks[di] {
                 Mark::Gray => {
