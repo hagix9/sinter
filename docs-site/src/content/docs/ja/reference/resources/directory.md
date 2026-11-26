@@ -93,6 +93,10 @@ with = { path = "/srv/app/var/data", owner = "app", group = "app", mode = "0750"
 
 すべての対応ターゲットに適用されます。ディレクトリ作成は
 [`file`](/ja/reference/resources/file/#信頼境界) と同じ親パスの信頼境界を使います。
+[`allow_writable_parents`](/ja/reference/recipe-format/#allow_writable_parents) に
+列挙したディレクトリの中のディレクトリ（`parents: true` がそこに作るものも含む）は
+拒否します。この例外はファイル全体だけが対象です。直接の親を他者が書き込める
+ディレクトリは、audit が `lstat` だけで注記付きで観測します。
 
 ## 関連
 

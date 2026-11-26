@@ -37,6 +37,10 @@ pub struct Document {
     /// Resource Plugins this recipe enables (`plugins`, DESIGN §38.7), from
     /// the entry recipe only. Empty when the key is absent.
     pub plugins: Vec<crate::plugin::PluginRef>,
+    /// Directories other accounts can write to in which this recipe may
+    /// publish or remove whole files (`allow_writable_parents`, DESIGN §63),
+    /// from the entry recipe only. Empty when the key is absent.
+    pub writable_parents: Vec<String>,
 }
 
 /// A recipe's explicit execution targets, by inventory host and group
@@ -256,6 +260,10 @@ pub fn document_from_value(root: Value, path: &Path, origin: &str) -> Result<Doc
         None => Vec::new(),
         Some(v) => parse_plugins(v, origin)?,
     };
+    let writable_parents = match map.get("allow_writable_parents") {
+        None => Vec::new(),
+        Some(v) => parse_writable_parents(v, origin)?,
+    };
 
     Ok(Document {
         path: path.to_path_buf(),
@@ -270,7 +278,54 @@ pub fn document_from_value(root: Value, path: &Path, origin: &str) -> Result<Doc
         targets,
         env,
         plugins,
+        writable_parents,
     })
+}
+
+/// `allow_writable_parents: [<dir>, ...]` (DESIGN §63.2): a non-empty list of
+/// at most [`crate::ir::WRITABLE_PARENTS_MAX`] distinct directories, each a
+/// static, canonical absolute path other than `/` (no `.` or `..`, no repeated
+/// or trailing `/`, no control character, no `{{ }}` interpolation).
+fn parse_writable_parents(v: &Value, origin: &str) -> Result<Vec<String>> {
+    let bad =
+        |why: String| SinterError::schema(format!("{}: allow_writable_parents: {}", origin, why));
+    let list = v
+        .as_list()
+        .ok_or_else(|| bad("must be a list of directory paths".to_string()))?;
+    if list.is_empty() {
+        return Err(bad("must list at least one directory".to_string()));
+    }
+    if list.len() > crate::ir::WRITABLE_PARENTS_MAX {
+        return Err(bad(format!(
+            "lists {} directories; at most {} are allowed",
+            list.len(),
+            crate::ir::WRITABLE_PARENTS_MAX
+        )));
+    }
+    let mut out: Vec<String> = Vec::new();
+    for item in list {
+        let Value::Str(s) = item else {
+            return Err(bad("entries must be strings".to_string()));
+        };
+        if s.contains("{{") || s.contains("}}") {
+            return Err(bad(format!(
+                "{:?} is not a static path (no interpolation is allowed here)",
+                s
+            )));
+        }
+        if s.chars().any(char::is_control) {
+            return Err(bad("a path has a control character".to_string()));
+        }
+        crate::paths::validate_path(s).map_err(|e| bad(e.message))?;
+        if s == "/" {
+            return Err(bad("the root directory cannot be listed".to_string()));
+        }
+        if out.contains(s) {
+            return Err(bad(format!("{} is listed more than once", s)));
+        }
+        out.push(s.clone());
+    }
+    Ok(out)
 }
 
 /// `plugins: [{ id, version }, ...]`: a non-empty list of distinct plugin

@@ -124,6 +124,19 @@ There is no SSH-specific audit logic.
 Audit also reports systemd manager synchronization as its own drift dimension,
 `manager_reload` (see [Reading audit output](#reading-audit-output)).
 
+A path whose only problem is a direct parent that other accounts can write to
+(mode `0777` without the sticky bit, for example), which `plan` and `apply`
+refuse unless the recipe lists it in
+[`allow_writable_parents`](/en/reference/recipe-format/#allow_writable_parents),
+is observed without following links: its `lstat`, and for a regular file of up
+to 256 KiB with one hard link its content, read with
+`dd iflag=nofollow,nonblock` between two `lstat`s that must agree and compared
+by digest (never shown). The result is compliant or drift with the note
+"parent … is writable by other accounts: observed without following links …".
+A symbolic link or a file with several hard links there, a file of another
+account, a larger file, a failed read and a writable directory higher up are
+still errors.
+
 ## Connection-risk approvals (approve, approvals)
 
 Some changes can cut the SSH connection Sinter uses (firewalld zones,

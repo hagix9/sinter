@@ -87,7 +87,9 @@ hostname = {{ facts.hostname }}
 
 すべての対応ターゲットに適用されます。テンプレートの公開は
 [`file`](/ja/reference/resources/file/#信頼境界) と同じ信頼境界を使います（`/tmp`
-のような共有ディレクトリとその排他的なステージング規則を含む）。
+のような共有ディレクトリとその排他的なステージング規則、および
+[`allow_writable_parents`](/ja/reference/recipe-format/#allow_writable_parents) に
+列挙したディレクトリを含む。後者では全体の公開と削除だけで、`validate` は拒否します）。
 
 ## 関連
 

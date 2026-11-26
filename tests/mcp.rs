@@ -906,6 +906,38 @@ fn plugins_are_refused_by_every_manifest_tool() {
     assert!(v.to_string().contains("unknown resource type"), "{v}");
 }
 
+#[test]
+fn allow_writable_parents_is_refused_by_every_manifest_tool() {
+    // DESIGN §63: publishing in a directory other accounts can write to is
+    // not offered over MCP; a manifest that asks for it is refused before
+    // anything is loaded, by every tool that accepts a manifest.
+    let mut m = Mcp::start();
+    init(&mut m);
+    let manifest = "version: 1\nallow_writable_parents: [/opt/synthetic-app]\nresources:\n  - id: a\n    type: file\n    with: { path: /opt/synthetic-app/a.conf, content: \"x\" }\n";
+    let calls = [
+        ("sinter_validate_manifest", json!({"manifest": manifest})),
+        ("sinter_inspect_manifest", json!({"manifest": manifest})),
+        (
+            "sinter_plan",
+            json!({"manifest": manifest, "target": "rocky9"}),
+        ),
+        (
+            "sinter_plan_host",
+            json!({"manifest": manifest, "target": "web01"}),
+        ),
+        (
+            "sinter_audit_host",
+            json!({"manifest": manifest, "target": "web01"}),
+        ),
+    ];
+    for (i, (tool, args)) in calls.into_iter().enumerate() {
+        let (is_err, v) = Mcp::payload(&m.tool(10 + i as u64, tool, args));
+        assert!(is_err, "{tool} accepted allow_writable_parents: {v}");
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("allow_writable_parents"), "{tool}: {msg}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // F-03: JSON-RPC batch receive support (MCP 2025-03-26)
 // ---------------------------------------------------------------------------

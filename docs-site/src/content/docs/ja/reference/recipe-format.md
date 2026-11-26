@@ -27,11 +27,13 @@ backup: { paths: [...] }      # 省略可。v1.1.0 以降（apply 前にコピ�
 env: { NAME: value }          # 省略可。package/command の既定環境変数
 
 plugins: [{ id, version }]    # 省略可。v1.9.0 以降（トップレベルのレシピのみ）
+
+allow_writable_parents: [/opt/myapp]   # 省略可（トップレベルのレシピのみ）
 ```
 
 許可されるトップレベルフィールド: `version`、`vars`、`include`、
-`resources`、`handlers`、（v1.1.0 以降）`targets` と `backup`、`env`、および（v1.9.0 以降）
-`plugins`。それ以外はスキーマエラーです。
+`resources`、`handlers`、（v1.1.0 以降）`targets` と `backup`、`env`、（v1.9.0 以降）
+`plugins`、および `allow_writable_parents`。それ以外はスキーマエラーです。
 
 ## env
 
@@ -184,6 +186,60 @@ vars:
 *v1.9.0 から利用できます。* [Resource Plugins](/ja/reference/resource-plugins/) を `id` と
 `version` で有効にします。書けるのはトップレベルのレシピだけで、include されたファイルに
 `plugins` を書くと拒否します。
+
+## allow_writable_parents
+
+Sinter は通常、親ディレクトリを他のアカウントが（スティッキービットなしで）書き込める
+パス（モード `0777`、共有グループの `0775` など）を拒否します。Sinter の確認と変更の間に、
+他のアカウントがそこにあるエントリを差し替えられるからです。このフィールドには、それでも
+このレシピが **ファイル全体を公開する、またはファイルを削除する** ことを許すディレクトリを
+列挙します。
+
+```yaml
+version: 1
+allow_writable_parents: [/opt/myapp/drop]
+resources:
+  - id: drop_conf
+    type: file
+    with:
+      path: /opt/myapp/drop/app.conf
+      content: "level = 2\n"
+```
+
+```toml
+allow_writable_parents = ["/opt/myapp/drop"]
+```
+
+規則:
+
+- 重複のない静的な絶対パスを最大 32 個（`{{ }}`、`.`/`..`、連続または末尾の `/` は不可）。
+  `/` は拒否します。書けるのはトップレベルのレシピだけです。include されたファイルに書くと
+  拒否し、バンドルファイルにはこのフィールドはなく、バンドルの各レシピは自分のリストだけを
+  使います。MCP のマニフェストでは使えません。
+- `sinter validate` は、列挙したディレクトリごとに警告を 1 つ表示します。
+- 列挙したディレクトリが受け入れられるのは、パスの **直接の親** であり、シンボリックリンクで
+  ない実ディレクトリで、root（`--sudo` なしなら接続ユーザーも可）が所有し、他のアカウントの
+  ディレクトリの中になく、ACL がなく、その上のディレクトリがすべて通常の検査に通り、実行が
+  root（root ログインまたは `--sudo`）であるときだけです。
+- 使えるのは `file`、`template`、`file_merge` だけで、ファイル全体を（所有者・グループ・
+  モードとともに）作成・置換するか、削除（`state: absent`）するときだけです。そこでは plan
+  でも apply でも次を拒否します: 所有者・グループ・モードだけの変更、`validate` コマンド、
+  `directory`（`parents: true` が作る親も含む）、`link`、その他のリソースタイプ、その
+  ディレクトリ内のパスの `backup`。
+- 既存のエントリは、ないか、root（`--sudo` なしなら接続ユーザーも可）が所有しハード
+  リンクが 1 つの通常ファイルでなければなりません。シンボリックリンクや他のアカウントの
+  ファイルは拒否します。256 KiB を超える既存ファイルは拒否します（リンクをたどらずにその
+  大きさまで読むため）。
+- このフィールドを使った結果にはすべて "parent … is writable by other accounts; allowed by
+  allow_writable_parents" という注記が付きます（テキストと JSON）。公開のたびに、空の
+  `.sinter-stage.*` ディレクトリが列挙したディレクトリに残ります（注記で報告します。都合の
+  よいときに削除してください）。
+
+ディレクトリを列挙することで受け入れること: そこに書き込めるアカウントは、Sinter が書いた
+後のファイルを置換・改名・削除でき、ファイルのモードが許す範囲で読めます。Sinter が保証する
+のは、そのディレクトリを理由に root がその外の何かを書き込み・読み取り・削除しないこと、
+そして公開した内容が宣言どおりだったことだけです。このフィールドがなくても、`sinter audit`
+はそのようなパスを読み取り専用で観測します（[audit](/ja/reference/cli/) を参照）。
 
 ## resources
 

@@ -192,7 +192,11 @@ package signature checking, or write a whole file with
 | `present` | `true` | The file is created with the managed part only. `owner`/`group`/`mode` apply; without them it belongs to the applying user (inside another account's home directory: to that account) with mode `0644`. |
 | `absent` | either | Nothing to do: compliant and unchanged. The file is not created. |
 
-The parent directory must exist, exactly as for `file`. If an earlier resource
+The parent directory must exist, exactly as for `file`, and passes the same
+trust boundary (a directory listed in
+[`allow_writable_parents`](/en/reference/recipe-format/#allow_writable_parents)
+is accepted for the whole-file publication `file_merge` makes; audit of a path
+whose direct parent others can write reads it without following links). If an earlier resource
 of the same run creates the file, plan reports this resource as unknown
 (deferred to apply) instead of failing.
 

@@ -1478,7 +1478,7 @@ Sinter does not claim safety against a hostile root administrator.
 
 Parent symlinks are rejected for all managed filesystem mutation paths in v0.1.
 
-One kind of directory that others can write is accepted as a parent: a shared directory (§23.4), the sticky directory owned by a trusted principal such as /tmp and /var/tmp. A directory that others can write without the sticky bit, or that another account owns, is still refused.
+One kind of directory that others can write is accepted as a parent: a shared directory (§23.4), the sticky directory owned by a trusted principal such as /tmp and /var/tmp. A directory that others can write without the sticky bit, or that another account owns, is still refused. A recipe can list a directory that others can write without the sticky bit in `allow_writable_parents`; it is then accepted as the direct parent of a `file`, `template` or `file_merge` run as root, for publishing or removing a whole file only, and audit observes a path below any such direct parent without following links (§63).
 
 The final path component is inspected without following an unexpected symlink.
 
@@ -1707,6 +1707,8 @@ regular file => remove
 any other object type => fail
 
 Relative source is relative to the declaring recipe file.
+
+In a directory other accounts can write to that the recipe lists in `allow_writable_parents`, only a whole publication or a removal is supported; a metadata-only change and `validate` are refused (§63.2). The same holds for `template` and `file_merge`; `directory` and `link` are refused in such a directory.
 
 26.2 directory
 
@@ -4577,3 +4579,60 @@ Exercised against the scripted target only, plus the read-only measurement of 62
 - `modprobe -- <name>` as root loads the module and exits 0; exits non-zero for an unknown module and as a non-root user.
 - `/sys/module/<name>` appears after a load; how built-in modules appear there on each kernel.
 - systemd-modules-load reads `/etc/modules-load.d/sinter-<name>.conf` at boot, and modprobe honours `/etc/modprobe.d/sinter-blacklist-<name>.conf`; the parent walk of §23 over `/sys` and `/sys/module` (sysfs) behaves like other root-owned directories.
+
+63. Parents other accounts can write to: `allow_writable_parents` and read-only audit (next release; NOT RELEASED)
+
+63.1 The rule it relaxes, and why only a little
+
+The parent path check (§23) refuses a path whose ancestor is group- or other-writable and not a sticky directory owned by a trusted principal: another account could rename or replace an entry in such a directory between Sinter's check and its change, and root would then write, change the owner or mode of, read, or remove something elsewhere. Most of Sinter's file operations are path-based (`chown`, `chmod`, `mkdir` followed by metadata, `cp -a` for backups, `cat` and `sha256sum` for reads), so a general switch would turn every such directory into a way to make root act outside it. Only one operation is built to survive a directory others can write to: the staging script (§23.5) pins the directory as an open descriptor, stages the new file with its final mode, owner and attributes inside a private directory identified by a random group, and publishes it relative to the pinned directory (`ln -T` for a new name, `mv -T -f` for an existing one). The exception is limited to what that script does, plus the removal of a regular file (an unlink never follows a link).
+
+63.2 `allow_writable_parents`
+
+Syntax. A top-level field of a recipe, YAML or TOML: `allow_writable_parents: [/opt/myapp, ...]`. A non-empty list of at most 32 distinct static strings (no `{{ }}`), each an absolute, canonical path by the rule of §4.10 (no `.` or `..`, no repeated or trailing `/`, no control character), never `/`. Anything else is a schema error at load (exit 2). The field belongs to the recipe that is run: like `targets`, `env` and `plugins` it is refused in an included file, a bundle file has no such field, and a recipe of a bundle (nested or flat) never gets another recipe's list (each recipe's model carries its own list into its own engine). MCP manifests may not use it (refused before anything is loaded, by every manifest tool); the MCP boundary does not widen.
+
+Warning. Loading a recipe that declares the field adds one warning per listed directory to the load warnings, which `validate` shows like every other load warning (plan and apply show the note below on each result instead): "allow_writable_parents lists D: Sinter publishes and removes whole files in it although other accounts can write to it; those accounts can still replace or remove what Sinter wrote there".
+
+Conditions. A listed directory D that is group- or other-writable without being a shared directory (§23.4) is accepted by the parent walk, in the sequential and in the batched walk alike (both apply the same per-ancestor predicate), only when all of these hold:
+
+- D is the direct parent of the managed path. A writable directory higher up is refused even when listed: an entry below it (a subdirectory) could be replaced by a symbolic link while Sinter works below it.
+- D itself is a directory (not a symbolic link, not another type) reached through ancestors that pass §23 unchanged.
+- D is owned by a trusted principal (§23: root; without `--sudo` also the connecting account).
+- D is not inside another account's tree (§23.2).
+- The run is as root (a root login or `--sudo`). As an unprivileged account the staging script cannot prove that a staging directory in such a directory is its own.
+- The resource is a `file`, `template` or `file_merge` (the types that publish or remove a whole regular file through `publish_file`).
+- D's access metadata is inspected and carries no ACL or other access-affecting attribute, exactly as for any ancestor (`check_parent_xattrs` is unchanged).
+
+D is then treated as the direct parent of an entry gate (§23.4): the entry must be absent, or owned by a trusted principal; a regular file must have one hard link; and, in addition to the gate of a shared directory, a symbolic link, device, socket or FIFO there is refused. An `owner` that is not a trusted principal is refused in plan and in apply (as in a shared directory). When a condition does not hold, the refusal is the one §23 gives without the field (the same message), followed by one sentence that names the condition: "allow_writable_parents lists D, but the exception does not apply: …" (for a symbolic link or another type: "allow_writable_parents lists it, but the exception applies only to a real directory"). A directory that is not listed is refused exactly as before, with no added sentence.
+
+What is allowed in D. Creating or replacing a regular file's content (with its owner, group and mode) through the staging script, and removing a regular file (`state: absent`). Plan and apply decide from the same walk, so a plan reports the refusal apply would give.
+
+What stays refused in D, even when listed, in plan and in apply, with "<path> is in D, a directory other accounts can write to (allowed by allow_writable_parents only for publishing a whole file or removing one): <operation> is not supported there":
+
+- a change of owner, group or mode alone (path-based `chown`/`chmod` would follow a link swapped in after the check; the same content with a new mode in one publication is allowed);
+- a `validate` command (it reads the staged file by its path inside D, and another account can rename the staging directory and put its own in its place there; publication itself is unaffected because the script proves the staging directory by its group and inode);
+- a `directory` (created with `mkdir`, then changed by path), including the directories `parents: true` would create in D; a `link`; any other resource type, including the types that write through their own command (`dnf_repository`, `sysctl`, …) — the dispatcher names the operation "a directory", "a link" or "a resource of this type";
+- a declared backup of a path in D ("a backup is not supported there"): the backup walk never uses the exception, and a backup store below a listed D is refused the same way.
+
+Reads in D. Everything Sinter reads of an entry of a directory a walk accepted under this section is read without following a link and bracketed by two `lstat`s that must agree (device, inode, size, mtime, ctime, mode, owner, group): the content and its digest by the read of 63.3 (the digest is computed on the controller, never by `sha256sum`), the extended attributes and ACLs by `getfattr`/`getfacl` between the two `lstat`s (an unequal pair makes the inspection incomplete, which refuses the replacement). Consequently an existing file in D larger than 256 KiB (`PARTIAL_EDIT_MAX_BYTES`) cannot be compared and is refused in plan and apply. A walk that accepted D records it for the rest of the run; a listed directory that nobody else can write to is not affected.
+
+Recording. Every result that used the exception carries the note "parent D is writable by other accounts; allowed by allow_writable_parents" in plan and apply, text and JSON, also for a sensitive resource (D is a static recipe value; the refusal messages of a sensitive resource withhold the path of the entry as before). Publication in D leaves the empty staging directory in place: the script removes a staging directory by name only where nobody else can rename entries (§23.5), so every publication adds the existing note "the empty staging directory … was left in place".
+
+Residual risk, accepted by listing D: any account that can write to D can replace, rename or remove the file after Sinter wrote it, can take a name first (the exclusive publication then fails), and can read what the file's mode lets it read. Sinter's guarantee is only that root does not write, change, read or remove anything outside D because of D, and that what it published was the declared content when it was published. The detection of a swapped entry relies on rename, link and unlink updating the ctime of the inode (Linux does on ext4, XFS, Btrfs and tmpfs; not verified on a real host by this implementation).
+
+63.3 Audit of a path whose parent others can write to
+
+Audit used to report such a path as an error. When the only reason the walk refuses is a group- or other-writable direct parent (listed or not: every other condition of 63.2 except "the run is as root" and the resource type holds), audit observes it without following anything:
+
+- the entry's `lstat` is the entry gate's (§23.4, with the additions of 63.2); a symbolic link, another type, an untrusted owner or a regular file with several hard links is an error;
+- the content of a regular file of at most 256 KiB is read with the fixed argv `/usr/bin/dd if=<path> iflag=nofollow,nonblock bs=262145 count=1 status=none`, between two `lstat`s that must agree; the number of bytes read must equal the size; the digest is compared on the controller and the content is never shown (audit never shows content);
+- the same read serves `template` and `file_merge` (`audit_partial_read`); `directory` uses the `lstat` only.
+
+The result is compliant or drift exactly as for any path, with the note "parent D is writable by other accounts: observed without following links; Sinter refuses to change this path unless allow_writable_parents lists D" (for a listed D: "…; allowed by allow_writable_parents for publishing"). Everything else stays an error: a writable ancestor higher up, a symbolic link or other file type in the parents, an untrusted owner of D, D inside another account's tree, an entry that is a link or has several hard links, a failed or truncated read, a change between the two `lstat`s, a size over the limit. A missing direct parent below trusted ancestors is still absence (drift for `state: present`). Plan is not relaxed by this section: a change in an unlisted writable directory is refused exactly as before. Audit dispatches no mutation.
+
+63.4 Not verified on a real host
+
+Exercised against the scripted target only. Assumed and to be measured on Ubuntu 24.04/26.04 and Rocky Linux 9/10:
+
+- the staging script as root in a directory of mode 0777 without the sticky bit (stage, `publish new`, `publish replace`, the left staging directory);
+- `dd iflag=nofollow,nonblock` fails on a symbolic link (ELOOP), does not block on a FIFO, and reads a regular file of up to 256 KiB in one `read` of `bs=262145`;
+- rename(2), link(2) and unlink(2) update the ctime that `stat %z` reports on each supported file system.

@@ -218,6 +218,17 @@ parent chain Sinter has accepted, and it refuses rather than guessing.
 - Directories others can write without the sticky bit, shared directories owned
   by another account, and shared directories inside another account's tree stay
   refused.
+- **Listed writable directories**: a recipe can list a directory others can
+  write without the sticky bit in
+  [`allow_writable_parents`](/en/reference/recipe-format/#allow_writable_parents).
+  Run as root, it is then accepted as the direct parent for creating, replacing
+  or removing the whole file only; a change of owner, group or mode alone and
+  `validate` stay refused there, the existing file must be root's with one hard
+  link and at most 256 KiB, and every result notes the directory.
+- **Audit** observes a path whose only problem is a direct parent others can
+  write (listed or not) without following links (`lstat`, and the content read
+  with `dd iflag=nofollow` between two `lstat`s that must agree, up to 256 KiB),
+  and reports compliant or drift with a note; everything else stays an error.
 
 ## Related
 

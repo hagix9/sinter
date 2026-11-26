@@ -356,6 +356,17 @@ fn check_mcp_manifest_authority(doc: &Document) -> Result<(), ToolError> {
                 .to_string(),
         });
     }
+    // `allow_writable_parents` (DESIGN §63) widens where root may write: an
+    // MCP manifest never gets it, so the MCP boundary does not widen.
+    if !doc.writable_parents.is_empty() {
+        return Err(ToolError {
+            category: "invalid_manifest",
+            kind: Some("schema"),
+            message: "MCP manifests may not use \"allow_writable_parents:\" — publishing in \
+                      directories other accounts can write to is not offered over MCP"
+                .to_string(),
+        });
+    }
     if !doc.includes.is_empty() {
         return Err(ToolError {
             category: "invalid_manifest",

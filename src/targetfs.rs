@@ -472,6 +472,83 @@ pub struct TargetFs {
     /// Successful, non-sensitive account lookups already made by this
     /// `TargetFs` (performance WP-P1). See [`IdentityMemo`].
     identity_memo: IdentityMemo,
+    /// The directories the recipe lists in `allow_writable_parents` (DESIGN
+    /// §63). Only the recipe of this engine: never another recipe's.
+    writable_parents: std::collections::BTreeSet<String>,
+    /// Audit only (DESIGN §63.3): a group- or other-writable *direct* parent
+    /// that passes every other condition is accepted for read-only
+    /// observation without following anything.
+    audit_writable: bool,
+    /// What the resource being handled may do in a listed directory others
+    /// can write to. Reset by the dispatcher for every resource.
+    writable_use: WritableUse,
+    /// Set by a successful parent walk that accepted the direct parent under
+    /// the exception of DESIGN §63 (or for audit); cleared at the start of
+    /// every walk and of every resource. Implies `shared_parent`.
+    writable_parent: Option<String>,
+    /// The listed directory the exception was used for by the resource being
+    /// handled (for the note on its result); reset by the dispatcher.
+    writable_used: Option<String>,
+    /// Every directory a walk accepted under the exception in this run: a
+    /// content read, digest or attribute read of an entry in one of them never
+    /// follows a link and is checked by an `lstat` before and after. Never
+    /// shrinks.
+    nofollow_dirs: std::collections::BTreeSet<String>,
+}
+
+/// What the resource being handled may do in a directory that other accounts
+/// can write to and that the recipe lists in `allow_writable_parents`
+/// (DESIGN §63.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WritableUse {
+    /// Publishing a whole regular file through the staging script, or
+    /// removing one (`file`, `template`, `file_merge`).
+    Publish,
+    /// Anything else, named for the refusal.
+    Refuse(&'static str),
+}
+
+/// What the resource being handled is called in a refusal of DESIGN §63 when
+/// the dispatcher did not name it.
+pub(crate) const DEFAULT_WRITABLE_OPERATION: &str = "this operation";
+
+/// The verdict of the parent walk on one ancestor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParentVerdict {
+    /// Nobody else can write to it.
+    Plain,
+    /// A shared (sticky, trusted-owner) directory (FS-2).
+    Shared,
+    /// A group- or other-writable direct parent accepted under DESIGN §63.
+    Writable,
+}
+
+/// The outcome of the DESIGN §63 conditions for one writable ancestor.
+enum WritableCheck {
+    Accepted,
+    /// Every condition holds except that the resource does something other
+    /// than publishing or removing a whole file there.
+    Operation(&'static str),
+    /// A condition does not hold; the sentence names it.
+    Unmet(String),
+}
+
+/// DESIGN §63.2: the refusal of an operation that the exception does not allow.
+pub(crate) fn writable_operation_refusal(entry: &str, dir: &str, operation: &str) -> SinterError {
+    SinterError::apply(format!(
+        "{} is in {}, a directory other accounts can write to (allowed by \
+         allow_writable_parents only for publishing a whole file or removing one): {} is not \
+         supported there",
+        entry, dir, operation
+    ))
+}
+
+/// The note of a resource whose parent was accepted under DESIGN §63.
+pub fn writable_parent_note(dir: &str) -> String {
+    format!(
+        "parent {} is writable by other accounts; allowed by allow_writable_parents",
+        dir
+    )
 }
 
 /// Memo of account lookups (`getent passwd|group <key>`) that already
@@ -509,7 +586,7 @@ struct IdentityMemo {
     /// not rest on the verdict staying true: inside another account's tree
     /// the observation runs as that account, and any other accepted chain is
     /// one nobody else can write to.
-    walks: BTreeMap<String, GateOutcome>,
+    walks: BTreeMap<(String, &'static str), GateOutcome>,
 }
 
 /// What the parent walk concluded about one path (L-1/L-2).
@@ -517,8 +594,14 @@ struct IdentityMemo {
 enum GateOutcome {
     /// The walk accepted the path: the tree account it settled (if any), what
     /// it saw of the ancestors (for the plan's privilege note) and whether the
-    /// direct parent is a shared directory (FS-2: the entry gate applies).
-    Open(Option<TreeIdentity>, BTreeMap<String, (u32, u32)>, bool),
+    /// direct parent is a shared directory (FS-2: the entry gate applies),
+    /// and the direct parent it accepted under DESIGN §63, if any.
+    Open(
+        Option<TreeIdentity>,
+        BTreeMap<String, (u32, u32)>,
+        bool,
+        Option<String>,
+    ),
     /// The first ancestor the walk could not accept does not exist.
     ParentAbsent(SinterError),
     /// The walk refused the path.
@@ -584,7 +667,52 @@ impl TargetFs {
             shared_parent: false,
             redact: false,
             identity_memo: IdentityMemo::default(),
+            writable_parents: std::collections::BTreeSet::new(),
+            audit_writable: false,
+            writable_use: WritableUse::Refuse(DEFAULT_WRITABLE_OPERATION),
+            writable_parent: None,
+            writable_used: None,
+            nofollow_dirs: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// The directories of the recipe's `allow_writable_parents` (DESIGN §63).
+    pub fn set_writable_parents(&mut self, dirs: &[String]) {
+        self.writable_parents = dirs.iter().cloned().collect();
+    }
+
+    /// Audit only (DESIGN §63.3): accept a group- or other-writable direct
+    /// parent for observation without following anything.
+    pub(crate) fn set_audit_writable(&mut self, on: bool) {
+        self.audit_writable = on;
+    }
+
+    /// What the resource being handled may do in a listed writable directory.
+    pub(crate) fn set_writable_use(&mut self, u: WritableUse) {
+        self.writable_use = u;
+    }
+
+    /// Forget which listed directory the last resource used, and return it.
+    pub(crate) fn take_writable_used(&mut self) -> Option<String> {
+        self.writable_used.take()
+    }
+
+    /// The direct parent the last accepted walk took under DESIGN §63, if any.
+    pub fn writable_parent(&self) -> Option<&str> {
+        self.writable_parent.as_deref()
+    }
+
+    /// DESIGN §63.2: an operation other than publishing a whole file or
+    /// removing one, on a path whose parent the last walk accepted under
+    /// `allow_writable_parents`, is refused with this error. `None` when the
+    /// last walk did not use the exception.
+    pub(crate) fn writable_refusal(&self, path: &str, operation: &str) -> Option<SinterError> {
+        let dir = self.writable_parent.as_deref()?;
+        Some(writable_operation_refusal(
+            if self.redact { "the entry" } else { path },
+            dir,
+            operation,
+        ))
     }
 
     pub fn fault(&self) -> Option<&str> {
@@ -788,6 +916,7 @@ impl TargetFs {
     pub fn clear_identity(&mut self) {
         self.identity = None;
         self.shared_parent = false;
+        self.writable_parent = None;
     }
 
     /// Mark the resource being handled as sensitive (or not): the refusals of
@@ -833,7 +962,8 @@ impl TargetFs {
         observe: impl FnOnce(&mut Self) -> Result<T>,
     ) -> Result<Observed<T>> {
         match self.gate(path)? {
-            GateOutcome::Open(identity, _, shared) => {
+            GateOutcome::Open(identity, _, shared, writable) => {
+                self.take_writable_outcome(writable);
                 if shared {
                     // FS-2: the parent is a shared directory, so the entry
                     // itself is judged (by `lstat`, never followed) before
@@ -868,7 +998,8 @@ impl TargetFs {
     /// Elsewhere it is the `lstat` as the identity the walk settled.
     pub fn observed_stat(&mut self, path: &str) -> Result<Observed<Stat>> {
         match self.gate(path)? {
-            GateOutcome::Open(identity, _, shared) => {
+            GateOutcome::Open(identity, _, shared, writable) => {
+                self.take_writable_outcome(writable);
                 if shared {
                     return match self.entry_gate(path) {
                         Ok(st) => Ok(Observed::Value(st)),
@@ -889,8 +1020,8 @@ impl TargetFs {
     /// The walk for [`Self::observed`], or the verdict it reached for the
     /// directory of this path since the last mutation.
     fn gate(&mut self, path: &str) -> Result<GateOutcome> {
-        let (dir, _) = parent_and_name(path);
-        if let Some(outcome) = self.identity_memo.walks.get(&dir) {
+        let key = self.walk_key(path);
+        if let Some(outcome) = self.identity_memo.walks.get(&key) {
             return Ok(outcome.clone());
         }
         let outcome = match self.walk_ancestors(path, true) {
@@ -898,6 +1029,7 @@ impl TargetFs {
                 self.identity.take(),
                 self.parents_seen.clone(),
                 self.shared_parent,
+                self.writable_parent.clone(),
             ),
             Err(e) if e.kind == crate::error::ErrorKind::Indeterminate => return Err(e),
             Err(e) => {
@@ -908,20 +1040,45 @@ impl TargetFs {
                 }
             }
         };
-        self.identity_memo.walks.insert(dir, outcome.clone());
+        self.identity_memo.walks.insert(key, outcome.clone());
         Ok(outcome)
+    }
+
+    /// The memo key of the walk for `path`: its directory and, only where the
+    /// recipe lists that directory in `allow_writable_parents`, what the
+    /// resource may do there (the verdict of DESIGN §63 depends on it).
+    fn walk_key(&self, path: &str) -> (String, &'static str) {
+        let (dir, _) = parent_and_name(path);
+        let scope = if self.writable_parents.contains(&dir) {
+            match self.writable_use {
+                WritableUse::Publish => "publish",
+                WritableUse::Refuse(op) => op,
+            }
+        } else {
+            ""
+        };
+        (dir, scope)
+    }
+
+    /// Take up the DESIGN §63 verdict of a walk answered from the memo.
+    fn take_writable_outcome(&mut self, writable: Option<String>) {
+        if let Some(d) = &writable {
+            self.writable_used = Some(d.clone());
+        }
+        self.writable_parent = writable;
     }
 
     /// [`Self::check_trusted_parents`] for plan, answering with the verdict the
     /// walk that gated the observation of this path reached when there is one
     /// (plan only decides; apply always walks afresh).
     pub fn check_trusted_parents_observed(&mut self, path: &str) -> Result<()> {
-        let (dir, _) = parent_and_name(path);
-        match self.identity_memo.walks.get(&dir).cloned() {
-            Some(GateOutcome::Open(identity, seen, shared)) => {
+        let key = self.walk_key(path);
+        match self.identity_memo.walks.get(&key).cloned() {
+            Some(GateOutcome::Open(identity, seen, shared, writable)) => {
                 self.identity = identity;
                 self.parents_seen = seen;
                 self.shared_parent = shared;
+                self.take_writable_outcome(writable);
                 if shared {
                     // The same entry gate as at apply: plan does not rely on
                     // the observation having passed it.
@@ -932,6 +1089,7 @@ impl TargetFs {
             Some(GateOutcome::ParentAbsent(e)) | Some(GateOutcome::Refused(e)) => {
                 self.identity = None;
                 self.shared_parent = false;
+                self.writable_parent = None;
                 self.parents_seen.clear();
                 Err(e)
             }
@@ -952,7 +1110,10 @@ impl TargetFs {
             if st.kind == ObjKind::Absent {
                 return true;
             }
-            if self.check_parent_stat(&dir, &st, &mut tree, true).is_err() {
+            if self
+                .check_parent_stat(path, &dir, &st, &mut tree, true)
+                .is_err()
+            {
                 return false;
             }
         }
@@ -991,6 +1152,7 @@ impl TargetFs {
         let walked = self.check_trusted_parents(&missing).is_ok();
         self.identity = None;
         self.shared_parent = false;
+        self.writable_parent = None;
         self.parents_seen.clear();
         walked
     }
@@ -1788,6 +1950,9 @@ impl TargetFs {
     }
 
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>> {
+        if self.reads_without_following(path) {
+            return self.read_nofollow_checked(path);
+        }
         let out = self.run_argv_ok("/bin/cat", &["--".to_string(), path.to_string()])?;
         if out.stdout_truncated {
             return Err(SinterError::apply(format!(
@@ -1812,8 +1977,103 @@ impl TargetFs {
     /// as a digest mismatch and never as absence (the object's existence is
     /// established separately by `inspect`).
     pub fn sha256(&mut self, path: &str) -> Result<Option<String>> {
+        if self.reads_without_following(path) {
+            // DESIGN §63: `sha256sum` would follow a link another account
+            // swapped in; the digest is taken on the controller of what a
+            // read that never follows one returned.
+            let bytes = self.read_nofollow_checked(path)?;
+            return Ok(Some(crate::resources::sha256_hex(&bytes)));
+        }
         let out = self.run_argv("/usr/bin/sha256sum", &["--".to_string(), path.to_string()])?;
         interpret_sha256(&out, path)
+    }
+
+    /// Whether `path` lies directly in a directory that other accounts can
+    /// write to and that a parent walk of this run accepted under DESIGN §63
+    /// (every read of an entry follows such a walk, which records the
+    /// directory before anything of the entry is read): then its content,
+    /// digest and attributes are read
+    /// only by [`Self::read_nofollow_checked`] and [`Self::xattrs`]'s checked
+    /// form, never through a command that follows a link.
+    pub(crate) fn reads_without_following(&self, path: &str) -> bool {
+        let (dir, _) = parent_and_name(path);
+        self.nofollow_dirs.contains(&dir)
+    }
+
+    /// DESIGN §63.3: the whole content of the regular file at `path`, read
+    /// without following anything, bracketed by two `lstat`s that must agree.
+    ///
+    /// * `lstat` first: a regular file of at most
+    ///   [`crate::resources::PARTIAL_EDIT_MAX_BYTES`] bytes, else refused;
+    /// * `dd if=<path> iflag=nofollow,nonblock bs=<limit+1> count=1
+    ///   status=none` (fixed argv; a symbolic link fails with ELOOP and a FIFO
+    ///   does not block);
+    /// * `lstat` again: device, inode, size, mtime, ctime, mode, owner and
+    ///   group as before, and the number of bytes read equal to the size.
+    ///
+    /// Renaming, linking or unlinking a file changes its ctime, so an entry
+    /// that another account took away and put back while it was read is seen.
+    /// Any failure is an error, never absence and never a content.
+    pub(crate) fn read_nofollow_checked(&mut self, path: &str) -> Result<Vec<u8>> {
+        let limit = crate::resources::PARTIAL_EDIT_MAX_BYTES;
+        let shown = if self.redact { "the entry" } else { path }.to_string();
+        let before = self.inspect(path)?;
+        if before.kind != ObjKind::File {
+            return Err(SinterError::apply(format!(
+                "{} is not a regular file; in a directory other accounts can write to it is not \
+                 read",
+                shown
+            )));
+        }
+        if before.size > limit {
+            return Err(SinterError::apply(format!(
+                "{} is larger than {} bytes; in a directory other accounts can write to Sinter \
+                 reads a file only up to that size",
+                shown, limit
+            )));
+        }
+        let out = self.run_argv(
+            "/usr/bin/dd",
+            &[
+                format!("if={}", path),
+                "iflag=nofollow,nonblock".to_string(),
+                format!("bs={}", limit + 1),
+                "count=1".to_string(),
+                "status=none".to_string(),
+            ],
+        )?;
+        match out.completion {
+            Completion::Exited(0)
+                if out.stderr.is_empty() && !out.stdout_truncated && !out.stderr_truncated => {}
+            Completion::Indeterminate { ref reason, .. } => {
+                return Err(SinterError::indeterminate(format!(
+                    "the read of {} did not complete: {}",
+                    shown, reason
+                )))
+            }
+            _ => {
+                return Err(SinterError::apply(format!(
+                    "could not read {} without following links: {}",
+                    shown,
+                    if self.redact {
+                        "details withheld: sensitive resource".to_string()
+                    } else {
+                        let text = String::from_utf8_lossy(&out.stderr);
+                        let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                        crate::diff::sanitize_line(line.trim())
+                    }
+                )))
+            }
+        }
+        let after = self.inspect(path)?;
+        if !same_observation(&before, &after) || out.stdout.len() as u64 != before.size {
+            return Err(SinterError::apply(format!(
+                "{} changed while it was read (in a directory other accounts can write to); \
+                 nothing read is used",
+                shown
+            )));
+        }
+        Ok(out.stdout)
     }
 
     /// The actionable reason extended-attribute inspection is unavailable on
@@ -1843,6 +2103,30 @@ impl TargetFs {
     /// inspection failure is reported honestly and must be treated as a refusal
     /// by callers, never as "no metadata".
     pub fn xattrs(&mut self, path: &str) -> Result<Xattrs> {
+        if !self.reads_without_following(path) {
+            return self.xattrs_inner(path);
+        }
+        // DESIGN §63: `getfattr` and `getfacl` follow a final link. The entry
+        // must be the same object (no link) before and after they ran.
+        let before = self.inspect(path)?;
+        if !matches!(before.kind, ObjKind::File | ObjKind::Dir) {
+            return Ok(Xattrs {
+                attrs: BTreeMap::new(),
+                inspected: false,
+            });
+        }
+        let x = self.xattrs_inner(path)?;
+        let after = self.inspect(path)?;
+        if !same_observation(&before, &after) {
+            return Ok(Xattrs {
+                attrs: BTreeMap::new(),
+                inspected: false,
+            });
+        }
+        Ok(x)
+    }
+
+    fn xattrs_inner(&mut self, path: &str) -> Result<Xattrs> {
         if !self.has_getfattr {
             return Ok(Xattrs {
                 attrs: BTreeMap::new(),
@@ -2798,15 +3082,36 @@ impl TargetFs {
     /// whether the direct parent is a shared directory.
     fn walk_ancestors(&mut self, path: &str, allow_tree: bool) -> Result<()> {
         let r = self.walk_ancestors_inner(path, allow_tree);
-        if r.is_err() {
-            self.shared_parent = false;
+        match &r {
+            Err(_) => {
+                self.shared_parent = false;
+                self.writable_parent = None;
+            }
+            Ok(()) => {
+                if let Some(d) = &self.writable_parent {
+                    // DESIGN §63: what is read of an entry in this directory
+                    // from now on is read without following anything.
+                    self.nofollow_dirs.insert(d.clone());
+                    self.writable_used = Some(d.clone());
+                }
+            }
         }
         r
+    }
+
+    /// Record the verdict of `check_parent_stat` for one ancestor (both
+    /// walks): the last ancestor, the direct parent, decides whether the path
+    /// is in a shared directory (FS-2) or in a writable directory accepted
+    /// under DESIGN §63 (which the entry gate then also judges).
+    fn take_parent_verdict(&mut self, dir: &str, v: ParentVerdict) {
+        self.shared_parent = v != ParentVerdict::Plain;
+        self.writable_parent = (v == ParentVerdict::Writable).then(|| dir.to_string());
     }
 
     fn walk_ancestors_inner(&mut self, path: &str, allow_tree: bool) -> Result<()> {
         self.identity = None;
         self.shared_parent = false;
+        self.writable_parent = None;
         self.parents_seen.clear();
         let mut tree: Option<(String, u32)> = None;
         let dirs = ancestor_dirs(path);
@@ -2816,7 +3121,8 @@ impl TargetFs {
         }
         for dir in dirs {
             let st = self.inspect(&dir)?;
-            self.shared_parent = self.check_parent_stat(&dir, &st, &mut tree, allow_tree)?;
+            let v = self.check_parent_stat(path, &dir, &st, &mut tree, allow_tree)?;
+            self.take_parent_verdict(&dir, v);
             self.parents_seen.insert(dir.clone(), (st.uid, st.mode));
             // Effective writability cannot be proven from mode bits alone when
             // extended access metadata (ACLs) is present. If inspection cannot
@@ -2867,15 +3173,37 @@ impl TargetFs {
                     .to_string()
             } else {
                 format!(
-                    "{} belongs to uid {}: in the shared directory {} Sinter reads, changes and \
+                    "{} belongs to uid {}: in {} Sinter reads, changes and \
                      removes only entries owned by {} (paths below a directory of that account \
                      can still be managed as that account when the recipe sets `owner`)",
                     path,
                     st.uid,
-                    dir,
+                    self.shared_place_clause(&dir),
                     self.trusted_owner_words()
                 )
             }));
+        }
+        if let Some(wdir) = self.writable_parent.clone() {
+            // DESIGN §63: in a directory others can write to without the
+            // sticky bit, any account can rename or replace even a trusted
+            // principal's entry. A symbolic link (or a device, socket or
+            // FIFO) there is never read through, changed or removed.
+            if !matches!(st.kind, ObjKind::File | ObjKind::Dir) {
+                return Err(SinterError::apply(if self.redact {
+                    "an entry in a directory other accounts can write to is not a regular file \
+                     or a directory; Sinter does not follow, read or change it there (details \
+                     withheld: sensitive resource)"
+                        .to_string()
+                } else {
+                    format!(
+                        "{} is a {} in {}, a directory other accounts can write to: Sinter \
+                         does not follow, read or change it there",
+                        path,
+                        st.kind.describe(),
+                        wdir
+                    )
+                }));
+            }
         }
         if st.kind == ObjKind::File {
             let links = self.stat_nlink(path)?;
@@ -2886,16 +3214,39 @@ impl TargetFs {
                         .to_string()
                 } else {
                     format!(
-                        "{} has {} hard links: in the shared directory {} Sinter does not read \
+                        "{} has {} hard links: in {} Sinter does not read \
                          or change a file that is also reachable under another name (find the \
                          other names with `find / -xdev -samefile {}`; remove the ones that are \
                          not wanted)",
-                        path, links, dir, path
+                        path,
+                        links,
+                        self.shared_place_clause(&dir),
+                        path
                     )
                 }));
             }
         }
         Ok(st)
+    }
+
+    /// How a message names the direct parent the entry gate judges for: a
+    /// shared directory (FS-2), or a directory other accounts can write to
+    /// accepted under DESIGN §63.
+    fn shared_place(&self, dir: &str) -> String {
+        if self.writable_parent.is_some() {
+            format!("{}, a directory other accounts can write to", dir)
+        } else {
+            format!("the shared directory {}", dir)
+        }
+    }
+
+    /// [`Self::shared_place`] as the opening clause of a sentence.
+    fn shared_place_clause(&self, dir: &str) -> String {
+        if self.writable_parent.is_some() {
+            format!("{},", self.shared_place(dir))
+        } else {
+            self.shared_place(dir)
+        }
     }
 
     /// Hard link count of a regular file (`stat -c %h`, strict record).
@@ -2951,12 +3302,12 @@ impl TargetFs {
                 .to_string()
         } else {
             format!(
-                "cannot give {} to uid {}: it lies in the shared directory {}, where Sinter \
-                 manages only entries owned by {} (use a location outside the shared directory, \
+                "cannot give {} to uid {}: it lies in {}, where Sinter \
+                 manages only entries owned by {} (use a location outside that directory, \
                  or a directory of that account)",
                 path,
                 uid,
-                dir,
+                self.shared_place(&dir),
                 self.trusted_owner_words()
             )
         }))
@@ -2998,11 +3349,13 @@ impl TargetFs {
     /// creation, content, or entries of other accounts (see `entry_gate`).
     fn check_parent_stat(
         &self,
+        path: &str,
         dir: &str,
         st: &Stat,
         tree: &mut Option<(String, u32)>,
         allow_tree: bool,
-    ) -> Result<bool> {
+    ) -> Result<ParentVerdict> {
+        let listed = self.writable_parents.contains(dir);
         match st.kind {
             ObjKind::Absent => {
                 return Err(SinterError::apply(format!(
@@ -3015,16 +3368,28 @@ impl TargetFs {
             ObjKind::Symlink => {
                 return Err(SinterError::apply(format!(
                     "parent path {} is a symlink; refusing to follow it (use the path the \
-                     symlink resolves to)",
-                    dir
+                     symlink resolves to){}",
+                    dir,
+                    if listed {
+                        ". allow_writable_parents lists it, but the exception applies only to \
+                         a real directory, never to a symbolic link"
+                    } else {
+                        ""
+                    }
                 )))
             }
             ObjKind::Dir => {}
             other => {
                 return Err(SinterError::apply(format!(
-                    "parent path {} has unexpected type {}",
+                    "parent path {} has unexpected type {}{}",
                     dir,
-                    other.describe()
+                    other.describe(),
+                    if listed {
+                        ". allow_writable_parents lists it, but the exception applies only to \
+                         a real directory"
+                    } else {
+                        ""
+                    }
                 )))
             }
         }
@@ -3059,7 +3424,27 @@ impl TargetFs {
         }
         if st.mode & 0o022 != 0 {
             if trusted_owner && st.mode & 0o1000 != 0 && tree.is_none() {
-                return Ok(true);
+                return Ok(ParentVerdict::Shared);
+            }
+            // DESIGN §63: a listed directory (or, for audit, any) that is the
+            // direct parent, a trusted principal's, outside another account's
+            // tree, and (to change anything) used as root for publishing a
+            // whole file or removing one. Its access metadata is still judged
+            // by `check_parent_xattrs` exactly as for any ancestor.
+            let mut unmet = None;
+            if listed || self.audit_writable {
+                match self.writable_parent_unmet(path, dir, st, trusted_owner, tree.is_some()) {
+                    WritableCheck::Accepted => return Ok(ParentVerdict::Writable),
+                    WritableCheck::Operation(op) if listed => {
+                        return Err(writable_operation_refusal(
+                            if self.redact { "the entry" } else { path },
+                            dir,
+                            op,
+                        ));
+                    }
+                    WritableCheck::Operation(_) => {}
+                    WritableCheck::Unmet(why) => unmet = Some(why),
+                }
             }
             let why = if st.mode & 0o1000 == 0 {
                 "it has no sticky bit, so another user could replace entries below it: remove \
@@ -3073,13 +3458,64 @@ impl TargetFs {
                  accepted: use another location"
             };
             return Err(SinterError::apply(format!(
-                "parent path {} grants group or other write access; refusing unsafe path ({}); {}",
+                "parent path {} grants group or other write access; refusing unsafe path ({}); {}{}",
                 dir,
                 mode_to_string(st.mode),
-                why
+                why,
+                match unmet {
+                    Some(u) if listed => format!(
+                        ". allow_writable_parents lists {}, but the exception does not apply: {}",
+                        dir, u
+                    ),
+                    _ => String::new(),
+                }
             )));
         }
-        Ok(false)
+        Ok(ParentVerdict::Plain)
+    }
+
+    /// The conditions of DESIGN §63.2 (and, for audit, §63.3) for a group- or
+    /// other-writable ancestor `dir` of `path` that is not a shared directory.
+    fn writable_parent_unmet(
+        &self,
+        path: &str,
+        dir: &str,
+        st: &Stat,
+        trusted_owner: bool,
+        in_tree: bool,
+    ) -> WritableCheck {
+        let (parent, _) = parent_and_name(path);
+        if parent != dir {
+            return WritableCheck::Unmet(format!(
+                "it is not the direct parent of {} (a directory that others can write to is \
+                 accepted only as the directory that holds the managed path itself)",
+                if self.redact { "the path" } else { path }
+            ));
+        }
+        if !trusted_owner {
+            return WritableCheck::Unmet(format!(
+                "it is owned by uid {}, and only a directory owned by {} is accepted",
+                st.uid,
+                self.trusted_owner_words()
+            ));
+        }
+        if in_tree {
+            return WritableCheck::Unmet("it lies inside another account's directory".to_string());
+        }
+        if self.audit_writable {
+            return WritableCheck::Accepted;
+        }
+        if !self.runs_as_root() {
+            return WritableCheck::Unmet(
+                "the run is not as root (connect as root or use --sudo): an unprivileged \
+                 account cannot prove a staging directory is its own in such a directory"
+                    .to_string(),
+            );
+        }
+        match self.writable_use {
+            WritableUse::Publish => WritableCheck::Accepted,
+            WritableUse::Refuse(op) => WritableCheck::Operation(op),
+        }
     }
 
     /// Extended access metadata verdict for one ancestor (shared by both walks).
@@ -3156,7 +3592,8 @@ impl TargetFs {
         let stats = interpret_stat_batch(&out, path, dirs)?;
         // Complete stat gate: every record is validated before getfattr exists.
         for (dir, st) in dirs.iter().zip(stats.iter()) {
-            self.shared_parent = self.check_parent_stat(dir, st, tree, allow_tree)?;
+            let v = self.check_parent_stat(path, dir, st, tree, allow_tree)?;
+            self.take_parent_verdict(dir, v);
             self.parents_seen.insert(dir.clone(), (st.uid, st.mode));
         }
         let out = self.run_argv("/usr/bin/getfattr", &batched_getfattr_args(dirs))?;
@@ -3614,6 +4051,19 @@ pub(crate) fn parse_sha256_record(out: &Output, path: &str) -> Result<String> {
         )));
     }
     Ok(String::from_utf8(digest.to_vec()).expect("validated ASCII"))
+}
+
+/// Two `lstat`s of one name saw the same, unchanged object (DESIGN §63.3).
+fn same_observation(a: &Stat, b: &Stat) -> bool {
+    a.kind == b.kind
+        && a.dev == b.dev
+        && a.ino == b.ino
+        && a.size == b.size
+        && a.mtime == b.mtime
+        && a.ctime == b.ctime
+        && a.mode == b.mode
+        && a.uid == b.uid
+        && a.gid == b.gid
 }
 
 fn same_identity(previous: &Stat, current: &Stat) -> bool {
@@ -5244,8 +5694,8 @@ mod tests {
             let permit = fs.mutation_permit().unwrap();
             fs.resolve_uid("app").unwrap();
             fs.identity_memo.walks.insert(
-                "/d".to_string(),
-                GateOutcome::Open(None, BTreeMap::new(), false),
+                ("/d".to_string(), ""),
+                GateOutcome::Open(None, BTreeMap::new(), false, None),
             );
             assert_eq!(fs.identity_memo.entries.len(), 1, "{name}: primed");
             assert_eq!(fs.identity_memo.walks.len(), 1, "{name}: walk primed");
@@ -5260,8 +5710,8 @@ mod tests {
         let mut fs = memo_fs(memo_target());
         fs.resolve_uid("app").unwrap();
         fs.identity_memo.walks.insert(
-            "/d".to_string(),
-            GateOutcome::Open(None, BTreeMap::new(), false),
+            ("/d".to_string(), ""),
+            GateOutcome::Open(None, BTreeMap::new(), false, None),
         );
         let _ = fs.set_metadata("/d/x", 0o600, 0, 0);
         assert!(fs.identity_memo.entries.is_empty(), "set_metadata");
@@ -6535,7 +6985,7 @@ mod tests {
         let stats = interpret_stat_batch(&pc_out(0, stat, ""), "/x/f", dirs)?;
         let fs = pc_capture_fs(stats[0].uid);
         for (d, st) in dirs.iter().zip(&stats) {
-            fs.check_parent_stat(d, st, &mut None, false)?;
+            fs.check_parent_stat("/x/f", d, st, &mut None, false)?;
         }
         let xs = interpret_getfattr_batch(&pc_out(0, getfattr, ""), "/x/f", dirs)?;
         for (d, x) in dirs.iter().zip(&xs) {

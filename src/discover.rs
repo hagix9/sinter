@@ -1361,6 +1361,7 @@ pub fn empty_model() -> crate::model::Model {
         targets: None,
         warnings: Vec::new(),
         plugins: None,
+        writable_parents: Vec::new(),
     }
 }
 

@@ -612,6 +612,9 @@ fn copy_one(
     // settles that account's identity, and the path is then handled as that
     // account only (DESIGN §40.7). A non-root invocation has no such tree: for it
     // this walk is the strict one.
+    // DESIGN §63.2: a backup is a path-based copy, so the exception of
+    // `allow_writable_parents` never applies to it.
+    fs.set_writable_use(crate::targetfs::WritableUse::Refuse("a backup"));
     if let Err(e) = fs.check_trusted_parents(path) {
         // v1.14.1 (BK-PARENT-ABSENT): a path below a directory that does not
         // exist yet is absent (DESIGN §4.12, §23): the first ancestor the walk

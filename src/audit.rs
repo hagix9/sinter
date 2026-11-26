@@ -306,13 +306,23 @@ pub fn run_audit(mut engine: Engine) -> Result<AuditReport> {
     // finding (`Completed`), an observation error is `Indeterminate`.
     let progress = engine.progress.clone();
     let mut stage = StageTracker::start(&*progress, Stage::Resources, Some(order.len()));
+    // DESIGN §63.3: a path whose only fault is a group- or other-writable
+    // direct parent is observed without following anything.
+    engine.fs.set_audit_writable(true);
     for &ridx in &order {
         let res = engine.model.resources[ridx].clone();
         stage.item_started(Some(ItemRef::resource(&res.type_, &res.id)));
         engine
             .fs
             .set_stats_scope(crate::engine::scope_label(&res.type_));
-        results.push(audit_resource(&mut engine, &res));
+        engine.fs.clear_identity();
+        let _ = engine.fs.take_writable_used();
+        let r = audit_resource(&mut engine, &res);
+        let note = engine
+            .fs
+            .take_writable_used()
+            .map(|d| writable_audit_note(&d, engine.model.writable_parents.contains(&d)));
+        results.push(append_note(r, note));
     }
     stage.end(
         if results
@@ -1851,6 +1861,24 @@ fn audit_manager_facet(
             "manager consistency not verified: no single unit can be derived for this managed systemd input"
                 .to_string(),
         )),
+    }
+}
+
+/// DESIGN §63.3: the note of an audit result whose path is in a directory
+/// other accounts can write to.
+fn writable_audit_note(dir: &str, listed: bool) -> String {
+    if listed {
+        format!(
+            "parent {} is writable by other accounts: observed without following links; \
+             allowed by allow_writable_parents for publishing",
+            dir
+        )
+    } else {
+        format!(
+            "parent {d} is writable by other accounts: observed without following links; Sinter \
+             refuses to change this path unless allow_writable_parents lists {d}",
+            d = dir
+        )
     }
 }
 

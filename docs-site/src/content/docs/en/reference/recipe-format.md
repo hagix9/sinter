@@ -27,11 +27,13 @@ backup: { paths: [...] }      # optional, v1.1.0+ (copied before apply)
 env: { NAME: value }          # optional default environment for package/command
 
 plugins: [{ id, version }]    # optional, v1.9.0+ (top-level recipe only)
+
+allow_writable_parents: [/opt/myapp]   # optional (top-level recipe only)
 ```
 
 Top-level fields allowed: `version`, `vars`, `include`, `resources`,
-`handlers`, (from v1.1.0) `targets` and `backup`, `env`, and (from v1.9.0)
-`plugins`. Anything else is a schema error.
+`handlers`, (from v1.1.0) `targets` and `backup`, `env`, (from v1.9.0)
+`plugins`, and `allow_writable_parents`. Anything else is a schema error.
 
 ## env
 
@@ -187,6 +189,63 @@ vars:
 *Available from v1.9.0.* Enables [Resource Plugins](/en/reference/resource-plugins/) by
 `id` and `version`. Allowed only in the top-level recipe; an included file that
 declares `plugins` is rejected.
+
+## allow_writable_parents
+
+Sinter normally refuses a path whose parent directory other accounts can write
+to without the sticky bit (mode `0777`, `0775` with a shared group, …): another
+account could swap an entry there between Sinter's check and its change. This
+field lists such directories in which this recipe may still **publish a whole
+file or remove one**:
+
+```yaml
+version: 1
+allow_writable_parents: [/opt/myapp/drop]
+resources:
+  - id: drop_conf
+    type: file
+    with:
+      path: /opt/myapp/drop/app.conf
+      content: "level = 2\n"
+```
+
+```toml
+allow_writable_parents = ["/opt/myapp/drop"]
+```
+
+Rules:
+
+- At most 32 distinct static absolute paths (no `{{ }}`, no `.`/`..`, no
+  repeated or trailing `/`); `/` is refused. Only in the top-level recipe: an
+  included file that declares it is rejected, a bundle file has no such field,
+  and each recipe of a bundle uses only its own list. MCP manifests may not use it.
+- `sinter validate` shows one warning per listed directory.
+- A listed directory is accepted only as the **direct parent** of the path, only
+  when it is a real directory (not a symbolic link) owned by root (or, without
+  `--sudo`, by the connecting user), not inside another account's directory,
+  without an ACL, every directory above it passing the usual checks, and only
+  when the run is as root (a root login or `--sudo`).
+- Only `file`, `template` and `file_merge` use it, and only to create or replace
+  the whole file (with its owner, group and mode) or to remove it
+  (`state: absent`). Refused there, in plan and in apply: a change of owner,
+  group or mode alone, a `validate` command, `directory` (also the parents
+  `parents: true` would create), `link`, any other resource type, and a
+  `backup` of a path in the directory.
+- The existing entry must be absent, or a regular file owned by root (or the
+  connecting user without `--sudo`) with one hard link; a symbolic link or a
+  file of another account is refused. An existing file larger than 256 KiB is
+  refused (it is read without following links, up to that size).
+- Every result that used the field carries the note "parent … is writable by
+  other accounts; allowed by allow_writable_parents" (text and JSON), and each
+  publication leaves its empty `.sinter-stage.*` directory in the listed
+  directory (reported in a note; remove it when convenient).
+
+What you accept by listing a directory: any account that can write to it can
+replace, rename or remove the file after Sinter wrote it, and can read what the
+file's mode allows. Sinter only guarantees that root does not write, read or
+remove anything outside the directory because of it, and that what it published
+was the declared content. Without the field, `sinter audit` still observes such
+a path read-only (see [audit](/en/reference/cli/)).
 
 ## resources
 

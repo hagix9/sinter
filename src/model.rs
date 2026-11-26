@@ -118,6 +118,10 @@ pub struct Model {
     /// The Resource Plugins the entry recipe enables, verified (DESIGN §38).
     /// `None` when it enables none: then no plugin type exists.
     pub plugins: Option<std::sync::Arc<crate::plugin::PluginSet>>,
+    /// `allow_writable_parents` of the entry recipe (DESIGN §63): directories
+    /// other accounts can write to in which this recipe, and only this one,
+    /// may publish or remove whole files. Never merged across recipes.
+    pub writable_parents: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +163,7 @@ impl Model {
             targets,
             warnings: Vec::new(),
             plugins: None,
+            writable_parents: Vec::new(),
         }
     }
 
@@ -239,6 +244,7 @@ pub(crate) fn prepare_with_plugins(
         entry: None,
         targets: None,
         recipe_env: None,
+        writable_parents: Vec::new(),
         refs,
         plugin_ctx: plugin_ctx.clone(),
         plugins: None,
@@ -652,6 +658,8 @@ struct LoadState {
     targets: Option<TargetSelector>,
     /// Recipe-wide default `env` of the entry recipe (DESIGN §27.1).
     recipe_env: Option<Value>,
+    /// `allow_writable_parents` of the entry recipe (DESIGN §63).
+    writable_parents: Vec<String>,
     /// How strictly secret references are checked (strict unless listing).
     refs: crate::secret_source::ReferenceCheck,
     /// Where plugins may come from for this load (DESIGN §38.7).
@@ -690,6 +698,7 @@ impl LoadState {
             self.entry = Some(canon.clone());
             self.targets = doc.targets.clone();
             self.recipe_env = doc.env.clone();
+            self.writable_parents = doc.writable_parents.clone();
             // Only a recipe that enables plugins reads the plugin root.
             if !doc.plugins.is_empty() {
                 self.plugins = Some(std::sync::Arc::new(self.plugin_ctx.load(&doc.plugins)?));
@@ -705,6 +714,14 @@ impl LoadState {
             // fragment pulled in by `include` (no implicit merging).
             return Err(SinterError::schema(format!(
                 "{}: targets may only be declared in the top-level recipe, not in an included file",
+                canon.display()
+            )));
+        } else if !doc.writable_parents.is_empty() {
+            // Which directories others can write to a run may publish in is
+            // decided by the recipe that is run, never by a fragment.
+            return Err(SinterError::schema(format!(
+                "{}: allow_writable_parents may only be declared in the top-level recipe, not in \
+                 an included file",
                 canon.display()
             )));
         } else if doc.env.is_some() {
@@ -3384,6 +3401,15 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
     // R-3: `template.vars` values are passed to the template as written; a
     // `{{ ... }}` inside one is not evaluated and would be rendered literally.
     let mut warnings = Vec::new();
+    // DESIGN §63.2: every listed directory is named once per load.
+    for d in &state.writable_parents {
+        warnings.push(format!(
+            "allow_writable_parents lists {}: Sinter publishes and removes whole files in it \
+             although other accounts can write to it; those accounts can still replace or \
+             remove what Sinter wrote there",
+            d
+        ));
+    }
     for fr in &frozen {
         if fr.type_ != "template" {
             continue;
@@ -3453,6 +3479,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
         targets: state.targets,
         warnings,
         plugins: state.plugins,
+        writable_parents: state.writable_parents,
     })
 }
 

@@ -392,6 +392,7 @@ fn refused_manifests() -> Vec<(&'static str, String)> {
     vec![
         ("plugins", "version: 1\nplugins:\n  - id: firewalld\n    version: 0.3.0\nresources:\n  - id: x\n    type: firewalld.service\n    with: { zone: public, service: http }\n".to_string()),
         ("include", "version: 1\ninclude:\n  - other.yaml\nresources: []\n".to_string()),
+        ("allow_writable_parents", "version: 1\nallow_writable_parents: [/opt/synthetic-app]\nresources:\n  - id: x\n    type: file\n    with: { path: /opt/synthetic-app/x, content: y }\n".to_string()),
         ("source", r("file", "path: /etc/x, source: /etc/shadow")),
         ("content secret", r("file", "path: /etc/x, content: { secret: s.age }")),
         ("password_hash secret", r("user", "name: appu, password_hash: { secret: s.age }")),
@@ -431,6 +432,7 @@ fn refused_manifests_never_reach_the_host() {
             let want = match what {
                 "plugins" => "plugins",
                 "include" => "include",
+                "allow_writable_parents" => "allow_writable_parents",
                 "source" => "source",
                 "content secret" | "password_hash secret" | "password_verifier secret" => "decrypt",
                 "unknown type" | "firewalld type without plugin" => "unknown resource type",

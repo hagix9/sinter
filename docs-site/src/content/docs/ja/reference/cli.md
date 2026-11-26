@@ -125,6 +125,18 @@ audit は systemd マネージャの同期状態も、独立したドリフト�
 `manager_reload` として報告します（[audit の出力を読む](#audit-の出力を読む)を
 参照）。
 
+問題が「他のアカウントが書き込める直接の親」（スティッキービットのない `0777` など）だけで
+あるパスは、レシピが
+[`allow_writable_parents`](/ja/reference/recipe-format/#allow_writable_parents) に列挙
+しない限り `plan` と `apply` は拒否しますが、audit はリンクをたどらずに観測します:
+その `lstat` と、ハードリンクが 1 つで 256 KiB 以下の通常ファイルならその内容を、
+一致しなければならない 2 回の `lstat` の間に `dd iflag=nofollow,nonblock` で読み、
+ダイジェストで比較します（内容は表示しません）。結果は注記
+"parent … is writable by other accounts: observed without following links …" 付きの
+compliant または drift です。そこにあるシンボリックリンクやハードリンクが複数のファイル、
+他のアカウントのファイル、それより大きいファイル、読み取りの失敗、さらに上の書き込み
+可能なディレクトリは、引き続きエラーです。
+
 ## 接続リスクの承認（approve、approvals）
 
 変更によっては、Sinter が使う SSH 接続を切ることがあります（firewalld の zone、source、interface、reload、NetworkManager のプロファイル）。こうした型のリソースは接続の前に分類されます。**R** は常に承認が必要、**C** は管理経路に当たる場合だけ承認が必要、**N** は不要です。接続の後、Sinter は自分の接続を運ぶ interface と firewalld の zone を調べます。判定できなければ、承認の有無にかかわらず変更を拒否します。v1.15.0 から、この制御は firewalld 0.3.0 と `nm_connection` に強制されます。firewalld 0.2.0 は v1.15.0 では強制しません（v1.14.1 と同じ動作。SSH 接続を切りうる変更には firewalld 0.3.0 を使ってください。0.2.0 の変更が安全という意味ではありません）。これらの型を使わない実行は変わりません。通常の実行は変わりません。

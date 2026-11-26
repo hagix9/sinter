@@ -1171,6 +1171,44 @@ impl Engine {
         }
     }
 
+    /// DESIGN §63.2, for plan and apply alike, after the parent walk: when the
+    /// walk accepted the direct parent under `allow_writable_parents`, only a
+    /// whole file published through the staging script is allowed. A
+    /// metadata-only change (`chown`/`chmod` by path would follow a link
+    /// swapped in after the check) and a `validate` command (it reads the
+    /// staged file by its path, which another account could swap in that
+    /// directory) are refused. Does nothing when the walk did not use the
+    /// exception.
+    fn writable_parent_check(
+        &self,
+        res: &FrozenResource,
+        path: &str,
+        publishes: bool,
+        validates: bool,
+    ) -> Result<()> {
+        let refusal = if !publishes {
+            self.fs
+                .writable_refusal(path, "a change of owner, group or mode alone")
+        } else {
+            None
+        };
+        let refusal = refusal.or_else(|| {
+            validates
+                .then(|| {
+                    self.fs.writable_refusal(
+                        path,
+                        "a validate command (it reads the staged file by its path, which other \
+                         accounts could replace there)",
+                    )
+                })
+                .flatten()
+        });
+        match refusal {
+            Some(e) => Err(SinterError::apply(format!("{}: {}", res.id, e.message))),
+            None => Ok(()),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn file_present(
         &mut self,
@@ -1271,6 +1309,12 @@ impl Engine {
                 return Ok(unchanged_result(res, "file already matches desired state"));
             }
             let parent_note = self.plan_parent_check(res, path)?;
+            self.writable_parent_check(
+                res,
+                path,
+                content_changed || stat.kind == ObjKind::Absent,
+                validate.is_some(),
+            )?;
             let existing_owner = (stat.kind == ObjKind::File).then_some(stat.uid);
             let explicit_owner = meta.manage_owner.then_some(meta.owner_uid).flatten();
             if let Some(e) = self
@@ -1365,6 +1409,12 @@ impl Engine {
         }
 
         self.fs.check_trusted_parents(path)?;
+        self.writable_parent_check(
+            res,
+            path,
+            content_changed || stat.kind == ObjKind::Absent,
+            validate.is_some(),
+        )?;
         self.fs.reject_final_symlink(path)?;
         if stat.kind != ObjKind::Absent {
             self.confirm_same_entry(res, path, &stat)?;

@@ -135,7 +135,12 @@ pub const TOP_LEVEL_FIELDS: &[&str] = &[
     "env",
     // Resource Plugins the recipe enables (DESIGN §38.7).
     "plugins",
+    // Directories other accounts can write to that this recipe may publish
+    // whole files in (DESIGN §63).
+    "allow_writable_parents",
 ];
+/// The most directories `allow_writable_parents` may list.
+pub const WRITABLE_PARENTS_MAX: usize = 32;
 /// Fields of one `plugins` entry.
 pub const PLUGIN_REF_FIELDS: &[&str] = &["id", "version"];
 /// Fields of the top-level `backup` map.

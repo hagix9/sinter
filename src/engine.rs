@@ -459,20 +459,23 @@ impl Engine {
                 },
             );
         }
+        let mut fs = TargetFs::new_for(
+            ex,
+            opts.sudo,
+            target_uid,
+            target_gid,
+            home,
+            pkg_backend,
+            has_getfattr,
+            has_getfacl,
+            opts.mode == Mode::Apply,
+            opts.fault.clone(),
+        );
+        // DESIGN §63: the directories of this recipe only.
+        fs.set_writable_parents(&model.writable_parents);
         Ok(Engine {
             model,
-            fs: TargetFs::new_for(
-                ex,
-                opts.sudo,
-                target_uid,
-                target_gid,
-                home,
-                pkg_backend,
-                has_getfattr,
-                has_getfacl,
-                opts.mode == Mode::Apply,
-                opts.fault.clone(),
-            ),
+            fs,
             facts,
             vars,
             registers: BTreeMap::new(),
@@ -744,7 +747,8 @@ impl Engine {
             }
 
             self.fs.set_stats_scope(scope_label(&res.type_));
-            let rr = match self.dispatch_resource(&res, item.as_ref()) {
+            let _ = self.fs.take_writable_used();
+            let mut rr = match self.dispatch_resource(&res, item.as_ref()) {
                 Ok(r) => r,
                 Err(e) => {
                     if self.opts.mode == Mode::Plan {
@@ -755,6 +759,11 @@ impl Engine {
                     failed_result_from_error(&res, &e)
                 }
             };
+            // DESIGN §63.2: a result that relied on `allow_writable_parents`
+            // says so, in plan and apply, text and JSON.
+            if let Some(d) = self.fs.take_writable_used() {
+                rr.notes.push(crate::targetfs::writable_parent_note(&d));
+            }
             let is_stop = rr.is_failure() || rr.is_indeterminate();
             if is_stop {
                 stopped = true;
@@ -1076,6 +1085,10 @@ impl Engine {
         // another account's tree makes its walk switch (and only its walk).
         self.fs.clear_identity();
         self.fs.set_redact(res.sensitive || res.derived_sensitive);
+        // DESIGN §63.2: only these types publish or remove a whole file
+        // through the staging script; any other type is refused in a listed
+        // directory others can write to, with its name in the reason.
+        self.fs.set_writable_use(writable_use_for(&res.type_));
         let outcome = match res.type_.as_str() {
             "file" => self.run_file(res, item),
             "directory" => self.run_directory(res, item),
@@ -1109,6 +1122,10 @@ impl Engine {
         };
         self.fs.clear_identity();
         self.fs.set_redact(false);
+        self.fs
+            .set_writable_use(crate::targetfs::WritableUse::Refuse(
+                crate::targetfs::DEFAULT_WRITABLE_OPERATION,
+            ));
         match outcome {
             Ok(mut r) => {
                 // FS-0d: packages, users and groups can only be changed by
@@ -1289,6 +1306,21 @@ fn program_handler_result(
         reason,
         sensitive: h.sensitive,
         provenance: None,
+    }
+}
+
+/// DESIGN §63.2: what a resource of `type_` may do in a directory other
+/// accounts can write to that the recipe lists in `allow_writable_parents`.
+/// Only the types that publish or remove a whole regular file through the
+/// staging script (`file`, `template`, `file_merge`) may; every other type is
+/// refused there, named in the reason.
+pub(crate) fn writable_use_for(type_: &str) -> crate::targetfs::WritableUse {
+    use crate::targetfs::WritableUse;
+    match type_ {
+        "file" | "template" | "file_merge" => WritableUse::Publish,
+        "directory" => WritableUse::Refuse("a directory"),
+        "link" => WritableUse::Refuse("a link"),
+        _ => WritableUse::Refuse("a resource of this type"),
     }
 }
 

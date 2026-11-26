@@ -92,6 +92,11 @@ Fully idempotent.
 
 Applies to all supported targets. Directory creation uses the same parent-path
 trust boundary as [`file`](/en/reference/resources/file/#trust-boundary).
+A directory in a directory listed in
+[`allow_writable_parents`](/en/reference/recipe-format/#allow_writable_parents)
+(also one that `parents: true` would create there) is refused: that exception
+covers only whole files. Audit observes a directory whose direct parent others
+can write by `lstat` only, with a note.
 
 ## Related
 
