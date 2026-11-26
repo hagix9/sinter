@@ -4175,6 +4175,26 @@ Bundle planning and the audit of a host nothing is applied to (§49.1, §49.4), 
 - FR-061 (secrets in templates and variables), FR-038 (persisted handler notifications), FR-039 (parallel, continue-on-error, resume), FR-001 to FR-008 (Command Audit), FR-025/FR-067 beyond `sinter discover`, FR-075 to FR-078: not taken; each changes a safety boundary, the execution engine or the audit contract and keeps its recorded status. FR-062 (colours, recap, host names) keeps its DEFERRED status; every status is already printed as a word and never as a colour alone (§ output rules), and `NO_COLOR`, non-TTY and JSON behaviour are unchanged.
 - firewalld rich rules (FR-022) and the remaining NetworkManager types (FR-024): unchanged.
 
+56.2a Owner-listed candidates checked on 2026-11-26 (status at the end of this development round)
+
+| Item | Status | Where |
+|---|---|---|
+| Planning across the recipes of a bundle, parent directories, audit of an unapplied host | implemented | §49.1, §49.3, §49.4 |
+| Nested bundles | implemented (the old rule "bundles do not nest" is withdrawn by the Owner) | §19.3 |
+| Parents other accounts can write to (`allow_writable_parents`), audit of such paths | implemented for the safe subset described there | §63 |
+| Partial runs and declared backups | implemented, also for nested bundles | §49.6 |
+| `dnf_repository`, `dnf_module`, `crypto_policy`, `file_merge` | implemented | §50 to §53 |
+| `tuned`, `timezone`, `locale`, `sysctl`, `hostname`, `kernel_module` | implemented | §54, §55, §57, §60 to §62 |
+| `kernel_args`, `grub` | design only: a wrong change can make a host unbootable, and the verification needs disposable hosts and reboots this round may not use | §58 |
+| `package` with several names, versions, `latest`; `mount`; `cron`; `archive`; `download`; `git` | not taken | §56.2 |
+| Undefined variables in templates | implemented | §49.5 |
+| Status colours, recap, host names in progress output (FR-062) | not taken: every status is already a word (colour is never the only signal), and `NO_COLOR`, non-TTY and JSON output are unchanged; a redesign of the recap and of host names in progress lines changes every output contract and its tests, and was not needed by any change of this round | §56.2 |
+| Handler notifications that survive a failed run (FR-038) | not taken: needs persisted state on the target or the controller and a recovery contract | §56.2 |
+| firewalld rich rules (FR-022) | not taken: §44.5 conditions unchanged | §44.5 |
+| Release verifier end line | implemented (permanent fix, tests) | `release/verify_approval_set.py` |
+| Dependabot alerts (astro, docs site only) | not taken: every fixed astro release requires Node.js >= 22.23.4; the local toolchain is 22.23.3, so the docs build could not be verified with the update, and installing another Node.js needs its own approval. The site is built statically without the affected adapter. Resume: update the lockfile where Node >= 22.23.4 is available and run the docs build and checks | docs-site |
+| Internal decision ids in user docs | removed (`cli.md`) | docs-site |
+
 56.3 Real-host acceptance needed before a release
 
 Measured so far: read-only observations on one Rocky Linux 10.2 host (the DNF 4 link, `update-crypto-policies --show` and the policy files, `hostnamectl`, `sysctl -n`, and the distribution's repository files through the section parser). Not measured: every change command and every other supported OS. A release needs, on disposable hosts of the supported list: the PostgreSQL bundle of `examples/bundles/postgresql-pgdg17` planned, audited (drift), applied, re-applied (no change) and audited (compliant) on EL 9 and EL 10; `dnf_repository` files read back by DNF and a package installed from a new repository; `dnf_module` enable, disable and reset with the state file DNF writes (EL 9; EL 10 has no streams); `crypto_policy` set and re-observed on EL 9 and EL 10; `file_merge` on `authorized_keys` as root in a user's tree and as the user; `sysctl` and `hostname` on Ubuntu and the RHEL family; `tuned` on a host with TuneD installed and running (none of its `tuned-adm` forms or state files is measured: profile selection, `off`, `recommend`, `verify`, EL 9, EL 10 and Ubuntu); `parents: true` and the partial-run backups on one host of each family. These join the existing acceptance run of the release; they are not run per feature.
