@@ -102,10 +102,25 @@ pub fn valid_repo_file(path: &str) -> bool {
 
 /// The text written as the section's `name` key: one line of printable
 /// characters without leading or trailing space.
+///
+/// Besides control characters, the Unicode line and paragraph separators
+/// (a reader might end the line there) and the bidirectional controls (the
+/// line would be displayed in another order than it is stored) are refused.
 pub fn valid_description(s: &str) -> bool {
+    let unsafe_char = |c: char| {
+        c.is_control()
+            || matches!(
+                c,
+                '\u{0085}'
+                    | '\u{2028}'
+                    | '\u{2029}'
+                    | '\u{202A}'..='\u{202E}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+    };
     !s.is_empty()
         && s.len() <= MAX_DESCRIPTION_BYTES
-        && !s.chars().any(|c| c.is_control())
+        && !s.chars().any(unsafe_char)
         && s.trim() == s
 }
 
@@ -282,7 +297,8 @@ impl RepoSpec {
             if !valid_description(d) {
                 return Err(bad(
                     ctx,
-                    "description must be one line of 1-256 bytes without control characters and \
+                    "description must be one line of 1-256 bytes without control characters, \
+                     Unicode line or paragraph separators or bidirectional controls, and \
                      without leading or trailing space",
                 ));
             }
@@ -425,6 +441,18 @@ impl RepoSpec {
             out.push(("gpgkey", k.clone(), true));
         }
         out
+    }
+}
+
+impl RepoSpec {
+    /// The declared keys as `field: value` lines (a list as its entries
+    /// separated by one space), for the display of a section that is
+    /// created. Declared values only: nothing of the file.
+    pub(crate) fn declared_lines(&self) -> Vec<String> {
+        self.declared_keys()
+            .into_iter()
+            .map(|(key, values, _)| format!("{}: {}", field_of(key), values.join(" ")))
+            .collect()
     }
 }
 

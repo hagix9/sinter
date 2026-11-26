@@ -22,6 +22,8 @@ use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The resource types that manage a whole path.
+/// (`dnf_repository` manages a section of its file with its own rules; a
+/// `file_merge` beside it would bypass them, so it counts as the owner.)
 const WHOLE_PATH_TYPES: &[&str] = &[
     "file",
     "template",
@@ -29,7 +31,29 @@ const WHOLE_PATH_TYPES: &[&str] = &[
     "link",
     "systemd_timer",
     "sysctl",
+    "dnf_repository",
 ];
+
+/// Refuse a `file_merge` on DNF's configuration: the repository files, the
+/// main configuration and everything under `/etc/dnf/` and `/etc/yum/`
+/// (module state, variables, plugin configuration). A partial edit there
+/// could switch off package signature checking with one line, which no
+/// native resource may do. The path is absolute and has no `.`, `..` or
+/// repeated separator (`validate_path`), so the comparison is on text.
+pub(crate) fn check_not_dnf_configuration(path: &str, ctx: &str) -> Result<()> {
+    const TREES: [&str; 3] = ["/etc/yum.repos.d", "/etc/dnf", "/etc/yum"];
+    let inside = |tree: &str| {
+        path.strip_prefix(tree)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    };
+    if path == "/etc/yum.conf" || TREES.iter().any(|t| inside(t)) {
+        return Err(SinterError::schema(format!(
+            "{}: file_merge does not edit DNF configuration ({}): repositories and DNF configuration are managed with dnf_repository and dnf_module (or a whole file resource), which keep package signature checking",
+            ctx, path
+        )));
+    }
+    Ok(())
+}
 
 const META_FIELDS: [&str; 3] = ["owner", "group", "mode"];
 
@@ -109,6 +133,7 @@ pub(super) fn freeze_fields(
     fr.path = staged_field(stage, tol, "path", || {
         let path = static_string(&r.with, "path", scope, ctx, true, field_sensitive("path"))?;
         validate_path(&path).map_err(|e| SinterError::schema(format!("{}: {}", ctx, e.message)))?;
+        check_not_dnf_configuration(&path, ctx)?;
         Ok(path)
     })?;
     let Some(resolved) = resolved_static_fields(r, scope, ctx, sensitive_vars, stage, tol)? else {
@@ -270,8 +295,16 @@ pub(super) fn check_ownership(
                 &["path"],
                 &peer.id,
                 format!(
-                    "conflicting management of path {}: {} ({}) manages the whole path and {} (file_merge) manages a part of it",
-                    path, r.id, r.type_, peer.id
+                    "conflicting management of path {}: {} ({}) manages {} and {} (file_merge) manages a part of it",
+                    path,
+                    r.id,
+                    r.type_,
+                    if r.type_ == "dnf_repository" {
+                        "a repository of that file"
+                    } else {
+                        "the whole path"
+                    },
+                    peer.id
                 ),
             );
         }

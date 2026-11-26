@@ -235,6 +235,9 @@ fn check_line(ctx: &str, line: &str) -> Result<()> {
         Some("may not contain NUL")
     } else if line.trim().is_empty() {
         Some("must not be empty or only whitespace")
+    } else if mentions_marker(line) {
+        // Such a line would damage or imitate a block of `merge: block`.
+        Some("may not carry the words of a managed-block marker line (BEGIN/END SINTER MANAGED BLOCK); manage a block with merge: block")
     } else {
         None
     };
@@ -808,26 +811,50 @@ fn edit_block(
     }
 }
 
-/// Whether `line` sets `key`, in which style, and its value without
-/// surrounding blanks. A comment line never does.
-fn key_line<'a>(line: &'a str, key: &str) -> Option<(SeparatorStyle, &'a str)> {
+/// A line that sets the declared key, or would be taken for one.
+enum KeyLine<'a> {
+    /// The key exactly as declared, at the start of the line: the style
+    /// and the value without surrounding blanks.
+    Exact(SeparatorStyle, &'a str),
+    /// The key after leading blanks. Indentation usually means structure
+    /// (a YAML mapping, an sshd `Match` block) this type does not know.
+    Indented,
+    /// The key in another letter case. Whether the file's reader takes it
+    /// for the same setting is not known.
+    OtherCase,
+}
+
+/// Whether `line` sets `key`. A comment line never does.
+fn key_line<'a>(line: &'a str, key: &str) -> Option<KeyLine<'a>> {
     const BLANK: [char; 2] = [' ', '\t'];
     let t = line.trim_start_matches(BLANK);
     if t.starts_with('#') || t.starts_with(';') {
         return None;
     }
-    let rest = t.strip_prefix(key)?;
+    // `key` is ASCII, so a match of its length ends on a character boundary.
+    let head = t.get(..key.len())?;
+    if !head.eq_ignore_ascii_case(key) {
+        return None;
+    }
+    let rest = &t[key.len()..];
     let after = rest.trim_start_matches(BLANK);
-    if let Some(v) = after.strip_prefix('=') {
-        Some((SeparatorStyle::Equals, v.trim_matches(BLANK)))
+    let found = if let Some(v) = after.strip_prefix('=') {
+        (SeparatorStyle::Equals, v.trim_matches(BLANK))
     } else if let Some(v) = after.strip_prefix(':') {
-        Some((SeparatorStyle::Colon, v.trim_matches(BLANK)))
+        (SeparatorStyle::Colon, v.trim_matches(BLANK))
     } else if rest.is_empty() || rest.starts_with(BLANK) {
-        Some((SeparatorStyle::Space, after.trim_end_matches(BLANK)))
+        (SeparatorStyle::Space, after.trim_end_matches(BLANK))
     } else {
         // A longer key that only starts with this one.
-        None
-    }
+        return None;
+    };
+    Some(if head != key {
+        KeyLine::OtherCase
+    } else if t.len() != line.len() {
+        KeyLine::Indented
+    } else {
+        KeyLine::Exact(found.0, found.1)
+    })
 }
 
 fn is_section_header(line: &str) -> bool {
@@ -855,8 +882,22 @@ fn edit_key_value(
         }
         match key_line(line, key) {
             None => {}
-            Some((s, v)) if s == style => matches.push((i, v)),
-            Some(_) => {
+            Some(KeyLine::Indented) => {
+                return refuse(format!(
+                    "line {} sets the key {} but is indented; an indented setting usually belongs to a structure (a nested mapping, a conditional block) that key_value does not understand, so the file is refused",
+                    i + 1,
+                    key
+                ))
+            }
+            Some(KeyLine::OtherCase) => {
+                return refuse(format!(
+                    "line {} sets a key that differs from the declared key {} only in letter case; Sinter does not guess whether the file's reader treats them as the same setting",
+                    i + 1,
+                    key
+                ))
+            }
+            Some(KeyLine::Exact(s, v)) if s == style => matches.push((i, v)),
+            Some(KeyLine::Exact(..)) => {
                 return refuse(format!(
                     "line {} sets the key {} with another separator than the declared {:?}; Sinter does not guess which syntax the file uses",
                     i + 1,

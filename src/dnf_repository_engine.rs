@@ -17,7 +17,7 @@ use crate::expressions::EvalVal;
 use crate::inifile;
 use crate::model::FrozenResource;
 use crate::resources::{unchanged_result, PARTIAL_EDIT_MAX_BYTES};
-use crate::result::{Change, ResourceResult};
+use crate::result::{Change, DiffBody, ResourceResult};
 use crate::targetfs::ObjKind;
 use crate::value::Value;
 
@@ -62,6 +62,11 @@ fn refused(res: &FrozenResource, why: &str) -> String {
     } else {
         format!("{}: {}", res.id, why)
     }
+}
+
+/// Whether the drift is that of a section that does not exist yet.
+fn section_is_created(drift: &[Drift]) -> bool {
+    matches!(drift, [(field, _, desired)] if field == "state" && desired == "present")
 }
 
 fn any_sensitive(res: &FrozenResource, vals: &BTreeMap<String, EvalVal>) -> bool {
@@ -129,10 +134,42 @@ impl Engine {
             res,
             &spec.file,
             stat,
+            bytes.as_deref(),
             &meta,
             Some(new_content.into_bytes()),
             sensitive,
         )?;
+        // What is shown is the declared keys only (old and new value of each
+        // that differs, `state` for a section that is created or removed):
+        // a line of the file this resource does not manage is never
+        // displayed. A redacted diff stays redacted.
+        if let Some(diff) = r.diff.as_mut() {
+            if !matches!(diff.body, DiffBody::Redacted) {
+                diff.body = if sensitive {
+                    DiffBody::Redacted
+                } else {
+                    let side = |pick: fn(&Drift) -> &String| -> Vec<String> {
+                        decision
+                            .drift
+                            .iter()
+                            .map(|d| crate::diff::sanitize_line(&format!("{}: {}", d.0, pick(d))))
+                            .collect()
+                    };
+                    let mut added = side(|d| &d.2);
+                    if section_is_created(&decision.drift) {
+                        added.extend(
+                            spec.declared_lines()
+                                .iter()
+                                .map(|l| crate::diff::sanitize_line(l)),
+                        );
+                    }
+                    DiffBody::Text {
+                        removed: side(|d| &d.1),
+                        added,
+                    }
+                };
+            }
+        }
         r.notes.extend(decision.notes);
         if self.opts.mode == Mode::Plan
             && r.change == Change::Changed

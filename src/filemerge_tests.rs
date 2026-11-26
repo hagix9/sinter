@@ -365,7 +365,7 @@ fn key_value_written_lines_are_read_back_as_unchanged() {
 
 #[test]
 fn key_value_same_value_with_other_spacing_is_not_rewritten() {
-    for cur in ["k=v\n", "k = v\n", "  k\t=\tv  \n", "k= v", "k =v\n"] {
+    for cur in ["k=v\n", "k = v\n", "k\t=\tv  \n", "k= v", "k =v\n"] {
         assert_eq!(
             edit(cur, &kv("k", "=", Some("v"), Present)),
             None,
@@ -373,7 +373,7 @@ fn key_value_same_value_with_other_spacing_is_not_rewritten() {
         );
         assert_eq!(edit(cur, &kv("k", " = ", Some("v"), Present)), None);
     }
-    for cur in ["k v\n", "k\tv\n", "  k   v  \n"] {
+    for cur in ["k v\n", "k\tv\n", "k   v  \n"] {
         assert_eq!(
             edit(cur, &kv("k", " ", Some("v"), Present)),
             None,
@@ -385,7 +385,7 @@ fn key_value_same_value_with_other_spacing_is_not_rewritten() {
 
 #[test]
 fn key_value_replaces_only_the_one_line_whose_value_differs() {
-    let cur = "# k=comment\na=1\n  k = old  \nb=2\n";
+    let cur = "# k=comment\na=1\nk = old  \nb=2\n";
     assert_eq!(
         edit(cur, &kv("k", "=", Some("new"), Present)).unwrap(),
         "# k=comment\na=1\nk=new\nb=2\n"
@@ -795,4 +795,56 @@ fn static_identity_is_known_only_for_literal_fields() {
         Some(Identity::Key("k".into()))
     );
     assert_eq!(id(&[("merge", s("{{ vars.m }}")), ("key", s("k"))]), None);
+}
+
+#[test]
+fn key_value_refuses_an_indented_or_differently_cased_key_line() {
+    for state in [Present, Absent] {
+        let value = (state == Present).then_some("v");
+        for cur in ["  k=v\n", "\tk = other\n", "a=1\n k=v\nk=v\n"] {
+            let why = refused(cur, &kv("k", "=", value, state));
+            assert!(why.contains("is indented"), "{cur:?}: {why}");
+        }
+        for cur in [" k v\n", "\tk\n"] {
+            let why = refused(cur, &kv("k", " ", value, state));
+            assert!(why.contains("is indented"), "{cur:?}: {why}");
+        }
+        for (cur, key, sep) in [
+            ("K=v\n", "k", "="),
+            ("port: 1\n", "Port", ": "),
+            (
+                "passwordauthentication yes\n",
+                "PasswordAuthentication",
+                " ",
+            ),
+            ("  Key=v\n", "key", "="),
+        ] {
+            let why = refused(cur, &kv(key, sep, value, state));
+            assert!(why.contains("only in letter case"), "{cur:?}: {why}");
+            assert!(!why.contains("yes") && !why.contains("=v"), "{why}");
+        }
+    }
+    // An indented comment, a longer key and a non-ASCII line are no match.
+    let cur = "  # k=1\n  kk=2\n  KK=3\n  é=4\n";
+    assert_eq!(
+        edit(cur, &kv("k", "=", Some("v"), Present)).unwrap(),
+        format!("{cur}k=v\n")
+    );
+}
+
+#[test]
+fn line_refuses_the_words_of_a_marker_line() {
+    for line in [
+        "# BEGIN SINTER MANAGED BLOCK a",
+        "// END SINTER MANAGED BLOCK a",
+        "text END SINTER MANAGED BLOCK",
+    ] {
+        let mut with = std::collections::BTreeMap::new();
+        with.insert("merge".to_string(), Value::Str("line".into()));
+        with.insert("line".to_string(), Value::Str(line.into()));
+        for lenient in [true, false] {
+            let e = MergeSpec::check(&with, "m", lenient).unwrap_err();
+            assert!(e.message.contains("managed-block marker"), "{}", e.message);
+        }
+    }
 }

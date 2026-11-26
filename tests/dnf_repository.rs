@@ -272,8 +272,9 @@ fn plan_shows_the_changed_line_and_changes_nothing() {
     assert_eq!(x.change, Change::Changed);
     match &x.diff.as_ref().expect("a diff").body {
         DiffBody::Text { removed, added } => {
-            assert_eq!(removed, &["enabled=0"]);
-            assert_eq!(added, &["enabled=1"]);
+            // The declared key, old and new value: not lines of the file.
+            assert_eq!(removed, &["enabled: 0"]);
+            assert_eq!(added, &["enabled: 1"]);
         }
         other => panic!("unexpected diff {other:?}"),
     }
@@ -1291,4 +1292,279 @@ fn plan_defers_to_apply_when_an_earlier_change_may_provide_the_repository() {
     let p = recipe("repo-nodefer", &doc(body));
     assert!(failure(&p, Mode::Plan, target())
         .contains("set file to the file that defines the repository"));
+}
+
+// ---------------------------------------------------------------------------
+// audit findings: display, description, key source, handlers, hard links
+// ---------------------------------------------------------------------------
+
+#[test]
+fn no_unmanaged_line_of_the_file_is_displayed() {
+    // A private repository: a token in the URL path and a client
+    // certificate, neither of them declared here. They lie between the two
+    // lines this resource changes.
+    let token = "TOKEN-synthetic-0123456789";
+    let file = "/etc/yum.repos.d/tools.repo";
+    let content = format!(
+        "# UNMANAGED-COMMENT\n[tools]\nname=Tools\nbaseurl=https://tools.example.invalid/{token}/el9/\nsslclientcert=/etc/pki/synthetic-client.pem\nenabled=0\ngpgcheck=1\n\n[other]\nname=UNMANAGED-OTHER\nenabled=0\n"
+    );
+    let body = repo(
+        "tools",
+        &format!("      name: tools\n      file: {file}\n      enabled: true\n      description: Tools (managed)\n"),
+    );
+    let p = recipe("repo-unmanaged-lines", &doc(&body));
+    let unmanaged = [
+        token,
+        "sslclientcert",
+        "synthetic-client",
+        "UNMANAGED",
+        "baseurl",
+    ];
+    for mode in [Mode::Plan, Mode::Apply] {
+        let r = run_recipe_fake(&p, mode, false, target().with_fs_file(file, &content));
+        assert_success(&r);
+        let x = find(&r, "tools");
+        assert_eq!(x.change, Change::Changed);
+        if mode == Mode::Plan {
+            match &x.diff.as_ref().expect("a diff").body {
+                DiffBody::Text { removed, added } => {
+                    assert_eq!(removed, &["description: Tools", "enabled: 0"]);
+                    assert_eq!(added, &["description: Tools (managed)", "enabled: 1"]);
+                }
+                other => panic!("unexpected diff {other:?}"),
+            }
+        }
+        let out = rendered(&r, mode);
+        for word in unmanaged {
+            assert!(!out.contains(word), "{mode:?} shows {word}: {out}");
+        }
+    }
+    let a = audit(&p, target().with_fs_file(file, &content));
+    assert_eq!(a.resources[0].status, AuditResourceStatus::Drift);
+    let dims: Vec<&str> = a.resources[0]
+        .details
+        .iter()
+        .map(|d| d.dimension.as_str())
+        .collect();
+    assert_eq!(dims, ["description", "enabled"]);
+    let out = rendered_audit(&a);
+    for word in unmanaged {
+        assert!(!out.contains(word), "audit shows {word}: {out}");
+    }
+
+    // A section that is created or removed: `state`, and for a new section
+    // the declared keys. Nothing of the file around it.
+    let r = plan(
+        &recipe("repo-unmanaged-new", &example()),
+        target().with_fs_file(EXAMPLE, "[other]\nname=UNMANAGED-OTHER\nenabled=0\n"),
+    );
+    match &find(&r, "example").diff.as_ref().expect("a diff").body {
+        DiffBody::Text { removed, added } => {
+            assert_eq!(removed, &["state: absent"]);
+            assert_eq!(added[0], "state: present");
+            assert!(added.contains(&format!("baseurl: {URL}")), "{added:?}");
+            assert!(added.contains(&"gpgcheck: 1".to_string()), "{added:?}");
+        }
+        other => panic!("unexpected diff {other:?}"),
+    }
+    assert!(!rendered(&r, Mode::Plan).contains("UNMANAGED"));
+    let gone = doc(&repo(
+        "tools",
+        &format!("      name: tools\n      file: {file}\n      state: absent\n"),
+    ));
+    let r = plan(
+        &recipe("repo-unmanaged-gone", &gone),
+        target().with_fs_file(file, &content),
+    );
+    match &find(&r, "tools").diff.as_ref().expect("a diff").body {
+        DiffBody::Text { removed, added } => {
+            assert_eq!(removed, &["state: present"]);
+            assert_eq!(added, &["state: absent"]);
+        }
+        other => panic!("unexpected diff {other:?}"),
+    }
+    let out = rendered(&r, Mode::Plan);
+    for word in unmanaged {
+        assert!(!out.contains(word), "removal shows {word}: {out}");
+    }
+}
+
+#[test]
+fn a_description_with_line_separators_or_bidi_controls_is_rejected() {
+    // Written as YAML escapes, so the recipe text itself stays plain.
+    for code in ["2028", "2029", "0085", "202A", "202E", "2066", "2069"] {
+        let body = repo(
+            "r",
+            &format!("      name: example\n      description: \"a\\u{code}[evil]\"\n      baseurl: \"{URL}\"\n"),
+        );
+        let e = load_err(&format!("repo-desc-{code}"), &doc(&body));
+        assert!(e.contains("description must be one line"), "U+{code}: {e}");
+    }
+    // From a variable: refused when it is evaluated, nothing is written.
+    let body = format!(
+        "version: 1\nvars:\n  d:\n    value: \"a\\u2028[evil]\"\nresources:\n{}",
+        repo(
+            "r",
+            &format!("      name: example\n      description: \"{{{{ vars.d }}}}\"\n      baseurl: \"{URL}\"\n")
+        )
+    );
+    let p = recipe("repo-desc-var", &body);
+    match try_run_recipe_fake(&p, Mode::Apply, false, target()) {
+        Err(e) => assert!(
+            e.message.contains("description must be one line"),
+            "{}",
+            e.message
+        ),
+        Ok(r) => {
+            assert_ne!(r.status, AggregateStatus::Success);
+            assert!(!fs_of(&r).nodes.contains_key(EXAMPLE));
+        }
+    }
+    // Ordinary non-ASCII text is a description.
+    let body = repo(
+        "r",
+        &format!("      name: example\n      description: \"例のパッケージ\"\n      baseurl: \"{URL}\"\n"),
+    );
+    sinter::model::load_model(&recipe("repo-desc-ok", &doc(&body))).unwrap();
+}
+
+#[test]
+fn a_key_fetched_over_http_is_rejected_at_load_and_at_evaluation() {
+    let with_key = |key: &str| {
+        repo(
+            "r",
+            &format!("      name: example\n      baseurl: \"{URL}\"\n      gpgkey: \"{key}\"\n"),
+        )
+    };
+    let e = load_err(
+        "repo-http-key",
+        &doc(&with_key("http://keys.example.invalid/RPM-GPG-KEY-example")),
+    );
+    assert!(
+        e.contains("gpgkey") && e.contains("file:/// or https://"),
+        "{e}"
+    );
+    let body = format!(
+        "version: 1\nvars:\n  k:\n    value: \"http://keys.example.invalid/RPM-GPG-KEY-example\"\nresources:\n{}",
+        with_key("{{ vars.k }}")
+    );
+    let p = recipe("repo-http-key-var", &body);
+    for mode in [Mode::Plan, Mode::Apply] {
+        match try_run_recipe_fake(&p, mode, false, target()) {
+            Err(e) => assert!(e.message.contains("file:/// or https://"), "{}", e.message),
+            Ok(r) => {
+                assert_ne!(r.status, AggregateStatus::Success);
+                assert_eq!(mutation_command_count(&r), 0);
+                assert!(!fs_of(&r).nodes.contains_key(EXAMPLE));
+            }
+        }
+    }
+}
+
+#[test]
+fn a_change_notifies_its_handler_and_no_change_does_not() {
+    let yaml = format!(
+        "version: 1\nresources:\n  - id: crb\n    type: dnf_repository\n    notify: [restart-app]\n    with:\n      name: crb\n      file: {ROCKY}\n      enabled: true\nhandlers:\n  - id: restart-app\n    service: myapp\n    action: restart\n"
+    );
+    let p = recipe("repo-handler", &yaml);
+    let t = || with_rocky(target()).with_service("myapp", ("loaded", "active", "enabled"));
+    let restarts = |r: &RunReport| {
+        r.commands
+            .iter()
+            .filter(|c| c.program.ends_with("systemctl") && c.args.iter().any(|a| a == "restart"))
+            .count()
+    };
+    let planned = plan(&p, t());
+    assert_eq!(planned.handlers_pending, ["restart-app"]);
+    assert_eq!(restarts(&planned), 0);
+    let r = apply(&p, t());
+    assert_success(&r);
+    assert_eq!(find(&r, "crb").change, Change::Changed);
+    assert_eq!(r.handlers_run.len(), 1);
+    assert_eq!(restarts(&r), 1);
+    // Already as declared: no handler.
+    let mut again = t();
+    again.fs = r.fake_fs.clone();
+    let r = apply(&p, again);
+    assert_success(&r);
+    assert_eq!(find(&r, "crb").change, Change::None);
+    assert!(r.handlers_run.is_empty());
+    assert_eq!(restarts(&r), 0);
+    // A refused change: no handler.
+    let unchecked = "[crb]\nname=CRB\nenabled=0\n";
+    let r = try_run_recipe_fake(
+        &p,
+        Mode::Apply,
+        false,
+        target()
+            .with_fs_file(ROCKY, unchecked)
+            .with_service("myapp", ("loaded", "active", "enabled")),
+    );
+    if let Ok(r) = r {
+        assert_ne!(r.status, AggregateStatus::Success);
+        assert!(r.handlers_run.is_empty());
+        assert_eq!(restarts(&r), 0);
+    }
+}
+
+#[test]
+fn a_repository_file_with_a_second_hard_link_is_refused() {
+    let p = recipe("repo-hardlink", &crb(true));
+    let other = "/etc/yum.repos.d/rocky.repo.orig";
+    let mk = || {
+        let mut t = with_rocky(target());
+        t.fs.as_mut().unwrap().put_hardlink(ROCKY, other);
+        t
+    };
+    for mode in [Mode::Plan, Mode::Apply] {
+        let e = failure(&p, mode, mk());
+        assert!(e.contains("2 hard links"), "{mode:?}: {e}");
+    }
+    let r = try_run_recipe_fake(&p, Mode::Apply, false, mk());
+    if let Ok(r) = r {
+        assert_eq!(text(fs_of(&r), ROCKY), ROCKY_REPO);
+        assert_eq!(text(fs_of(&r), other), ROCKY_REPO);
+        assert_eq!(mutation_command_count(&r), 0);
+    }
+    let a = audit(&p, mk());
+    assert_eq!(a.resources[0].status, AuditResourceStatus::Error);
+}
+
+#[test]
+fn a_same_size_in_place_change_after_the_read_is_refused_by_content() {
+    let p = recipe("repo-cas-content", &crb(true));
+    let theirs = ROCKY_REPO.replace("countme=1", "countme=0");
+    assert_eq!(theirs.len(), ROCKY_REPO.len());
+    let mut t = with_rocky(target()).with_fs_event(
+        "sha256sum",
+        ROCKY,
+        0,
+        vec![FsEventAction::WriteInPlace {
+            path: ROCKY.into(),
+            data: theirs.as_bytes().to_vec(),
+        }],
+    );
+    t.fs.as_mut().unwrap().freeze_mtime = true;
+    match try_run_recipe_fake(&p, Mode::Apply, false, t) {
+        Err(e) => assert!(
+            e.message.contains("changed since it was read"),
+            "{}",
+            e.message
+        ),
+        Ok(r) => {
+            assert_ne!(r.status, AggregateStatus::Success);
+            let x = find(&r, "crb");
+            assert_eq!(x.change, Change::None);
+            assert!(
+                x.reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("changed since it was read"),
+                "{:?}",
+                x.reason
+            );
+            assert_eq!(text(fs_of(&r), ROCKY), theirs);
+            assert_eq!(mutation_command_count(&r), 0);
+        }
+    }
 }

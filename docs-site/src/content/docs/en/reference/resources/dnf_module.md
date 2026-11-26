@@ -78,6 +78,20 @@ state = "enabled"
   you to run `dnf module list <name>` on the host.
 - dnf may refresh repository metadata over the network for this command; a
   proxy from `env` applies.
+- `-y` and `env` are handled as for [`package`](/en/reference/resources/package/).
+  `-y` answers every question dnf asks with yes; that includes importing the
+  signing key of a repository that has `repo_gpgcheck=1` when its metadata
+  is first read. `env` is added to Sinter's baseline environment for this
+  one command and can replace a baseline variable; the variable names are
+  not restricted.
+- **Enabling a module can enable other modules it depends on.** dnf does
+  that in the same command, and Sinter does not report it: only the declared
+  module's state file is read again, and the result names that module only.
+  Run `dnf module list --enabled` on the host to see everything that is
+  enabled, and declare the modules you rely on as their own `dnf_module`
+  resources.
+- The state file must have one name only: a state file with more than one
+  hard link is refused (plan, apply and audit).
 - A change notifies handlers like any other resource. A second apply changes
   nothing and does not run dnf.
 - **Audit** compares the recorded state with the declared one and reports

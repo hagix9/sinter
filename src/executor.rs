@@ -3039,6 +3039,13 @@ pub enum FsEventAction {
         src: String,
         dst: String,
     },
+    /// The regular file at `path` is rewritten in place: the same inode,
+    /// new content and new timestamps (which `freeze_mtime` hides, as a
+    /// coarse clock would).
+    WriteInPlace {
+        path: String,
+        data: Vec<u8>,
+    },
     /// The owner of the object at `path` changes (the object stays the same).
     Chown {
         path: String,
@@ -4816,6 +4823,7 @@ impl FakeExecutor {
                         fs.nodes.remove(path);
                     }
                     FsEventAction::PutHardlink { src, dst } => fs.put_hardlink(src, dst),
+                    FsEventAction::WriteInPlace { path, data } => fs.write_in_place(path, data),
                     FsEventAction::Chown { path, uid, gid } => {
                         if let Some(n) = fs.nodes.get_mut(path) {
                             n.uid = *uid;

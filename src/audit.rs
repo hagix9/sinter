@@ -632,6 +632,16 @@ pub(crate) fn audit_partial_read(engine: &mut Engine, path: &str) -> Result<Opti
             path
         )));
     }
+    // What plan and apply refuse is not judged here either: the file has a
+    // second name, which a partial edit would cut off.
+    let links = gated_obs(engine, path, None, |fs| {
+        crate::resources::partial_hard_links(fs, path)
+    })?;
+    if links != 1 {
+        return Err(SinterError::apply(
+            crate::resources::partial_hard_link_refusal(path, links),
+        ));
+    }
     Ok(Some(bytes))
 }
 

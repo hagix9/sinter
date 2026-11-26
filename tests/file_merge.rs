@@ -745,7 +745,7 @@ fn audit_is_compliant_when_the_managed_part_matches_whatever_else_the_file_holds
     assert_eq!(a.status, AuditResourceStatus::Compliant, "{:?}", a.reason);
     let a = audit_one(
         &kv_recipe("      value: \"100\"\n"),
-        with_file(fake(), CONF, "a=1\n max_connections = 100\n", 0o644),
+        with_file(fake(), CONF, "a=1\nmax_connections = 100\n", 0o644),
     );
     assert_eq!(a.status, AuditResourceStatus::Compliant, "{:?}", a.reason);
 }
@@ -999,34 +999,40 @@ fn a_failed_stat_is_an_error_and_not_an_absent_file() {
 fn a_file_changed_between_the_read_and_the_publication_is_not_overwritten() {
     let before = format!("{K1}\n");
     let concurrent = format!("{K1}\n{K2}\n");
-    // Another actor rewrites the file right after Sinter read it.
-    let t = with_file(fake(), AK, &before, 0o600).with_fs_event(
-        "sha256sum",
-        AK,
-        0,
-        vec![FsEventAction::PutFile {
-            path: AK.to_string(),
-            data: concurrent.clone().into_bytes(),
-            mode: 0o600,
-            uid: 0,
-            gid: 0,
-        }],
-    );
-    let r = apply(&ak_recipe("present"), t);
-    assert_eq!(r.status, AggregateStatus::ApplyFailed);
-    let x = res(&r, "m");
-    assert_eq!(x.execution, Execution::Failed);
-    assert_eq!(x.change, Change::None);
-    assert!(
-        x.reason.as_deref().unwrap().contains("drift"),
-        "{:?}",
-        x.reason
-    );
-    assert_eq!(
-        content(&r, AK),
-        concurrent,
-        "the concurrent writer's file was lost"
-    );
+    // Another actor rewrites the file right after Sinter read it: before
+    // the content comparison, and after it (while the new file is staged).
+    for (program, arg, why) in [
+        ("sha256sum", AK, "changed since it was read"),
+        ("sh", "stage", "drift"),
+    ] {
+        let t = with_file(fake(), AK, &before, 0o600).with_fs_event(
+            program,
+            arg,
+            0,
+            vec![FsEventAction::PutFile {
+                path: AK.to_string(),
+                data: concurrent.clone().into_bytes(),
+                mode: 0o600,
+                uid: 0,
+                gid: 0,
+            }],
+        );
+        let r = apply(&ak_recipe("present"), t);
+        assert_eq!(r.status, AggregateStatus::ApplyFailed, "{program}");
+        let x = res(&r, "m");
+        assert_eq!(x.execution, Execution::Failed, "{program}");
+        assert_eq!(x.change, Change::None, "{program}");
+        assert!(
+            x.reason.as_deref().unwrap().contains(why),
+            "{program}: {:?}",
+            x.reason
+        );
+        assert_eq!(
+            content(&r, AK),
+            concurrent,
+            "{program}: the concurrent writer's file was lost"
+        );
+    }
 }
 
 fn run_fault(yaml: &str, t: FakeTarget, fault: &str) -> RunReport {
@@ -1792,4 +1798,351 @@ fn the_documented_recipes_do_what_the_page_says() {
         .find(|b| b.starts_with("127.0.0.1 localhost\n"))
         .unwrap();
     assert_eq!(content(&r, HOSTS), shown);
+}
+
+// ---------------------------------------------------------------------------
+// audit findings: DNF configuration, content comparison, hard links, display
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dnf_configuration_is_not_edited_by_file_merge() {
+    for path in [
+        "/etc/yum.repos.d/x.repo",
+        "/etc/yum.repos.d/sub/x.repo",
+        "/etc/yum.repos.d",
+        "/etc/dnf/dnf.conf",
+        "/etc/dnf/modules.d/nodejs.module",
+        "/etc/dnf/vars/releasever",
+        "/etc/dnf",
+        "/etc/yum.conf",
+        "/etc/yum/vars/releasever",
+        "/etc/yum/pluginconf.d/x.conf",
+    ] {
+        for with in [
+            format!("      path: {path}\n      merge: line\n      line: 'gpgcheck=0'\n"),
+            format!(
+                "      path: {path}\n      merge: block\n      marker: m\n      content: \"gpgcheck=0\\n\"\n"
+            ),
+            format!(
+                "      path: {path}\n      merge: key_value\n      key: gpgcheck\n      value: \"0\"\n"
+            ),
+        ] {
+            let e = load_err(&merge(&with));
+            assert!(
+                e.contains("does not edit DNF configuration")
+                    && e.contains("dnf_repository")
+                    && e.contains("package signature checking"),
+                "{path}: {e}"
+            );
+        }
+    }
+    // The path from a static variable is judged too.
+    let e = load_err(
+        "version: 1\nvars:\n  d:\n    value: /etc/yum.repos.d\nresources:\n  - id: m\n    type: file_merge\n    with:\n      path: \"{{ vars.d }}/x.repo\"\n      merge: line\n      line: 'gpgcheck=0'\n",
+    );
+    assert!(e.contains("does not edit DNF configuration"), "{e}");
+    // Names that only start like these are ordinary paths.
+    for path in [
+        "/etc/yum.repos.d.bak/x",
+        "/etc/dnfx/a.conf",
+        "/etc/yum.conf.rpmnew",
+    ] {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("r.yaml");
+        std::fs::write(&p, line_recipe(path, "a=b", "")).unwrap();
+        load_model(&p).unwrap_or_else(|e| panic!("{path}: {}", e.message));
+    }
+}
+
+#[test]
+fn file_merge_and_dnf_repository_on_one_file_conflict_in_either_order() {
+    let repo = "  - id: r\n    type: dnf_repository\n    with:\n      name: crb\n      file: /etc/yum.repos.d/rocky.repo\n      enabled: true\n";
+    let m = "  - id: m\n    type: file_merge\n    with:\n      path: /etc/yum.repos.d/rocky.repo\n      merge: line\n      line: 'x=1'\n";
+    for body in [format!("{repo}{m}"), format!("{m}{repo}")] {
+        load_err(&doc(&body));
+    }
+}
+
+#[test]
+fn a_same_size_in_place_change_after_the_read_is_refused_by_content() {
+    // Neither size, inode nor (with a coarse clock) the timestamps change:
+    // only the content tells.
+    let before = "workers=2\nlisten=80\n";
+    let theirs = "workers=2\nlisten=81\n";
+    let yaml = merge(&format!(
+        "      path: {CONF}\n      merge: key_value\n      key: workers\n      value: \"4\"\n"
+    ));
+    for mode in [Mode::Apply, Mode::Plan] {
+        let mut t = with_file(fake(), CONF, before, 0o644).with_fs_event(
+            "sha256sum",
+            CONF,
+            0,
+            vec![FsEventAction::WriteInPlace {
+                path: CONF.to_string(),
+                data: theirs.as_bytes().to_vec(),
+            }],
+        );
+        t.fs.as_mut().unwrap().freeze_mtime = true;
+        let ino = t.fs.as_ref().unwrap().nodes[CONF].ino;
+        match try_run(mode, &yaml, t) {
+            Err(e) => assert!(
+                e.message.contains("changed since it was read"),
+                "{}",
+                e.message
+            ),
+            Ok(r) => {
+                assert_ne!(r.status, AggregateStatus::Success);
+                let x = res(&r, "m");
+                assert_eq!(x.change, Change::None);
+                assert!(
+                    x.reason
+                        .as_deref()
+                        .unwrap()
+                        .contains("changed since it was read"),
+                    "{:?}",
+                    x.reason
+                );
+                assert_eq!(
+                    content(&r, CONF),
+                    theirs,
+                    "the other writer's change was lost"
+                );
+                assert_eq!(node(&r, CONF).3, ino);
+                assert!(
+                    mutations(&r.commands).is_empty(),
+                    "{:?}",
+                    mutations(&r.commands)
+                );
+            }
+        }
+    }
+    // Without the concurrent change the same target is edited.
+    let mut t = with_file(fake(), CONF, before, 0o644);
+    t.fs.as_mut().unwrap().freeze_mtime = true;
+    let r = apply(&yaml, t);
+    assert_changed(&r, "m");
+    assert_eq!(content(&r, CONF), "workers=4\nlisten=80\n");
+}
+
+#[test]
+fn a_file_with_a_second_hard_link_is_refused_in_plan_apply_and_audit() {
+    let other = "/etc/app/other.conf";
+    let before = "workers=2\n";
+    let yaml = merge(&format!(
+        "      path: {CONF}\n      merge: key_value\n      key: workers\n      value: \"4\"\n"
+    ));
+    let mk = || {
+        let mut t = with_file(fake(), CONF, before, 0o644);
+        t.fs.as_mut().unwrap().put_hardlink(CONF, other);
+        t
+    };
+    let e = plan_err(&yaml, mk());
+    assert!(e.message.contains("2 hard links"), "{}", e.message);
+    let r = apply(&yaml, mk());
+    assert_eq!(r.status, AggregateStatus::ApplyFailed);
+    assert!(
+        res(&r, "m")
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("2 hard links"),
+        "{:?}",
+        res(&r, "m").reason
+    );
+    assert_eq!(content(&r, CONF), before);
+    assert_eq!(content(&r, other), before);
+    assert_eq!(node(&r, CONF).3, node(&r, other).3, "the link was split");
+    assert!(mutations(&r.commands).is_empty());
+    // Also when the managed part is already as declared: the audit of a file
+    // the next change would refuse is an error, not "compliant".
+    let a = audit_one(&yaml, mk());
+    assert_eq!(a.status, AuditResourceStatus::Error, "{:?}", a);
+    assert!(
+        a.reason.as_deref().unwrap().contains("2 hard links"),
+        "{:?}",
+        a.reason
+    );
+    // A link count that cannot be read is an error, never "one link".
+    let t = with_file(fake(), CONF, before, 0o644).with_fs_event(
+        "stat",
+        "%h",
+        0,
+        vec![FsEventAction::FailCommand {
+            code: 1,
+            stderr: "stat: synthetic failure\n".to_string(),
+        }],
+    );
+    let r = apply(&yaml, t);
+    assert_eq!(r.status, AggregateStatus::ApplyFailed);
+    let why = res(&r, "m").reason.clone().unwrap();
+    assert!(
+        why.contains("cannot determine the hard link count") && why.contains("partial edit"),
+        "{why}"
+    );
+    assert_eq!(content(&r, CONF), before);
+}
+
+#[test]
+fn removing_several_equal_lines_shows_only_those_lines() {
+    let before = "keep one\ndrop me\nUNMANAGED-BETWEEN\ndrop me\nkeep two\n";
+    let yaml = line_recipe(CONF, "drop me", "      state: absent\n");
+    let r = plan(&yaml, with_file(fake(), CONF, before, 0o644));
+    let x = res(&r, "m");
+    assert_eq!(x.change, Change::Changed);
+    match &x.diff.as_ref().expect("a diff").body {
+        sinter::result::DiffBody::Text { removed, added } => {
+            assert_eq!(removed, &["drop me", "drop me"]);
+            assert!(added.is_empty());
+        }
+        other => panic!("unexpected diff {other:?}"),
+    }
+    for format in [OutputFormat::Text, OutputFormat::Json] {
+        let mut out = Vec::new();
+        sinter::output::render_plan(
+            &r,
+            &RenderOptions {
+                verbose: true,
+                format,
+                color: false,
+            },
+            &mut out,
+        )
+        .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.contains("UNMANAGED-BETWEEN"), "{out}");
+    }
+    let r = apply(&yaml, with_file(fake(), CONF, before, 0o644));
+    assert_changed(&r, "m");
+    assert_eq!(content(&r, CONF), "keep one\nUNMANAGED-BETWEEN\nkeep two\n");
+}
+
+#[test]
+fn an_indented_or_differently_cased_key_line_is_refused() {
+    let yaml = |key: &str, sep: &str| {
+        merge(&format!(
+            "      path: {CONF}\n      merge: key_value\n      key: {key}\n      separator: \"{sep}\"\n      value: \"9\"\n"
+        ))
+    };
+    for (label, key, sep, before, why) in [
+        (
+            "yaml mapping",
+            "port",
+            ": ",
+            "server:\n  port: 1\n",
+            "indented",
+        ),
+        (
+            "sshd match",
+            "PasswordAuthentication",
+            " ",
+            "Match User synthetic\n\tPasswordAuthentication yes\n",
+            "indented",
+        ),
+        ("indented equals", "a", "=", " a=1\n", "indented"),
+        (
+            "other case",
+            "PasswordAuthentication",
+            " ",
+            "passwordauthentication yes\n",
+            "only in letter case",
+        ),
+        (
+            "other case equals",
+            "Workers",
+            "=",
+            "workers=2\n",
+            "only in letter case",
+        ),
+    ] {
+        for state in ["present", "absent"] {
+            let y = format!("{}      state: {state}\n", yaml(key, sep));
+            let y = if state == "absent" {
+                y.replace("      value: \"9\"\n", "")
+            } else {
+                y
+            };
+            let e = plan_err(&y, with_file(fake(), CONF, before, 0o644));
+            assert!(e.message.contains(why), "{label}/{state}: {}", e.message);
+            let r = apply(&y, with_file(fake(), CONF, before, 0o644));
+            assert_eq!(r.status, AggregateStatus::ApplyFailed, "{label}/{state}");
+            assert_eq!(content(&r, CONF), before, "{label}/{state}");
+            let a = audit_one(&y, with_file(fake(), CONF, before, 0o644));
+            assert_eq!(
+                a.status,
+                AuditResourceStatus::Error,
+                "{label}/{state}: {a:?}"
+            );
+        }
+    }
+    // An indented comment or a longer key is no setting of the key.
+    let r = apply(
+        &yaml("port", "="),
+        with_file(fake(), CONF, "  # port=1\n  portal=2\nPORTAL=3\n", 0o644),
+    );
+    assert_changed(&r, "m");
+    assert_eq!(
+        content(&r, CONF),
+        "  # port=1\n  portal=2\nPORTAL=3\nport=9\n"
+    );
+}
+
+#[test]
+fn a_replaced_key_line_is_rewritten_as_key_separator_value() {
+    // Documented: an inline comment or quotes are part of the value.
+    let yaml = merge(&format!(
+        "      path: {CONF}\n      merge: key_value\n      key: a\n      value: \"2\"\n"
+    ));
+    let r = apply(
+        &yaml,
+        with_file(fake(), CONF, "a = \"1\" # note\nb=1\n", 0o644),
+    );
+    assert_changed(&r, "m");
+    assert_eq!(content(&r, CONF), "a=2\nb=1\n");
+}
+
+#[test]
+fn a_line_with_the_marker_words_is_rejected_at_load() {
+    for line in [
+        "# BEGIN SINTER MANAGED BLOCK foo",
+        "# END SINTER MANAGED BLOCK foo",
+        "x BEGIN SINTER MANAGED BLOCK",
+    ] {
+        for state in ["present", "absent"] {
+            let e = load_err(&line_recipe(CONF, line, &format!("      state: {state}\n")));
+            assert!(e.contains("managed-block marker"), "{line}: {e}");
+        }
+    }
+    // From a variable: judged when it is evaluated, before anything is read
+    // or written.
+    let yaml = format!(
+        "version: 1\nvars:\n  l:\n    value: '# BEGIN SINTER MANAGED BLOCK foo'\nresources:\n  - id: m\n    type: file_merge\n    with:\n      path: {CONF}\n      merge: line\n      line: \"{{{{ vars.l }}}}\"\n"
+    );
+    match try_run(Mode::Apply, &yaml, with_file(fake(), CONF, "a\n", 0o644)) {
+        Err(e) => assert!(e.message.contains("managed-block marker"), "{}", e.message),
+        Ok(r) => {
+            assert_ne!(r.status, AggregateStatus::Success);
+            assert_eq!(content(&r, CONF), "a\n");
+        }
+    }
+}
+
+#[test]
+fn a_line_matches_an_equal_line_inside_a_managed_block() {
+    // Documented limit: `line` looks at every line of the file.
+    let before = "# BEGIN SINTER MANAGED BLOCK b\nshared\n# END SINTER MANAGED BLOCK b\n";
+    let r = apply(
+        &line_recipe(CONF, "shared", ""),
+        with_file(fake(), CONF, before, 0o644),
+    );
+    assert_eq!(r.status, AggregateStatus::Success);
+    assert_eq!(res(&r, "m").change, Change::None);
+    let r = apply(
+        &line_recipe(CONF, "shared", "      state: absent\n"),
+        with_file(fake(), CONF, before, 0o644),
+    );
+    assert_changed(&r, "m");
+    assert_eq!(
+        content(&r, CONF),
+        "# BEGIN SINTER MANAGED BLOCK b\n# END SINTER MANAGED BLOCK b\n"
+    );
 }

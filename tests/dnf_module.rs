@@ -1158,3 +1158,46 @@ fn the_toml_form_and_the_shipped_example_plan_like_the_yaml_form() {
     );
     assert_eq!(find(&rep, "install-nodejs").change, Change::Changed);
 }
+
+// ---------------------------------------------------------------------------
+// handlers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_change_notifies_its_handler_and_no_change_or_a_failure_does_not() {
+    let yaml = "version: 1\nresources:\n  - id: m\n    type: dnf_module\n    notify: [restart-app]\n    with:\n      name: nodejs\n      stream: \"20\"\n      state: enabled\nhandlers:\n  - id: restart-app\n    service: myapp\n    action: restart\n";
+    let r = recipe("dm-h", yaml);
+    let t = || fake().with_service("myapp", ("loaded", "active", "enabled"));
+    let restart = |rep: &RunReport| {
+        rep.commands
+            .iter()
+            .position(|c| c.program.ends_with("systemctl") && c.args.iter().any(|a| a == "restart"))
+    };
+    let p = plan(&r, t());
+    assert_eq!(p.handlers_pending, ["restart-app"]);
+    assert!(restart(&p).is_none());
+    let rep = apply(&r, t());
+    assert_success(&rep);
+    assert_eq!(rep.handlers_run.len(), 1);
+    assert_eq!(rep.handlers_run[0].id, "restart-app");
+    // The handler ran after dnf changed the module.
+    let dnf = rep
+        .commands
+        .iter()
+        .position(|c| c.args.iter().any(|a| a == "module"))
+        .unwrap();
+    assert!(dnf < restart(&rep).expect("the handler did not run"));
+
+    // No change, no handler.
+    let rep = apply(&r, t().with_module_state("nodejs", "20", "", "enabled"));
+    assert_success(&rep);
+    assert!(rep.handlers_run.is_empty());
+    assert!(restart(&rep).is_none());
+    // A failed change does not run it either.
+    let failing = t();
+    failing.el().lock().unwrap().module_change = FakeChange::Fail;
+    let rep = apply(&r, failing);
+    assert_eq!(rep.status, AggregateStatus::ApplyFailed);
+    assert!(rep.handlers_run.is_empty());
+    assert!(restart(&rep).is_none());
+}

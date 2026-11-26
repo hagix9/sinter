@@ -418,6 +418,7 @@ impl Engine {
             meta,
             &input,
             validate.as_ref(),
+            None,
         )
     }
 
@@ -478,6 +479,26 @@ impl Engine {
                 res.id, path
             )));
         }
+        // A partial edit replaces the file by a new one. A second name of
+        // the same file would keep the old content, silently.
+        let links = match self.fs.observed(path, |fs| partial_hard_links(fs, path))? {
+            Observed::Value(n) => n,
+            Observed::ParentAbsent => {
+                return Err(SinterError::apply(format!(
+                    "{}: a parent of {} disappeared during observation",
+                    res.id, path
+                )))
+            }
+            Observed::Gone => return Err(self.vanished(res)),
+            Observed::Refused(e) => return Err(self.observation_refusal(res, path, e)),
+        };
+        if links != 1 {
+            return Err(SinterError::apply(format!(
+                "{}: {}",
+                res.id,
+                partial_hard_link_refusal(path, links)
+            )));
+        }
         Ok((stat, Some(bytes)))
     }
 
@@ -492,11 +513,21 @@ impl Engine {
     /// is already as desired. `owner`, `group` and `mode` are read from
     /// `vals` exactly as for `file`: unset fields keep an existing file's
     /// values. An absent path with nothing to write is left absent.
+    ///
+    /// `observed` is the content [`Self::partial_observe`] returned (`None`
+    /// for an absent path): the bytes `new_content` was computed from. When
+    /// the file is to be rewritten, the SHA-256 the target reports for it
+    /// (the observation `file` makes anyway) must be the SHA-256 of those
+    /// bytes; otherwise the file changed since it was read and nothing is
+    /// written. This is a comparison of content, so it also catches a
+    /// change that left size, inode and timestamps as they were.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn partial_publish(
         &mut self,
         res: &FrozenResource,
         path: &str,
         stat: Stat,
+        observed: Option<&[u8]>,
         vals: &BTreeMap<String, EvalVal>,
         new_content: Option<Vec<u8>>,
         sensitive: bool,
@@ -504,6 +535,13 @@ impl Engine {
         if new_content.is_none() && stat.kind == ObjKind::Absent {
             return Ok(unchanged_result(res, "path is absent"));
         }
+        if (stat.kind == ObjKind::File) != observed.is_some() {
+            return Err(SinterError::apply(format!(
+                "{}: internal error: a partial edit was not given the content it was computed from",
+                res.id
+            )));
+        }
+        let read_sha = observed.map(sha256_hex);
         let input = self.classify_manager_input(res, path, false)?;
         let sensitive = sensitive || res.sensitive;
         let meta = self.file_meta(res, vals, stat.kind, sensitive)?;
@@ -516,6 +554,7 @@ impl Engine {
             meta,
             &input,
             None,
+            read_sha.as_deref(),
         )
     }
 
@@ -1143,6 +1182,9 @@ impl Engine {
         meta: MetaSpec,
         input: &Option<ManagerInput>,
         validate: Option<&ValidateSpec>,
+        // Partial edits only: the SHA-256 of the bytes the desired content
+        // was computed from. The file must still hold them.
+        read_sha: Option<&str>,
     ) -> Result<ResourceResult> {
         // The content may be sensitive only at run time (it comes from a
         // register or a secret): what the filesystem layer refuses from here on
@@ -1189,6 +1231,15 @@ impl Engine {
             (Some(_), ObjKind::Absent) => true,
             (Some(_), ObjKind::File) => {
                 let remote = self.observe_sha256(res, path)?;
+                if let Some(read) = read_sha {
+                    if remote.as_deref() != Some(read) {
+                        return Err(SinterError::apply(format!(
+                            "{}: {} changed since it was read; refusing to replace it (nothing was written, run again)",
+                            res.id,
+                            if sensitive { "the file" } else { path }
+                        )));
+                    }
+                }
                 remote.as_deref() != desired_sha.as_deref()
             }
             (None, _) => false,
@@ -2836,6 +2887,7 @@ impl Engine {
             meta,
             &input,
             validate.as_ref(),
+            None,
         )
     }
 
@@ -8310,6 +8362,28 @@ fn parents_hint(e: SinterError, parents: bool) -> SinterError {
         None => format!("{}{}", e.message, HINT),
     };
     SinterError { message, ..e }
+}
+
+/// The hard link count of the file a partial edit read. A count that
+/// cannot be read is an error (never "one"), said in the terms of a partial
+/// edit rather than of the shared-directory rule the count also serves.
+pub(crate) fn partial_hard_links(fs: &mut crate::targetfs::TargetFs, path: &str) -> Result<u64> {
+    fs.hard_links(path).map_err(|mut e| {
+        e.message = e.message.replace(
+            "refusing in a shared directory",
+            "a partial edit refuses a file whose other names it cannot rule out",
+        );
+        e
+    })
+}
+
+/// Why a partial edit (plan, apply and audit alike) refuses a regular file
+/// that has more than one name.
+pub(crate) fn partial_hard_link_refusal(path: &str, links: u64) -> String {
+    format!(
+        "{} has {} hard links; a partial edit replaces the file, which would leave the other name(s) with the old content, so it is refused",
+        path, links
+    )
 }
 
 pub(crate) fn unchanged_result(res: &FrozenResource, reason: &str) -> ResourceResult {

@@ -857,6 +857,19 @@ impl FakeFs {
         self.nodes.insert(dst.to_string(), n);
     }
 
+    /// Rewrite the regular file at `path` in place: every name of its inode
+    /// gets the content, the inode number stays, the timestamps advance.
+    pub fn write_in_place(&mut self, path: &str, data: &[u8]) {
+        let ino = self.nodes.get(path).expect("file to rewrite").ino;
+        let t = self.tick();
+        for n in self.nodes.values_mut().filter(|n| n.ino == ino) {
+            assert!(matches!(n.kind, FakeKind::File(_)), "not a regular file");
+            n.kind = FakeKind::File(data.to_vec());
+            n.mtime = t;
+            n.ctime = t;
+        }
+    }
+
     pub fn file_bytes(&self, path: &str) -> Option<Vec<u8>> {
         match self.nodes.get(path) {
             Some(FakeNode {

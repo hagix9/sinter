@@ -44,7 +44,7 @@ enabled = true
 | `name` | yes | static string | — | Repository id (the section name): `[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}`. `main` is refused (it is DNF's own configuration section). |
 | `state` | no | string | `present` | `present` or `absent`. |
 | `file` | no | static string | `/etc/yum.repos.d/<name>.repo` | The file that holds the section: a plain file name directly inside `/etc/yum.repos.d/` that ends in `.repo`. |
-| `description` | no | string | — | The section's `name=` key: one line, 1–256 bytes. |
+| `description` | no | string | — | The section's `name=` key: one line, 1–256 bytes. No control characters, no Unicode line or paragraph separators (U+0085, U+2028, U+2029) and no bidirectional controls (U+202A–U+202E, U+2066–U+2069). |
 | `baseurl` | no | string or list | — | `baseurl=`. |
 | `mirrorlist` | no | string | — | `mirrorlist=`. |
 | `metalink` | no | string | — | `metalink=`. |
@@ -106,8 +106,18 @@ enabled = true
   are therefore not observed: command-line overrides (`--enablerepo`,
   `--disablerepo`, `--setopt`), a second definition of the same repository id
   in another file, and DNF 5 override directories.
+- **Other files are not looked at.** Creating or removing a repository does
+  not check whether another file under `/etc/yum.repos.d/` defines the same
+  id. In particular, after `state: absent` removed a signature-checked
+  definition, a definition of the same id in another file (possibly with
+  `gpgcheck=0`) is what DNF uses from then on. Check with
+  `grep -l '^\[<id>\]' /etc/yum.repos.d/*.repo` when an id may be defined
+  more than once.
 - The file must be valid UTF-8 without NUL bytes and without CR line endings,
-  at most 256 KiB, and a regular file (a symlink is refused, never followed).
+  at most 256 KiB, and a regular file (a symlink is refused, never followed)
+  with one name only: a file with more than one hard link is refused in
+  plan, apply and audit, because the replacement would leave the other name
+  with the old content.
 - Only the repository's own section has to be readable with certainty. It is
   refused when: the id has two section headers in the file; a key appears
   twice in the section; a line of the section is neither blank, a comment
@@ -130,10 +140,25 @@ enabled = true
 - The change goes through the same code as a
   [`file`](/en/reference/resources/file/) resource: parent path checks,
   staging, atomic replacement and verification. A file that changed between
-  observation and replacement is not overwritten.
+  observation and replacement is not overwritten: the SHA-256 the target
+  reports for the file must be that of the bytes Sinter read, and the file's
+  identity is checked again right before the rename. A write that lands in
+  the last moment between that check and the rename is not detected.
+- **Only declared keys are displayed.** Plan shows, for each declared key
+  that differs, its value in the file and the declared value (`enabled: 0`
+  → `enabled: 1`), `state` for a section that is created or removed, and
+  for a new section the declared keys. Audit details name declared keys
+  only. A line of the file that this resource does not manage — another
+  section, an undeclared key, a comment — is never shown.
+- The value a declared key has in the file **is** shown (for example the
+  current `baseurl` when `baseurl` is declared and differs). If that URL
+  carries an access token in its path or query string, set `sensitive: true`
+  on the resource.
 - If the file holds a `password`, `username`, `proxy_password`,
-  `proxy_username` or `sslclientkey` key, or a URL with credentials, in any
-  section, the diff is redacted so those values never appear in output.
+  `proxy_username` or `sslclientkey` key, or a URL with credentials
+  (`user@host`), in any section, the diff and the audit details are redacted
+  as a whole. A token in the path or query string of a URL is not recognised
+  as a credential.
 - Sinter does **not** refresh repository metadata after a change. A
   `package` resource that depends on the repository acquires metadata itself
   when it installs.
@@ -141,6 +166,11 @@ enabled = true
   whose file is also the path of a `file`, `template`, `link` or `directory`
   resource, are validation errors. Several repositories in one file are
   allowed.
+- [`file_merge`](/en/reference/resources/file_merge/) cannot edit a
+  repository file or any other DNF configuration (`/etc/yum.repos.d/`,
+  `/etc/dnf/`, `/etc/yum/`, `/etc/yum.conf`): such a path is a validation
+  error, in either order of declaration. A partial edit there would bypass
+  the signature-checking rules above.
 - Changing a repository file needs root (connect as root or use `--sudo`);
   plan says so.
 - Audit: compliant when the section exists and every declared key has the

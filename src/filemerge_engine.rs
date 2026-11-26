@@ -13,10 +13,10 @@ use crate::audit::{AuditDriftDetail, AuditResourceResult, AuditResourceStatus};
 use crate::engine::{Engine, Mode};
 use crate::error::{ErrorKind, Result, SinterError};
 use crate::expressions::EvalVal;
-use crate::filemerge::{apply_edit, MergeSpec, MergeState};
+use crate::filemerge::{apply_edit, Edit, MergeSpec, MergeState};
 use crate::model::FrozenResource;
 use crate::paths::mode_to_string;
-use crate::result::ResourceResult;
+use crate::result::{DiffBody, ResourceResult};
 use crate::targetfs::{ObjKind, Observed, Stat};
 use crate::value::Value;
 
@@ -91,7 +91,36 @@ impl Engine {
 
         let outcome = apply_edit(current.as_deref(), &spec)
             .map_err(|e| SinterError::apply(format!("{}: {}: {}", res.id, path, e)))?;
-        self.partial_publish(res, &path, stat, &vals, outcome.new_content, sensitive)
+        // Several removed lines: the diff names them and none of the
+        // unmanaged lines between them.
+        let removed_lines = match (&spec.edit, spec.state, &current, &outcome.new_content) {
+            (Edit::Line { line }, MergeState::Absent, Some(cur), Some(_)) => Some((
+                line.clone(),
+                String::from_utf8_lossy(cur)
+                    .split('\n')
+                    .filter(|l| l == line)
+                    .count(),
+            )),
+            _ => None,
+        };
+        let mut r = self.partial_publish(
+            res,
+            &path,
+            stat,
+            current.as_deref(),
+            &vals,
+            outcome.new_content,
+            sensitive,
+        )?;
+        if let (Some((line, count)), Some(diff)) = (removed_lines, r.diff.as_mut()) {
+            if matches!(diff.body, DiffBody::Text { .. }) {
+                diff.body = DiffBody::Text {
+                    removed: vec![crate::diff::sanitize_line(&line); count],
+                    added: Vec::new(),
+                };
+            }
+        }
+        Ok(r)
     }
 }
 

@@ -34,7 +34,7 @@ Common to every `merge`:
 
 | Parameter | Required | Type | Default | Description |
 |-----------|----------|------|---------|-------------|
-| `path` | yes | string (absolute path) | — | The file. Same rules as `file.path`. |
+| `path` | yes | string (absolute path) | — | The file. Same rules as `file.path`. DNF configuration is refused (see [Paths that are refused](#paths-that-are-refused)). |
 | `merge` | yes | string | — | `line`, `block` or `key_value`. |
 | `state` | no | string | `present` | `present` or `absent` — of the managed part, not of the file. |
 | `create` | no | boolean | `false` | Whether a file that does not exist may be created (`state: present` only). |
@@ -46,7 +46,7 @@ Common to every `merge`:
 
 | Parameter | Required | Type | Default | Description |
 |-----------|----------|------|---------|-------------|
-| `line` | yes | string | — | Exactly one line: no line feed, carriage return or NUL, not empty and not only whitespace. |
+| `line` | yes | string | — | Exactly one line: no line feed, carriage return or NUL, not empty and not only whitespace, and not the words of a marker line (`BEGIN SINTER MANAGED BLOCK` / `END SINTER MANAGED BLOCK`). |
 
 `merge: block`:
 
@@ -84,6 +84,13 @@ expression, no prefix match and no fuzzy match.
   it is already there — once or several times — nothing changes; a duplicate is
   never added.
 - `absent`: every line exactly equal to `line` is removed. Nothing else.
+- `line` looks at **every** line of the file, also at a line inside a managed
+  block of `merge: block`. `absent` removes an equal line there too, and
+  `present` counts it as already there. Do not manage the same text with a
+  `line` and inside a `block` of one file.
+- A `line` that carries the words `BEGIN SINTER MANAGED BLOCK` or
+  `END SINTER MANAGED BLOCK` is a validation error: it would damage or imitate
+  a block. Use `merge: block` for a block.
 
 ### `block`: the lines between two marker lines
 
@@ -105,11 +112,15 @@ Sinter writes the block as
 
 ### `key_value`: one setting
 
-A line belongs to `key` when, after optional leading spaces or tabs, it starts
-with the key, followed by optional spaces or tabs and `=` or `:` — or, for the
-space separator, by at least one space or tab (or the end of the line). The key
+A line belongs to `key` when it starts with the key **in the first column**,
+followed by optional spaces or tabs and `=` or `:` — or, for the space
+separator, by at least one space or tab (or the end of the line). The key
 must end there: `port` does not match `port_max = 1`. Comment lines (first
 non-blank character `#` or `;`) never match.
+
+Two kinds of lines are **refused** instead of edited (see the fail-closed
+cases): a line that sets the key after leading spaces or tabs, and a line
+whose key differs from the declared key only in letter case.
 
 - `present`, no matching line: `key<separator>value` is appended.
 - `present`, exactly one matching line: the whole line is replaced by
@@ -118,6 +129,11 @@ non-blank character `#` or `;`) never match.
   `max_connections   =100` already has the value `100` and is not rewritten.
 - `absent`: the one matching line is removed; no matching line → no change.
 - Values are written as they are. Sinter adds no quotes and escapes nothing.
+- A replaced line is rewritten as exactly `key<separator>value`. Sinter does
+  not know comment or quoting syntax: an inline comment or quotes on the old
+  line are part of its value, so `a = "1" # note` has the value `"1" # note`
+  and becomes `a=2` when `value: "2"` is declared. Write the quotes and the
+  comment into `value` if the file needs them.
 
 ## Expected behavior
 
@@ -131,10 +147,21 @@ non-blank character `#` or `;`) never match.
 - A change is written like a `file` resource writes: staged beside the file,
   published atomically by rename, verified afterwards. The file is read before
   the edit; if it changed between that read and the publication, the
-  publication is refused and the other writer's content stays.
+  publication is refused and the other writer's content stays. Two checks
+  do this: the SHA-256 the target reports for the file must be that of the
+  bytes Sinter read (a comparison of content, so a change that keeps the
+  size and the timestamps is noticed too), and the file's identity (inode,
+  size, owner, mode, timestamps) is checked again right before the rename.
+  A write that lands in the last moment between that check and the rename
+  is not detected; Sinter takes no lock on the file.
+- The file must have **one name only**. A regular file with more than one
+  hard link is refused in plan, apply and audit: the replacement would leave
+  the other name with the old content.
 - The path must be a regular file. A symlink is refused and never followed;
   a directory or another object is refused.
-- Plan shows the change as the normal file diff. Plan and audit only read.
+- Plan shows the change as the normal file diff. When `merge: line` with
+  `state: absent` removes several equal lines, the diff lists those lines
+  only, not the unmanaged lines between them. Plan and audit only read.
 - `sensitive: true` on the resource, or a value that comes from a sensitive
   variable, redacts the diff and every value in plan, apply and audit. A new
   file of a sensitive resource gets mode `0600` unless `mode` says otherwise.
@@ -143,6 +170,18 @@ non-blank character `#` or `;`) never match.
   a secret.
 - A change notifies handlers like any other resource.
 - Not available through MCP.
+
+### Paths that are refused
+
+`file_merge` does not edit DNF configuration. A `path` that is
+`/etc/yum.conf`, or is inside `/etc/yum.repos.d/`, `/etc/dnf/` (for example
+`dnf.conf`, `modules.d/`, `vars/`) or `/etc/yum/`, is a validation error
+when the recipe is loaded. One added line there could switch off package
+signature checking (`gpgcheck=0`). Manage repositories with
+[`dnf_repository`](/en/reference/resources/dnf_repository/) and module
+streams with [`dnf_module`](/en/reference/resources/dnf_module/), which keep
+package signature checking, or write a whole file with
+[`file`](/en/reference/resources/file/).
 
 ### When the file does not exist
 
@@ -174,7 +213,13 @@ guess.
 - `key_value`: the key appears on two or more lines ("Sinter does not guess
   which one is in effect"); the file contains a section header (a line that is
   only `[...]`); a line sets the key with another separator style than the
-  declared one (for example `key value` in a file declared with `=`).
+  declared one (for example `key value` in a file declared with `=`); a
+  line sets the key but is indented (indentation usually means a structure
+  Sinter does not understand: a nested YAML mapping, an `sshd_config`
+  `Match` block); a line sets a key that differs from the declared key only
+  in letter case (Sinter does not guess whether the file's reader treats
+  them as the same setting).
+- The file has more than one hard link.
 
 ### Several resources on one file
 
@@ -188,7 +233,8 @@ guess.
   it on one of them only.
 - A `file`, `template`, `link`, `directory` or `systemd_timer` resource on the
   same path is a validation error: managing the whole path and a part of it
-  contradict each other.
+  contradict each other. So is a `dnf_repository` on the same file, in either
+  order of declaration (the path is refused for `file_merge` anyway).
 
 ### Audit
 
@@ -354,7 +400,11 @@ lines does not matter. It is **not safe** for:
   supported;
 - order-sensitive files, where a new setting must not simply go to the end;
 - formats where a key legitimately appears several times or the first match
-  wins, such as `sshd_config` with `Match` blocks;
+  wins, such as `sshd_config` with `Match` blocks (an indented setting of the
+  key is refused, but a `Match` block written without indentation is not
+  recognised);
+- formats whose keys are case-insensitive: a line with the key in another
+  letter case is refused, not treated as the same setting;
 - files that `Include` other files: Sinter sees only this one file, so the
   value in effect may come from somewhere else.
 
