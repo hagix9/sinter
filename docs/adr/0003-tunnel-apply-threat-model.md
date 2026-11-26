@@ -166,3 +166,30 @@ signed with a key the proposal process cannot read).
 - v1.15.0: documentation and the read-only boundary tests only (P6).
 - The approval primitive built for connection-risk control in v1.15.0 is the
   same one W1 will use; nothing is built twice.
+
+## 8. Status and open requirements recorded 2026-11-26 (no decision)
+
+Recorded for the next tunnel extension; nothing here is decided, designed for implementation or approved. W1 and W2 stay as in §5, W2's approval method and privilege boundary stay open (§5.2), the read-only MCP boundary (`sinter mcp`, `sinter serve`) is unchanged, and no message in a conversation is ever an approval.
+
+8.1 What changed since this record was written. The approval primitive of DESIGN §43.4 (`plan --approval-request`, `sinter approve`, `apply --approval`, the append-only ledger) is implemented and released in v1.15.0. Of the conditions in §6 for W1 this one is met; the others are not: an independent review of this ADR, approval records created by another local account or otherwise tamper-resistant, and the Owner's approval of W1.
+
+8.2 Requirements a later design must answer (W1 where it applies, otherwise W2):
+
+| Topic | Already decided here | Open |
+|---|---|---|
+| Change proposals through the tunnel | W1, §5.1 and the proposal policy §5.3 | the proposal process's configuration format and how it is started and stopped |
+| Remote execution of an approved apply | W2 is a separate decision, §5.2 | everything: which process executes, with which identity and targets file |
+| Binding approval to recipe, target host and plan digest | §5.4 (DESIGN §43.4): digest, host and resources; re-plan before mutation | how a bundle or several hosts are bound (one approval per host and recipe, or a set) |
+| Expiry and replay | §5.4: expiry, single use, marked used before contact | — |
+| Caller identification and permissions | T6 unresolved; no per-user authorization in the tunnel (ADR 0002 §8.4) | the binding of a request to the Owner (W2 precondition) |
+| Progress of an apply | — | a read-only way for the tunnel side to see that an approved run started, is running or ended, without a channel back into it |
+| Retrieving results | §5.5 ledger records the outcome | which part of the run report may be returned (no secrets, redaction as for plan) |
+| Execution continuing when the tunnel drops | W1: the tunnel takes no part in applying (§5.6) | W2: an apply must never depend on the tunnel staying up; how it is detached and supervised |
+| State after reconnecting | — | how a reconnected session finds a run by approval id, read-only |
+| No double execution | §5.4 single use; §5.6 no automatic retry | the same guarantee across a restarted write process |
+| Operation and approval history | §5.5 ledger, hash-chained, no secret values | retention and off-host copies stay an operator decision |
+| Resource Plugins | §5.3 refuses plugin mutate operations in proposals | whether an allow-listed plugin type may ever be proposed |
+| Resources that can cut the connection | §5.3 and DESIGN §43 unchanged; §43.6 guarded procedures | how a remote execution reports a change whose result it cannot observe after the connection is lost |
+| Secrets | proposals refuse secret references (§5.3); the ledger has no secret values | — |
+
+8.3 Dependencies before any of it: §6 unchanged, plus a decision on the MCP protocol revision the tunnel path uses (Sinter answers `2025-03-26` today) and the result of the real-host tunnel verification still open in ADR 0002 §14.

@@ -4641,3 +4641,8 @@ Exercised against the scripted target only. Assumed and to be measured on Ubuntu
 - `dd iflag=nofollow,nonblock` fails on a symbolic link (ELOOP), does not block on a FIFO, and reads a regular file of up to 256 KiB in one `read` of `bs=262145`;
 - rename(2), link(2) and unlink(2) update the ctime that `stat %z` reports on each supported file system;
 - the ten-field record of `stat -c '%F|%a|%u|%g|%s|%d|%i|%y|%z|%h'` (the bracket of 63.2 "Reads in D") on each supported coreutils (and uutils on Ubuntu 26.04).
+
+64. Future tunnel extensions (recorded 2026-11-26; NOT DESIGNED FOR IMPLEMENTATION)
+
+Changes proposed through the tunnel and the execution of approved changes are ADR 0003 (W1, W2); its §8 lists the requirements a later design must answer and what changed since (the approval primitive of §43.4 is released in v1.15.0). The MCP Skills extension is recorded in ADR 0002 §19: what the specification says, what is unknown about ChatGPT and the tunnel, and the points a design must settle. Neither is implemented, versioned or ordered; the read-only MCP boundary (§41, §38.12) is unchanged.
+
