@@ -411,6 +411,68 @@ fn redact_reason(sensitive: bool, msg: &str) -> String {
 }
 
 /// Shared outcome of a filesystem metadata comparison (owner/group/mode).
+/// The desired metadata of an object that exists, for audit.
+///
+/// A declared `owner` or `group` that names an account which does not exist
+/// on the host is a difference from the desired state, not a reason the
+/// object cannot be audited: the object is certainly not owned by it. It is
+/// reported as drift on that dimension and the remaining metadata is still
+/// compared. This applies only when the lookup CONFIRMS the absence; a
+/// lookup that fails or is incomplete leaves the original error (audit
+/// error), and a value that is unknown in plan stays not auditable.
+fn audit_meta(
+    engine: &mut Engine,
+    res: &FrozenResource,
+    vals: &BTreeMap<String, EvalVal>,
+    stat: &crate::targetfs::Stat,
+    sensitive: bool,
+    details: &mut Vec<AuditDriftDetail>,
+    meta: impl Fn(&mut Engine, &BTreeMap<String, EvalVal>) -> Result<crate::resources::MetaSpec>,
+) -> std::result::Result<crate::resources::MetaSpec, Box<AuditResourceResult>> {
+    let first = match meta(engine, vals) {
+        Ok(m) => return Ok(m),
+        Err(e) if e.kind == crate::error::ErrorKind::Unknown => {
+            return obs_or_error(res, sensitive, Err(e))
+        }
+        Err(e) => e,
+    };
+    let mut rest = vals.clone();
+    for (field, observed) in [("owner", stat.uid), ("group", stat.gid)] {
+        let Ok(Some((name, field_sensitive))) = ev_str(vals, field) else {
+            continue;
+        };
+        // A numeric id is not looked up by name.
+        if name.is_empty() || name.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let s = sensitive || field_sensitive;
+        let absent = if field == "owner" {
+            crate::accounts::lookup_user(&mut engine.fs, &name, s)
+                .map(|l| l == crate::accounts::Lookup::Absent)
+        } else {
+            crate::accounts::lookup_group(&mut engine.fs, &name, s)
+                .map(|l| l == crate::accounts::Lookup::Absent)
+        };
+        if matches!(absent, Ok(true)) {
+            details.push(AuditDriftDetail::new(
+                field,
+                observed.to_string(),
+                format!(
+                    "{} (no such {} on the host)",
+                    name,
+                    if field == "owner" { "user" } else { "group" }
+                ),
+                s,
+            ));
+            rest.remove(field);
+        }
+    }
+    if rest.len() == vals.len() {
+        return obs_or_error(res, sensitive, Err(first));
+    }
+    obs_or_error(res, sensitive, meta(engine, &rest))
+}
+
 fn compare_metadata(
     stat: &crate::targetfs::Stat,
     meta: &crate::resources::MetaSpec,
@@ -706,10 +768,14 @@ fn audit_file_impl(
         }
     }
 
-    let meta = match obs_or_error(
+    let meta = match audit_meta(
+        engine,
         res,
+        &vals,
+        &stat,
         sensitive,
-        engine.file_meta(res, &vals, ObjKind::File, sensitive),
+        &mut details,
+        |e, v| e.file_meta(res, v, ObjKind::File, sensitive),
     ) {
         Ok(m) => m,
         Err(r) => return *r,
@@ -911,11 +977,19 @@ fn audit_directory(
         }
     }
 
-    let meta = match obs_or_error(res, sensitive, engine.dir_meta(res, &vals, ObjKind::Dir)) {
+    let mut details = Vec::new();
+    let meta = match audit_meta(
+        engine,
+        res,
+        &vals,
+        &stat,
+        sensitive,
+        &mut details,
+        |e, v| e.dir_meta(res, v, ObjKind::Dir),
+    ) {
         Ok(m) => m,
         Err(r) => return *r,
     };
-    let mut details = Vec::new();
     compare_metadata(&stat, &meta, sensitive, &mut details);
     finish_drift(res, sensitive, details, "directory matches desired state")
 }
