@@ -66,7 +66,7 @@ if any of the run's identifiers would remain.
 
 `acceptance-target.sh` defines the checks; `derive-expected-checks.sh`
 writes their ids to `expected-check-ids.txt` (60 from v1.12.0, 76 from
-v1.15.0). Each prints one `== check <id> ok|FAIL` line, or
+v1.15.0, 104 from v1.16.0). Each prints one `== check <id> ok|FAIL` line, or
 `== check <id> NOT_APPLICABLE <reason>` (below). From v1.12.0 two sections cover the plugin
 commands (`plugin-checks`: list, verify, install, remove and the partial mutate
 permission, against a plugin root inside the run's private directory, never the
@@ -106,6 +106,35 @@ all six checks; they are never SKIP or NOT APPLICABLE. They pass only after
 firewalld 0.3.0 is registered and the reload rule on a loopback path is
 measured (`docs/design/v1.15.0-release-and-acceptance.md` §3.2).
 
+From v1.16.0 the `v1160-checks` section (before `fw03-checks`;
+`docs/design/v1.16.0-release-and-acceptance.md` §2–§4) adds 28 `v116-*` checks:
+nested bundles, the plan carry across recipes (a `group` and a `user` resource
+before a directory they own), `parents: true`, the audit of a fresh host
+(drift, exit 7), an undeclared template variable (exit 2), the backups of a
+partial run; `allow_writable_parents` in a 0777 directory of its own
+(`/opt/sinter-acc-writable`: publish, replace, a planted 0600 file that plan
+does not show and `file_merge` does not widen, the refused mode-only change
+and directory, the staging cleanup); `file_merge`, `dnf_repository` (a
+disabled `file:///` section; refused off DNF 4), `dnf_module` (`nodejs` on EL 9),
+`crypto_policy` (EL 9 `DEFAULT:NO-SHA1` and back; EL 10 the missing module
+refused), `sysctl` (`vm.dirty_expire_centisecs`, the `boot` dimension with a
+later file), `hostname`, `tuned`, `timezone`, `locale`, `kernel_module`
+(`dummy`), the shipped PostgreSQL bundle (PGDG over the network) and
+`v116-no-residue`. The bundle is read from `postgresql-pgdg17/` beside the
+script and used only when every file matches the SHA-256 pinned in the
+script (`V6PGSUMS`); `run-target.sh` does not upload it yet (an Owner decision,
+because its repository host and account names do not pass the publication
+scan of bundled harness files), so until then the four `v116-pg-*` checks fail
+on the RHEL-family targets. Each block records what it changes first and
+puts it back at its end, also after a failure; restores still armed run from an
+EXIT/TERM trap. A disposable name that exists before is a failed prerequisite
+and is never removed. The `== observe v116-*` lines record the raw facts of the
+plan's §4 (stat record, ctime, `find --version`, the link count of a removed
+directory, `dd`, `systemd-analyze cat-config sysctl.d`, the DNF link, module
+files, crypto modules, TuneD and hostname state) for the evidence; they are not
+checks. `sudo` restarts nothing, no firewall or network setting changes and
+nothing reboots.
+
 NOT APPLICABLE: `applicability.json` lists the only allowed
 (check, reason, targets) entries; in v1.15.0 `nm-profile-crud` with
 `NM_NOT_INSTALLED` on `ubuntu2404` and `ubuntu2604`. The check first prints
@@ -115,6 +144,16 @@ entry yields NOT APPLICABLE. An installed but stopped NetworkManager runs the
 check (and fails it). The end line adds `not_applicable=<n>`. `raw-verdict.py`
 (given the table and the label) and the manifest checker both verify the
 table and the observation line; a NOT_APPLICABLE line without them is a FAIL.
+v1.16.0 adds four reasons, each with its own fixed observation line (the
+`proof` of the table; the same rules in `raw-verdict.py` and the manifest
+checker): `NOT_DNF_HOST` for the four `v116-pg-*` checks on the Ubuntu targets
+(`== observe v116-os family=debian major=<n> dnf=absent`), `NO_MODULE_STREAMS`
+for `v116-dnf-module` on the three EL 10 targets (`== observe v116-dnf-modules
+modules_d=<absent|empty> list=empty rows=0 source=<cache|refresh>`),
+`TUNED_NOT_AVAILABLE` for the three `v116-tuned-*` checks on Ubuntu (`== observe
+v116-tuned installed=no candidate=none`, from `apt-cache policy`), and
+`MODULE_UNAVAILABLE` for `v116-kernel-module` on every target (`== observe
+v116-kmod loaded=no modprobe_n_rc=1`). Any other observation runs the check.
 
 Tests: `python3 -m unittest discover -s release/tests`
 (`test_acceptance_harness.py` drives these scripts against a fake `gcloud`;
@@ -122,6 +161,10 @@ Tests: `python3 -m unittest discover -s release/tests`
 the target set and the new check section statically;
 `test_acceptance_fw03_checks.py` runs the firewalld section against a fake
 `sinter`, `firewall-cmd`, `ip` and `ssh` with one defect at a time;
+`test_acceptance_v1160.py` runs the v1.16.0 section against a fake `sinter`
+and fake host tools sharing one synthetic host, with one defect at a time, the
+NOT APPLICABLE cases with and without table entry and proof, and the raw
+verdict of the resulting logs;
 `test_acceptance_v190_checks.py` and `test_acceptance_v1120_checks.py` run the
 check sections against a fake `sinter` with one defect at a time, and the
 plugin section against a built binary when `SINTER_ACCEPTANCE_REAL_BIN` is set).

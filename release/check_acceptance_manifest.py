@@ -66,6 +66,46 @@ SCHEMA2 = "sinter-acceptance-manifest/2"
 APPLICABILITY_PATH = "harness/applicability.json"
 APPLICABILITY_SCHEMA = "sinter-acceptance-applicability/1"
 NEWER_TARGETS = ("ubuntu2604", "rocky10", "rhel10", "alma10")
+# NOT APPLICABLE proofs: reason -> (every line of the observation's kind, the
+# one fixed form, what that form must show). The same rules as the harness's
+# raw-verdict.py (PROOFS); v1.16.0 adds four reasons
+# (docs/design/v1.16.0-release-and-acceptance.md §2). Not a schema change: the
+# manifest and the table keep their schemas; a reason not listed here is never
+# proven.
+NA_PROOFS = {
+    "NM_NOT_INSTALLED": (
+        r"^== observe nm-presence.*$",
+        r"^== observe nm-presence nmcli=(present|absent) service=(active|inactive|not-found)$",
+        lambda m: m.group(1) == "absent" and m.group(2) in ("inactive", "not-found")),
+    "NOT_DNF_HOST": (
+        r"^== observe v116-os(?: .*)?$",
+        r"^== observe v116-os family=(debian|redhat|unknown) major=(\d+|unknown) dnf=(absent|file|link:\S+)$",
+        lambda m: m.group(1) == "debian" and m.group(3) == "absent"),
+    "NO_MODULE_STREAMS": (
+        r"^== observe v116-dnf-modules(?: .*)?$",
+        r"^== observe v116-dnf-modules modules_d=(absent|empty|nonempty) list=(empty|rows|error) rows=(\d+) source=(cache|refresh)$",
+        lambda m: m.group(1) in ("absent", "empty") and m.group(2) == "empty" and m.group(3) == "0"),
+    "TUNED_NOT_AVAILABLE": (
+        r"^== observe v116-tuned(?: .*)?$",
+        r"^== observe v116-tuned installed=(yes|no) candidate=(present|none)$",
+        lambda m: m.group(1) == "no" and m.group(2) == "none"),
+    "MODULE_UNAVAILABLE": (
+        r"^== observe v116-kmod(?: .*)?$",
+        r"^== observe v116-kmod loaded=(yes|no) modprobe_n_rc=(\d+)$",
+        lambda m: m.group(1) == "no" and m.group(2) == "1"),
+}
+
+
+def na_proven(text, reason):
+    """The log proves the reason with exactly one fixed observation line."""
+    if reason not in NA_PROOFS:
+        return False
+    kind, form, shows = NA_PROOFS[reason]
+    lines = re.findall(kind, text, re.M)
+    if len(lines) != 1:
+        return False
+    m = re.match(form, lines[0])
+    return bool(m) and shows(m)
 GLIBC = re.compile(r"^GLIBC_\d+\.\d+(\.\d+)?$")
 OPENSSL = re.compile(r"^(none|OPENSSL_\d+\.\d+\.\d+[a-z]?)$")
 SONAME = re.compile(r"^[A-Za-z0-9._+-]{1,128}$")
@@ -698,10 +738,7 @@ def check_na_bundle(files, facts, errors):
             if table is None or label not in table.get((cid, reason), set()):
                 errors.append(f"logs/{label}.log: NOT_APPLICABLE {cid} {reason} is not allowed for {label}")
                 continue
-            obs = re.findall(r"(?m)^== observe nm-presence nmcli=(present|absent) service=(active|inactive|not-found)$", text)
-            all_obs = re.findall(r"(?m)^== observe nm-presence.*$", text)
-            if not (reason == "NM_NOT_INSTALLED" and len(obs) == 1 and len(all_obs) == 1 and obs[0][0] == "absent"
-                    and obs[0][1] in ("inactive", "not-found")):
+            if not na_proven(text, reason):
                 errors.append(f"logs/{label}.log: NOT_APPLICABLE {cid} {reason} is not proven by the observation line")
             if re.search(rf"(?m)^== check {re.escape(cid)} (ok|FAIL|SKIP)$", text):
                 errors.append(f"logs/{label}.log: {cid} is both NOT_APPLICABLE and run")

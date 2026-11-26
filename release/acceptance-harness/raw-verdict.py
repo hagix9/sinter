@@ -17,9 +17,11 @@
 # NOT APPLICABLE (v1.15.0, DESIGN §47.3): a `== check <id> NOT_APPLICABLE
 # <reason>` line is accepted only when the applicability table lists (id,
 # reason, label) and the log proves the reason with exactly one fixed
-# observation line (`== observe nm-presence nmcli=absent service=<inactive|not-found>`
-# for NM_NOT_INSTALLED). Such a check leaves the expected set; it is never counted
-# as passed, and the end marker must carry `not_applicable=<n>`.
+# observation line of that reason's kind (PROOFS below: for NM_NOT_INSTALLED
+# `== observe nm-presence nmcli=absent service=<inactive|not-found>`; the
+# v1.16.0 reasons of docs/design/v1.16.0-release-and-acceptance.md §2 each have
+# their own). Such a check leaves the expected set; it is never counted as
+# passed, and the end marker must carry `not_applicable=<n>`.
 #
 # Usage: raw-verdict.py <raw.log> <expected-ids.txt> <run_start_iso> <acc_rc>
 #                       [<applicability.json> <label>]
@@ -40,8 +42,31 @@ def read(path):
         return None
 
 
-OBSERVE_NM = re.compile(r"^== observe nm-presence nmcli=(present|absent) service=(active|inactive|not-found)$", re.M)
-PROOFS = {"NM_NOT_INSTALLED": "nm"}
+# reason -> (every line of the observation's kind, the one fixed form, what that form must show).
+# The same rules are in release/check_acceptance_manifest.py (NA_PROOFS); a test keeps them equal.
+PROOFS = {
+    "NM_NOT_INSTALLED": (
+        r"^== observe nm-presence.*$",
+        r"^== observe nm-presence nmcli=(present|absent) service=(active|inactive|not-found)$",
+        lambda m: m.group(1) == "absent" and m.group(2) in ("inactive", "not-found")),
+    # v1.16.0: the PostgreSQL bundle installs PGDG RPMs
+    "NOT_DNF_HOST": (
+        r"^== observe v116-os(?: .*)?$",
+        r"^== observe v116-os family=(debian|redhat|unknown) major=(\d+|unknown) dnf=(absent|file|link:\S+)$",
+        lambda m: m.group(1) == "debian" and m.group(3) == "absent"),
+    "NO_MODULE_STREAMS": (
+        r"^== observe v116-dnf-modules(?: .*)?$",
+        r"^== observe v116-dnf-modules modules_d=(absent|empty|nonempty) list=(empty|rows|error) rows=(\d+) source=(cache|refresh)$",
+        lambda m: m.group(1) in ("absent", "empty") and m.group(2) == "empty" and m.group(3) == "0"),
+    "TUNED_NOT_AVAILABLE": (
+        r"^== observe v116-tuned(?: .*)?$",
+        r"^== observe v116-tuned installed=(yes|no) candidate=(present|none)$",
+        lambda m: m.group(1) == "no" and m.group(2) == "none"),
+    "MODULE_UNAVAILABLE": (
+        r"^== observe v116-kmod(?: .*)?$",
+        r"^== observe v116-kmod loaded=(yes|no) modprobe_n_rc=(\d+)$",
+        lambda m: m.group(1) == "no" and m.group(2) == "1"),
+}
 
 
 def load_table(path):
@@ -66,12 +91,14 @@ def load_table(path):
 
 def proven(text, reason):
     """The log proves the reason with exactly one fixed observation line."""
-    if PROOFS.get(reason) == "nm":
-        obs = OBSERVE_NM.findall(text)
-        all_lines = re.findall(r"^== observe nm-presence.*$", text, re.M)
-        return (len(obs) == 1 and len(all_lines) == 1 and obs[0][0] == "absent"
-                and obs[0][1] in ("inactive", "not-found"))
-    return False
+    if reason not in PROOFS:
+        return False
+    kind, form, shows = PROOFS[reason]
+    lines = re.findall(kind, text, re.M)
+    if len(lines) != 1:
+        return False
+    m = re.match(form, lines[0])
+    return bool(m) and shows(m)
 
 
 def main():

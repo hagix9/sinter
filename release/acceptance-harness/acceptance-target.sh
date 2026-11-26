@@ -1022,6 +1022,781 @@ else check discover-roundtrip FAIL "rc=$R status=$AST not_compliant=$ANON"; fi
 sudo rm -rf "$DD"; rm -rf "$S/disc"
 # END v1150-checks
 
+# ------------------------------------------------------------- v1.16.0
+# BEGIN v1160-checks
+# docs/design/v1.16.0-release-and-acceptance.md §2-§4. One block per check: it
+# writes its recipes below $V6 (the run's private directory), runs the frozen
+# sinter on this host with --sudo, compares exit codes and fields of the JSON
+# documents, and judges the host itself where it can (stat, the tool's own
+# answer). Whatever a block changes on the host is recorded before the change
+# and put back at the end of the block, also when the check failed; an armed
+# restore that has not run yet runs from the EXIT/TERM trap when the harness
+# stops in the middle. Names are disposable (sinter-acc*, /opt/sinter-acc-*,
+# /etc/sinter-acc); one that exists before the block is a failed prerequisite
+# and is never removed. NOT_APPLICABLE only through na_allowed and after the
+# fixed observation line applicability.json names. The "== observe v116-..."
+# lines record the raw facts the plan's §4 asks for (evidence, not checks).
+# Nothing here restarts sshd, changes a firewall or the network, or reboots.
+V6ROOT=""   # the host's root directory; the stand-in tests replace this line only
+V6="$S/v116"; rm -rf "$V6"; mkdir -m 700 "$V6"
+V6B=/opt/sinter-acc-v116; V6W=/opt/sinter-acc-writable; V6E=/etc/sinter-acc
+V6TMO_PG=2700   # seconds for one run of the PostgreSQL bundle (PGDG over the network)
+v6h() { printf '%s' "$V6ROOT$1"; }   # a host path as the harness itself reaches it
+v6j() { # v6j <json file> <python expression over d> -> the value or ERR:<type>
+  python3 -I -c 'import json, sys
+def R(d):  # the resources of a recipe document, or of every execution of a bundle document
+    if isinstance(d, dict) and "executions" in d:
+        return [r for e in d["executions"] for r in ((e.get("result") or {}).get("resources") or [])]
+    return d.get("resources") or []
+def by(d, i):
+    m = [r for r in R(d) if r.get("id") == i]
+    return m[0] if len(m) == 1 else {}
+def C(d): return sorted(set(r.get("change") for r in R(d)))
+def ST(d): return sorted(set(r.get("status") for r in R(d)))
+def TXT(r): return " ".join([str(r.get("reason") or "")] + [str(n) for n in (r.get("notes") or [])])
+def DIM(r): return sorted(x.get("dimension") for x in (r.get("details") or []))
+try:
+    d = json.load(open(sys.argv[1])); print(eval(sys.argv[2]))
+except Exception as e:
+    print("ERR:%s" % type(e).__name__)' "$1" "$2"; }
+v6x() { # v6x <tag> <plan|apply|audit> <recipe> [args]: the frozen sinter as root, JSON in $V6/<tag>.json, stderr in .err
+  local t=$1 c=$2 f=$3; shift 3
+  "$EXE" "$c" "$f" --sudo --format json "$@" > "$V6/$t.json" 2> "$V6/$t.err"; }
+v6in() { cat "$V6/$1.json" "$V6/$1.err" 2> /dev/null | grep -qF -- "$2" && echo yes || echo no; }   # v6in <tag> <text>: is it in that run's output
+v6e() { head -c 300 "$V6/$1.err" 2> /dev/null | tr '\n' ' '; }
+v6st() { sudo stat -c "$2" "$(v6h "$1")" 2> /dev/null || echo missing; }
+v6ex() { sudo test -e "$(v6h "$1")" || sudo test -L "$(v6h "$1")"; }
+v6body() { sudo cat "$(v6h "$1")" 2> /dev/null; }
+v6_now() { # the state of a host path as one word: absent, link:<text>, file:<sha256> or other
+  local p; p=$(v6h "$1")
+  if sudo test -L "$p"; then echo "link:$(sudo readlink "$p")"
+  elif sudo test -f "$p"; then echo "file:$(sudo cat "$p" | sha256sum | cut -d' ' -f1)"
+  elif sudo test -e "$p"; then echo other; else echo absent; fi; }
+v6_save() { # v6_save <key> <host path>: keep the bytes (or the link, or the absence) for v6_put_back
+  v6_now "$2" > "$V6/orig.$1.state"
+  case "$(cat "$V6/orig.$1.state")" in file:*) sudo cat "$(v6h "$2")" > "$V6/orig.$1" ;; esac; }
+v6_same() { [ "$(v6_now "$2")" = "$(cat "$V6/orig.$1.state" 2> /dev/null)" ]; }
+v6_put_back() { # v6_put_back <key> <host path>: the saved bytes rewritten in place, the saved link, or removed when it was absent
+  local was p; was=$(cat "$V6/orig.$1.state" 2> /dev/null); p=$(v6h "$2")
+  v6_same "$1" "$2" && return 0
+  case "$was" in
+    file:*) sudo test -L "$p" && sudo rm -f "$p"; sudo sh -c 'cat > "$1"' sh "$p" < "$V6/orig.$1" ;;
+    link:*) sudo ln -sfn "${was#link:}" "$p" ;;
+    absent) sudo rm -f "$p" ;;
+  esac; }
+v6_mkdir() { # v6_mkdir <host dir> <mode>: a disposable root:root directory -> created | in-use | FAIL
+  if v6ex "$1"; then echo in-use
+  elif sudo mkdir -m "$2" "$(v6h "$1")" && sudo chown 0:0 "$(v6h "$1")" && sudo chmod "$2" "$(v6h "$1")"; then echo created
+  else echo FAIL; fi; }
+v6_put() { # v6_put <host path> <mode> < content: a root:root file the harness plants
+  sudo sh -c 'cat > "$1"' sh "$(v6h "$1")" && sudo chown 0:0 "$(v6h "$1")" && sudo chmod "$2" "$(v6h "$1")"; }
+# Restores: v6_arm records one, v6_restore runs it once; v6_restore_all runs what is still armed.
+V6_ARMED=""
+v6_arm() { case " $V6_ARMED " in *" $1 "*) ;; *) V6_ARMED="$V6_ARMED $1" ;; esac; }
+v6_restore() { case " $V6_ARMED " in *" $1 "*) V6_ARMED=$(printf ' %s ' $V6_ARMED | sed "s/ $1 / /; s/^ *//; s/ *$//"); "$1" ;; esac; }
+v6_restore_all() { local f; for f in $V6_ARMED; do v6_restore "$f"; done; }
+trap v6_restore_all EXIT
+trap 'v6_restore_all; exit 143' TERM HUP INT
+
+V6FAM=$(. "$V6ROOT/etc/os-release" 2> /dev/null; case " ${ID:-} ${ID_LIKE:-} " in (*" rhel "*|*" fedora "*) echo redhat ;; (*" debian "*|*" ubuntu "*) echo debian ;; (*) echo unknown ;; esac)
+V6MAJ=$(. "$V6ROOT/etc/os-release" 2> /dev/null; v=${VERSION_ID:-}; v=${v%%.*}; case "$v" in (''|*[!0-9]*) echo unknown ;; (*) echo "$v" ;; esac)
+if [ -L "$V6ROOT/usr/bin/dnf" ]; then V6DNF="link:$(readlink "$V6ROOT/usr/bin/dnf")"; elif [ -e "$V6ROOT/usr/bin/dnf" ]; then V6DNF=file; else V6DNF=absent; fi
+case "${V6DNF##*/}" in link:dnf5*|dnf5*) V6GEN=dnf5 ;; link:dnf-*|dnf-*|link:dnf4*|dnf4*) V6GEN=dnf4 ;; absent) V6GEN=none ;; *) V6GEN=unknown ;; esac
+echo "== observe v116-os family=$V6FAM major=$V6MAJ dnf=$V6DNF"
+V6RH=no; [ "$V6FAM" = redhat ] && [ "$V6GEN" = dnf4 ] && V6RH=yes   # a DNF 4 host of the RHEL family
+V6B_ST=$(v6_mkdir "$V6B" 0755)
+v6r_base() { [ "$V6B_ST" = created ] && sudo rm -rf "$(v6h "$V6B")"; }
+[ "$V6B_ST" = created ] && v6_arm v6r_base
+echo "V116_BASE $V6B=$V6B_ST"
+
+# ---- v116-audit-fresh-drift, v116-bundle-nested: a top bundle -> os -> os/net
+# (two levels below it, DESIGN §19.3); the audit of the fresh paths first
+# (§49.4: drift, exit 7, nothing created), then validate, plan (the later
+# recipes' paths are decided at apply, §49.1), apply, re-apply and audit
+N6="$V6/nest"; mkdir -p "$N6/os/net"
+printf 'version: 1\nname: v116site\nrecipes:\n  - os\n  - 30_top.yaml\n' > "$N6/site.yaml"
+printf 'version: 1\nname: os\nrecipes:\n  - 10_base.yaml\n  - net\n' > "$N6/os/bundle.yaml"
+printf 'version: 1\nname: net\nrecipes:\n  - 20_net.yaml\n' > "$N6/os/net/bundle.yaml"
+v6_file_res() { # v6_file_res <id> <path> <content>: one file resource as YAML lines
+  printf '  - id: %s\n    type: file\n    with:\n      path: %s\n      content: "%s"\n      owner: root\n      group: root\n      mode: "0644"\n' "$1" "$2" "$3"; }
+printf 'version: 1\nresources:\n  - id: nest_dir\n    type: directory\n    with:\n      path: %s/nest\n      owner: root\n      group: root\n      mode: "0755"\n' "$V6B" > "$N6/os/10_base.yaml"
+{ printf 'version: 1\nresources:\n'; v6_file_res nest_net "$V6B/nest/net.conf" 'v116 nested level 2\n'; } > "$N6/os/net/20_net.yaml"
+{ printf 'version: 1\nresources:\n'; v6_file_res nest_top "$V6B/nest/top.conf" 'v116 top level\n'; } > "$N6/30_top.yaml"
+v6x n1 audit "$N6/site.yaml"; NR1=$?
+NS1="rc=$NR1 statuses=$(v6j "$V6/n1.json" 'ST(d)') resources=$(v6j "$V6/n1.json" 'len(R(d))') created=$(v6ex "$V6B/nest" && echo yes || echo no)"
+echo "V116_NEST_FRESH_AUDIT $NS1"
+if [ "$V6B_ST" = created ] && [ "$NS1" = "rc=7 statuses=['drift'] resources=3 created=no" ]; then
+  check v116-audit-fresh-drift ok "audit of a bundle nothing is applied to: exit 7, every resource drift, nothing created"
+else check v116-audit-fresh-drift FAIL "base=$V6B_ST $NS1 $(v6e n1)"; fi
+"$EXE" validate "$N6/site.yaml" > "$V6/n0.out" 2>&1; NR0=$?
+v6x n2 plan "$N6/site.yaml"; NR2=$?
+NP2="labels=$(v6j "$V6/n2.json" '[r["recipe"] for r in d["bundle"]["recipes"]]') unknown=$(v6j "$V6/n2.json" '[(r["id"], r["unknown"]) for r in R(d)]') carried=$(v6j "$V6/n2.json" '"(recipe os/10_base)" in TXT(by(d, "nest_net")) and "(recipe os/10_base)" in TXT(by(d, "nest_top"))')"
+v6x n3 apply "$N6/site.yaml"; NR3=$?
+NB3="$(v6body "$V6B/nest/net.conf" | tr '\n' '|')$(v6body "$V6B/nest/top.conf" | tr '\n' '|')"
+v6x n4 apply "$N6/site.yaml"; NR4=$?
+v6x n5 audit "$N6/site.yaml"; NR5=$?
+NS="validate=$NR0/$(grep -qF '3 recipe(s) from 2 nested bundle(s)' "$V6/n0.out" && echo yes || echo no) plan=$NR2 $NP2 apply=$NR3:$(v6j "$V6/n3.json" 'C(d)') bodies=$NB3 reapply=$NR4:$(v6j "$V6/n4.json" 'C(d)') audit=$NR5:$(v6j "$V6/n5.json" 'ST(d)')"
+echo "V116_NEST $NS"
+if [ "$V6B_ST" = created ] && [ "$NS" = "validate=0/yes plan=0 labels=['os/10_base', 'os/net/20_net', '30_top'] unknown=[('nest_dir', False), ('nest_net', True), ('nest_top', True)] carried=True apply=0:['changed'] bodies=v116 nested level 2|v116 top level| reapply=0:['none'] audit=0:['compliant']" ]; then
+  check v116-bundle-nested ok "nested bundle two levels deep: labels, plan carry across sub-bundles, apply, no change on re-apply, audit compliant"
+else check v116-bundle-nested FAIL "$NS $(v6e n2)"; fi
+
+# ---- v116-bundle-carry: a later recipe's directory owned by an account an
+# earlier recipe creates (§49.1 accounts). A group and a user resource, not a
+# package's creates_accounts: no small distribution package that creates a
+# system account is known to be absent on every image (creates_accounts is
+# exercised by the PostgreSQL bundle on the RHEL family).
+V6U=sinteracc
+CU0=$(getent passwd "$V6U" > /dev/null 2>&1 && echo present || echo absent)
+CG0=$(getent group "$V6U" > /dev/null 2>&1 && echo present || echo absent)
+CA="$V6/carry"; mkdir -p "$CA"
+printf 'version: 1\nname: v116carry\nrecipes:\n  - 10_group.yaml\n  - 20_user.yaml\n  - 30_dir.yaml\n' > "$CA/bundle.yaml"
+printf 'version: 1\nresources:\n  - id: acc_grp\n    type: group\n    with:\n      name: %s\n      system: true\n' "$V6U" > "$CA/10_group.yaml"
+printf 'version: 1\nresources:\n  - id: acc_user\n    type: user\n    with:\n      name: %s\n      system: true\n      group: %s\n      shell: /usr/sbin/nologin\n' "$V6U" "$V6U" > "$CA/20_user.yaml"
+printf 'version: 1\nresources:\n  - id: acc_dir\n    type: directory\n    with:\n      path: %s/carry\n      owner: %s\n      group: %s\n      mode: "0750"\n' "$V6B" "$V6U" "$V6U" > "$CA/30_dir.yaml"
+v6r_carry() { # only what this block created
+  [ "$CU0" = absent ] && getent passwd "$V6U" > /dev/null 2>&1 && sudo userdel "$V6U" > /dev/null 2>&1
+  [ "$CG0" = absent ] && getent group "$V6U" > /dev/null 2>&1 && sudo groupdel "$V6U" > /dev/null 2>&1
+  echo "V116_CARRY_RESTORE user=$(getent passwd "$V6U" > /dev/null 2>&1 && echo present || echo absent) group=$(getent group "$V6U" > /dev/null 2>&1 && echo present || echo absent)"; }
+if [ "$V6B_ST" = created ] && [ "$CU0" = absent ] && [ "$CG0" = absent ]; then
+  v6_arm v6r_carry
+  v6x c1 plan "$CA/bundle.yaml"; CR1=$?
+  CP1="plan=$CR1 dir_unknown=$(v6j "$V6/c1.json" 'by(d, "acc_dir").get("unknown")') named=$(v6j "$V6/c1.json" '"(recipe 20_user)" in TXT(by(d, "acc_dir")) or "(recipe 10_group)" in TXT(by(d, "acc_dir"))')"
+  v6x c2 apply "$CA/bundle.yaml"; CR2=$?
+  CS="$CP1 apply=$CR2 dir=$(v6st "$V6B/carry" '%U:%G %a')"
+  v6_restore v6r_carry
+else CS="prerequisite: base=$V6B_ST user=$CU0 group=$CG0 (an existing account is never removed)"; fi
+echo "V116_CARRY $CS"
+if [ "$CS" = "plan=0 dir_unknown=True named=True apply=0 dir=$V6U:$V6U 750" ]; then
+  check v116-bundle-carry ok "plan defers the directory owned by the account an earlier recipe creates; apply creates it with that owner"
+else check v116-bundle-carry FAIL "$CS $(v6e c1)"; fi
+
+# ---- v116-directory-parents: parents: true creates the missing parents
+# (0755, root) top down, the declared mode on the leaf; an existing parent
+# keeps its mode and identity; plan creates nothing; re-apply changes nothing
+PK=FAIL; [ "$V6B_ST" = created ] && sudo mkdir -m 0711 "$(v6h "$V6B/keep")" && sudo chown 0:0 "$(v6h "$V6B/keep")" && sudo chmod 0711 "$(v6h "$V6B/keep")" && PK=ok
+PB0="$(v6st "$V6B" '%a %u %g %i')/$(v6st "$V6B/keep" '%a %u %g %i')"
+cat > "$V6/par.yaml" <<YAML
+version: 1
+resources:
+  - id: par_new
+    type: directory
+    with:
+      path: $V6B/p1/p2/p3
+      parents: true
+      owner: root
+      group: root
+      mode: "0750"
+  - id: par_keep
+    type: directory
+    with:
+      path: $V6B/keep/k1/k2
+      parents: true
+      mode: "0700"
+YAML
+v6x pa1 plan "$V6/par.yaml"; PR1=$?
+PP1="plan=$PR1:$(v6j "$V6/pa1.json" '[(r["id"], r["change"]) for r in R(d)]') created=$(v6ex "$V6B/p1" && echo yes || echo no)/$(v6ex "$V6B/keep/k1" && echo yes || echo no)"
+v6x pa2 apply "$V6/par.yaml"; PR2=$?
+PM="$(for p in p1 p1/p2 p1/p2/p3 keep/k1 keep/k1/k2; do printf '%s ' "$(v6st "$V6B/$p" '%F:%a:%u:%g' | tr ' ' _)"; done)"
+PB1="$(v6st "$V6B" '%a %u %g %i')/$(v6st "$V6B/keep" '%a %u %g %i')"
+v6x pa3 apply "$V6/par.yaml"; PR3=$?
+PS="prep=$PK $PP1 apply=$PR2 modes=[$PM] existing=$([ "$PB0" = "$PB1" ] && echo unchanged || echo "CHANGED:$PB0->$PB1") reapply=$PR3:$(v6j "$V6/pa3.json" 'C(d)')"
+echo "V116_PARENTS $PS"
+if [ "$V6B_ST" = created ] && [ "$PS" = "prep=ok plan=0:[('par_new', 'changed'), ('par_keep', 'changed')] created=no/no apply=0 modes=[directory:755:0:0 directory:755:0:0 directory:750:0:0 directory:755:0:0 directory:700:0:0 ] existing=unchanged reapply=0:['none']" ]; then
+  check v116-directory-parents ok "missing parents created 0755 root, leaf as declared, existing parents untouched, plan creates nothing, re-apply unchanged"
+else check v116-directory-parents FAIL "$PS $(v6e pa2)"; fi
+
+# ---- v116-template-undefined-var: an undeclared vars.* in a template body is
+# exit 2 at validate and before any contact (§49.5)
+mkdir -p "$V6/tpl"
+printf 'a={{ vars.known }}\nb={{ vars.v116_undeclared }}\n' > "$V6/tpl/t.j2"
+printf 'version: 1\nvars:\n  known: { value: x }\nresources:\n  - id: tpl\n    type: template\n    with:\n      path: %s/tpl.conf\n      source: t.j2\n      mode: "0644"\n' "$V6B" > "$V6/tpl/t.yaml"
+"$EXE" validate "$V6/tpl/t.yaml" > "$V6/t1.out" 2>&1; TR1=$?
+v6x t2 plan "$V6/tpl/t.yaml"; TR2=$?
+TS="validate=$TR1:$(grep -qF 'references the undefined variable vars.v116_undeclared' "$V6/t1.out" && echo yes || echo no) plan=$TR2:$(v6in t2 'references the undefined variable vars.v116_undeclared') file=$(v6ex "$V6B/tpl.conf" && echo created || echo absent)"
+echo "V116_TEMPLATE $TS"
+if [ "$TS" = "validate=2:yes plan=2:yes file=absent" ]; then check v116-template-undefined-var ok "undeclared template variable: exit 2 at validate and at plan, nothing written"
+else check v116-template-undefined-var FAIL "$TS"; fi
+
+# ---- v116-skip-resource-backup: in a partial run the backup only the
+# excluded resource needs is skipped (SKIPPED_BY_USER) and the one a running
+# resource needs is taken (§49.6); the store is below the disposable base
+BK=FAIL
+[ "$V6B_ST" = created ] && sudo mkdir -m 0755 "$(v6h "$V6B/bk")" && printf 'a-old\n' | v6_put "$V6B/bk/a.conf" 0644 && printf 's-old\n' | v6_put "$V6B/bk/s.conf" 0644 && BK=ok
+{ printf 'version: 1\nbackup:\n  directory: %s/bk-store\n  paths:\n    - path: %s/bk/a.conf\n      resources: [bk_a]\n    - path: %s/bk/s.conf\n      resources: [bk_a, bk_b]\nresources:\n' "$V6B" "$V6B" "$V6B"
+  v6_file_res bk_a "$V6B/bk/a.conf" 'a-new\n'; v6_file_res bk_b "$V6B/bk/s.conf" 's-new\n'; } > "$V6/bk.yaml"
+v6x b1 apply "$V6/bk.yaml" --skip-resource bk_a; BR1=$?
+BS="prep=$BK apply=$BR1 entries=$(v6j "$V6/b1.json" 'sorted((e["path"].rsplit("/", 1)[-1], e["status"], e.get("reason")) for e in d["backup"]["entries"])') bodies=$(v6body "$V6B/bk/a.conf" | tr -d '\n')/$(v6body "$V6B/bk/s.conf" | tr -d '\n') copies=$(sudo find "$(v6h "$V6B/bk-store")" -type f -name a.conf 2> /dev/null | grep -c .)/$(sudo find "$(v6h "$V6B/bk-store")" -type f -name s.conf 2> /dev/null | grep -c .)"
+echo "V116_SKIP_BACKUP $BS"
+if [ "$BS" = "prep=ok apply=0 entries=[('a.conf', 'skipped', 'SKIPPED_BY_USER'), ('s.conf', 'backed_up', None)] bodies=a-old/s-new copies=0/1" ]; then
+  check v116-skip-resource-backup ok "--skip-resource: the excluded resource's backup is skipped (SKIPPED_BY_USER), the shared one is taken"
+else check v116-skip-resource-backup FAIL "$BS $(v6e b1)"; fi
+
+# ---- allow_writable_parents (§63) in a non-sticky 0777 directory of this
+# block, as root. First the raw facts of §63.4 (observations only).
+V6W_ST=$(v6_mkdir "$V6W" 0777)
+v6r_writable() { [ "$V6W_ST" = created ] && sudo rm -rf "$(v6h "$V6W")"; }
+[ "$V6W_ST" = created ] && v6_arm v6r_writable
+WD=$(v6h "$V6W")
+echo "V116_WRITABLE $V6W=$V6W_ST mode=$(v6st "$V6W" '%a %u %g')"
+if [ "$V6W_ST" = created ]; then
+  echo "== observe v116-fs type=$(stat -f -c %T "$WD" 2>&1 | tr -s ' ' _)"
+  printf 'probe\n' | v6_put "$V6W/.v116-probe" 0644
+  echo "V116_STAT_RECORD $(sudo stat -c '%F|%a|%u|%g|%s|%d|%i|%y|%z|%h' "$WD/.v116-probe" 2>&1 | tr ' ' _)"
+  echo "== observe v116-stat fields=$(sudo stat -c '%F|%a|%u|%g|%s|%d|%i|%y|%z|%h' "$WD/.v116-probe" 2> /dev/null | awk -F'|' '{print NF}') links=$(sudo stat -c %h "$WD/.v116-probe" 2>&1)"
+  z0=$(sudo stat -c %z "$WD/.v116-probe"); sleep 1; sudo mv "$WD/.v116-probe" "$WD/.v116-probe2"; z1=$(sudo stat -c %z "$WD/.v116-probe2")
+  sleep 1; sudo ln "$WD/.v116-probe2" "$WD/.v116-probe3"; z2=$(sudo stat -c %z "$WD/.v116-probe2")
+  sleep 1; sudo rm -f "$WD/.v116-probe3"; z3=$(sudo stat -c %z "$WD/.v116-probe2")
+  echo "== observe v116-ctime rename=$([ "$z0" != "$z1" ] && echo changed || echo same) link=$([ "$z1" != "$z2" ] && echo changed || echo same) unlink=$([ "$z2" != "$z3" ] && echo changed || echo same)"
+  echo "== observe v116-find $(find --version 2>&1 | head -1 | tr -s ' \t' __ | cut -c1-80)"
+  echo "== observe v116-removed-dir-fd links=$(sudo sh -c 'mkdir "$1" && exec 5< "$1" && rmdir "$1" && stat -L -c %h /proc/self/fd/5' sh "$WD/.v116-fdprobe" 2>&1 | tr -s ' \n' __)"
+  sudo ln -s /etc/hostname "$WD/.v116-link"; sudo mkfifo "$WD/.v116-fifo"; sudo sh -c 'head -c 262144 /dev/zero > "$1"' sh "$WD/.v116-big"
+  DL=$(sudo dd if="$WD/.v116-link" iflag=nofollow,nonblock bs=262145 count=1 status=none 2>&1 > /dev/null); DLR=$?
+  timeout 20 sudo dd if="$WD/.v116-fifo" iflag=nofollow,nonblock bs=262145 count=1 status=none > /dev/null 2>&1; DFR=$?
+  DB=$(sudo dd if="$WD/.v116-big" iflag=nofollow,nonblock bs=262145 count=1 status=none 2> /dev/null | wc -c | tr -d ' ')
+  echo "== observe v116-dd symlink_rc=$DLR fifo_rc=$DFR big_bytes=$DB symlink_err=$(printf '%s' "$DL" | head -1 | tr -s ' ' _ | cut -c1-80)"
+  sudo rm -f "$WD/.v116-probe2" "$WD/.v116-link" "$WD/.v116-fifo" "$WD/.v116-big"
+fi
+v6_w() { # v6_w <file> <resource lines>: a recipe that lists the writable directory
+  printf 'version: 1\nallow_writable_parents: [%s]\nresources:\n%s' "$V6W" "$2" > "$1"; }
+v6_w "$V6/w1.yaml" "$(v6_file_res w_app "$V6W/app.conf" 'v116 one\n')"
+v6_w "$V6/w2.yaml" "$(v6_file_res w_app "$V6W/app.conf" 'v116 two\n')"
+"$EXE" validate "$V6/w1.yaml" > "$V6/w0.out" 2>&1; WR0=$?
+v6x w1 apply "$V6/w1.yaml"; WR1=$?
+WB1="$(v6body "$V6W/app.conf" | tr -d '\n'):$(v6st "$V6W/app.conf" '%U:%G:%a:%h'):$(v6in w1 'allowed by allow_writable_parents')"
+v6x w2 apply "$V6/w2.yaml"; WR2=$?
+WB2="$(v6body "$V6W/app.conf" | tr -d '\n'):$(v6st "$V6W/app.conf" '%U:%G:%a:%h')"
+v6x w3 audit "$V6/w2.yaml"; WR3=$?
+WS="validate=$WR0:$(grep -qF "allow_writable_parents lists $V6W" "$V6/w0.out" && echo yes || echo no) new=$WR1:$WB1 replace=$WR2:$WB2 audit=$WR3:$(v6j "$V6/w3.json" 'ST(d)')"
+echo "V116_WRITABLE_PUBLISH $WS"
+if [ "$V6W_ST" = created ] && [ "$WS" = "validate=0:yes new=0:v116 one:root:root:644:1:yes replace=0:v116 two:root:root:644:1 audit=0:['compliant']" ]; then
+  check v116-writable-publish ok "in a listed 0777 directory: published new, replaced, audit compliant; the result notes the exception"
+else check v116-writable-publish FAIL "$WS $(v6e w1)"; fi
+# metadata alone, and a directory, stay refused there (plan and apply)
+v6_w "$V6/w4.yaml" "$(v6_file_res w_app "$V6W/app.conf" 'v116 two\n' | sed 's/"0644"/"0600"/')"
+v6_w "$V6/w5.yaml" "$(printf '  - id: w_dir\n    type: directory\n    with:\n      path: %s/sub\n      mode: "0755"\n' "$V6W")"
+v6x w4p plan "$V6/w4.yaml"; WR4P=$?; v6x w4a apply "$V6/w4.yaml"; WR4A=$?
+v6x w5p plan "$V6/w5.yaml"; WR5P=$?; v6x w5a apply "$V6/w5.yaml"; WR5A=$?
+WN='is not supported there'
+WRF="metadata=$WR4P:$(v6in w4p "$WN")/$WR4A:$(v6in w4a "$WN"):$(v6st "$V6W/app.conf" '%a') directory=$WR5P:$(v6in w5p "$WN")/$WR5A:$(v6in w5a "$WN"):$(v6ex "$V6W/sub" && echo created || echo absent)"
+echo "V116_WRITABLE_REFUSED $WRF"
+if [ "$V6W_ST" = created ] && [ "$WRF" = "metadata=4:yes/5:yes:644 directory=4:yes/5:yes:absent" ]; then check v116-writable-refusals ok "a mode-only change and a directory are refused in plan (4) and apply (5); nothing changed"
+else check v116-writable-refusals FAIL "$WRF"; fi
+# a trusted principal's 0600 file renamed into the managed name: plan shows no
+# content of it, and file_merge does not make it readable by more accounts
+CANW="synthetic-v116-planted-canary-$$"
+PL=FAIL; [ "$V6W_ST" = created ] && printf 'planted=%s\n' "$CANW" | v6_put "$V6W/.v116-plant" 0600 && sudo mv "$WD/.v116-plant" "$WD/merge.conf" && PL=ok
+PL0="$PL:$(v6st "$V6W/merge.conf" '%U:%a:%h')"; PLS0=$(v6_now "$V6W/merge.conf")
+v6_w "$V6/w6.yaml" "$(v6_file_res w_merge "$V6W/merge.conf" 'replaced\n')"
+v6_w "$V6/w7.yaml" "$(printf '  - id: w_merge\n    type: file_merge\n    with:\n      path: %s/merge.conf\n      merge: key_value\n      key: planted\n      value: "x"\n      mode: "0644"\n' "$V6W")"
+v6x w6 plan "$V6/w6.yaml"; WR6=$?
+"$EXE" plan "$V6/w6.yaml" --sudo > "$V6/w6t.json" 2> "$V6/w6t.err"; WR6T=$?
+v6x w7 plan "$V6/w7.yaml"; WR7=$?
+"$EXE" plan "$V6/w7.yaml" --sudo > "$V6/w7t.json" 2> "$V6/w7t.err"; WR7T=$?
+v6x w8 apply "$V6/w7.yaml"; WR8=$?
+WLEAK=$(cat "$V6"/w6.json "$V6"/w6.err "$V6"/w6t.json "$V6"/w6t.err "$V6"/w7.json "$V6"/w7.err "$V6"/w7t.json "$V6"/w7t.err "$V6"/w8.json "$V6"/w8.err 2> /dev/null | grep -c "$CANW")
+WP="planted=$PL0 file_plan=$WR6/$WR6T:$(v6j "$V6/w6.json" '(by(d, "w_merge").get("diff") or {}).get("type")'):$(v6in w6 'content differs (not shown)') merge_plan=$WR7/$WR7T:$(v6in w7 'readable by more accounts') merge_apply=$WR8:$(v6in w8 'readable by more accounts') leak=$WLEAK after=$(v6st "$V6W/merge.conf" '%U:%a:%h'):$([ "$(v6_now "$V6W/merge.conf")" = "$PLS0" ] && echo same-bytes || echo CHANGED)"
+echo "V116_WRITABLE_PLANTED $(printf '%s' "$WP" | sed "s/$CANW/<canary>/g")"
+if [ "$WP" = "planted=ok:root:600:1 file_plan=0/0:summary:yes merge_plan=4/4:yes merge_apply=5:yes leak=0 after=root:600:1:same-bytes" ]; then
+  check v116-writable-planted ok "a planted 0600 root file: plan shows a summary only (text and JSON), file_merge with mode 0644 refused in plan and apply, the file unchanged"
+else check v116-writable-planted FAIL "$(printf '%s' "$WP" | sed "s/$CANW/<canary>/g")"; fi
+WSG=$(sudo find "$WD" -maxdepth 1 -name '.sinter-stage.*' 2> /dev/null | grep -c .)
+WSL=$(cat "$V6"/w1.json "$V6"/w2.json "$V6"/w1.err "$V6"/w2.err 2> /dev/null | grep -c 'was left in place')
+echo "V116_STAGING_LEFT dirs=$WSG notes=$WSL entries=[$(sudo ls -A "$WD" 2> /dev/null | tr '\n' ' ')]"
+if [ "$V6W_ST" = created ] && [ "$WR1" -eq 0 ] && [ "$WR2" -eq 0 ] && [ "$WSG" = 0 ] && [ "$WSL" = 0 ]; then
+  check v116-writable-staging-cleanup ok "no .sinter-stage.* directory is left in the writable directory after the publications"
+else check v116-writable-staging-cleanup FAIL "dirs=$WSG notes=$WSL publish=$WR1/$WR2"; fi
+v6_restore v6r_writable
+
+# ---- v116-file-merge: line, block and key_value on a file of this block in
+# /etc/sinter-acc; exact bytes after the edit; unchanged on re-apply; audit
+# compliant; the original bytes again after the parts are removed
+V6E_ST=$(v6_mkdir "$V6E" 0755)
+v6r_etc() { [ "$V6E_ST" = created ] && sudo rm -rf "$(v6h "$V6E")"; }
+[ "$V6E_ST" = created ] && v6_arm v6r_etc
+FMF="$V6E/merge.conf"
+[ "$V6E_ST" = created ] && printf '# v116 file_merge target\nalpha=1\nkeep=yes\n' | v6_put "$FMF" 0644
+FM0=$(v6_now "$FMF")
+fm_recipe() { # fm_recipe <file> <alpha value> <line state> <block state>
+  printf 'version: 1\nresources:\n  - id: fm_kv\n    type: file_merge\n    with:\n      path: %s\n      merge: key_value\n      key: alpha\n      value: "%s"\n  - id: fm_line\n    type: file_merge\n    with:\n      path: %s\n      merge: line\n      line: "sinter-acc-line"\n      state: %s\n  - id: fm_block\n    type: file_merge\n    with:\n      path: %s\n      merge: block\n      marker: v116\n      state: %s\n%s' \
+    "$FMF" "$2" "$FMF" "$3" "$FMF" "$4" "$([ "$4" = present ] && printf '      content: "b1\\nb2\\n"\n')" > "$1"; }
+fm_recipe "$V6/fm1.yaml" 2 present present
+fm_recipe "$V6/fm2.yaml" 1 absent absent
+v6x fm1 apply "$V6/fm1.yaml"; FR1=$?
+FMB=$(v6body "$FMF" | od -An -c | tr -s ' \n' ' ')
+FWANT=$(printf '# v116 file_merge target\nalpha=2\nkeep=yes\nsinter-acc-line\n# BEGIN SINTER MANAGED BLOCK v116\nb1\nb2\n# END SINTER MANAGED BLOCK v116\n' | od -An -c | tr -s ' \n' ' ')
+v6x fm2 apply "$V6/fm1.yaml"; FR2=$?
+v6x fm3 audit "$V6/fm1.yaml"; FR3=$?
+v6x fm4 apply "$V6/fm2.yaml"; FR4=$?
+FS="apply=$FR1:$(v6j "$V6/fm1.json" 'C(d)') bytes=$([ "$FMB" = "$FWANT" ] && echo exact || echo DIFFERENT) reapply=$FR2:$(v6j "$V6/fm2.json" 'C(d)') audit=$FR3:$(v6j "$V6/fm3.json" 'ST(d)') remove=$FR4 original=$([ "$(v6_now "$FMF")" = "$FM0" ] && echo yes || echo no)"
+echo "V116_FILE_MERGE $FS"; [ "$FMB" = "$FWANT" ] || echo "V116_FILE_MERGE_BYTES $FMB"
+if [ "$V6E_ST" = created ] && [ "$FS" = "apply=0:['changed'] bytes=exact reapply=0:['none'] audit=0:['compliant'] remove=0 original=yes" ]; then
+  check v116-file-merge ok "line, block and key_value: exact bytes, unchanged on re-apply, audit compliant, original bytes after removal"
+else check v116-file-merge FAIL "etc=$V6E_ST $FS $(v6e fm1)"; fi
+v6_restore v6r_etc
+
+# ---- dnf_repository (§51): a disabled local file:/// repository in a file of
+# this block (RHEL family); the refusal on a host that is not DNF 4
+DRF=/etc/yum.repos.d/sinter-acc.repo
+dr_recipe() { # dr_recipe <file> <state> [gpgcheck value]
+  if [ "$2" = present ]; then
+    printf 'version: 1\nresources:\n  - id: acc_repo\n    type: dnf_repository\n    with:\n      name: sinter-acc\n      file: %s\n      description: "Sinter acceptance local repository"\n      baseurl: "file://%s/repo"\n      enabled: false\n      gpgcheck: %s\n' "$DRF" "$V6B" "${3:-true}" > "$1"
+  else printf 'version: 1\nresources:\n  - id: acc_repo\n    type: dnf_repository\n    with:\n      name: sinter-acc\n      file: %s\n      state: absent\n' "$DRF" > "$1"; fi; }
+dr_recipe "$V6/dr1.yaml" present; dr_recipe "$V6/dr2.yaml" absent; dr_recipe "$V6/dr0.yaml" present false
+"$EXE" validate "$V6/dr0.yaml" > "$V6/dr0.out" 2>&1; DR0=$?
+v6x dr0p plan "$V6/dr0.yaml"; DR0P=$?
+DG="validate=$DR0:$(grep -c 'never writes gpgcheck=0' "$V6/dr0.out") plan=$DR0P file=$(v6ex "$DRF" && echo present || echo absent)"
+echo "V116_DNF_REPO_GPGCHECK_FALSE $DG"
+if [ "$DG" = "validate=2:1 plan=2 file=absent" ]; then check v116-dnf-repository-gpgcheck-refused ok "gpgcheck: false is a load error (exit 2) on every host; nothing written"
+else check v116-dnf-repository-gpgcheck-refused FAIL "$DG"; fi
+DR_PRE=$(v6ex "$DRF" && echo in-use || echo absent)
+v6r_repo() { [ "$DR_PRE" = absent ] && sudo rm -f "$(v6h "$DRF")"; }
+v6_dnf_list() { sudo dnf -q --disablerepo='*' repolist --disabled 2>&1 | awk '{print $1}' | grep -cx sinter-acc; }   # reads every .repo file, loads no metadata
+if [ "$V6RH" = yes ] && [ "$DR_PRE" = absent ]; then
+  v6_arm v6r_repo
+  v6x dr1 plan "$V6/dr1.yaml"; D1=$?
+  v6x dr2 apply "$V6/dr1.yaml"; D2=$?
+  DRB=$(v6body "$DRF")
+  echo "V116_DNF_REPO_FILE<<"; printf '%s\n' "$DRB"; echo ">>"
+  DREAD=$(v6_dnf_list)
+  v6x dr3 apply "$V6/dr1.yaml"; D3=$?
+  v6x dr4 audit "$V6/dr1.yaml"; D4=$?
+  v6x dr5 apply "$V6/dr2.yaml"; D5=$?
+  DS="plan=$D1:$(v6j "$V6/dr1.json" 'C(d)') apply=$D2 lines=$(printf '%s\n' "$DRB" | grep -cxE '\[sinter-acc\]|baseurl=file://'"$V6B"'/repo|enabled=0|gpgcheck=1') owner=$(v6st "$DRF" '%U:%G:%a') dnf_reads=$DREAD reapply=$D3:$(v6j "$V6/dr3.json" 'C(d)') audit=$D4:$(v6j "$V6/dr4.json" 'ST(d)') absent=$D5:$(v6body "$DRF" | grep -c '^\[sinter-acc\]')/$(v6_dnf_list)/$(v6ex "$DRF" && echo kept || echo removed)"
+  v6_restore v6r_repo
+elif [ "$V6RH" = no ]; then
+  v6x dr1 plan "$V6/dr1.yaml"; D1=$?
+  case "$V6GEN" in dnf5) DW='it uses DNF 5' ;; *) DW='dnf_repository is not supported on this host' ;; esac
+  DS="refusal plan=$D1:$(v6in dr1 "$DW") file=$(v6ex "$DRF" && echo present || echo absent)"
+else DS="prerequisite: $DRF exists"; fi
+echo "V116_DNF_REPO $DS"
+case "$V6RH:$DS" in
+  "yes:plan=0:['changed'] apply=0 lines=4 owner=root:root:644 dnf_reads=1 reapply=0:['none'] audit=0:['compliant'] absent=0:0/0/kept") DOK=yes ;;
+  "no:refusal plan=4:yes file=absent") DOK=yes ;;
+  *) DOK=no ;; esac
+if [ "$DOK" = yes ]; then check v116-dnf-repository ok "$([ "$V6RH" = yes ] && echo 'section written with gpgcheck=1, read back by dnf, unchanged, compliant, removed' || echo 'refused on a host that is not DNF 4, nothing written')"
+else check v116-dnf-repository FAIL "$DS $(v6e dr1)"; fi
+
+# ---- dnf_module (§52): EL 9: enable a stream of nodejs (one the host lists),
+# disable, reset; EL 10: no module streams (NOT_APPLICABLE, proven); not DNF 4: refused
+DMF=/etc/dnf/modules.d/nodejs.module
+dm_recipe() { printf 'version: 1\nresources:\n  - id: acc_mod\n    type: dnf_module\n    with:\n      name: nodejs\n      state: %s\n%s' "$2" "${3:+      stream: \"$3\"
+}" > "$1"; }
+dm_state() { v6body "$DMF" | sed -n 's/^state=//p' | head -1; }
+dm_stream() { v6body "$DMF" | sed -n 's/^stream=//p' | head -1; }
+DMDO=no
+if [ "$V6RH" = yes ]; then
+  MDD=$(v6h /etc/dnf/modules.d)
+  if [ ! -d "$MDD" ]; then MDS=absent; elif [ -z "$(ls -A "$MDD" 2> /dev/null)" ]; then MDS=empty; else MDS=nonempty; fi
+  MLS=cache; ML=$(sudo dnf -q -C module list 2>&1); MLR=$?
+  if [ "$MLR" -ne 0 ] && printf '%s' "$ML" | grep -qi 'cache'; then MLS=refresh; ML=$(sudo dnf -q module list 2>&1); MLR=$?; fi
+  MROWS=$(printf '%s\n' "$ML" | awk '/^Name[ \t]+Stream/ {h = 1; next} /^$/ {h = 0} h && NF >= 2 {n++} END {print n + 0}')
+  if [ "$MROWS" -gt 0 ]; then MLIST=rows; elif [ "$MLR" -eq 0 ] || printf '%s' "$ML" | grep -q 'No matching Modules to list'; then MLIST=empty; else MLIST=error; fi
+  echo "V116_DNF_MODULE_LIST rc=$MLR<<"; printf '%s\n' "$ML" | head -60; echo ">>"
+  echo "== observe v116-dnf-modules modules_d=$MDS list=$MLIST rows=$MROWS source=$MLS"
+  DMS0=$(v6_now "$DMF"); DMST0=$(dm_state)
+  if { [ "$MDS" = absent ] || [ "$MDS" = empty ]; } && [ "$MLIST" = empty ] && na_allowed v116-dnf-module NO_MODULE_STREAMS; then
+    # the plan's expectation, recorded: plan reports the change, apply fails at dnf
+    dm_recipe "$V6/dm0.yaml" enabled 22
+    v6r_dnfmod0() { [ "$DMS0" = absent ] && v6ex "$DMF" && { sudo dnf -y -q module reset nodejs > /dev/null 2>&1; sudo rm -f "$(v6h "$DMF")"; }; }
+    v6_arm v6r_dnfmod0
+    v6x dm0p plan "$V6/dm0.yaml"; DM0P=$?; v6x dm0a apply "$V6/dm0.yaml"; DM0A=$?
+    echo "V116_DNF_MODULE_EL10 plan=$DM0P apply=$DM0A state_file=$(v6_now "$DMF") apply_reason=$(v6j "$V6/dm0a.json" 'TXT(by(d, "acc_mod"))' | cut -c1-200)"
+    v6_restore v6r_dnfmod0
+    not_applicable v116-dnf-module NO_MODULE_STREAMS "no module streams on $LABEL: /etc/dnf/modules.d $MDS, dnf module list empty"
+  else DMDO=yes; fi
+else DMDO=refusal; fi
+if [ "$DMDO" = yes ]; then
+  DMSTR=$(printf '%s\n' "$ML" | awk '/^Name[ \t]+Stream/ {h = 1; next} /^$/ {h = 0} h && $1 == "nodejs" {s = $2; d = ($3 == "[d]" || $3 ~ /^\[d/) ? 1 : 0; if (d && !dd) {print s; dd = 1; exit}; if (!f) f = s} END {if (!dd && f) print f}' | head -1)
+  echo "V116_DNF_MODULE stream=${DMSTR:-none} state_before=${DMST0:-default}/$DMS0"
+  v6r_dnfmod() { [ -n "$(dm_state)" ] && sudo dnf -y -q module reset nodejs > /dev/null 2>&1; echo "V116_DNF_MODULE_RESTORE $(v6_now "$DMF") state=$(dm_state)"; }
+  if [ -n "$DMSTR" ] && [ -z "$DMST0" ]; then
+    v6_arm v6r_dnfmod
+    dm_recipe "$V6/dm1.yaml" enabled "$DMSTR"; dm_recipe "$V6/dm2.yaml" disabled; dm_recipe "$V6/dm3.yaml" reset
+    v6x dm1 plan "$V6/dm1.yaml"; M1=$?
+    v6x dm2 apply "$V6/dm1.yaml"; M2=$?; MS2="$(dm_state)/$(dm_stream)"
+    echo "V116_DNF_MODULE_FILE_ENABLED<<"; v6body "$DMF"; echo ">>"
+    v6x dm3 apply "$V6/dm1.yaml"; M3=$?
+    v6x dm4 audit "$V6/dm1.yaml"; M4=$?
+    v6x dm5 apply "$V6/dm2.yaml"; M5=$?; MS5=$(dm_state)
+    echo "V116_DNF_MODULE_FILE_DISABLED<<"; v6body "$DMF"; echo ">>"
+    v6x dm6 audit "$V6/dm2.yaml"; M6=$?
+    v6x dm7 apply "$V6/dm3.yaml"; M7=$?; MS7="$(v6_now "$DMF" | cut -d: -f1)/$(dm_state)"
+    echo "V116_DNF_MODULE_FILE_RESET<<"; v6body "$DMF"; echo ">>"
+    v6x dm8 audit "$V6/dm3.yaml"; M8=$?
+    DMR="plan=$M1:$(v6j "$V6/dm1.json" 'C(d)') enable=$M2:$MS2 reapply=$M3:$(v6j "$V6/dm3.json" 'C(d)') audit=$M4 disable=$M5:$MS5 audit=$M6 reset=$M7:$MS7 audit=$M8"
+    v6_restore v6r_dnfmod
+  else DMR="prerequisite: stream=${DMSTR:-none} state_before=${DMST0:-default} (a module not in its default state is not touched)"; fi
+  echo "V116_DNF_MODULE $DMR"
+  case "$DMR" in "plan=0:['changed'] enable=0:enabled/$DMSTR reapply=0:['none'] audit=0 disable=0:disabled audit=0 reset=0:"*"/ audit=0") DMOK=yes ;; *) DMOK=no ;; esac
+  if [ "$DMOK" = yes ]; then check v116-dnf-module ok "nodejs:$DMSTR enabled, unchanged, compliant, disabled, reset (state file read back each time)"
+  else check v116-dnf-module FAIL "$DMR $(v6e dm2)"; fi
+elif [ "$DMDO" = refusal ]; then
+  dm_recipe "$V6/dm1.yaml" enabled 22
+  v6x dm1 plan "$V6/dm1.yaml"; M1=$?
+  case "$V6GEN" in dnf5) DW='it uses DNF 5' ;; *) DW='dnf_module is not supported on this host' ;; esac
+  DMR="refusal plan=$M1:$(v6in dm1 "$DW")"; echo "V116_DNF_MODULE $DMR"
+  if [ "$DMR" = "refusal plan=4:yes" ]; then check v116-dnf-module ok "refused on a host that is not DNF 4"; else check v116-dnf-module FAIL "$DMR"; fi
+fi
+
+# ---- crypto_policy (§53): EL 9 DEFAULT -> DEFAULT:NO-SHA1 -> back with
+# allow_weaker; EL 10 the missing module refused and a run at the current
+# policy unchanged; no update-crypto-policies: refused. Nothing is restarted.
+CPT=$(v6h /usr/bin/update-crypto-policies)
+cp_recipe() { printf 'version: 1\nresources:\n  - id: acc_cp\n    type: crypto_policy\n    with:\n      policy: %s\n%s' "$2" "${3:+      allow_weaker: true
+}" > "$1"; }
+cp_show() { sudo "$CPT" --show 2> /dev/null; }
+cp_recipe "$V6/cp1.yaml" DEFAULT:NO-SHA1
+if [ -x "$CPT" ]; then
+  CP0=$(cp_show)
+  echo "== observe v116-crypto show=$CP0 nosha1_module=$([ -f "$(v6h /usr/share/crypto-policies/policies/modules/NO-SHA1.pmod)" ] && echo present || echo absent) modules=$(ls "$(v6h /usr/share/crypto-policies/policies/modules)" 2> /dev/null | sed 's/\.pmod$//' | tr '\n' ',')"
+  v6r_crypto() { [ -n "$CP0" ] && [ "$(cp_show)" != "$CP0" ] && sudo "$CPT" --set "$CP0" > /dev/null 2>&1; echo "V116_CRYPTO_RESTORE show=$(cp_show)"; }
+  v6_arm v6r_crypto
+  if [ "$V6MAJ" = 9 ] && [ "$CP0" = DEFAULT ]; then
+    cp_recipe "$V6/cp2.yaml" DEFAULT; cp_recipe "$V6/cp3.yaml" DEFAULT weaker
+    v6x cp1 apply "$V6/cp1.yaml"; K1=$?; KS1=$(cp_show)
+    KSSH=$(ssh -i "$SSHKEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/opt/sinter-acceptance/ssh/known_hosts \
+      -o ConnectTimeout=20 -p 22 "$SSHUSER@127.0.0.1" /usr/bin/true > /dev/null 2>&1 && echo ok || echo FAIL)
+    echo "== observe v116-crypto-ssh policy=$KS1 new_loopback_session=$KSSH sshd_restarted=no"
+    v6x cp2 apply "$V6/cp1.yaml"; K2=$?
+    v6x cp3 audit "$V6/cp1.yaml"; K3=$?
+    v6x cp4 plan "$V6/cp2.yaml"; K4=$?
+    v6x cp5 apply "$V6/cp3.yaml"; K5=$?; KS5=$(cp_show)
+    KS="set=$K1:$KS1 reapply=$K2:$(v6j "$V6/cp2.json" 'C(d)') audit=$K3:$(v6j "$V6/cp3.json" 'ST(d)') lower=$K4:$(v6in cp4 'removing it weakens the policy') back=$K5:$KS5"
+    KW="set=0:DEFAULT:NO-SHA1 reapply=0:['none'] audit=0:['compliant'] lower=4:yes back=0:DEFAULT"
+  elif [ "$V6MAJ" != 9 ] && [ "$V6MAJ" != unknown ] && [ -n "$CP0" ]; then
+    case "$CP0" in DEFAULT|FUTURE) cp_recipe "$V6/cp2.yaml" "$CP0" ;; *) cp_recipe "$V6/cp2.yaml" "$CP0" weaker ;; esac
+    v6x cp1 plan "$V6/cp1.yaml"; K1=$?
+    v6x cp2 apply "$V6/cp2.yaml"; K2=$?
+    KS="missing_module=$K1:$(v6in cp1 'is not defined on this host'):$(cp_show) current=$K2:$(v6j "$V6/cp2.json" 'C(d)'):$(cp_show)"
+    KW="missing_module=4:yes:$CP0 current=0:['none']:$CP0"
+  else KS="prerequisite: EL$V6MAJ policy=$CP0 (EL 9 must start at DEFAULT)"; KW=no; fi
+  v6_restore v6r_crypto
+else
+  v6x cp1 plan "$V6/cp1.yaml"; K1=$?
+  KS="refusal plan=$K1:$(v6in cp1 'crypto_policy is not supported on this host (update-crypto-policies was not found)')"
+  KW="refusal plan=4:yes"; [ "$V6FAM" = redhat ] && KW="no update-crypto-policies on a RHEL-family host"
+fi
+echo "V116_CRYPTO $KS"
+if [ "$KS" = "$KW" ]; then check v116-crypto-policy ok "$KS"
+else check v116-crypto-policy FAIL "$KS (want $KW) $(v6e cp1)"; fi
+
+# ---- sysctl (§54): vm.dirty_expire_centisecs (writeback timing only) set at
+# run time and in Sinter's file; audit `boot` compliant, then drift while a
+# later file of this block sets another value; absent removes Sinter's file;
+# the original running value is put back.
+SK=vm.dirty_expire_centisecs; SF="/etc/sysctl.d/90-sinter-$SK.conf"; SL=/etc/sysctl.d/99-zz-sinter-acc.conf
+SV0=$(sysctl -n "$SK" 2> /dev/null); case "$SV0" in 2999) SV=3001 ;; *) SV=2999 ;; esac; SW=$((SV + 2))
+SCAT=$(sudo systemd-analyze cat-config sysctl.d 2> "$V6/sy-cat.err"); SCR=$?
+echo "V116_SYSCTL_HEADERS rc=$SCR stderr_bytes=$(wc -c < "$V6/sy-cat.err" | tr -d ' ')<<"; printf '%s\n' "$SCAT" | grep '^# /'; echo ">>"
+echo "== observe v116-sysctl-order rc=$SCR headers=$(printf '%s\n' "$SCAT" | grep -cE '^# /[^ ,]+\.conf$') sysctl_conf=$(printf '%s\n' "$SCAT" | grep -qxF '# /etc/sysctl.conf' && echo listed || echo not-listed) link99=$(sudo readlink "$(v6h /etc/sysctl.d/99-sysctl.conf)" 2> /dev/null || { v6ex /etc/sysctl.d/99-sysctl.conf && echo file || echo absent; })"
+SPRE="$(v6ex "$SF" && echo in-use || echo absent)/$(v6ex "$SL" && echo in-use || echo absent)"
+v6r_sysctl() { sudo rm -f "$(v6h "$SL")"; [ "${SPRE%%/*}" = absent ] && sudo rm -f "$(v6h "$SF")"
+  [ -n "$SV0" ] && [ "$(sysctl -n "$SK" 2> /dev/null)" != "$SV0" ] && sudo sysctl -q -w "$SK=$SV0" > /dev/null 2>&1
+  echo "V116_SYSCTL_RESTORE value=$(sysctl -n "$SK" 2> /dev/null) files=$(v6ex "$SF" && echo left || echo none)/$(v6ex "$SL" && echo left || echo none)"; }
+if [ -n "$SV0" ] && [ "$SPRE" = absent/absent ]; then
+  v6_arm v6r_sysctl
+  printf 'version: 1\nresources:\n  - id: acc_sysctl\n    type: sysctl\n    with:\n      name: %s\n      value: "%s"\n' "$SK" "$SV" > "$V6/sy1.yaml"
+  printf 'version: 1\nresources:\n  - id: acc_sysctl\n    type: sysctl\n    with:\n      name: %s\n      state: absent\n' "$SK" > "$V6/sy2.yaml"
+  v6x sy1 plan "$V6/sy1.yaml"; Y1=$?
+  v6x sy2 apply "$V6/sy1.yaml"; Y2=$?; YO=$(v6st "$SF" '%U:%G:%a')
+  YB=$(v6body "$SF" | od -An -c | tr -s ' \n' ' '); YW=$(printf '# Managed by Sinter (sysctl). Local changes are replaced.\n%s = %s\n' "$SK" "$SV" | od -An -c | tr -s ' \n' ' ')
+  YV2=$(sysctl -n "$SK" 2> /dev/null)
+  v6x sy3 apply "$V6/sy1.yaml"; Y3=$?
+  v6x sy4 audit "$V6/sy1.yaml"; Y4=$?
+  printf '%s = %s\n' "$SK" "$SW" | v6_put "$SL" 0644
+  v6x sy5 audit "$V6/sy1.yaml"; Y5=$?
+  echo "V116_SYSCTL_LATER_FILE_AUDIT $(v6j "$V6/sy5.json" '[(x.get("dimension"), x.get("observed"), x.get("desired")) for x in by(d, "acc_sysctl").get("details") or []]')"
+  sudo rm -f "$(v6h "$SL")"
+  v6x sy6 apply "$V6/sy2.yaml"; Y6=$?
+  YS="plan=$Y1:$(v6j "$V6/sy1.json" 'C(d)') apply=$Y2:value=$YV2:file=$([ "$YB" = "$YW" ] && echo exact || echo DIFFERENT):$YO reapply=$Y3:$(v6j "$V6/sy3.json" 'C(d)') audit=$Y4:$(v6j "$V6/sy4.json" 'ST(d)') later_file=$Y5:$(v6j "$V6/sy5.json" 'DIM(by(d, "acc_sysctl"))') absent=$Y6:$(v6ex "$SF" && echo left || echo removed):running=$(sysctl -n "$SK" 2> /dev/null)"
+  v6_restore v6r_sysctl
+else YS="prerequisite: value=${SV0:-unreadable} files=$SPRE"; fi
+echo "V116_SYSCTL $YS"
+if [ "$YS" = "plan=0:['changed'] apply=0:value=$SV:file=exact:root:root:644 reapply=0:['none'] audit=0:['compliant'] later_file=7:['boot'] absent=0:removed:running=$SV" ]; then
+  check v116-sysctl ok "$SK set and persisted, compliant, boot drift from a later file, file removed by absent (running value kept), original value restored"
+else check v116-sysctl FAIL "$YS $(v6e sy2)"; fi
+
+# ---- hostname (§55): sinter-acc-<label> as the static name, unchanged on
+# re-apply, compliant; the static, transient and pretty names, /etc/hostname
+# and /etc/hosts as before afterwards. While the test name is set, /etc/hosts
+# carries a temporary line for it so that sudo can resolve the host name.
+HN="sinter-acc-$LABEL"
+HS0=$(hostnamectl --static 2> /dev/null); HT0=$(hostnamectl --transient 2> /dev/null); HP0=$(hostnamectl --pretty 2> /dev/null)
+v6_save hostname /etc/hostname; v6_save hosts /etc/hosts
+echo "V116_HOSTNAME_BEFORE static=$HS0 transient=$HT0 pretty=[$HP0] etc_hostname=$(cat "$V6/orig.hostname.state")"
+v6r_hostname() {
+  if [ -n "$HS0" ]; then sudo hostnamectl set-hostname "$HS0" > /dev/null 2>&1; fi
+  v6_put_back hostname /etc/hostname
+  [ "$(hostnamectl --transient 2> /dev/null)" != "$HT0" ] && [ -n "$HT0" ] && sudo hostnamectl --transient set-hostname "$HT0" > /dev/null 2>&1
+  [ "$(hostnamectl --pretty 2> /dev/null)" != "$HP0" ] && sudo hostnamectl --pretty set-hostname "$HP0" > /dev/null 2>&1
+  v6_put_back hosts /etc/hosts
+  echo "V116_HOSTNAME_RESTORE static=$(hostnamectl --static 2> /dev/null) transient=$(hostnamectl --transient 2> /dev/null) pretty=[$(hostnamectl --pretty 2> /dev/null)]"; }
+if [ "$HS0" != "$HN" ] && hostnamectl --static > /dev/null 2>&1; then
+  v6_arm v6r_hostname
+  HH=not-needed; getent hosts "$HN" > /dev/null 2>&1 || { printf '127.0.1.1 %s # sinter acceptance, temporary\n' "$HN" | sudo sh -c 'cat >> "$1"' sh "$(v6h /etc/hosts)" && HH=added; }
+  printf 'version: 1\nresources:\n  - id: acc_hostname\n    type: hostname\n    with:\n      name: %s\n' "$HN" > "$V6/hn1.yaml"
+  v6x hn1 plan "$V6/hn1.yaml"; H1=$?
+  v6x hn2 apply "$V6/hn1.yaml"; H2=$?
+  HS2=$(hostnamectl --static 2> /dev/null)
+  echo "== observe v116-hostname after_set static=$HS2 transient=$(hostnamectl --transient 2> /dev/null) pretty_kept=$([ "$(hostnamectl --pretty 2> /dev/null)" = "$HP0" ] && echo yes || echo no) etc_hostname=$(v6body /etc/hostname | head -1) hosts_line=$HH"
+  v6x hn3 apply "$V6/hn1.yaml"; H3=$?
+  v6x hn4 audit "$V6/hn1.yaml"; H4=$?
+  HSS="plan=$H1:$(v6j "$V6/hn1.json" 'C(d)') apply=$H2:$HS2 reapply=$H3:$(v6j "$V6/hn3.json" 'C(d)') audit=$H4:$(v6j "$V6/hn4.json" 'ST(d)')"
+  v6_restore v6r_hostname
+else HSS="prerequisite: static=$HS0"; fi
+echo "V116_HOSTNAME $HSS"
+if [ "$HSS" = "plan=0:['changed'] apply=0:$HN reapply=0:['none'] audit=0:['compliant']" ] && [ "$(hostnamectl --static 2> /dev/null)" = "$HS0" ] && v6_same hostname /etc/hostname && v6_same hosts /etc/hosts; then
+  check v116-hostname ok "static name set, unchanged, compliant; names, /etc/hostname and /etc/hosts restored"
+else check v116-hostname FAIL "$HSS restored_static=$(hostnamectl --static 2> /dev/null)"; fi
+
+# ---- timezone (§60): Asia/Tokyo (Etc/UTC when the host already is in Tokyo); the
+# link /etc/localtime (and /etc/timezone where it exists) as before afterwards
+TZL0=$(sudo readlink "$(v6h /etc/localtime)" 2> /dev/null); TZ0=${TZL0##*zoneinfo/}
+case "$TZ0" in Asia/Tokyo) TZW=Etc/UTC ;; *) TZW=Asia/Tokyo ;; esac
+v6_save localtime /etc/localtime; v6_save etctz /etc/timezone
+v6r_tz() { [ -n "$TZL0" ] && [ "$(sudo readlink "$(v6h /etc/localtime)" 2> /dev/null)" != "$TZL0" ] && { sudo timedatectl set-timezone "$TZ0" > /dev/null 2>&1; v6_put_back localtime /etc/localtime; }
+  v6_put_back etctz /etc/timezone; echo "V116_TIMEZONE_RESTORE link=$(sudo readlink "$(v6h /etc/localtime)" 2> /dev/null)"; }
+if [ -n "$TZL0" ] && [ "$TZ0" != "$TZL0" ]; then
+  v6_arm v6r_tz
+  printf 'version: 1\nresources:\n  - id: acc_tz\n    type: timezone\n    with:\n      name: %s\n' "$TZW" > "$V6/tz1.yaml"
+  v6x tz1 plan "$V6/tz1.yaml"; Z1=$?
+  v6x tz2 apply "$V6/tz1.yaml"; Z2=$?; TZL2=$(sudo readlink "$(v6h /etc/localtime)" 2> /dev/null)
+  echo "== observe v116-timezone before=$TZL0 after=$TZL2 etc_timezone=$(cat "$V6/orig.etctz.state" | cut -d: -f1)->$(v6_same etctz /etc/timezone && echo same || echo changed)"
+  v6x tz3 apply "$V6/tz1.yaml"; Z3=$?
+  v6x tz4 audit "$V6/tz1.yaml"; Z4=$?
+  ZS="plan=$Z1:$(v6j "$V6/tz1.json" 'C(d)') apply=$Z2:${TZL2##*zoneinfo/} reapply=$Z3:$(v6j "$V6/tz3.json" 'C(d)') audit=$Z4:$(v6j "$V6/tz4.json" 'ST(d)')"
+  v6_restore v6r_tz
+else ZS="prerequisite: /etc/localtime is not a link into zoneinfo ($(cat "$V6/orig.localtime.state"))"; fi
+echo "V116_TIMEZONE $ZS"
+if [ "$ZS" = "plan=0:['changed'] apply=0:$TZW reapply=0:['none'] audit=0:['compliant']" ] && v6_same localtime /etc/localtime && v6_same etctz /etc/timezone; then
+  check v116-timezone ok "$TZW set through timedatectl, unchanged, compliant; link restored to $TZL0"
+else check v116-timezone FAIL "$ZS now=$(v6_now /etc/localtime)"; fi
+
+# ---- locale (§61): LANG=C.UTF-8 (C.utf8 when the file already says
+# C.UTF-8) in the family's file; the file's bytes as before afterwards
+case "$V6FAM" in debian) LF=/etc/default/locale ;; *) LF=/etc/locale.conf ;; esac
+v6_save locale "$LF"
+LANG0=$(v6body "$LF" | sed -n 's/^LANG=//p' | tr -d '"' | head -1)
+case "$LANG0" in C.UTF-8) LW=C.utf8 ;; *) LW=C.UTF-8 ;; esac
+echo "V116_LOCALE_BEFORE file=$LF $(cat "$V6/orig.locale.state")<<"; v6body "$LF"; echo ">>"
+v6r_locale() { v6_put_back locale "$LF"; echo "V116_LOCALE_RESTORE $(v6_same locale "$LF" && echo same-bytes || echo DIFFERENT)"; }
+v6_arm v6r_locale
+printf 'version: 1\nresources:\n  - id: acc_locale\n    type: locale\n    with:\n      lang: %s\n' "$LW" > "$V6/lc1.yaml"
+v6x lc1 plan "$V6/lc1.yaml"; L1=$?
+v6x lc2 apply "$V6/lc1.yaml"; L2=$?; LB2=$(v6body "$LF")
+echo "V116_LOCALE_AFTER<<"; printf '%s\n' "$LB2"; echo ">>"
+echo "== observe v116-locale file=$LF keys_before=$(sed -n 's/=.*//p' "$V6/orig.locale" 2> /dev/null | sort | tr '\n' ',') keys_after=$(printf '%s\n' "$LB2" | sed -n 's/=.*//p' | sort | tr '\n' ',') comments_after=$(printf '%s\n' "$LB2" | grep -c '^#')"
+v6x lc3 apply "$V6/lc1.yaml"; L3=$?
+v6x lc4 audit "$V6/lc1.yaml"; L4=$?
+LS="plan=$L1:$(v6j "$V6/lc1.json" 'C(d)') apply=$L2:$(printf '%s\n' "$LB2" | sed -n 's/^LANG=//p' | tr -d '"') reapply=$L3:$(v6j "$V6/lc3.json" 'C(d)') audit=$L4:$(v6j "$V6/lc4.json" 'ST(d)')"
+v6_restore v6r_locale
+echo "V116_LOCALE $LS"
+if [ "$LS" = "plan=0:['changed'] apply=0:$LW reapply=0:['none'] audit=0:['compliant']" ] && v6_same locale "$LF"; then
+  check v116-locale ok "LANG=$LW through localectl, unchanged, compliant; $LF restored byte for byte"
+else check v116-locale FAIL "$LS restored=$(v6_same locale "$LF" && echo yes || echo no)"; fi
+
+# ---- kernel_module (§62): dummy loaded and persisted, re-apply unchanged,
+# compliant, absent removes Sinter's file. Sinter never unloads, so the module
+# stays loaded on this disposable VM; a dummy interface the load created is
+# removed. NOT_APPLICABLE only when the dry run says the module does not exist.
+KMF=/etc/modules-load.d/sinter-dummy.conf
+KL0=$([ -d "$(v6h /sys/module/dummy)" ] && echo yes || echo no)
+KMN=$(modprobe -n -v -- dummy 2>&1); KMR=$?
+KIF0=$(ip -o link show type dummy 2> /dev/null | awk -F': ' '{print $2}' | tr '\n' ' ')
+echo "V116_MODPROBE_DRY_RUN rc=$KMR<<"; printf '%s\n' "$KMN" | head -5; echo ">>"
+echo "== observe v116-kmod loaded=$KL0 modprobe_n_rc=$KMR"
+v6r_kmod() { [ "$KPRE" = absent ] && sudo rm -f "$(v6h "$KMF")"
+  for i in $(ip -o link show type dummy 2> /dev/null | awk -F': ' '{print $2}'); do
+    case " $KIF0 " in *" $i "*) ;; *) case "$i" in dummy[0-9]*) sudo ip link del "$i" > /dev/null 2>&1 ;; esac ;; esac; done
+  echo "V116_KMOD_RESTORE file=$(v6ex "$KMF" && echo left || echo none) loaded=$([ -d "$(v6h /sys/module/dummy)" ] && echo yes || echo no) dummy_links=$(ip -o link show type dummy 2> /dev/null | grep -c .)"; }
+KPRE=$(v6ex "$KMF" && echo in-use || echo absent)
+if [ "$KL0" = no ] && [ "$KMR" -eq 1 ] && na_allowed v116-kernel-module MODULE_UNAVAILABLE; then
+  not_applicable v116-kernel-module MODULE_UNAVAILABLE "modprobe -n reports no dummy module for the running kernel of $LABEL"
+elif [ "$KPRE" = absent ]; then
+  v6_arm v6r_kmod
+  printf 'version: 1\nresources:\n  - id: acc_kmod\n    type: kernel_module\n    with:\n      name: dummy\n' > "$V6/km1.yaml"
+  printf 'version: 1\nresources:\n  - id: acc_kmod\n    type: kernel_module\n    with:\n      name: dummy\n      state: absent\n' > "$V6/km2.yaml"
+  v6x km1 plan "$V6/km1.yaml"; KR1=$?
+  v6x km2 apply "$V6/km1.yaml"; KR2=$?
+  KB=$(v6body "$KMF" | od -An -c | tr -s ' \n' ' '); KW=$(printf '# Managed by Sinter (kernel_module). Local changes are replaced.\ndummy\n' | od -An -c | tr -s ' \n' ' ')
+  KL2=$([ -d "$(v6h /sys/module/dummy)" ] && echo loaded || echo not-loaded)
+  v6x km3 apply "$V6/km1.yaml"; KR3=$?
+  v6x km4 audit "$V6/km1.yaml"; KR4=$?
+  v6x km5 apply "$V6/km2.yaml"; KR5=$?
+  KS="plan=$KR1:$(v6j "$V6/km1.json" 'C(d)') apply=$KR2:$KL2:file=$([ "$KB" = "$KW" ] && echo exact || echo DIFFERENT) reapply=$KR3:$(v6j "$V6/km3.json" 'C(d)') audit=$KR4:$(v6j "$V6/km4.json" 'ST(d)') absent=$KR5:$(v6ex "$KMF" && echo left || echo removed):$([ -d "$(v6h /sys/module/dummy)" ] && echo still-loaded || echo unloaded)"
+  echo "V116_KMOD loaded_before=$KL0 $KS"
+  v6_restore v6r_kmod
+  if [ "$KS" = "plan=0:['changed'] apply=0:loaded:file=exact reapply=0:['none'] audit=0:['compliant'] absent=0:removed:still-loaded" ]; then
+    check v116-kernel-module ok "dummy loaded (/sys/module/dummy) and persisted, unchanged, compliant, file removed by absent (module stays loaded)"
+  else check v116-kernel-module FAIL "$KS $(v6e km2)"; fi
+else check v116-kernel-module FAIL "prerequisite: $KMF exists"; fi
+
+# ---- tuned (§57): install tuned (package) and start it (service) in the same
+# recipe as the tuned resource; another vendor profile than the current one
+# with verify; off. Restored: the selection, the service state, and the package
+# removed only when it was not installed before.
+TUIDS="v116-tuned-profile v116-tuned-verify v116-tuned-off"
+tu_inst() { if [ "$V6FAM" = debian ]; then dpkg-query -W -f='${Status}' tuned 2> /dev/null | grep -q 'install ok installed'; else rpm -q tuned > /dev/null 2>&1; fi; }
+tu_prof() { v6body /etc/tuned/active_profile | tr -d '\n'; }
+TI0=$(tu_inst && echo yes || echo no)
+if [ "$TI0" = yes ]; then TC=present
+elif [ "$V6FAM" = debian ]; then TC=$(apt-cache policy tuned 2> /dev/null | awk '/Candidate:/ {print ($2 == "" || $2 == "(none)") ? "none" : "present"; f = 1} END {if (!f) print "none"}')
+else TC=$(sudo dnf -q list --available tuned > /dev/null 2>&1 && echo present || echo none); fi
+TA0=$(systemctl is-active tuned 2> /dev/null); TE0=$(systemctl is-enabled tuned 2> /dev/null); TP0=$(tu_prof)
+TM0=$(v6body /etc/tuned/profile_mode | tr -d '\n')
+echo "== observe v116-tuned installed=$TI0 candidate=$TC"
+echo "V116_TUNED_BEFORE service=${TA0:-none}/${TE0:-none} profile=${TP0:-none} mode=${TM0:-none}"
+if [ "$TI0" = no ] && [ "$TC" = none ] && na_allowed v116-tuned-profile TUNED_NOT_AVAILABLE && na_allowed v116-tuned-verify TUNED_NOT_AVAILABLE && na_allowed v116-tuned-off TUNED_NOT_AVAILABLE; then
+  for id in $TUIDS; do not_applicable "$id" TUNED_NOT_AVAILABLE "the tuned package is neither installed nor installable on $LABEL"; done
+else
+  case "$TP0" in virtual-guest) TP1=balanced; TP2=throughput-performance ;; balanced) TP1=virtual-guest; TP2=throughput-performance ;; *) TP1=virtual-guest; TP2=balanced ;; esac
+  v6r_tuned() {
+    if [ "$TI0" = no ]; then
+      sudo systemctl disable --now tuned > /dev/null 2>&1
+      if [ "$V6FAM" = debian ]; then sudo env DEBIAN_FRONTEND=noninteractive apt-get -y -q remove tuned > /dev/null 2>&1; else sudo dnf -y -q remove tuned > /dev/null 2>&1; fi
+    else
+      [ "$(systemctl is-active tuned 2> /dev/null)" = active ] || sudo systemctl start tuned > /dev/null 2>&1
+      if [ "$TM0" = auto ]; then sudo tuned-adm auto_profile > /dev/null 2>&1
+      elif [ -n "$TP0" ]; then [ "$(tu_prof)" = "$TP0" ] || sudo tuned-adm profile "$TP0" > /dev/null 2>&1
+      else sudo tuned-adm off > /dev/null 2>&1; fi
+      [ "$TA0" = active ] || sudo systemctl stop tuned > /dev/null 2>&1
+      case "$TE0" in enabled) sudo systemctl enable tuned > /dev/null 2>&1 ;; disabled) sudo systemctl disable tuned > /dev/null 2>&1 ;; esac
+    fi
+    echo "V116_TUNED_RESTORE installed=$(tu_inst && echo yes || echo no) service=$(systemctl is-active tuned 2> /dev/null)/$(systemctl is-enabled tuned 2> /dev/null) profile=$(tu_prof)"; }
+  v6_arm v6r_tuned
+  tu_recipe() { # tu_recipe <file> <tuned with-lines>
+    printf 'version: 1\nresources:\n  - id: acc_tuned_pkg\n    type: package\n    with:\n      name: tuned\n      state: present\n  - id: acc_tuned_svc\n    type: service\n    depends_on: [acc_tuned_pkg]\n    with:\n      name: tuned\n      state: running\n      enabled: true\n  - id: acc_tuned\n    type: tuned\n    depends_on: [acc_tuned_svc]\n    with:\n%s' "$2" > "$1"; }
+  tu_recipe "$V6/tu1.yaml" "$(printf '      profile: %s\n' "$TP1")"
+  tu_recipe "$V6/tu2.yaml" "$(printf '      profile: %s\n      verify: true\n' "$TP2")"
+  tu_recipe "$V6/tu3.yaml" "$(printf '      state: off\n')"
+  v6x tu1 plan "$V6/tu1.yaml"; U1=$?
+  echo "V116_TUNED_PLAN rc=$U1 $(v6j "$V6/tu1.json" '[(r["id"], r["change"], r["unknown"]) for r in R(d)]')"
+  timeout 1800 "$EXE" apply "$V6/tu1.yaml" --sudo --format json > "$V6/tu2.json" 2> "$V6/tu2.err"; U2=$?; UP2=$(tu_prof)
+  echo "== observe v116-tuned-after-select active_profile=$UP2 profile_mode=$(v6body /etc/tuned/profile_mode | tr -d '\n') service=$(systemctl is-active tuned 2> /dev/null) tuned_adm=$(ls -l "$(v6h /usr/sbin/tuned-adm)" 2> /dev/null | awk '{print $1}')"
+  v6x tu3 apply "$V6/tu1.yaml"; U3=$?
+  v6x tu4 audit "$V6/tu1.yaml"; U4=$?
+  US1="plan=$U1 apply=$U2:$UP2 reapply=$U3:$(v6j "$V6/tu3.json" 'C(d)') audit=$U4:$(v6j "$V6/tu4.json" 'ST(d)')"
+  v6x tu5 apply "$V6/tu2.yaml"; U5=$?; UP5=$(tu_prof)
+  v6x tu6 audit "$V6/tu2.yaml"; U6=$?
+  US2="apply=$U5:$UP5:$(v6in tu5 'verify: tuned-adm verify reports the selected profile as applied') audit=$U6:$(v6j "$V6/tu6.json" 'ST(d)'):$(v6in tu6 'tuned-adm verify reports the profile as applied')"
+  v6x tu7 apply "$V6/tu3.yaml"; U7=$?; UP7=$(tu_prof)
+  echo "== observe v116-tuned-after-off active_profile_file=$(v6_now /etc/tuned/active_profile | cut -c1-12) bytes=$(v6body /etc/tuned/active_profile | wc -c | tr -d ' ')"
+  v6x tu8 apply "$V6/tu3.yaml"; U8=$?
+  v6x tu9 audit "$V6/tu3.yaml"; U9=$?
+  US3="apply=$U7:[$UP7] reapply=$U8:$(v6j "$V6/tu8.json" 'C(d)') audit=$U9:$(v6j "$V6/tu9.json" 'ST(d)')"
+  echo "V116_TUNED profile $US1 | verify $US2 | off $US3"
+  v6_restore v6r_tuned
+  if [ "$US1" = "plan=0 apply=0:$TP1 reapply=0:['none'] audit=0:['compliant']" ]; then check v116-tuned-profile ok "tuned installed and started in the recipe, $TP1 selected, unchanged, compliant"
+  else check v116-tuned-profile FAIL "$US1 $(v6e tu2)"; fi
+  if [ "$US2" = "apply=0:$TP2:yes audit=0:['compliant']:yes" ]; then check v116-tuned-verify ok "$TP2 selected with verify: applied after the change and in audit"
+  else check v116-tuned-verify FAIL "$US2 $(v6e tu5)"; fi
+  if [ "$US3" = "apply=0:[] reapply=0:['none'] audit=0:['compliant']" ]; then check v116-tuned-off ok "state off clears the selection, unchanged, compliant"
+  else check v116-tuned-off FAIL "$US3 $(v6e tu7)"; fi
+fi
+
+# ---- PostgreSQL bundle (§56.3): examples/bundles/postgresql-pgdg17 on a fresh
+# RHEL-family system, plan with the deferrals, audit drift, apply (PGDG over the
+# network), re-apply unchanged, audit compliant; then the service is stopped and
+# what the bundle installed is removed again. The bundle is not part of this
+# script (its public repository host and account names are content the
+# publication scan of bundled harness files refuses): it is read from the
+# directory V6PGSRC and used only when every file matches the SHA-256 pinned
+# here (the stand-in tests compare the pins with the repository); missing or
+# different, the four checks fail.
+PGIDS="v116-pg-plan v116-pg-apply v116-pg-reapply v116-pg-audit"
+V6PGSRC="$(dirname "$0")/postgresql-pgdg17"   # beside this script; the stand-in tests replace this line only
+V6PGSUMS='0f8627d94833d487cdd03a43c55cfdae0d93a31e9f8703856108d7fd66c40df2  01_repository.yaml
+c4e6bf5914210f942d6419429ddb7db7b51e805b80b8022d7c1e8570f62560c8  02_module.yaml
+315e3eae64ea91d2e3f24500de6701efe333790dfeab651e4ca8fca1b46807c5  03_package.yaml
+a70d592b8ef60980c87d3854ebdd348582347d0929390f9325e6f7196637fcc3  04_initdb.yaml
+efaffec852b04f74aaad1a84ff761170fe3e275f85613212671e165f9377afe3  05_directory.yaml
+07d50d15f6b073b5f3c177e6a1a5ef8c39a920005736524739556922c17041ba  06_config.yaml
+7386447f0b5901f92456730b091c6e185ebe543c19845958e01a13abcd0f6719  07_service.yaml
+c1fec798b1635a1ec0a69beeff47fbb590b8690a14216604e0a3e3166bb15767  bundle.yaml
+a70c9527426017d00fa4e6f9d2941d515357a27a7be82e155248ece53bbe5453  files/PGDG-RPM-GPG-KEY-RHEL
+9c0208991d6da83bd2d21727f7626a8a031598121e3843c36421d94c1611b4bf  files/pg_hba.conf
+685bd02fa6dd69737d4042c066e26973222ea482066a4157c68eae04b93a1460  files/postgresql.conf.tmpl'
+PG="$V6/pg"; mkdir -p "$PG"
+PGSRC=ok
+if [ "$(cd "$V6PGSRC" 2> /dev/null && find . -type f | sed 's|^\./||' | LC_ALL=C sort | tr '\n' ' ')" != "$(printf '%s\n' "$V6PGSUMS" | awk '{print $2}' | LC_ALL=C sort | tr '\n' ' ')" ]; then PGSRC=missing
+else
+  (cd "$V6PGSRC" && find . -type f -exec sh -c 'mkdir -p "$1/$(dirname "$2")" && cp "$2" "$1/$2"' sh "$PG" {} \;)
+  (cd "$PG" && printf '%s\n' "$V6PGSUMS" | sha256sum -c --quiet > /dev/null 2>&1) || PGSRC=mismatch
+fi
+echo "V116_PG_SOURCE $PGSRC"
+PGRF=/etc/yum.repos.d/pgdg-17.repo; PGKF=/etc/pki/rpm-gpg/PGDG-RPM-GPG-KEY-RHEL
+if [ "$V6RH" = yes ]; then
+  PGP0=$(rpm -qa --qf '%{NAME}\n' 2> /dev/null | grep '^postgresql' | sort | tr '\n' ' ')
+  PGD0=$(v6ex /var/lib/pgsql && echo present || echo absent); PGU0=$(getent passwd postgres > /dev/null 2>&1 && echo present || echo absent)
+  PGM0=$(v6body /etc/dnf/modules.d/postgresql.module | sed -n 's/^state=//p' | head -1)
+  PGPRE="$(v6ex "$PGRF" && echo in-use || echo absent)/$(v6ex "$PGKF" && echo in-use || echo absent)/$([ -z "$PGP0" ] && echo none || echo "$PGP0")"
+  echo "V116_PG_BEFORE files=$PGPRE datadir=$PGD0 postgres=$PGU0 module=${PGM0:-default}"
+  v6r_pg() {
+    sudo systemctl disable --now postgresql-17 > /dev/null 2>&1
+    PGNEW=$(rpm -qa --qf '%{NAME}\n' 2> /dev/null | grep '^postgresql' | sort | tr '\n' ' ')
+    [ -n "$PGNEW" ] && [ -z "$PGP0" ] && sudo dnf -y -q remove $PGNEW > /dev/null 2>&1
+    sudo rm -f "$(v6h "$PGRF")" "$(v6h "$PGKF")"
+    [ "$V6MAJ" = 9 ] && [ -z "$PGM0" ] && [ -n "$(v6body /etc/dnf/modules.d/postgresql.module | sed -n 's/^state=//p')" ] && sudo dnf -y -q module reset postgresql > /dev/null 2>&1
+    [ "$PGD0" = absent ] && sudo rm -rf "$(v6h /var/lib/pgsql)"
+    [ "$PGU0" = absent ] && getent passwd postgres > /dev/null 2>&1 && { sudo userdel postgres > /dev/null 2>&1; sudo groupdel postgres > /dev/null 2>&1; }
+    echo "V116_PG_RESTORE packages=[$(rpm -qa --qf '%{NAME}\n' 2> /dev/null | grep '^postgresql' | sort | tr '\n' ' ')] repo=$(v6ex "$PGRF" && echo left || echo none) datadir=$(v6ex /var/lib/pgsql && echo left || echo none) service=$(systemctl is-active postgresql-17 2> /dev/null)"; }
+  if [ "$PGSRC" = ok ] && [ "$PGPRE" = absent/absent/none ] && [ "$PGD0" = absent ]; then
+    v6_arm v6r_pg
+    timeout "$V6TMO_PG" "$EXE" plan "$PG/bundle.yaml" --sudo --format json > "$V6/pg1.json" 2> "$V6/pg1.err"; G1=$?
+    GD=$(v6j "$V6/pg1.json" '[(r["id"], r["unknown"]) for r in R(d) if r["id"] in ("pgdg_key", "pgdg_common", "pg_pkg", "pg_confd", "pg_conf", "pg_hba", "pg_service")]')
+    GM=$(v6j "$V6/pg1.json" '(by(d, "pg_module_off").get("change"), by(d, "pg_module_off").get("disposition"))')
+    timeout "$V6TMO_PG" "$EXE" audit "$PG/bundle.yaml" --sudo --format json > "$V6/pg2.json" 2> "$V6/pg2.err"; G2=$?
+    case "$V6MAJ" in 9) GMW="('changed', 'normal')" ;; *) GMW="('none', 'skipped_by_condition')" ;; esac
+    GS1="plan=$G1 deferred=$GD module=$GM audit_fresh=$G2"
+    echo "V116_PG_PLAN $GS1"
+    if [ "$GS1" = "plan=0 deferred=[('pgdg_key', False), ('pgdg_common', False), ('pg_pkg', False), ('pg_confd', True), ('pg_conf', True), ('pg_hba', True), ('pg_service', True)] module=$GMW audit_fresh=7" ]; then
+      check v116-pg-plan ok "on a fresh system plan exits 0 with the account, cluster and unit deferred to apply; audit drift (7)"
+    else check v116-pg-plan FAIL "$GS1 $(v6e pg1)"; fi
+    timeout "$V6TMO_PG" "$EXE" apply "$PG/bundle.yaml" --sudo --format json > "$V6/pg3.json" 2> "$V6/pg3.err"; G3=$?
+    GA="apply=$G3:$(v6j "$V6/pg3.json" '[e["exit_code"] for e in d["executions"]]') rpm=$(rpm -q postgresql17-server > /dev/null 2>&1 && echo installed || echo missing) service=$(systemctl is-active postgresql-17 2> /dev/null) confd=$(v6st /var/lib/pgsql/17/data/conf.d '%U:%G:%a')"
+    echo "== observe v116-pg-dnf repolist=$(sudo dnf -q repolist --enabled 2> /dev/null | awk '{print $1}' | grep -E '^pgdg(-common|17)$' | sort | tr '\n' ',') pgdg_key_imported=$(rpm -q gpg-pubkey --qf '%{SUMMARY}\n' 2> /dev/null | grep -ci postgresql) module=$(v6body /etc/dnf/modules.d/postgresql.module | sed -n 's/^state=//p' | head -1)"
+    echo "V116_PG_APPLY $GA"
+    if [ "$GA" = "apply=0:[0, 0, 0, 0, 0, 0, 0] rpm=installed service=active confd=postgres:postgres:700" ]; then
+      check v116-pg-apply ok "the bundle applied: PGDG repositories, server package, cluster, configuration validated by postgres, service active"
+    else check v116-pg-apply FAIL "$GA $(v6e pg3)"; fi
+    timeout "$V6TMO_PG" "$EXE" apply "$PG/bundle.yaml" --sudo --format json > "$V6/pg4.json" 2> "$V6/pg4.err"; G4=$?
+    GR="reapply=$G4:$(v6j "$V6/pg4.json" 'C(d)')"; echo "V116_PG_REAPPLY $GR"
+    if [ "$GR" = "reapply=0:['none']" ]; then check v116-pg-reapply ok "second apply of the bundle: no change"
+    else check v116-pg-reapply FAIL "$GR $(v6e pg4)"; fi
+    timeout "$V6TMO_PG" "$EXE" audit "$PG/bundle.yaml" --sudo --format json > "$V6/pg5.json" 2> "$V6/pg5.err"; G5=$?
+    GU="audit=$G5:$(v6j "$V6/pg5.json" '[(r["id"], r["status"]) for r in R(d) if r["status"] != "compliant"]')"; echo "V116_PG_AUDIT $GU"
+    case "$V6MAJ" in 9) GUW="audit=0:[('pg_initdb', 'not_auditable')]" ;; *) GUW="audit=0:[('pg_module_off', 'not_applicable'), ('pg_initdb', 'not_auditable')]" ;; esac
+    if [ "$GU" = "$GUW" ]; then check v116-pg-audit ok "audit of the applied bundle: compliant (the initdb command not auditable, the module step not applicable on EL 10)"
+    else check v116-pg-audit FAIL "$GU $(v6e pg5)"; fi
+    v6_restore v6r_pg
+  else for id in $PGIDS; do check "$id" FAIL "prerequisite: bundle=$PGSRC (beside the script, pinned), existing PostgreSQL or PGDG files=$PGPRE datadir=$PGD0"; done; fi
+elif [ "$V6FAM" = debian ] && [ "$V6DNF" = absent ] && na_allowed v116-pg-plan NOT_DNF_HOST && na_allowed v116-pg-apply NOT_DNF_HOST \
+     && na_allowed v116-pg-reapply NOT_DNF_HOST && na_allowed v116-pg-audit NOT_DNF_HOST; then
+  for id in $PGIDS; do not_applicable "$id" NOT_DNF_HOST "the bundle installs PGDG RPMs; $LABEL is not a DNF host"; done
+else for id in $PGIDS; do check "$id" FAIL "not a DNF 4 host of the RHEL family and not listed as not applicable (family=$V6FAM dnf=$V6DNF)"; done; fi
+
+# ---- v116-no-residue: every restore ran, and what this section changed is as
+# it was before (files, names, values, the disposable directories, accounts)
+v6_restore_all
+NRS="base=$(v6ex "$V6B" && echo left || echo gone) writable=$(v6ex "$V6W" && echo left || echo gone) etc=$(v6ex "$V6E" && echo left || echo gone)"
+NRS="$NRS repo=$([ "$DR_PRE" = absent ] && v6ex "$DRF" && echo left || echo ok) sysctl=$([ -z "$SV0" ] || [ "$(sysctl -n "$SK" 2> /dev/null)" = "$SV0" ] && echo ok || echo DIFF)/$(v6ex "$SL" && echo left || echo ok)"
+NRS="$NRS hostname=$([ "$(hostnamectl --static 2> /dev/null)" = "$HS0" ] && v6_same hostname /etc/hostname && v6_same hosts /etc/hosts && echo ok || echo DIFF)"
+NRS="$NRS timezone=$(v6_same localtime /etc/localtime && echo ok || echo DIFF) locale=$(v6_same locale "$LF" && echo ok || echo DIFF)"
+NRS="$NRS account=$([ "$CU0" = absent ] && getent passwd "$V6U" > /dev/null 2>&1 && echo left || echo ok) kmod_file=$([ "$KPRE" = absent ] && v6ex "$KMF" && echo left || echo ok)"
+[ -x "$CPT" ] && NRS="$NRS crypto=$([ "$(cp_show)" = "$CP0" ] && echo ok || echo DIFF)"
+[ "$DMDO" = yes ] && NRS="$NRS nodejs_module=$([ -z "$(dm_state)" ] && echo ok || echo DIFF)"
+[ -n "${TI0:-}" ] && NRS="$NRS tuned=$([ "$(tu_inst && echo yes || echo no)" = "$TI0" ] && echo ok || echo DIFF)"
+[ "$V6RH" = yes ] && NRS="$NRS pg=$(v6ex "$PGRF" || [ "$(systemctl is-active postgresql-17 2> /dev/null)" = active ] && echo left || echo ok)"
+trap - EXIT TERM HUP INT
+echo "V116_NO_RESIDUE $NRS armed=[${V6_ARMED}]"
+case " $NRS " in *" base=gone writable=gone etc=gone "*) NRB=ok ;; *) NRB=no ;; esac
+if [ "$NRB" = ok ] && ! printf '%s' "$NRS" | grep -qE '=(left|DIFF)|/left' && [ -z "$V6_ARMED" ]; then
+  check v116-no-residue ok "disposable directories removed; files, names, values, accounts and packages as before the section"
+else check v116-no-residue FAIL "$NRS"; fi
+rm -rf "$V6"
+# END v1160-checks
+
 # ------------------------------------------------- v1.15.0 firewalld 0.3.0
 # BEGIN fw03-checks
 # docs/design/v1.15.0-release-and-acceptance.md §3 and §3.1 (P7-R1):

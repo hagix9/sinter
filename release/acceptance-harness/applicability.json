@@ -1,12 +1,66 @@
 {
   "schema": "sinter-acceptance-applicability/1",
-  "note": "DESIGN §47.3, docs/design/v1.15.0-release-and-acceptance.md §2 (Owner decision D-8). A check may be reported NOT_APPLICABLE only for a listed (check, reason, target) and only when the target's log proves the reason with the fixed observation line. NOT_APPLICABLE is never counted as passed.",
+  "note": "DESIGN §47.3, docs/design/v1.15.0-release-and-acceptance.md §2 (Owner decision D-8), docs/design/v1.16.0-release-and-acceptance.md §2 (the C entries of its table). A check may be reported NOT_APPLICABLE only for a listed (check, reason, target) and only when the target's log proves the reason with the fixed observation line. NOT_APPLICABLE is never counted as passed.",
   "entries": [
     {
       "check": "nm-profile-crud",
       "reason": "NM_NOT_INSTALLED",
       "targets": ["ubuntu2404", "ubuntu2604"],
       "proof": "== observe nm-presence nmcli=absent service=<inactive|not-found>"
+    },
+    {
+      "check": "v116-pg-plan",
+      "reason": "NOT_DNF_HOST",
+      "targets": ["ubuntu2404", "ubuntu2604"],
+      "proof": "== observe v116-os family=debian major=<n> dnf=absent"
+    },
+    {
+      "check": "v116-pg-apply",
+      "reason": "NOT_DNF_HOST",
+      "targets": ["ubuntu2404", "ubuntu2604"],
+      "proof": "== observe v116-os family=debian major=<n> dnf=absent"
+    },
+    {
+      "check": "v116-pg-reapply",
+      "reason": "NOT_DNF_HOST",
+      "targets": ["ubuntu2404", "ubuntu2604"],
+      "proof": "== observe v116-os family=debian major=<n> dnf=absent"
+    },
+    {
+      "check": "v116-pg-audit",
+      "reason": "NOT_DNF_HOST",
+      "targets": ["ubuntu2404", "ubuntu2604"],
+      "proof": "== observe v116-os family=debian major=<n> dnf=absent"
+    },
+    {
+      "check": "v116-dnf-module",
+      "reason": "NO_MODULE_STREAMS",
+      "targets": ["rocky10", "rhel10", "alma10"],
+      "proof": "== observe v116-dnf-modules modules_d=<absent|empty> list=empty rows=0 source=<cache|refresh>"
+    },
+    {
+      "check": "v116-tuned-profile",
+      "reason": "TUNED_NOT_AVAILABLE",
+      "targets": ["ubuntu2404", "ubuntu2604"],
+      "proof": "== observe v116-tuned installed=no candidate=none"
+    },
+    {
+      "check": "v116-tuned-verify",
+      "reason": "TUNED_NOT_AVAILABLE",
+      "targets": ["ubuntu2404", "ubuntu2604"],
+      "proof": "== observe v116-tuned installed=no candidate=none"
+    },
+    {
+      "check": "v116-tuned-off",
+      "reason": "TUNED_NOT_AVAILABLE",
+      "targets": ["ubuntu2404", "ubuntu2604"],
+      "proof": "== observe v116-tuned installed=no candidate=none"
+    },
+    {
+      "check": "v116-kernel-module",
+      "reason": "MODULE_UNAVAILABLE",
+      "targets": ["ubuntu2404", "ubuntu2604", "rocky9", "rocky10", "rhel9", "rhel10", "alma9", "alma10"],
+      "proof": "== observe v116-kmod loaded=no modprobe_n_rc=1"
     }
   ]
 }

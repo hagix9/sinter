@@ -250,7 +250,7 @@ class HarnessStatic(unittest.TestCase):
                                 os.path.join(HARNESS, "acceptance-target.sh"), out], capture_output=True, text=True)
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertEqual(rd(out), rd(IDS_PATH))
-        self.assertEqual(len(IDS), 76)
+        self.assertEqual(len(IDS), 104)  # 76 of v1.15.0 and the 28 v116-* checks of v1.16.0 (test_acceptance_v1160.py)
         for c in NEW_CHECKS + FW03_CHECKS:
             self.assertIn(c, IDS)
 
@@ -341,12 +341,13 @@ class HarnessSumsCheck(unittest.TestCase):
     def test_table_allows_only_the_nm_check(self):
         doc = json.loads(rd(TABLE_PATH, "r"))
         self.assertEqual(doc["schema"], "sinter-acceptance-applicability/1")
-        self.assertEqual([(e["check"], e["reason"], e["targets"]) for e in doc["entries"]],
+        # v1.16.0 adds v116-* entries (checked in test_acceptance_v1160.py); the v1.15.0 entry is unchanged
+        self.assertEqual([(e["check"], e["reason"], e["targets"]) for e in doc["entries"] if not e["check"].startswith("v116-")],
                          [("nm-profile-crud", "NM_NOT_INSTALLED", ["ubuntu2404", "ubuntu2604"])])
 
     def test_script_declares_not_applicable_only_after_the_observation(self):
         s = rd(os.path.join(HARNESS, "acceptance-target.sh"), "r")
-        calls = re.findall(r"(?m)^\s*not_applicable (\S+) (\S+)", s)
+        calls = [c for c in re.findall(r"(?m)^\s*not_applicable (\S+) (\S+)", s) if not c[0].startswith("v116-")]
         self.assertEqual(calls, [("nm-profile-crud", "NM_NOT_INSTALLED")])
         obs = s.index('echo "== observe nm-presence nmcli=$NMC service=$NMSV"')
         self.assertLess(obs, s.index("not_applicable nm-profile-crud"))
