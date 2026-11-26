@@ -331,14 +331,45 @@ def _is_finding(kind, value, labels):
     raise AssertionError(kind)
 
 
-def scan(text, where, allowed, labels, errors):
+# Screening exceptions (AGENTS.md hygiene item 15). Each names one exact
+# bundle path, exact (category, value) literals, the reason, the approval
+# source and the last day it applies. A finding is exempted only in that file,
+# only in that category and only for exactly that value, up to and including
+# the expiry date (UTC); afterwards, and everywhere else, the scan reports it
+# as before. This is not sanitization.allowed_literals, which applies to every
+# file of a bundle.
+SCREENING_EXCEPTIONS = (
+    {
+        "path": "harness/acceptance-target.sh",   # release/acceptance-harness/acceptance-target.sh
+        "literals": (("hostname", "download.postgresql.org"), ("username", "postgres")),
+        "reason": "v1.16.0 acceptance: PostgreSQL bundle (PGDG) on RHEL-family targets",
+        "approval": "Owner decision 2026-11-27",
+        "expiry": "at the completion of the v1.16.0 publication, at the latest 2026-12-31",
+        "expires": "2026-12-31",
+    },
+)
+
+
+def _screening_exempt(where, cat, value, today):
+    for e in SCREENING_EXCEPTIONS:
+        if (where == e["path"] and (cat, value) in e["literals"]
+                and today <= datetime.date.fromisoformat(e["expires"])):
+            return True
+    return False
+
+
+def scan(text, where, allowed, labels, errors, today=None):
     """Report sensitive content by category and line; never echo the value."""
+    if today is None:
+        today = datetime.datetime.now(datetime.timezone.utc).date()
     seen = set()
     for lineno, line in enumerate(text.splitlines(), 1):
         for cat, rx, group, kind in RULES:
             for m in rx.finditer(line):
                 value = m.group(group)
                 if not _is_finding(kind, value, labels):
+                    continue
+                if _screening_exempt(where, cat, value, today):
                     continue
                 if value in allowed and (
                     cat in SUPPRESSIBLE or (kind == "secret" and SYNTHETIC.search(value))

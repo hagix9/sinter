@@ -122,13 +122,46 @@ later file), `hostname`, `tuned`, `timezone`, `locale`, `kernel_module`
 (`dummy`), the shipped PostgreSQL bundle (embedded byte for byte as heredocs
 written into the work directory; PGDG over the network) and `v116-no-residue`.
 Screening exception for the embedded bundle (`SCREENING_EXCEPTIONS` in
-`release/tests/test_acceptance_harness.py`, the publishable-harness scan): the
-exact literals `download.postgresql.org` (hostname) and `postgres` (account
-name), in `acceptance-target.sh` only; reason "v1.16.0 acceptance: PostgreSQL
-bundle (PGDG) on RHEL-family targets"; approval "Owner decision 2026-11-27";
-expiry "at the completion of the v1.16.0 publication, at the latest
-2026-12-31". After that date the scan fails again; the exception covers no
-other file, category or value. Each block records what it changes first and
+`release/check_acceptance_manifest.py`, applied by the release checker's scan
+and so by the publishable-harness test): the exact literals
+`download.postgresql.org` (hostname) and `postgres` (account name), in the
+bundle path `harness/acceptance-target.sh` only; reason "v1.16.0 acceptance:
+PostgreSQL bundle (PGDG) on RHEL-family targets"; approval "Owner decision
+2026-11-27"; expiry "at the completion of the v1.16.0 publication, at the
+latest 2026-12-31". It is not `sanitization.allowed_literals` (which applies
+to every file of a bundle). After 2026-12-31 (UTC) the scan reports the
+findings again; it covers no other file, category or value (tested). The
+published logs must pass the scan without any exception (tested: every
+label's stand-in log after `sanitize.py`).
+
+### Time budget (v1.16.0)
+
+The `v1160-checks` section's checks share `V6_BUDGET=840` s from its start:
+every command of the section runs under `timeout` with min(its own cap, the
+budget left) and nothing new starts once the budget is spent (its checks
+fail; caps: `sinter` 300 s, the PostgreSQL apply 900 s and re-apply 600 s, the
+TuneD install 600 s, `dnf module list` 120/180 s, other `dnf`/`apt` reads
+60-120 s, local tools 30-60 s). The PostgreSQL block starts only with at least
+540 s left. Restore steps have their own caps (30-120 s) and run also after
+the budget.
+
+Worst case of the section: the budget 840 s + the restore of the one block in
+progress (largest: TuneD or PostgreSQL, 420 s) + the reads that also run after
+the budget, because restores and the final comparison need the original
+state (hostname 45 s, TuneD 30 s, locale manager environment 60 s, crypto
+policy 30 s: 165 s) + the final residue reads (about 90 s) = 1515 s, about
+25.3 min. Expected on a healthy target: Ubuntu 4-7 min, EL 9 9-15 min, EL 10 7-13 min.
+
+Per target (worst): the base checks 23 min (v1.15.0 p5 measured 12-23 min,
+rhel10 the longest) + 25.3 min = 48.3 min on the target. The runner waits
+`POLL_TRIES=175` polls of `POLL_INT=15` s plus a 4-5 s ssh each, about
+57 min (8.6 min margin; it was 160, about 52 min). The R8 kit's
+`TMO_TARGET=3600` s covers start, upload, preparation (measured 3-4 min),
+the 48.3 min and fetch and stop (about 2 min): about 53.8 min, 6.2 min
+margin. Not covered: a preparation that waits its full
+`SINTER_PREP_QUIET_SECONDS` for a running package manager together with the
+worst case above; such a run ends as `TIMEOUT` (non-PASS, no change to the
+host beyond the disposable VM), as before. Each block records what it changes first and
 puts it back at its end, also after a failure; restores still armed run from an
 EXIT/TERM trap. A disposable name that exists before is a failed prerequisite
 and is never removed. The `== observe v116-*` lines record the raw facts of the

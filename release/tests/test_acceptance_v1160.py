@@ -46,7 +46,7 @@ IDS_PATH = os.path.join(HARNESS, "expected-check-ids.txt")
 IDS = [l.strip() for l in open(IDS_PATH) if l.strip()]
 TOOL_NAMES = ["sysctl", "hostnamectl", "timedatectl", "update-crypto-policies", "tuned-adm", "modprobe", "rpm", "dpkg-query",
               "apt-cache", "apt-get", "dnf", "systemctl", "systemd-analyze", "getent", "userdel", "groupdel", "ip", "chown",
-              "timeout", "ssh", "sha256sum", "stat"]
+              "timeout", "ssh", "sha256sum", "stat", "sudo", "locale"]
 
 FAKE_SINTER = r'''#!/usr/bin/env python3
 """A stand-in for sinter that follows the documented contract of the v1.16.0
@@ -302,6 +302,8 @@ def account_ok(name, kind, carry, mode_):
 
 def platform_dnf4(rid, t):
     p = hp("/usr/bin/dnf")
+    if not os.path.islink(p) and DEFECT == "refusal-other-text":
+        raise Fail("%s: %s is not supported on this host: /usr/bin/dnf is not a symbolic link to a DNF 4 program, so the DNF generation cannot be told (only DNF 4 is supported)" % (rid, t))
     if not os.path.islink(p):
         raise Fail("%s: %s is not supported on this host (its package manager is not DNF)" % (rid, t))
     if "dnf5" in os.readlink(p):
@@ -555,6 +557,8 @@ def t_dnf_module(r, w, mode_, carry, run):
 
 def t_crypto_policy(r, w, mode_, carry, run):
     tool = hp("/usr/bin/update-crypto-policies")
+    if not os.path.exists(tool) and DEFECT == "refusal-other-text":
+        raise Fail("%s: crypto_policy is not supported on this host (its configuration is not readable)" % r["id"])
     if not os.path.exists(tool):
         raise Fail("%s: crypto_policy is not supported on this host (update-crypto-policies was not found)" % r["id"])
     s = load_state(); cur = s["crypto"]; want = w["policy"]
@@ -651,6 +655,7 @@ def t_locale(r, w, mode_, carry, run):
         v = "C.utf8" if DEFECT == "locale-spelling" else w["lang"]
         lines = [l for l in t.split("\n") if l and not l.startswith("LANG=")]
         open(hp(f), "w").write("LANG=%s\n" % v + "".join(l + "\n" for l in lines))
+        s = load_state(); s.setdefault("manager_env", {})["LANG"] = v; save_state(s)   # as systemd-localed does
     return [("LANG", m.group(1) if m else "(not set)", w["lang"])]
 
 
@@ -695,7 +700,10 @@ def t_package(r, w, mode_, carry, run):
                 s["units"].append("tuned")
             if n == "postgresql17-server":
                 s["packages"] += ["postgresql17", "postgresql17-libs"]
-                s["users"].append("postgres"); s["groups"].append("postgres"); s["units"].append("postgresql-17")
+                for pool in ("users", "groups"):
+                    if "postgres" not in s[pool]:
+                        s[pool].append("postgres")
+                s["units"].append("postgresql-17")
         else:
             s["packages"].remove(n)
         save_state(s)
@@ -1016,6 +1024,8 @@ if me == "update-crypto-policies":
     sys.exit(99)
 
 if me == "tuned-adm":
+    if a[0] == "recommend":
+        print("virtual-guest"); sys.exit(0)
     if a[0] == "profile":
         open(hp("/etc/tuned/active_profile"), "w").write(a[1] + "\n")
     elif a[0] == "off":
@@ -1089,6 +1099,17 @@ if me in ("apt-get", "dnf"):
 
 if me == "systemctl":
     s = S(); verb = a[0]; unit = a[-1]
+    env = s.setdefault("manager_env", {})
+    if verb == "show-environment":
+        print("PATH=/usr/bin"); [print("%s=%s" % kv) for kv in sorted(env.items())]; sys.exit(0)
+    if verb == "set-environment":
+        for kv in a[1:]:
+            k, _, v = kv.partition("="); env[k] = v
+        W(s); sys.exit(0)
+    if verb == "unset-environment":
+        for k in a[1:]:
+            env.pop(k, None)
+        W(s); sys.exit(0)
     sv = s["services"].setdefault(unit, {"active": False, "enabled": False})
     if verb == "is-active":
         print("active" if sv["active"] else ("inactive" if unit in s["units"] else "inactive")); sys.exit(0 if sv["active"] else 3)
@@ -1140,8 +1161,19 @@ if me == "chown":
             s["owners"][p[len(FR):]] = "%s:%s" % (names.get(spec[0], spec[0]), names.get(spec[1], spec[1]) if len(spec) > 1 else "root")
     W(s); sys.exit(0)
 
-if me == "timeout":
-    os.execvp(a[1], a[1:])
+if me == "timeout":   # timeout [-k N] DURATION CMD...: the stand-ins never hang
+    i = 0
+    while a[i].startswith("-"):
+        i += 2 if a[i] == "-k" else 1
+    os.execvp(a[i + 1], a[i + 1:])
+
+if me == "sudo":   # reached through timeout (the shell function covers direct calls)
+    if a and a[0] == "-n":
+        a = a[1:]
+    os.execvp(a[0], a)
+
+if me == "locale":
+    print("C\nC.utf8\nPOSIX\nen_US.utf8"); sys.exit(0)
 
 if me == "ssh":
     sys.exit(0)
@@ -1268,7 +1300,14 @@ def world(label, root, **over):
           "crypto": "DEFAULT", "packages": ["tuned"] if tuned else [], "units": ["tuned"] if tuned else [],
           "services": {"tuned": {"active": True, "enabled": True}} if tuned else {}, "users": ["root"], "groups": ["root"],
           "owners": {}, "hosts_resolvable": [], "tuned_candidate": "2.21.0-1",
-          "module_list": MODULE_LIST_EL9 if major == 9 else None}
+          "module_list": MODULE_LIST_EL9 if major == 9 else None,
+          "manager_env": {"LANG": "en_US.UTF-8" if rh else "C.UTF-8"}}
+    if over.pop("hosts_no_newline", False):
+        with open(root + "/etc/hosts", "w") as f:
+            f.write("127.0.0.1 localhost")
+    if over.pop("machine_info", False):
+        with open(root + "/etc/machine-info", "w") as f:
+            f.write('PRETTY_HOSTNAME="Fixture VM"\n')
     st.update(over)
     return st
 
@@ -1278,15 +1317,19 @@ def results(out):
             re.findall(r"^== check (\S+) NOT_APPLICABLE (\S+)$", out, re.M))
 
 
+LABELS = ["ubuntu2404", "ubuntu2604", "rocky9", "rocky10", "rhel9", "rhel10", "alma9", "alma10"]
+
+
 class Run:
-    def __init__(self, ok, bad, na, out, state, root_left):
+    def __init__(self, ok, bad, na, out, state, root_left, prefixes=None):
         self.ok, self.bad, self.na, self.out, self.state, self.root_left = ok, bad, na, out, state, root_left
+        self.prefixes = prefixes or {}
 
 
 PG_EXAMPLE = os.path.join(REPO, "examples", "bundles", "postgresql-pgdg17")
 
 
-def run_section(label, defect="", table=TABLE_PATH, keep=None, grab="", **over):
+def run_section(label, defect="", table=TABLE_PATH, keep=None, grab="", budget=None, **over):
     with tempfile.TemporaryDirectory(prefix="v1160-") as d:
         os.chmod(d, 0o700)
         b = os.path.join(d, "bin"); os.mkdir(b)
@@ -1319,6 +1362,8 @@ def run_section(label, defect="", table=TABLE_PATH, keep=None, grab="", **over):
         body = section()
         assert body.count('V6ROOT=""   #') == 1
         body = body.replace('V6ROOT=""   #', "V6ROOT='%s'   #" % root)
+        if budget is not None:
+            body = body.replace("V6_BUDGET=840   #", "V6_BUDGET=%d   #" % budget)
         env = dict(os.environ, FAKE_ROOT=root, FAKE_STATE=sp, FAKE_DEFECT=defect, FAKE_GRAB=grab, PATH=b + os.pathsep + os.environ["PATH"])
         p = subprocess.run(["bash", "-c", prelude + body + '\necho "== section end passed=$PASS failed=$FAIL na=$NA"\n'],
                            capture_output=True, text=True, env=env, timeout=900, cwd=d)
@@ -1326,7 +1371,7 @@ def run_section(label, defect="", table=TABLE_PATH, keep=None, grab="", **over):
         assert p.returncode == 0, out
         ok, bad, na = results(p.stdout)
         left = sorted(x for x in os.listdir(root + "/opt")) + sorted(x for x in os.listdir(root + "/etc") if x.startswith("sinter-acc"))
-        return Run(ok, bad, na, out, json.load(open(sp)), left)
+        return Run(ok, bad, na, out, json.load(open(sp)), left, {root: "", d: "/var/tmp/sinter-acceptance"})
 
 
 V116 = [l.strip() for l in open(IDS_PATH) if l.strip().startswith("v116-")]
@@ -1445,6 +1490,8 @@ class EachDefectFailsItsCheck(unittest.TestCase):
         "pg-noidem": ("rocky10", ["v116-pg-reapply"]),
         "pg-audit-drift": ("rocky9", ["v116-pg-audit"]),
         "sysctl-sticky": ("rocky9", ["v116-no-residue"]),
+        # M3 of audit G: another refusal sentence is not the documented refusal
+        "refusal-other-text": ("ubuntu2404", ["v116-dnf-repository", "v116-dnf-module", "v116-crypto-policy"]),
     }
 
     def test_each_defect(self):
@@ -1467,6 +1514,79 @@ class EachDefectFailsItsCheck(unittest.TestCase):
                 covered.update(ids)
         # every new check has at least one defect that fails it
         self.assertEqual(sorted(set(V116) - covered), [])
+
+
+class ExistingStateIsKept(unittest.TestCase):
+    """Audit G mutants M1, M2 and the NON-BLOCKER restores: what existed before is as it was."""
+
+    def test_an_existing_postgres_account_is_kept(self):
+        r = run_section("rocky9", users=["root", "postgres"], groups=["root", "postgres"])
+        self.assertEqual(r.bad, [], r.out)
+        self.assertIn("postgres", r.state["users"]); self.assertIn("postgres", r.state["groups"])
+
+    def test_a_postgres_group_alone_is_kept(self):
+        r = run_section("rocky9", groups=["root", "postgres"])
+        self.assertEqual(r.bad, [], r.out)
+        self.assertNotIn("postgres", r.state["users"]); self.assertIn("postgres", r.state["groups"])
+
+    def test_a_stopped_disabled_tuned_stays_stopped_and_disabled(self):
+        def stop(root, st):
+            st["services"]["tuned"] = {"active": False, "enabled": False}
+        r = run_section("rocky9", keep=stop)
+        self.assertEqual(r.bad, [], r.out)
+        self.assertEqual(r.state["services"]["tuned"], {"active": False, "enabled": False})
+        self.assertIn("V116_TUNED_RESTORE installed=yes service=inactive/disabled profile=virtual-guest", r.out)
+
+    def test_manager_lang_machine_info_and_hosts_without_newline(self):
+        r = run_section("rocky9", hosts_no_newline=True, machine_info=True)
+        self.assertEqual(r.bad, [], r.out)
+        self.assertEqual(r.state["manager_env"]["LANG"], "en_US.UTF-8")   # localectl had set C.UTF-8
+        self.assertIn("== observe v116-locale-manager before=en_US.UTF-8 after_apply=C.UTF-8 readable=read", r.out)
+        self.assertIn("manager_lang=same", r.out)
+
+    def test_the_new_observations_are_logged(self):
+        r = run_section("rocky9")
+        for line in ("== observe v116-tuned-readonly recommend=virtual-guest recommend_rc=0 recommend_changed=no verify_audit_changed=no",
+                     "== observe v116-locale-a rc=0 lines=4 c_utf8=listed",
+                     "== observe v116-kmod-dry-run loaded_after=no modules_load_d=0",
+                     "== observe v116-crypto-set policy=DEFAULT rc=0 lines=0 first= show_after=DEFAULT"):
+            self.assertIn(line, r.out)
+        self.assertRegex(r.out, r"== observe v116-sysctl-order rc=0 headers=\d+ sysctl_conf=not-listed masked=0 ")
+
+
+class TimeBudget(unittest.TestCase):
+    def run_budget(self, budget, **over):
+        text = open(TARGET, encoding="utf-8").read()
+        assert text.count("V6_BUDGET=840   #") == 1
+        return run_section("rocky9", budget=budget, **over)
+
+    def test_a_spent_budget_fails_the_rest_and_still_restores(self):
+        r = run_section("rocky9", budget=0)
+        self.assertEqual(r.ok, ["v116-no-residue"], r.out)   # nothing else runs once the budget is spent ...
+        self.assertIn("v116-pg-plan", r.bad)
+        self.assertIn("budget left", r.out)
+        # ... and what the section touched is put back
+        self.assertEqual(r.state["hostname"]["static"], "fixture-vm")
+        self.assertEqual(r.state["sysctl"]["vm.dirty_expire_centisecs"], "3000")
+        self.assertEqual(r.root_left, [], r.out)
+
+    def test_the_postgresql_block_needs_its_share_of_the_budget(self):
+        text = section()
+        self.assertIn('[ "$PGLEFT" -ge 540 ]', text)
+        self.assertIn("V6_BUDGET=840   #", text)
+
+    def test_every_command_of_the_section_is_bounded(self):
+        code = "\n".join(l for l in section().splitlines() if not l.lstrip().startswith("#"))
+        tools = r"(?:dnf|apt-get|apt-cache|tuned-adm|systemctl|hostnamectl|timedatectl|userdel|groupdel|modprobe|ssh|update-crypto-policies|locale)"
+        seen = 0
+        for line in code.splitlines():
+            # a tool in command position: at the start, after $( ; && || then else {, or after sudo / env
+            for m in re.finditer(r"(?:^\s*|\$\(|;\s+|&&\s+|\|\|\s+|\bthen\s+|\belse\s+|\{\s+|v6[tr] \d+ )(?:sudo\s+)?(?:env \S+ )?(%s|\"\$EXE\"|\"\$CPT\")(?=\s)" % tools, line):
+                seen += 1
+                self.assertRegex(line[:m.start(1)], r"v6[tr] \d+ (?:sudo )?(?:env \S+ )?$", line)
+        self.assertGreater(seen, 60)
+        self.assertNotIn("V6TMO_PG", code)
+        self.assertIn('v6t 300 "$EXE" "$c" "$f" --sudo --format json', code)
 
 
 class ShortCircuits(unittest.TestCase):
@@ -1581,6 +1701,44 @@ class RawVerdictOnSectionLogs(unittest.TestCase):
         r = run_section("rocky9", "crypto-weaken")
         rc, v = self.verdict(self.full_log("rocky9", r), "rocky9", rc="1")
         self.assertEqual((rc, v), (1, "FAIL"))
+
+
+class SanitizedLogsPassTheReleaseScan(unittest.TestCase):
+    """Audit G B-1: every label's log, after sanitize.py, has no finding in the release checker's scan."""
+
+    def test_every_label(self):
+        cam = load_module(os.path.join(RELEASE, "check_acceptance_manifest.py"), "cam_v1160_scan")
+        cases = [(l, {}) for l in ("rocky9", "rocky10", "rhel9", "rhel10", "alma9", "alma10")] + \
+                [("ubuntu2404", {"tuned_installed": False}), ("ubuntu2604", {"tuned_installed": False, "tuned_candidate": "(none)", "no_dummy": True})]
+        cases[1][1]["no_module_streams"] = True
+
+        def one(case):
+            label, over = case
+            return label, run_section(label, **dict(over))
+        with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 2)) as ex:
+            runs = list(ex.map(one, cases))
+        for label, r in runs:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as t:
+                # on a target the section's paths are the host's own (V6ROOT is empty) and the work
+                # directory is /var/tmp/sinter-acceptance; the stand-in's temporary prefixes stand for those
+                text = r.out
+                for k, v in sorted(r.prefixes.items(), key=lambda kv: -len(kv[0])):
+                    text = text.replace(k, v)
+                raw, out = os.path.join(t, "raw.log"), os.path.join(t, "out.log")
+                with open(raw, "w") as f:
+                    f.write(text)
+                env = dict(os.environ, SINTER_PROJECT="synthetic-project-0001", SINTER_ZONE="synthetic-zone-1a",
+                           SINTER_SPECS="fixture-vm:%s:no:no" % label)
+                p = subprocess.run([sys.executable, os.path.join(HARNESS, "sanitize.py"), label, raw, out],
+                                   capture_output=True, text=True, env=env)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                with open(out) as f:
+                    clean = f.read()
+                errors = []
+                cam.scan(clean, "logs/%s.log" % label, set(), set(LABELS), errors)
+                self.assertEqual(errors, [], "\n".join(clean.splitlines()[int(e.split(":")[1]) - 1] for e in errors[:5]))
+                self.assertIn("V116_CARRY_RESTORE sinteracc_accounts=", clean)
+                self.assertRegex(clean, r"V116_NO_RESIDUE .* names=ok .* accounts=ok ")
 
 
 class ManifestCheckerProofs(unittest.TestCase):
