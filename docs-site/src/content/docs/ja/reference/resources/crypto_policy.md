@@ -79,6 +79,15 @@ plan と apply で、ホストが報告するポリシーが宣言と違うと�
 
 - RHEL、Rocky Linux、AlmaLinux の 9 と 10。
 - Debian と Ubuntu は対象外です。
+- 使えるポリシーとサブポリシーはリリースによって異なります。ホストにないものは
+  `plan` で拒否します。Rocky Linux 10.2 で確認した内容は次のとおりです。
+  ポリシーは `DEFAULT`、`FUTURE`、`LEGACY`、`FIPS`、`EMPTY`。サブポリシーは
+  `AD-SUPPORT`、`AD-SUPPORT-LEGACY`、`ECDHE-ONLY`、`NO-ENFORCE-EMS`、`NO-PQ`、
+  `OSPP`、`TEST-PQ`。`NO-SHA1` と `NO-CAMELLIA` は**ありません**（EL 10 は既定で
+  SHA-1 を無効にしています）。このページの `DEFAULT:NO-SHA1` の例は EL 9 向けです。
+  ホストにあるものは
+  `ls /usr/share/crypto-policies/policies /usr/share/crypto-policies/policies/modules`
+  で確認できます。
 
 ## まだ実機で確認していないこと
 

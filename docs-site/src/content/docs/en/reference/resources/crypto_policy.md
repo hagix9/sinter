@@ -127,6 +127,14 @@ explicit choice; Sinter does not suggest or do it on its own.
 
 - RHEL, Rocky Linux and AlmaLinux 9 and 10.
 - Not Debian or Ubuntu.
+- Which policies and subpolicies exist depends on the release, and Sinter
+  refuses in `plan` one the host does not have. Observed on Rocky Linux 10.2:
+  policies `DEFAULT`, `FUTURE`, `LEGACY`, `FIPS`, `EMPTY`; subpolicies
+  `AD-SUPPORT`, `AD-SUPPORT-LEGACY`, `ECDHE-ONLY`, `NO-ENFORCE-EMS`, `NO-PQ`,
+  `OSPP`, `TEST-PQ`. `NO-SHA1` and `NO-CAMELLIA` are **not** there (EL 10
+  already disables SHA-1 by default), so the `DEFAULT:NO-SHA1` examples on this
+  page are for EL 9. List yours with
+  `ls /usr/share/crypto-policies/policies /usr/share/crypto-policies/policies/modules`.
 
 ## Not yet verified on real hosts
 
