@@ -6,10 +6,10 @@
 # The whole bundle can be planned and audited on a host where nothing is
 # installed yet:
 #
-#   sinter plan  examples/bundles/postgresql-pgdg17 --host <host> --sudo
-#   sinter audit examples/bundles/postgresql-pgdg17 --host <host> --sudo   # drift, exit 7
-#   sinter apply examples/bundles/postgresql-pgdg17 --host <host> --sudo
-#   sinter apply examples/bundles/postgresql-pgdg17 --host <host> --sudo   # no change
+#   sinter plan  examples/bundles/postgresql-pgdg17/bundle.yaml --host <host> --sudo
+#   sinter audit examples/bundles/postgresql-pgdg17/bundle.yaml --host <host> --sudo   # drift, exit 7
+#   sinter apply examples/bundles/postgresql-pgdg17/bundle.yaml --host <host> --sudo
+#   sinter apply examples/bundles/postgresql-pgdg17/bundle.yaml --host <host> --sudo   # no change
 #
 # Plan reports what an earlier recipe creates (the postgres account, the data
 # directory, the service unit) as "decided at apply" in the later recipes.
