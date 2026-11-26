@@ -56,6 +56,16 @@ Linux hosts except where it says so.
 - **`tuned` resource**: the selected TuneD profile (a named one, the
   recommended one, or off), with the selection and its application reported
   separately. Never installs TuneD or starts its service.
+- **`allow_writable_parents`** (top level of a recipe): a directory other
+  accounts can write to may be the direct parent of a `file`, `template` or
+  `file_merge` that Sinter publishes or removes as root. Every other check
+  stays; metadata-only changes, directories, links, `validate` and backups
+  stay refused there. Each publication there leaves an empty staging
+  directory behind.
+- **Audit below a writable parent**: when the only reason a path cannot be
+  changed is a directly enclosing directory other accounts can write to, audit
+  observes it without following links and reports compliant or drift with a
+  note, instead of an error.
 - **Backups declared for resources**: a `backup.paths` entry may say
   `resources: [id, ...]`.
 - `examples/bundles/postgresql-pgdg17`: PostgreSQL 17 as a bundle of seven
