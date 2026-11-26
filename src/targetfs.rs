@@ -2925,7 +2925,8 @@ impl TargetFs {
             ObjKind::Absent => {
                 return Err(SinterError::apply(format!(
                     "required parent path {} does not exist; create it first, for example with \
-                     a directory resource that this resource depends on",
+                     a directory resource that this resource depends on (a directory resource \
+                     with parents: true also creates its missing parent directories)",
                     dir
                 )))
             }
@@ -3264,7 +3265,7 @@ pub(crate) fn interpret_stat_batch(out: &Output, path: &str, dirs: &[String]) ->
         Completion::Exited(0) => {}
         Completion::Exited(c) => {
             return Err(SinterError::apply(format!(
-                "cannot inspect {}: stat exited with status {} (a parent directory may be missing or inaccessible)",
+                "cannot inspect {}: stat exited with status {} (a parent directory may be missing or inaccessible; a directory resource with parents: true creates missing parent directories)",
                 what, c
             )))
         }

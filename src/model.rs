@@ -1161,6 +1161,17 @@ fn validate_declaration_shape(
             validate_path_state(&d.with, "link", ctx)?;
             // Execution requires `target` unless `state` is `absent`
             // (`run_link`). Enforce it here whenever the state is statically
+            // A literal: whether missing parents may be created is decided
+            // by the recipe text, never by a value computed at run time.
+            if !matches!(
+                d.with.get("parents"),
+                None | Some(Value::Null) | Some(Value::Bool(_))
+            ) {
+                return Err(SinterError::schema(format!(
+                    "{}: directory parents must be true or false",
+                    ctx
+                )));
+            }
             // known; an interpolated state is still checked when evaluated.
             let state_present = match d.with.get("state") {
                 None | Some(Value::Null) => true,
@@ -3525,7 +3536,7 @@ fn validate_with_fields(with: &BTreeMap<String, Value>, allowed: &[&str], ctx: &
 pub const FILE_FIELDS: &[&str] = &[
     "path", "state", "content", "source", "owner", "group", "mode", "validate",
 ];
-pub const DIR_FIELDS: &[&str] = &["path", "state", "owner", "group", "mode"];
+pub const DIR_FIELDS: &[&str] = &["path", "state", "owner", "group", "mode", "parents"];
 pub const LINK_FIELDS: &[&str] = &["path", "target", "state"];
 pub const TEMPLATE_FIELDS: &[&str] = &[
     "path", "state", "source", "owner", "group", "mode", "vars", "validate",

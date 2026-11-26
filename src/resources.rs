@@ -1954,6 +1954,80 @@ impl Engine {
     // -----------------------------------------------------------------------
     // directory
     // -----------------------------------------------------------------------
+    /// The directories above `path` that do not exist, top down (empty when
+    /// the parent exists). Read-only. The first component that exists but is
+    /// not a directory ends the list: the parent path check refuses it.
+    fn missing_parents(&mut self, res: &FrozenResource, path: &str) -> Result<Vec<String>> {
+        let mut missing = Vec::new();
+        for dir in ancestor_dirs(path) {
+            if !missing.is_empty() {
+                missing.push(dir);
+                continue;
+            }
+            if self.observe_stat(res, &dir)?.kind == ObjKind::Absent {
+                missing.push(dir);
+            }
+        }
+        Ok(missing)
+    }
+
+    /// `directory` with `parents: true` (DESIGN §49.3): create every missing
+    /// directory above `path`, top down. Each is created with a plain
+    /// `mkdir` (never `-p`) only after the parent path check accepted
+    /// everything above it, then set to mode 0755 and the owner of the
+    /// account the operation runs as, and re-observed. A directory that
+    /// already exists is never changed. `created` lists what was made, also
+    /// when a later step fails.
+    fn create_parents(
+        &mut self,
+        res: &FrozenResource,
+        path: &str,
+        created: &mut Vec<String>,
+    ) -> Result<()> {
+        for dir in ancestor_dirs(path) {
+            if dir == "/" {
+                continue;
+            }
+            let st = self.observe_stat(res, &dir)?;
+            match st.kind {
+                ObjKind::Dir => continue,
+                ObjKind::Absent => {}
+                other => {
+                    return Err(SinterError::apply(format!(
+                        "{}: parent path {} exists as {}; refusing to create below it",
+                        res.id,
+                        dir,
+                        other.describe()
+                    )))
+                }
+            }
+            self.fs.check_trusted_parents(&dir)?;
+            if let Some(e) = self.fs.tree_owner_conflict(&dir, None, None) {
+                return Err(e);
+            }
+            if let Some(e) = self.fs.shared_owner_conflict(&dir, None) {
+                return Err(e);
+            }
+            let permit = self.fs.mutation_permit()?;
+            self.fs.mkdir(&permit, &dir)?;
+            created.push(dir.clone());
+            let (uid, gid) = self.fs.default_owner();
+            self.fs.set_metadata(&dir, 0o755, uid, gid)?;
+            let now = self.fs.inspect(&dir)?;
+            if now.kind != ObjKind::Dir
+                || now.mode & 0o7777 != 0o755
+                || now.uid != uid
+                || now.gid != gid
+            {
+                return Err(SinterError::apply(format!(
+                    "{}: parent directory {} is not as it was created; refusing to continue",
+                    res.id, dir
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn run_directory(
         &mut self,
         res: &FrozenResource,
@@ -2038,11 +2112,30 @@ impl Engine {
         }
 
         // present
+        let parents = matches!(res.with.get("parents"), Some(Value::Bool(true)));
         match stat.kind {
             ObjKind::Absent => {
                 let meta = self.dir_meta(res, &vals, ObjKind::Absent)?;
                 if self.opts.mode == Mode::Plan {
-                    let note = self.plan_parent_check(res, &path)?;
+                    // `parents: true`: the parent path check is made for the
+                    // first directory that does not exist (everything above
+                    // it exists and is judged as always); the directories
+                    // from there down are created by apply.
+                    let missing = if parents {
+                        self.missing_parents(res, &path)?
+                    } else {
+                        Vec::new()
+                    };
+                    let note = match missing.first() {
+                        Some(first) => {
+                            let note = self.plan_parent_check(res, first)?;
+                            // Later resources below a created parent are
+                            // planned against this change.
+                            self.planned.paths.push((first.clone(), res.id.clone()));
+                            note
+                        }
+                        None => self.plan_parent_check(res, &path)?,
+                    };
                     let explicit = meta.manage_owner.then_some(meta.owner_uid).flatten();
                     if let Some(e) = self.fs.tree_owner_conflict(&path, explicit, None) {
                         return Err(e);
@@ -2061,13 +2154,58 @@ impl Engine {
                     r.notes.extend(self.plan_privilege_note(res, &path));
                     return Ok(r);
                 }
-                self.fs.check_trusted_parents(&path)?;
-                let explicit = meta.manage_owner.then_some(meta.owner_uid).flatten();
-                if let Some(e) = self.fs.tree_owner_conflict(&path, explicit, None) {
-                    return Err(e);
+                // `parents: true`: create what is missing above the
+                // directory, top down, each one only below parents the path
+                // check accepts. A failure after a parent was created is a
+                // failure that reports the change.
+                let mut created: Vec<String> = Vec::new();
+                if parents {
+                    if let Err(e) = self.create_parents(res, &path, &mut created) {
+                        if created.is_empty() {
+                            return Err(e);
+                        }
+                        let mut r = changed_result(res);
+                        r.execution = if e.kind == crate::error::ErrorKind::Indeterminate {
+                            Execution::Indeterminate
+                        } else {
+                            Execution::Failed
+                        };
+                        r.change = Change::Changed;
+                        r.verification = Verification::NotPerformed;
+                        r.reason = Some(format!(
+                            "{} (the parent directories {} were created before this failure)",
+                            e.message,
+                            created.join(", ")
+                        ));
+                        return Ok(r);
+                    }
                 }
-                if let Some(e) = self.fs.shared_owner_conflict(&path, explicit) {
-                    return Err(e);
+                let parents_made = !created.is_empty();
+                let leaf_checks = (|| {
+                    self.fs.check_trusted_parents(&path)?;
+                    let explicit = meta.manage_owner.then_some(meta.owner_uid).flatten();
+                    if let Some(e) = self.fs.tree_owner_conflict(&path, explicit, None) {
+                        return Err(e);
+                    }
+                    if let Some(e) = self.fs.shared_owner_conflict(&path, explicit) {
+                        return Err(e);
+                    }
+                    Ok(())
+                })();
+                if let Err(e) = leaf_checks {
+                    if !parents_made {
+                        return Err(e);
+                    }
+                    let mut r = changed_result(res);
+                    r.execution = Execution::Failed;
+                    r.change = Change::Changed;
+                    r.verification = Verification::NotPerformed;
+                    r.reason = Some(format!(
+                        "{} (the parent directories {} were created before this failure)",
+                        e.message,
+                        created.join(", ")
+                    ));
+                    return Ok(r);
                 }
                 let permit = self.fs.mutation_permit()?;
                 if let Err(e) = self.fs.mkdir(&permit, &path) {
@@ -2077,7 +2215,9 @@ impl Engine {
                     } else {
                         Execution::Failed
                     };
-                    r.change = if e.kind == crate::error::ErrorKind::Indeterminate {
+                    r.change = if parents_made {
+                        Change::Changed
+                    } else if e.kind == crate::error::ErrorKind::Indeterminate {
                         Change::Possible
                     } else {
                         Change::None
