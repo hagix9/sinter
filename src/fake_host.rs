@@ -1,7 +1,8 @@
 //! Scripted host tools for the in-process fake target (test support):
 //! `sysctl -n -- <name>` and `sysctl -w -- <name>=<value>` over a map of
-//! kernel parameters, and `hostnamectl --static|--transient|set-hostname`
-//! over two names.
+//! kernel parameters, `hostnamectl --static|--transient|set-hostname`
+//! over two names, and `tuned-adm profile|off|recommend|verify` over
+//! TuneD's state file on the scripted filesystem.
 //!
 //! The model is deliberately small. It answers only the commands Sinter
 //! sends, refuses everything else with a non-zero exit so a test notices an
@@ -68,6 +69,23 @@ pub struct FakeHostTools {
     pub hostname_reads: VecDeque<FakeRead>,
     /// Every `hostnamectl` argv received, in order.
     pub hostnamectl_calls: Vec<Vec<String>>,
+    /// How `tuned-adm profile <name>` and `tuned-adm off` behave.
+    pub tuned_change: FakeChange,
+    /// The profile `tuned-adm recommend` prints.
+    pub tuned_recommended: String,
+    /// Answers of the next `tuned-adm recommend` calls, in order; `Normal`
+    /// once empty.
+    pub tuned_recommend_reads: VecDeque<FakeRead>,
+    /// Another administrator: at the next `tuned-adm recommend`, the state
+    /// file `/etc/tuned/active_profile` gets this content.
+    pub tuned_external_selection: Option<String>,
+    /// The exit code of `tuned-adm verify` (0: applied, 1: not applied).
+    pub tuned_verify_exit: i32,
+    /// How the next `tuned-adm verify` calls end, in order; `Normal` (exit
+    /// with `tuned_verify_exit`) once empty.
+    pub tuned_verify_reads: VecDeque<FakeRead>,
+    /// Every `tuned-adm` argv received, in order.
+    pub tuned_calls: Vec<Vec<String>>,
 }
 
 fn exited(code: i32, stdout: &str, stderr: &str) -> Output {
@@ -233,7 +251,160 @@ pub(crate) fn hostnamectl(el: &FakeElHandle, is_root: bool, args: &[String]) -> 
     }
 }
 
+/// Serve `tuned-adm profile <name>`, `tuned-adm off`, `tuned-adm recommend`
+/// and `tuned-adm verify`. The selection lives in
+/// `/etc/tuned/active_profile` on the scripted filesystem, as TuneD keeps
+/// it; `daemon_active` is whether `tuned.service` is active.
+pub(crate) fn tuned_adm(
+    el: &FakeElHandle,
+    fs: Option<&mut crate::fakesys::FakeFs>,
+    is_root: bool,
+    daemon_active: bool,
+    args: &[String],
+) -> Output {
+    const NO_DAEMON: &str = "Cannot talk to TuneD daemon via DBus. Is TuneD daemon running?\n";
+    let mut el = el.lock().unwrap_or_else(|e| e.into_inner());
+    let host = &mut el.host;
+    host.tuned_calls.push(args.to_vec());
+    let Some(fs) = fs else {
+        return exited(1, "", "fake tuned-adm: no modeled filesystem\n");
+    };
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    match a.as_slice() {
+        ["recommend"] => {
+            if let Some(content) = host.tuned_external_selection.take() {
+                fs.put_file(
+                    crate::tuned::ACTIVE_PROFILE,
+                    content.as_bytes(),
+                    0o644,
+                    0,
+                    0,
+                );
+            }
+            let mode = host.tuned_recommend_reads.pop_front().unwrap_or_default();
+            read(mode, "tuned-adm", &format!("{}\n", host.tuned_recommended))
+        }
+        ["verify"] => {
+            let mode = host.tuned_verify_reads.pop_front().unwrap_or_default();
+            if mode != FakeRead::Normal {
+                return read(mode, "tuned-adm", "synthetic\n");
+            }
+            if !daemon_active {
+                return exited(1, "", NO_DAEMON);
+            }
+            match host.tuned_verify_exit {
+                0 => exited(
+                    0,
+                    "Verification succeeded, current system settings match the preset profile.\n",
+                    "",
+                ),
+                code => exited(
+                    code,
+                    "Verification failed, current system settings differ from the preset profile.\n",
+                    "",
+                ),
+            }
+        }
+        ["profile", _] | ["off"] => {
+            if !is_root {
+                return exited(1, "", "fake tuned-adm: not authorized\n");
+            }
+            if !daemon_active {
+                return exited(1, "", NO_DAEMON);
+            }
+            let content = match a.as_slice() {
+                ["profile", name] => {
+                    let defined = crate::tuned::profile_files(name)
+                        .iter()
+                        .any(|f| fs.file_bytes(f).is_some());
+                    if !defined {
+                        return exited(
+                            1,
+                            "",
+                            &format!("Requested profile '{}' doesn't exist.\n", name),
+                        );
+                    }
+                    format!("{}\n", name)
+                }
+                _ => String::new(),
+            };
+            let mode = host.tuned_change;
+            scripted(mode, "tuned-adm", || {
+                fs.put_file(
+                    crate::tuned::ACTIVE_PROFILE,
+                    content.as_bytes(),
+                    0o644,
+                    0,
+                    0,
+                );
+                fs.put_file("/etc/tuned/profile_mode", b"manual\n", 0o644, 0, 0);
+                exited(0, "", "")
+            })
+        }
+        _ => exited(2, "", "fake tuned-adm: unmodeled command\n"),
+    }
+}
+
 impl FakeTarget {
+    /// A host with TuneD installed: `/usr/sbin/tuned-adm`, an active
+    /// `tuned.service` (override it with `with_service`), the vendor
+    /// profiles `balanced`, `virtual-guest` and `throughput-performance`
+    /// in the newer layout (`/usr/lib/tuned/profiles`) and `powersave` in
+    /// the older one (`/usr/lib/tuned`), `virtual-guest` as the
+    /// recommendation, and `selected` in `/etc/tuned/active_profile`
+    /// (`None`: an empty file, as after `tuned-adm off`). Needs
+    /// `with_fake_fs` first.
+    pub fn with_tuned(mut self, selected: Option<&str>) -> Self {
+        self.executables.insert(crate::tuned::TOOL.to_string());
+        self.services.insert(
+            crate::tuned::SERVICE.to_string(),
+            (
+                "loaded".to_string(),
+                "active".to_string(),
+                "enabled".to_string(),
+            ),
+        );
+        self.el
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .host
+            .tuned_recommended = "virtual-guest".to_string();
+        let fs = self
+            .fs
+            .as_mut()
+            .expect("with_tuned needs with_fake_fs first");
+        let mut dirs: Vec<String> = ["/etc/tuned", "/usr/lib/tuned", "/usr/lib/tuned/profiles"]
+            .map(String::from)
+            .to_vec();
+        let mut files = Vec::new();
+        for (dir, name) in [
+            ("/usr/lib/tuned/profiles", "balanced"),
+            ("/usr/lib/tuned/profiles", "virtual-guest"),
+            ("/usr/lib/tuned/profiles", "throughput-performance"),
+            ("/usr/lib/tuned", "powersave"),
+        ] {
+            dirs.push(format!("{}/{}", dir, name));
+            files.push(format!("{}/{}/tuned.conf", dir, name));
+        }
+        for dir in dirs {
+            if !fs.nodes.contains_key(&dir) {
+                fs.mkdir_node(&dir, 0o755, 0, 0);
+            }
+        }
+        for file in files {
+            fs.put_file(&file, b"[main]\nsummary=synthetic profile\n", 0o644, 0, 0);
+        }
+        let content = selected.map(|s| format!("{}\n", s)).unwrap_or_default();
+        fs.put_file(
+            crate::tuned::ACTIVE_PROFILE,
+            content.as_bytes(),
+            0o644,
+            0,
+            0,
+        );
+        self
+    }
+
     /// A host with `/usr/bin/hostnamectl` and these static and transient
     /// names (an empty static name: not set).
     pub fn with_hostnamectl(mut self, static_name: &str, transient: &str) -> Self {

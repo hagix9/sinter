@@ -71,6 +71,8 @@ pub mod targets;
 pub mod timer;
 pub(crate) mod timer_engine;
 pub mod toml_front;
+pub mod tuned;
+pub(crate) mod tuned_engine;
 pub mod value;
 pub mod varsfile;
 pub mod yaml;

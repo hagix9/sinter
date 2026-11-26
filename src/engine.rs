@@ -1092,6 +1092,7 @@ impl Engine {
             "crypto_policy" => self.run_crypto_policy(res, item),
             "sysctl" => self.run_sysctl(res, item),
             "hostname" => self.run_hostname(res, item),
+            "tuned" => self.run_tuned(res, item),
             "group" => self.run_group(res, item),
             "user" => self.run_user(res, item),
             "postgresql_role" => self.run_postgresql_role(res, item),
@@ -1124,6 +1125,7 @@ impl Engine {
                             | "crypto_policy"
                             | "sysctl"
                             | "hostname"
+                            | "tuned"
                     )
                     && !self.fs.runs_as_root()
                 {

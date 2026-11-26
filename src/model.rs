@@ -1389,6 +1389,11 @@ fn validate_declaration_shape(
             crate::cryptopol::PolicySpec::check_literals(&d.with, ctx, field_sensitive("policy"))?;
             require_static_string_field(&d.with, "policy", ctx, field_sensitive("policy"))?;
         }
+        "tuned" => {
+            validate_with_fields(&d.with, crate::tuned::FIELDS, ctx)?;
+            crate::tuned::TunedSpec::check_literals(&d.with, ctx, field_sensitive("profile"))?;
+            require_optional_static_string(&d.with, "profile", ctx, field_sensitive("profile"))?;
+        }
         "hostname" => {
             validate_with_fields(&d.with, crate::hostname::FIELDS, ctx)?;
             crate::hostname::check_literals(&d.with, ctx, field_sensitive("name"))?;
@@ -2628,6 +2633,41 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         stage = Stage::ValueFree;
                         return Err(SinterError::schema(format!(
                             "conflicting ownership of the system-wide crypto policy by resources {} and {} (a recipe may hold one crypto_policy)",
+                            owner, r.id
+                        )));
+                    }
+                }
+                "tuned" => {
+                    let redact = field_sensitive("profile");
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(&r.with, crate::tuned::FIELDS, &resource_ctx)?;
+                        crate::tuned::TunedSpec::check_literals(&r.with, &resource_ctx, redact)
+                    })?;
+                    // `profile` is static: resolved here and held to the
+                    // profile grammar before any target is reached.
+                    if !r.with.get("profile").is_none_or(Value::is_null) {
+                        staged_field(&mut stage, &tol, "profile", || {
+                            let profile = static_string(
+                                &r.with,
+                                "profile",
+                                &scope,
+                                &resource_ctx,
+                                true,
+                                redact,
+                            )?;
+                            let mut resolved = r.with.clone();
+                            resolved.insert("profile".to_string(), Value::Str(profile));
+                            crate::tuned::TunedSpec::from_values(&resolved, &resource_ctx, redact)
+                                .map(|_| ())
+                        })?;
+                    }
+                    // One selected profile per host: one resource per recipe.
+                    if let Some(owner) = account_name_owner
+                        .insert(("tuned".to_string(), String::new()), r.id.clone())
+                    {
+                        stage = Stage::ValueFree;
+                        return Err(SinterError::schema(format!(
+                            "conflicting ownership of the TuneD profile by resources {} and {} (a recipe may hold one tuned)",
                             owner, r.id
                         )));
                     }

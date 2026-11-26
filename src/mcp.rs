@@ -454,6 +454,17 @@ fn check_mcp_manifest_authority(doc: &Document) -> Result<(), ToolError> {
                     .to_string(),
             });
         }
+        // `tuned` reads TuneD's state and runs `tuned-adm`; no form of it
+        // is measured on real hosts, so MCP does not offer the type.
+        if r.type_ == "tuned" {
+            return Err(ToolError {
+                category: "invalid_manifest",
+                kind: Some("schema"),
+                message: "MCP manifests may not use the tuned resource type yet — \
+                          its TuneD observation is not measured on real hosts"
+                    .to_string(),
+            });
+        }
         if r.type_ == "systemd_timer" {
             return Err(ToolError {
                 category: "invalid_manifest",

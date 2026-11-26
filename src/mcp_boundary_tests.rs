@@ -406,6 +406,7 @@ fn refused_manifests() -> Vec<(&'static str, String)> {
         ("crypto_policy", r("crypto_policy", "policy: FUTURE")),
         ("sysctl", r("sysctl", "name: vm.swappiness, value: 10")),
         ("hostname", r("hostname", "name: web01")),
+        ("tuned", r("tuned", "profile: balanced")),
         ("malformed", "version: 1\nresources: [\n".to_string()),
         ("not a mapping", "- just\n- a list\n".to_string()),
     ]
@@ -438,6 +439,7 @@ fn refused_manifests_never_reach_the_host() {
                 "crypto_policy" => "crypto_policy",
                 "sysctl" => "sysctl",
                 "hostname" => "hostname",
+                "tuned" => "tuned",
                 _ => "",
             };
             assert!(

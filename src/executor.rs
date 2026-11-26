@@ -3945,6 +3945,21 @@ impl FakeExecutor {
                     &req.args,
                 )
             }
+            "tuned-adm"
+                if req.program == crate::tuned::TOOL
+                    && self.target.executables.contains(&req.program) =>
+            {
+                crate::fake_host::tuned_adm(
+                    &self.target.el,
+                    self.target.fs.as_mut(),
+                    self.sudo || self.target.uid == 0,
+                    self.target
+                        .services
+                        .get(crate::tuned::SERVICE)
+                        .is_some_and(|s| s.0 != "not-found" && s.1 == "active"),
+                    &req.args,
+                )
+            }
             "hostnamectl"
                 if req.program == crate::hostname::TOOL
                     && self.target.executables.contains(&req.program) =>

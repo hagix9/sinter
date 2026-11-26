@@ -646,6 +646,38 @@ fn sysctl_is_refused_by_every_manifest_tool() {
 }
 
 #[test]
+fn tuned_is_refused_by_every_manifest_tool() {
+    // No TuneD observation is measured on real hosts; MCP does not offer
+    // the type (and stays read-only either way).
+    let mut m = Mcp::start();
+    init(&mut m);
+    let manifest =
+        "version: 1\nresources:\n  - id: t\n    type: tuned\n    with: { profile: balanced }\n";
+    let calls = [
+        ("sinter_validate_manifest", json!({"manifest": manifest})),
+        ("sinter_inspect_manifest", json!({"manifest": manifest})),
+        (
+            "sinter_plan",
+            json!({"manifest": manifest, "target": "rocky9"}),
+        ),
+        (
+            "sinter_plan_host",
+            json!({"manifest": manifest, "target": "web01"}),
+        ),
+        (
+            "sinter_audit_host",
+            json!({"manifest": manifest, "target": "web01"}),
+        ),
+    ];
+    for (i, (tool, args)) in calls.into_iter().enumerate() {
+        let (is_err, v) = Mcp::payload(&m.tool(10 + i as u64, tool, args));
+        assert!(is_err, "{tool} accepted a tuned manifest: {v}");
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("tuned"), "{tool}: {msg}");
+    }
+}
+
+#[test]
 fn hostname_is_refused_by_every_manifest_tool() {
     // `hostnamectl` is not measured on real hosts; MCP does not offer the
     // type (and stays read-only either way).

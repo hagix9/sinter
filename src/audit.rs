@@ -392,6 +392,7 @@ fn audit_resource(engine: &mut Engine, res: &FrozenResource) -> AuditResourceRes
         "crypto_policy" => audit_crypto_policy(engine, res, item.as_ref(), sensitive),
         "sysctl" => audit_sysctl(engine, res, item.as_ref(), sensitive),
         "hostname" => audit_hostname(engine, res, item.as_ref(), sensitive),
+        "tuned" => audit_tuned(engine, res, item.as_ref(), sensitive),
         "group" => audit_group(engine, res, item.as_ref(), sensitive),
         "user" => audit_user(engine, res, item.as_ref(), sensitive),
         "postgresql_role" => audit_postgresql_role(engine, res, item.as_ref(), sensitive),
@@ -1534,6 +1535,29 @@ fn audit_hostname(
         });
     }
     r
+}
+
+/// Audit a `tuned`: the profile TuneD's state file names against the
+/// declared one (dimension `profile`), `tuned.service` not being active
+/// while a profile is declared (`service`) and, with `verify: true`, what
+/// `tuned-adm verify` reports (`applied`). A host without the tool and
+/// every observation failure are errors, never drift.
+fn audit_tuned(
+    engine: &mut Engine,
+    res: &FrozenResource,
+    item: Option<&EvalVal>,
+    sensitive: bool,
+) -> AuditResourceResult {
+    let found = match obs_or_error(res, sensitive, engine.tuned_audit(res, item, sensitive)) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let details = found
+        .drift
+        .into_iter()
+        .map(|(f, o, d)| AuditDriftDetail::new(&f, o, d, sensitive))
+        .collect();
+    finish_drift(res, sensitive, details, &found.compliant)
 }
 
 /// Audit a `systemd_timer` (DESIGN §42.5): the checks that would stop plan

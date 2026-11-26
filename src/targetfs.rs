@@ -1561,6 +1561,22 @@ impl TargetFs {
         self.run_argv(crate::hostname::TOOL, &[which.flag().to_string()])
     }
 
+    /// The profile TuneD recommends for the host (`tuned`):
+    /// `tuned-adm recommend` prints it and changes nothing. Read-only, fixed
+    /// argv without any recipe value; no mutation permit is needed.
+    pub fn tuned_adm_recommend(&mut self) -> Result<Output> {
+        self.run_argv(crate::tuned::TOOL, &["recommend".to_string()])
+    }
+
+    /// Whether TuneD reports its selected profile as applied (`tuned`):
+    /// `tuned-adm verify` compares and sets nothing. Fixed argv without any
+    /// recipe value; no mutation permit is needed. Whether the call is free
+    /// of side effects is not measured, so the type runs it only on request
+    /// and never in plan.
+    pub fn tuned_adm_verify(&mut self) -> Result<Output> {
+        self.run_argv(crate::tuned::TOOL, &["verify".to_string()])
+    }
+
     /// Check one `OnCalendar` expression with the target's own systemd
     /// (`systemd_timer`, DESIGN §42.4). The expression was checked by Sinter
     /// first (printable ASCII, no leading `-`, no `\` or `%`), so it cannot
