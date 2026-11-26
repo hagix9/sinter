@@ -44,3 +44,10 @@ complete supported set — unknown `with` fields are schema errors.
 - Content publication is atomic (rename); existing metadata is preserved when
   omitted.
 - All types are idempotent — a converged resource mutates nothing on re-apply.
+
+
+Not provided: kernel command-line arguments and boot-loader settings (GRUB).
+A wrong change there can leave a host unable to boot, and these types need
+testing with reboots on every supported system before they can be offered.
+Their design is recorded (DESIGN §58); until then use the distribution's own
+tools by hand.
