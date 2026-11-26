@@ -59,6 +59,9 @@ pub enum BackupStatus {
     /// Apply: not attempted because the backup failed earlier (backup
     /// failure report only).
     NotRun,
+    /// A partial run left this declared backup out: nothing that runs needs
+    /// it (DESIGN §49.6). Nothing was copied, checked or prepared for it.
+    Skipped,
 }
 
 impl BackupStatus {
@@ -69,6 +72,7 @@ impl BackupStatus {
             BackupStatus::Absent => "absent",
             BackupStatus::Failed => "failed",
             BackupStatus::NotRun => "not_run",
+            BackupStatus::Skipped => "skipped",
         }
     }
 }
@@ -167,6 +171,33 @@ pub fn utc_stamp(secs: u64) -> String {
 }
 
 /// Plan-mode report: declared paths only; nothing observed or created.
+/// `report` with the declared backups a partial run leaves out appended as
+/// `skipped` entries; a report of only those when nothing else is backed up.
+/// `None` when there is nothing to say.
+pub fn with_skipped(report: Option<BackupReport>, skipped: &[String]) -> Option<BackupReport> {
+    if skipped.is_empty() {
+        return report;
+    }
+    let mut r = report.unwrap_or(BackupReport {
+        run_id: None,
+        directory: None,
+        directories: Vec::new(),
+        entries: Vec::new(),
+    });
+    for p in skipped {
+        if !r.entries.iter().any(|e| &e.path == p) {
+            r.entries.push(BackupEntry {
+                path: p.clone(),
+                status: BackupStatus::Skipped,
+                kind: None,
+                destination: None,
+                store: None,
+            });
+        }
+    }
+    Some(r)
+}
+
 pub fn planned(paths: &[String]) -> BackupReport {
     planned_in(paths, &BTreeMap::new(), None)
 }

@@ -346,6 +346,13 @@ fn render_backup_text(
             sanitize_line(id),
             sanitize_line(&b.directories.join(", "))
         )?,
+        _ if b
+            .entries
+            .iter()
+            .all(|e| e.status == crate::backup::BackupStatus::Skipped) =>
+        {
+            writeln!(out, "backup: nothing is backed up in this partial run")?
+        }
         _ => writeln!(out, "backup: planned (nothing is copied during plan)")?,
     }
     for e in &b.entries {
@@ -358,6 +365,9 @@ fn render_backup_text(
             }
             (crate::backup::BackupStatus::Failed, _, _) => "[failed]".to_string(),
             (crate::backup::BackupStatus::NotRun, _, _) => "[not_run]".to_string(),
+            (crate::backup::BackupStatus::Skipped, _, _) => {
+                "[skipped] SKIPPED_BY_USER: nothing that runs needs this backup".to_string()
+            }
             (_, _, _) => match &e.store {
                 Some(s) => format!("[planned] -> {}", sanitize_line(s)),
                 None => "[planned]".to_string(),
@@ -381,13 +391,21 @@ pub fn backup_json(b: &crate::backup::BackupReport) -> serde_json::Value {
         "run_id": b.run_id,
         "directory": b.directory,
         "directories": b.directories,
-        "entries": b.entries.iter().map(|e| serde_json::json!({
-            "path": e.path,
-            "status": e.status.label(),
-            "kind": e.kind,
-            "destination": e.destination,
-            "store": e.store,
-        })).collect::<Vec<_>>(),
+        "entries": b.entries.iter().map(|e| {
+            let mut v = serde_json::json!({
+                "path": e.path,
+                "status": e.status.label(),
+                "kind": e.kind,
+                "destination": e.destination,
+                "store": e.store,
+            });
+            // Only a skipped entry carries a reason: documents of runs
+            // without exclusions keep their shape.
+            if e.status == crate::backup::BackupStatus::Skipped {
+                v["reason"] = serde_json::Value::from(crate::skips::REASON);
+            }
+            v
+        }).collect::<Vec<_>>(),
     })
 }
 

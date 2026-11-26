@@ -1356,6 +1356,8 @@ pub fn empty_model() -> crate::model::Model {
         register_producers: BTreeMap::new(),
         backups: Vec::new(),
         backup_stores: BTreeMap::new(),
+        backup_resources: BTreeMap::new(),
+        backups_skipped: Vec::new(),
         targets: None,
         warnings: Vec::new(),
         plugins: None,

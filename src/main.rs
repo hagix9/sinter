@@ -3441,17 +3441,21 @@ struct ExecResult {
 /// * `failed` — apply's backup step failed (per-path `failed` / `not_run`);
 /// * `not_started` — apply failed before the backup step (e.g. connection);
 /// * `not_run` — the execution was not run (apply stopped earlier).
+///
+/// `model` is the model the execution runs (after `--skip-resource`): its
+/// backups are the ones this run takes, and `backups_skipped` the declared
+/// ones it leaves out (DESIGN §49.6).
 fn backup_record(
     phase: Phase,
-    unit: &RecipeUnit,
+    model: &BackupView,
     outcome: Option<&Result<Outcome, SinterError>>,
 ) -> serde_json::Value {
-    use sinter::backup::{planned, planned_in, BackupStatus};
-    if phase == Phase::Audit || unit.model.backups.is_empty() {
+    use sinter::backup::{planned, planned_in, with_skipped, BackupStatus};
+    if phase == Phase::Audit || (model.backups.is_empty() && model.skipped.is_empty()) {
         return serde_json::Value::Null;
     }
     let not_run = || {
-        let mut r = planned(&unit.model.backups);
+        let mut r = planned(&model.backups);
         for e in &mut r.entries {
             e.status = BackupStatus::NotRun;
         }
@@ -3467,16 +3471,33 @@ fn backup_record(
         Some(Ok(Outcome::Audit(_))) => return serde_json::Value::Null,
         Some(Err(e)) => match (&e.backup, phase) {
             (Some(b), _) => ("failed", (**b).clone()),
-            (None, Phase::Plan) => (
-                "planned",
-                planned_in(&unit.model.backups, &unit.model.backup_stores, None),
-            ),
+            (None, Phase::Plan) => ("planned", planned_in(&model.backups, &model.stores, None)),
             (None, _) => ("not_started", not_run()),
         },
     };
+    // The engine's own report already lists them; the reports built here do
+    // not.
+    let report = with_skipped(Some(report), &model.skipped).expect("a report was given");
     let mut v = sinter::output::backup_json(&report);
     v["status"] = serde_json::Value::from(status);
     v
+}
+
+/// The backup declaration of the model one execution runs.
+struct BackupView {
+    backups: Vec<String>,
+    stores: BTreeMap<String, String>,
+    skipped: Vec<String>,
+}
+
+impl BackupView {
+    fn of(model: &Model) -> Self {
+        BackupView {
+            backups: model.backups.clone(),
+            stores: model.backup_stores.clone(),
+            skipped: model.backups_skipped.clone(),
+        }
+    }
 }
 
 /// Run an execution plan sequentially.
@@ -3540,9 +3561,15 @@ fn run_executions(
                 unit: ex.unit,
                 target: ex.target,
                 exit_code: None,
+        let model = ex.model.take().unwrap_or_else(|| u.model.clone());
+        let model = match a.exec.skips() {
+            Some(s) => s.filter(ex.unit, model),
+            None => model,
+        };
+        let backup_view = BackupView::of(&model);
                 label: "not_run",
                 json: serde_json::json!({ "reason": format!("apply stopped after {} failed", culprit) }),
-                backup: backup_record(phase, u, None),
+                backup: backup_record(phase, &backup_view, None),
             });
             continue;
         }
@@ -3561,7 +3588,7 @@ fn run_executions(
         };
         let executed = execute(phase, model, &ex.target, a, Some(&id), session.sink());
         session.end(run_outcome_of(&executed));
-        let backup = backup_record(phase, u, Some(&executed));
+        let backup = backup_record(phase, &backup_view, Some(&executed));
         let (code, label, json) = match executed {
             Ok(outcome) => {
                 if text {

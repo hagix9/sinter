@@ -69,6 +69,43 @@ pub struct SkipPlan {
     pub blocked: Vec<Blocked>,
 }
 
+/// The types whose whole effect is their own `path`: nothing else on the
+/// host changes when one of them is applied without a handler.
+const PATH_ONLY_TYPES: &[&str] = &["file", "template", "directory", "link", "file_merge"];
+
+fn below_or_same(a: &str, b: &str) -> bool {
+    a == b || b == "/" || a.starts_with(&format!("{}/", b))
+}
+
+/// Whether the declared backup of `path` can be needed by what `model`
+/// (already reduced to the included resources) runs.
+///
+/// * A backup declared for resources (`resources: [...]`) is needed exactly
+///   when one of them is included (an id, or any instance of a loop).
+/// * Otherwise it is needed unless every included resource provably cannot
+///   touch it: each is a type that changes only its own path, notifies no
+///   handler, and its path is neither the backup path, nor below it, nor
+///   above it. Anything else (a package, a command, a service, a plugin
+///   type, a resource that notifies a handler) may change any path, so the
+///   backup stays. Nothing is left out on a guess.
+fn backup_needed(path: &str, model: &Model) -> bool {
+    if let Some(ids) = model.backup_resources.get(path) {
+        return model
+            .resources
+            .iter()
+            .any(|r| ids.iter().any(|id| matches(r, id)));
+    }
+    model.resources.iter().any(|r| {
+        if !PATH_ONLY_TYPES.contains(&r.type_.as_str()) || !r.notify.is_empty() {
+            return true;
+        }
+        match &r.path {
+            Some(p) => below_or_same(p, path) || below_or_same(path, p),
+            None => true,
+        }
+    })
+}
+
 /// The id a loop's instances share (`id[3]` -> `id`).
 fn loop_base(r: &FrozenResource) -> Option<&str> {
     if r.loop_index.is_some() {
@@ -296,9 +333,22 @@ impl SkipPlan {
 
     /// `model` with the excluded resources removed. A handler stays: it runs only
     /// if an included resource notifies it.
+    ///
+    /// The declared backups follow what runs (DESIGN §49.6): a backup that
+    /// nothing included can need is left out and listed in
+    /// `backups_skipped`; every other backup stays. A recipe without an
+    /// exclusion is returned unchanged.
     pub fn filter(&self, unit: usize, mut model: Model) -> Model {
         if let Some(u) = self.units.get(unit) {
+            if u.excluded.is_empty() {
+                return model;
+            }
             model.resources.retain(|r| !u.excluded.contains(&r.id));
+            let (keep, skip): (Vec<String>, Vec<String>) = std::mem::take(&mut model.backups)
+                .into_iter()
+                .partition(|p| backup_needed(p, &model));
+            model.backups = keep;
+            model.backups_skipped = skip;
         }
         model
     }

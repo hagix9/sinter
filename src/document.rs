@@ -25,6 +25,10 @@ pub struct Document {
     /// The store a path of `backup_paths` names (DESIGN §40.6): its own, or the
     /// `backup.directory` of this document.
     pub backup_stores: BTreeMap<String, String>,
+    /// The resources a path of `backup_paths` is declared for
+    /// (`resources: [id, ...]`, DESIGN §49.6). A path not here is backed up
+    /// for the recipe as a whole.
+    pub backup_resources: BTreeMap<String, Vec<String>>,
     /// Inventory hosts/groups this recipe may be applied to (`targets`).
     pub targets: Option<TargetSelector>,
     /// Recipe-wide default environment for `package`/`command` resources
@@ -229,8 +233,8 @@ pub fn document_from_value(root: Value, path: &Path, origin: &str) -> Result<Doc
         }
     }
 
-    let (backup_paths, backup_stores) = match map.get("backup") {
-        None => (Vec::new(), BTreeMap::new()),
+    let (backup_paths, backup_stores, backup_resources) = match map.get("backup") {
+        None => (Vec::new(), BTreeMap::new(), BTreeMap::new()),
         Some(v) => parse_backup(v, origin)?,
     };
     let targets = match map.get("targets") {
@@ -262,6 +266,7 @@ pub fn document_from_value(root: Value, path: &Path, origin: &str) -> Result<Doc
         handlers,
         backup_paths,
         backup_stores,
+        backup_resources,
         targets,
         env,
         plugins,
@@ -412,7 +417,15 @@ fn parse_targets(v: &Value, origin: &str) -> Result<TargetSelector> {
 /// Paths and stores are static target identifiers (DESIGN §4.9, §40.6): literal
 /// canonical absolute paths, never interpolated. `/` is rejected because a
 /// whole-root copy would contain the backup store itself.
-fn parse_backup(v: &Value, origin: &str) -> Result<(Vec<String>, BTreeMap<String, String>)> {
+#[allow(clippy::type_complexity)]
+fn parse_backup(
+    v: &Value,
+    origin: &str,
+) -> Result<(
+    Vec<String>,
+    BTreeMap<String, String>,
+    BTreeMap<String, Vec<String>>,
+)> {
     let ctx = format!("{}: backup", origin);
     let map = v
         .as_map()
@@ -454,7 +467,9 @@ fn parse_backup(v: &Value, origin: &str) -> Result<(Vec<String>, BTreeMap<String
     }
     let mut out = Vec::new();
     let mut stores = BTreeMap::new();
+    let mut for_resources: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (i, item) in list.iter().enumerate() {
+        let mut ids: Option<Vec<String>> = None;
         let (p, own) = match item.as_map() {
             Some(entry) => {
                 let at = format!("{}.paths[{}]", ctx, i);
@@ -467,6 +482,28 @@ fn parse_backup(v: &Value, origin: &str) -> Result<(Vec<String>, BTreeMap<String
                     .get("directory")
                     .map(|d| store(d, format!("{at}.directory")))
                     .transpose()?;
+                // `resources`: the resource ids this backup is for. Literal
+                // ids, at least one, each once.
+                if let Some(r) = entry.get("resources") {
+                    let bad = || {
+                        SinterError::schema(format!(
+                            "{at}.resources must be a non-empty list of resource ids"
+                        ))
+                    };
+                    let l = r.as_list().ok_or_else(bad)?;
+                    let mut out: Vec<String> = Vec::new();
+                    for v in l {
+                        let id = v.as_str().filter(|s| !s.is_empty()).ok_or_else(bad)?;
+                        if id.contains("{{") || out.iter().any(|x| x == id) {
+                            return Err(bad());
+                        }
+                        out.push(id.to_string());
+                    }
+                    if out.is_empty() {
+                        return Err(bad());
+                    }
+                    ids = Some(out);
+                }
                 (p, own)
             }
             None => (
@@ -494,8 +531,11 @@ fn parse_backup(v: &Value, origin: &str) -> Result<(Vec<String>, BTreeMap<String
         if let Some(dir) = own.or_else(|| common.clone()) {
             stores.insert(p.to_string(), dir);
         }
+        if let Some(ids) = ids {
+            for_resources.insert(p.to_string(), ids);
+        }
     }
-    Ok((out, stores))
+    Ok((out, stores, for_resources))
 }
 
 fn parse_resource(item: &Value, origin: &str, idx: usize) -> Result<ResourceDecl> {

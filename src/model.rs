@@ -99,6 +99,14 @@ pub struct Model {
     /// The store a recipe names for a path of `backups` (DESIGN §40.6). A path not
     /// here goes to the project file's store, else the default one.
     pub backup_stores: BTreeMap<String, String>,
+    /// The resources a path of `backups` is declared for (`resources` of a
+    /// `backup.paths` entry, DESIGN §49.6). A path not here belongs to the
+    /// recipe as a whole.
+    pub backup_resources: BTreeMap<String, Vec<String>>,
+    /// Declared backups a partial run leaves out because nothing that runs
+    /// needs them (DESIGN §49.6). Never copied, checked or prepared for;
+    /// reported as skipped. Empty in a run without exclusions.
+    pub backups_skipped: Vec<String>,
     /// Explicit execution targets (`targets`), from the entry recipe only.
     pub targets: Option<TargetSelector>,
     /// Load-time warnings: likely mistakes that are still valid recipes
@@ -143,6 +151,8 @@ impl Model {
             register_producers: BTreeMap::new(),
             backups: Vec::new(),
             backup_stores: BTreeMap::new(),
+            backup_resources: BTreeMap::new(),
+            backups_skipped: Vec::new(),
             targets,
             warnings: Vec::new(),
             plugins: None,
@@ -222,6 +232,7 @@ pub(crate) fn prepare_with_plugins(
         global_sensitive_vars,
         backups: Vec::new(),
         backup_stores: BTreeMap::new(),
+        backup_resources: BTreeMap::new(),
         entry: None,
         targets: None,
         recipe_env: None,
@@ -631,6 +642,7 @@ struct LoadState {
     backups: Vec<(String, String)>,
     /// The stores the documents name for those paths.
     backup_stores: BTreeMap<String, String>,
+    backup_resources: BTreeMap<String, Vec<String>>,
     /// Canonical path of the entry recipe (the first document loaded).
     entry: Option<PathBuf>,
     /// `targets` of the entry recipe.
@@ -737,6 +749,11 @@ fn expand_document(canon: &Path, doc: Document, state: &mut LoadState) -> Result
         doc.backup_stores
             .iter()
             .map(|(p, d)| (p.clone(), d.clone())),
+    );
+    state.backup_resources.extend(
+        doc.backup_resources
+            .iter()
+            .map(|(p, ids)| (p.clone(), ids.clone())),
     );
     for v in &doc.vars {
         if !state.var_names.insert(v.name.clone()) {
@@ -1786,6 +1803,18 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
     crate::backup::check_declared_overlap(&declared_backups)?;
     crate::backup::check_declared_stores(&declared_backups, &state.backup_stores)?;
 
+    // A backup declared for resources must name resources of this recipe
+    // (an id, or the id of a loop for all its instances).
+    for (path, ids) in &state.backup_resources {
+        for id in ids {
+            if !state.resources.iter().any(|r| &r.id == id) {
+                return Err(SinterError::schema(format!(
+                    "backup path {}: resources names {}, which is not a resource of this recipe",
+                    path, id
+                )));
+            }
+        }
+    }
     // A required variable needs a value from a variables file. A recipe no host
     // runs is not asked (`structure_only`), and nothing about its default is said.
     if !overrides.structure_only {
@@ -2914,6 +2943,8 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
         backup_stores: state.backup_stores,
         targets: state.targets,
         warnings,
+        backup_resources: state.backup_resources,
+        backups_skipped: Vec::new(),
         plugins: state.plugins,
     })
 }

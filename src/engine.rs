@@ -588,6 +588,7 @@ impl Engine {
             let mut dep_failure: Option<String> = None;
             let mut dep_unknown = false;
             for dep in &res.depends_on {
+        let backup = crate::backup::with_skipped(backup, &self.model.backups_skipped);
                 match results.get(dep).and_then(|i| out_results.get(*i)) {
                     Some(dr) if dr.satisfies_dependency() => {}
                     Some(dr) if dr.is_unknown_dependency() => {
