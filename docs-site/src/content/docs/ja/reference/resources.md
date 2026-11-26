@@ -3,7 +3,7 @@ title: リソースリファレンス
 description: v1.15.0 に実装されているすべての組み込み Sinter リソースタイプ。
 ---
 
-Sinter v1.15.0 は 12 の組み込みリソースタイプを実装しています（`postgresql_role` は v1.5.1 で追加、`systemd_timer` と `nm_connection` は v1.15.0 で追加）。[Resource Plugins](/ja/reference/resource-plugins/) で追加することもできます。以下の
+Sinter v1.15.0 は 12 の組み込みリソースタイプを実装しています（`postgresql_role` は v1.5.1 で追加、`systemd_timer` と `nm_connection` は v1.15.0 で追加）。v1.15.0 の後に `file_merge`、`dnf_repository`、`dnf_module`、`crypto_policy`、`sysctl`、`hostname` の 6 つを追加しましたが、**まだリリースには含まれていません**。[Resource Plugins](/ja/reference/resource-plugins/) で追加することもできます。以下の
 パラメータはサポートされる完全なセットであり、未知の `with`
 フィールドはスキーマエラーです。
 
@@ -20,6 +20,12 @@ Sinter v1.15.0 は 12 の組み込みリソースタイプを実装していま�
 | [nm_connection](/ja/reference/resources/nm_connection/) | NetworkManager の Ethernet プロファイル(v1.15.0 から) | `name`、`ifname`、`autoconnect`、`ipv4`、`ipv6`、`state`、`active` |
 | [group](/ja/reference/resources/group/) | ローカル Linux グループ | `name`、`state`、`gid`、`system` |
 | [user](/ja/reference/resources/user/) | ローカル Linux ユーザー | `name`、`state`、`uid`、`group`、`groups`、`shell`、`home`、`create_home`、`system`、`password_hash` |
+| [file_merge](/ja/reference/resources/file_merge/) | 既存テキストファイルの一部（行、目印付きブロック、`key = value`）（未リリース） | `path`、`merge`、`line` / `marker`+`content` / `key`+`value`、`state`、`create` |
+| [dnf_repository](/ja/reference/resources/dnf_repository/) | `/etc/yum.repos.d` のリポジトリ 1 セクション（未リリース） | `name`、`file`、`enabled`、`baseurl`、`gpgcheck`、`gpgkey`、`state` |
+| [dnf_module](/ja/reference/resources/dnf_module/) | DNF 4 のモジュールストリームの状態（未リリース） | `name`、`stream`、`state` |
+| [crypto_policy](/ja/reference/resources/crypto_policy/) | システム全体の暗号ポリシー（RHEL 系）（未リリース） | `policy`、`allow_weaker` |
+| [sysctl](/ja/reference/resources/sysctl/) | カーネルパラメータ 1 つ: 実行中の値と永続設定（未リリース） | `name`、`value`、`state`、`runtime`、`persist` |
+| [hostname](/ja/reference/resources/hostname/) | 静的ホスト名（未リリース） | `name` |
 | [postgresql_role](/ja/reference/resources/postgresql_role/) | ローカルの PostgreSQL サーバーのロール（v1.5.1 から） | `name`、`state`、`login`、`superuser`、…、`connection_limit`、`password_verifier` |
 
 ## 共通の規約

@@ -14,6 +14,12 @@ Ubuntu). File resources need the `attr` package on the target.
 | `signed-repo.yaml` | Any signed RPM repository (replace the key and URL first) |
 | `apache-htpasswd.yaml` | httpd with Basic authentication from a secret htpasswd file |
 
+`../bundles/postgresql-pgdg17/` builds the same PGDG server as a bundle of
+seven small recipes (repository, module, package, initdb, directory, config,
+service) with the types added after v1.15.0 (`dnf_repository`, `dnf_module`,
+`creates_accounts`; not in a release yet). The whole bundle can be planned and
+audited on a host where nothing is installed.
+
 Secrets are not shipped. Create them before applying:
 
 - `secrets/app-verifier.age` — the SCRAM-SHA-256 verifier of the PostgreSQL

@@ -9,7 +9,8 @@ run against a disposable RHEL-family or Debian/Ubuntu host (some need root /
 |------|-----------|
 | `packages.yaml` | `package` `state: present`, and dnf metadata auto-acquisition (no manual `dnf makecache`) |
 | `package-proxy.yaml` | one recipe-wide `env` proxy for every `package`/`command` (`NO_PROXY`, per-resource override) |
-| `dnf-module.yaml` | installing a package from a DNF module stream (`command` + `depends_on`) |
+| `dnf-module.yaml` | installing a package from a DNF module stream (`dnf_module` + `depends_on`; unreleased type) |
+| `dnf-repository.yaml` | enabling a distribution repository and installing from it (`dnf_repository`; unreleased type) |
 | `accounts-and-paths.yaml` | group → user → directory → file with explicit `depends_on` (package-created accounts are not inferred) |
 | `httpd-service.yaml` | package → dedicated user → service with explicit `depends_on` (a failed producer blocks its dependents) |
 | `validate-sshd-config.yaml` | `validate`: check the staged file before it is published |

@@ -3952,3 +3952,176 @@ Everything above is tested against the scripted target only. To measure on RHEL,
 - which package ships `/usr/bin/update-crypto-policies` on a minimal installation (`crypto-policies-scripts`);
 - the effect on new SSH connections after `FUTURE` and after `DEFAULT:NO-SHA1`, with and without an sshd restart;
 - a `notify` to a `service` handler after a policy change on a real systemd.
+
+54. `sysctl` resource (one kernel parameter)
+
+IMPLEMENTED, NOT RELEASED, NOT VERIFIED ON A REAL HOST. A built-in type for every supported OS, on top of `/usr/sbin/sysctl` (procps) and one file of Sinter's own in `/etc/sysctl.d`.
+
+54.1 Scope
+
+One kernel parameter of one host, in two independent parts: the value the running kernel uses now, and a persistent setting read at boot. Out of scope: editing `/etc/sysctl.conf` or any file Sinter does not own, evaluating which file wins at boot, running `sysctl --system`, patterns (`*`), the `/` separator, loading kernel modules, resetting a running value, `sinter discover`.
+
+54.2 Fields (`with`)
+
+- `name` (required, static): `[a-z0-9_]+(\.[A-Za-z0-9_-]+)+`, at most 128 bytes. Variables may be used; facts, registers and sensitive values may not. Resolved and checked at load. The grammar excludes `/`, `*`, `=`, whitespace, an empty segment and a leading `-`, so the name cannot become an option, an assignment, a pattern or a path component other than the one file name.
+- `value` (required with `present`): a string or an integer. One line of printable ASCII (tabs accepted), not empty, at most 1024 bytes after normalization, without `{{` (the value is passed through the synthetic `file` resource, whose `content` is an expression). Normalization: trimmed, every run of spaces and tabs collapsed to one space. Comparison, the file content and the argv of the change all use the normalized form, so `4096 87380 6291456` equals the kernel's tab-separated form. A boolean or a float is refused (write a string).
+- `state` (optional): the literal `present` (default) or `absent`. Not from a variable: what the resource does, and which path it owns, is known at load.
+- `runtime` (optional, default true), `persist` (optional, default true): literal booleans. At least one is true.
+- With `state: absent`, `value`, `runtime` and `persist` are refused at load.
+
+Unknown fields are refused. Two `sysctl` resources with the same `name` in one recipe are a load-time ownership conflict. When the resource manages the file (always, except `persist: false`), the file path takes part in the path-owner conflict of `file`, `template`, `directory`, `link`, `systemd_timer` and in the whole-path side of the `file_merge` conflict.
+
+54.3 The persistent setting
+
+Sinter owns one whole file per parameter: `/etc/sysctl.d/90-sinter-<name>.conf`, content exactly `# Managed by Sinter (sysctl). Local changes are replaced.\n<name> = <value>\n`, `root:root`, mode 0644. It is planned, written, removed and audited through a synthetic `file` resource (the construction of `systemd_timer`, §42): the parent walk of §23, the atomic staged publication with its compare-and-swap, the refusal of a symlink at the path, the diff and the redaction of a sensitive resource are those of `file`, unchanged. Sinter never edits `/etc/sysctl.conf` or another file. A file that sorts later in `/etc/sysctl.d`, or `/etc/sysctl.conf`, can override the value at boot; Sinter does not evaluate that, says so in a note on every result that changes the file, and the state after a reboot is NOT VERIFIED by the resource.
+
+54.4 Observation of the running value (read-only)
+
+- Tool presence: `/usr/bin/test -x /usr/sbin/sysctl` (`executable_present`). Absent: plan and apply fail with "sysctl cannot manage the running value on this host (/usr/sbin/sysctl was not found)"; audit reports Error. In plan only, when an earlier planned change may bring the tool, the resource is deferred/unknown and apply decides. No OS family is checked: like `file`, the type needs no platform backend.
+- Value: a new fixed-argv read-only target method runs `/usr/sbin/sysctl -n -- <name>` (it re-checks the name grammar itself). Accepted only: exit 0, no truncation of either stream, empty standard error, standard output exactly one line ending in a newline (an empty line is an empty value). The line is normalized as in 54.2. A non-zero exit is the error "unknown kernel parameter <name>" (the kernel does not have it, or the account cannot read it): never "absent", never drift. A signal, a timeout, no output, a second line, a control character or invalid UTF-8 is an observation error. This adds one shape to the read-only command shapes of §28.
+- With `runtime: false` and with `state: absent` the tool is not run and need not exist; the parameter is not checked against the running kernel.
+
+54.5 Change (apply)
+
+Order, for `state: present`:
+
+1. Observe the running value (when `runtime`). An unknown parameter or a failed observation stops the resource before anything is written. A failure here is never "indeterminate": nothing was sent that changes the host.
+2. If the running value differs and the connection is not root (and `--sudo` was not given), fail with "needs root"; nothing was changed.
+3. The file part (when `persist`), through the `file` code. If it fails or is indeterminate, the resource ends there with that result and the running value is not touched.
+4. If the running value differs: `/usr/sbin/sysctl -w -- <name>=<value>` through `exec` with a mutation permit; fixed absolute program, fixed argv, no shell, baseline environment, 60 s timeout. Then:
+   - timeout / lost connection, or a signal: execution indeterminate, change possible, verification unknown; nothing else is sent for the resource;
+   - non-zero exit: failed, change possible, with the first line of standard error (withheld for a sensitive resource);
+   - exit 0: the value is observed again. Equal to the declared value: changed, verified. Different: failed, verification failed (change `possible` when it still is the old value, `changed` otherwise). Observation failed: failed (or indeterminate), change possible.
+
+The parts are merged as for `systemd_timer` (the more severe execution and verification, any change). So a failure of step 4 after step 3 changed the file is a failed resource that reports the change; it is never success and never "no change". An error raised after the file changed carries the mutation state `changed`.
+
+No re-observation is done between step 1 and step 4: the declared value is absolute, no decision depends on the previous value, and the result is verified afterwards. A concurrent change of the file is refused by the `file` publication.
+
+`state: absent`: the file part with `state: absent` only. The running value is NOT reset (there is no previous value to restore); a note says so on every result that removes the file. The tool is not run.
+
+A resource whose result changes notifies handlers as usual. Nothing is restarted. `PlannedEffects` treats a planned `sysctl` change as opaque (the conservative default).
+
+54.6 Plan and audit
+
+Plan runs the observation and the read-only part of `file`, nothing else. It reports the file diff and, as a note, the running value (`"60" -> "10"`); with only the running value managed the diff is the summary current/desired. When the target user is not root, the usual "needs root" note is added.
+
+Audit: dimension `persistent` for every difference the `file` audit reports for Sinter's file (observed and desired are prefixed with the file dimension: `content`, `owner`, `group`, `mode`, `state`/`type`), and dimension `runtime` (observed -> desired) for the running value; each only when the resource manages it (`persist` / `runtime`; `absent` audits the file's absence only). A non-compliant, non-drift outcome of the file audit (error, not auditable) is the resource's outcome. An unknown parameter, a missing tool and every failed observation are Error, never drift. The compliant reason states that an override at boot is not evaluated.
+
+54.7 Safety rules
+
+- Plan and audit dispatch only `test -x`, `sysctl -n -- <name>` and the read-only commands of `file`.
+- No shell, no option injection (`--` before the operand; the name grammar excludes `=` so the read operand cannot be an assignment).
+- The exit code of `sysctl -w` never decides success.
+- A sensitive resource (`sensitive: true`, or a value derived from a sensitive source) shows no value: the diff is redacted, the running-value note is omitted, the `-w` command is recorded redacted, failure reasons name no value. The parameter name and the file path are shown.
+- MCP refuses the type (the observation is not measured on real hosts); the MCP boundary is unchanged.
+
+54.8 Limits
+
+- The value must be declared as the kernel reports it; a parameter the kernel rounds, clamps or keeps read-only fails after `sysctl -w` on every run.
+- Parameters that print several lines, empty values, names with `/` or `*`, and interface names containing a dot are not supported.
+- A parameter that exists only after a module is loaded is "unknown" until then (use `runtime: false`).
+- With `persist: false`, a file Sinter wrote earlier stays (use `absent`).
+
+54.9 Not verified on a real host
+
+Everything above was exercised against the scripted target only. Assumed and to be measured on Ubuntu 24.04/26.04 and Rocky Linux / RHEL / AlmaLinux 9/10:
+
+- `/usr/sbin/sysctl` exists (procps / procps-ng) and `test -x` finds it.
+- `sysctl -n -- vm.swappiness` prints `60\n`, exits 0, writes nothing to standard error; a multi-value parameter prints its fields tab-separated on one line.
+- A parameter the kernel does not have exits non-zero (`sysctl: cannot stat /proc/sys/...: No such file or directory`, exit 255 or 1).
+- `sysctl -w -- vm.swappiness=10` accepts `--`, prints `vm.swappiness = 10`, exits 0; a read-only or refused parameter exits non-zero.
+- `sysctl -n` as a non-root user reads the parameters a plan needs.
+- `systemd-sysctl` reads `/etc/sysctl.d/90-sinter-<name>.conf` at boot and the lexical order relative to distribution files (`99-sysctl.conf` -> `/etc/sysctl.conf` on some systems sorts later).
+
+55. `hostname` resource (the static host name)
+
+IMPLEMENTED, NOT RELEASED, NOT VERIFIED ON A REAL HOST. A built-in type for every supported OS, on top of `/usr/bin/hostnamectl` (systemd-hostnamed).
+
+55.1 Scope
+
+The static host name of one host (the name kept in `/etc/hostname`). Out of scope: the transient name (reported only), the pretty name and every other `hostnamectl` property, `/etc/hosts` (a `file_merge` resource does that), restarting services, `sinter discover`.
+
+55.2 Fields (`with`)
+
+- `name` (required, static): RFC 1123 labels `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?` separated by single dots, 1 to 64 bytes in total (Linux `HOST_NAME_MAX`), lower case only. A name with an upper-case letter is a load error that tells the user to write it in lower case; Sinter does not fold the case. Variables may be used; facts, registers and sensitive values may not. Resolved and checked at load.
+
+Unknown fields are refused. A recipe may hold one `hostname` resource; a second one is a load-time ownership conflict (whatever its `when`). The grammar excludes a leading `-`, whitespace, `/` and every shell or glob character, so the value cannot become an option; this is why the change needs no `--`.
+
+55.3 Observation (read-only)
+
+- Tool presence: `/usr/bin/test -x /usr/bin/hostnamectl` (`executable_present`). Absent: plan and apply fail with "hostname is not supported on this host (hostnamectl was not found)"; audit reports Error. In plan only, when an earlier planned change may bring the tool, the resource is deferred/unknown and apply decides. No OS family is checked.
+- Names: a new fixed-argv read-only target method runs `/usr/bin/hostnamectl --static` and `/usr/bin/hostnamectl --transient` (no recipe value in the argv). Accepted only: exit 0, no truncation of either stream, standard output at most one line (a final newline allowed), no control character, at most 255 bytes. No output, or one empty line, is "not set" (meaningful for the static name). Any other exit, a signal, a timeout or a second line is an observation error, never a state. Standard error is not interpreted. This adds one shape to the read-only command shapes of §28.
+- Both names are observed before anything is decided; a failure of either is an error (fail closed), also when the static name already equals the declared one.
+
+Comparison is the exact text: a static name `Web01` differs from a declared `web01` and is changed.
+
+55.4 Change (apply)
+
+- Needs root (the connection is root, or `--sudo`): otherwise the resource fails with "needs root" before anything is sent. Nothing is done when the static name already equals `name`.
+- `/usr/bin/hostnamectl set-hostname <name>` through `exec` with a mutation permit; fixed absolute program, fixed argv, no shell, baseline environment, 60 s timeout.
+- The exit code never decides success:
+  - timeout / lost connection, or a signal: execution indeterminate, change possible, verification unknown; nothing else is sent for the resource;
+  - non-zero exit: failed, change possible, with the first line of standard error (withheld for a sensitive resource);
+  - exit 0: the static name is observed again. Equal to `name`: changed, verified. Different: failed, verification failed (change `possible` when it still is the old name, `changed` otherwise). Observation failed: failed (or indeterminate), change possible.
+- The transient name is reported, not managed. After a verified change it is observed once more; when it is not `name`, a NOTE says that another source such as DHCP sets the running name. That is not drift and not a failure. When that last observation fails, a note says the transient name was not verified; the verified change of the static name stands. The same note is added to an unchanged result whose transient name differs.
+- No re-observation is done right before the change: the declared name is absolute and no decision depends on the previous one.
+- Sinter does not touch `/etc/hosts` and restarts nothing. Every plan and apply result that changes the name carries the note: programs that read the host name when they start keep the previous name until they are restarted; `/etc/hosts` is not changed; `facts.hostname` of this run stays the name observed at connect.
+
+A resource whose result changes notifies handlers as usual. `PlannedEffects` treats a planned `hostname` change as opaque (the conservative default).
+
+55.5 Connection risk
+
+None is classified. The SSH connection Sinter uses is addressed by the inventory (address, port, host key), not by the target's own host name, so changing the static name cannot cut the connection. The connection-risk control of §43 is therefore not involved, and no checkpoint or rollback exists for this type.
+
+55.6 Plan and audit
+
+Plan runs the tool check and the two observations, nothing else, and reports the summary current/desired (`(not set)` for an empty static name). When the target user is not root, the usual "needs root" note is added.
+
+Audit: dimension `static` (observed -> desired). A transient name that is not the declared one is appended to the reason as a note and never changes the status. A missing tool and every failed observation are Error, never drift.
+
+55.7 Safety rules
+
+- Plan and audit dispatch only `test -x`, `hostnamectl --static` and `hostnamectl --transient`.
+- No shell; the only recipe value in an argv is the checked name.
+- The exit code of `set-hostname` never decides success.
+- A sensitive resource names neither the declared nor an observed name: the diff is redacted, the transient note is omitted, the change command is recorded redacted, error and failure texts are withheld.
+- MCP refuses the type (the observation is not measured on real hosts); the MCP boundary is unchanged.
+
+55.8 Limits
+
+- Lower case only; no underscore, no trailing dot, at most 64 bytes.
+- Hosts where `systemd-hostnamed` cannot be reached (some containers): `hostnamectl` fails and the resource reports an observation error.
+- The transient name is not set on its own; when another source owns it, it stays different and is only reported.
+
+55.9 Not verified on a real host
+
+Everything above was exercised against the scripted target only. Assumed and to be measured on Ubuntu 24.04/26.04 and Rocky Linux / RHEL / AlmaLinux 9/10:
+
+- `/usr/bin/hostnamectl` exists and `test -x` finds it.
+- `hostnamectl --static` and `hostnamectl --transient` (no verb) print exactly the name and a newline, exit 0, for root and for a non-root user; an unset static name prints an empty line or nothing.
+- `hostnamectl set-hostname <name>` as root sets the static name (and normally the transient name), prints nothing and exits 0; a failure exits non-zero.
+- Neither observation changes anything on the host (starting `systemd-hostnamed` by bus activation is the only side effect assumed).
+- What the transient name is after `set-hostname` when DHCP or cloud-init owns it.
+
+56. Selection for the release after v1.15.0, and what was not taken
+
+Status: record of a development decision (2026-11-26). Nothing here is released.
+
+56.1 Taken
+
+Bundle planning and the audit of a host nothing is applied to (§49.1, §49.4), `creates_accounts` (§49.2), `parents: true` (§49.3), undefined variables in a template body (§49.5), declared backups in a partial run (§49.6), `file_merge` (§50), `dnf_repository` (§51), `dnf_module` (§52), `crypto_policy` (§53), `sysctl` (§54), `hostname` (§55), and the permanent fix of the release verifier's end-line parsing. All are built-in types or Core changes: a data-only Resource Plugin cannot write file content, cannot compare a free-form observed value with a wanted one, and has no operand class for `name:stream` (§38.6, §38.10, §48). Each new type keeps its logic in its own modules and reuses the `file` resource's publication path (parent checks, staging, atomic replacement, identity and content re-check, metadata rules) or a fixed-argv command with re-observation; the plugin boundary, the trust file and the MCP boundary are unchanged (every new type is refused over MCP).
+
+56.2 Not taken, with the condition for resuming
+
+- `package`: several names in one resource, version pinning, `latest`/update. Not taken: the install path is built per name around a metadata snapshot, a strict parser of the transaction and exact removal (§27); several names or a version constraint change what that parser must prove. A loop covers several packages today. Resume with a design of the transaction check for a set of names and for `name-version`, and real-host measurement on apt and dnf.
+- `kernel_module`: not taken. Loading and persistence are expressible today (`file` in `/etc/modules-load.d` plus a `command`), but unloading needs a use check and a dependency rule. Resume with a design for unload protection.
+- `mount`: not taken. `/etc/fstab` is order-sensitive and a wrong unmount is destructive; needs its own design (fstab entry identity, UUID, never unmounting what is in use) and disposable hosts.
+- `cron`: not taken. `systemd_timer` (§42) is the scheduling type; a file in `/etc/cron.d` is a `file`, and a line in a crontab-like file is a `file_merge`. A per-user crontab type needs a design for `crontab -u` and is separate from scheduling audits (FR-005 stays superseded).
+- `archive`, `download`, `git`: not taken. Each brings a network boundary or an extraction boundary (path traversal, links, ownership) that needs its own design and review; `download` needs a mandatory checksum and a size limit. Resume one at a time, each with its design approved first.
+- Structured merges (YAML, JSON, TOML) and INI sections in `file_merge`: not taken; `dnf_repository` has the only INI editor, for its own closed grammar.
+- FR-061 (secrets in templates and variables), FR-038 (persisted handler notifications), FR-039 (parallel, continue-on-error, resume), FR-001 to FR-008 (Command Audit), FR-025/FR-067 beyond `sinter discover`, FR-075 to FR-078: not taken; each changes a safety boundary, the execution engine or the audit contract and keeps its recorded status. FR-062 (colours, recap, host names) keeps its DEFERRED status; every status is already printed as a word and never as a colour alone (§ output rules), and `NO_COLOR`, non-TTY and JSON behaviour are unchanged.
+- firewalld rich rules (FR-022) and the remaining NetworkManager types (FR-024): unchanged.
+
+56.3 Real-host acceptance needed before a release
+
+Measured so far: read-only observations on one Rocky Linux 10.2 host (the DNF 4 link, `update-crypto-policies --show` and the policy files, `hostnamectl`, `sysctl -n`, and the distribution's repository files through the section parser). Not measured: every change command and every other supported OS. A release needs, on disposable hosts of the supported list: the PostgreSQL bundle of `examples/bundles/postgresql-pgdg17` planned, audited (drift), applied, re-applied (no change) and audited (compliant) on EL 9 and EL 10; `dnf_repository` files read back by DNF and a package installed from a new repository; `dnf_module` enable, disable and reset with the state file DNF writes (EL 9; EL 10 has no streams); `crypto_policy` set and re-observed on EL 9 and EL 10; `file_merge` on `authorized_keys` as root in a user's tree and as the user; `sysctl` and `hostname` on Ubuntu and the RHEL family; `parents: true` and the partial-run backups on one host of each family. These join the existing acceptance run of the release; they are not run per feature.

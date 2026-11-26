@@ -9,7 +9,8 @@ RHEL 系または Debian/Ubuntu ホストを対象にします（一部は root 
 |----------|----------------|
 | `packages.yaml` | `package` の `state: present` と、dnf メタデータの自動取得（手動の `dnf makecache` 不要） |
 | `package-proxy.yaml` | レシピ単位の `env` で全 `package`/`command` にプロキシを一度だけ設定（`NO_PROXY`、リソース単位の上書き） |
-| `dnf-module.yaml` | DNF モジュールストリームからのパッケージ導入（`command` + `depends_on`） |
+| `dnf-module.yaml` | DNF モジュールストリームからのパッケージ導入（`dnf_module` + `depends_on`。未リリースの型） |
+| `dnf-repository.yaml` | 配布元リポジトリの有効化とそこからの導入（`dnf_repository`。未リリースの型） |
 | `accounts-and-paths.yaml` | group → user → directory → file を明示的な `depends_on` で構成（パッケージ由来アカウントは推測しない） |
 | `httpd-service.yaml` | package → 専用 user → service を明示的な `depends_on` で構成（依存元が失敗すると依存先は実行されない） |
 | `validate-sshd-config.yaml` | `validate`: 公開前に staging ファイルを検証する |
