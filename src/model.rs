@@ -1373,6 +1373,17 @@ fn validate_declaration_shape(
             require_optional_static_string(&d.with, "file", ctx, field_sensitive("file"))?;
             crate::dnf_repository::RepoSpec::check(&d.with, ctx, true)?;
         }
+        "dnf_module" => {
+            validate_with_fields(&d.with, crate::dnfmod::FIELDS, ctx)?;
+            if let Some(v) = d.with.get("env") {
+                validate_env_map(v, ctx)?;
+            }
+            crate::dnfmod::ModuleSpec::check_literals(&d.with, ctx)?;
+            for key in ["name", "state"] {
+                require_static_string_field(&d.with, key, ctx, field_sensitive(key))?;
+            }
+            require_optional_static_string(&d.with, "stream", ctx, field_sensitive("stream"))?;
+        }
         "systemd_timer" => {
             validate_with_fields(&d.with, SYSTEMD_TIMER_FIELDS, ctx)?;
             require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
@@ -1745,8 +1756,9 @@ fn require_content_type(with: &BTreeMap<String, Value>, ctx: &str) -> Result<()>
 
 /// Apply the recipe-wide default `env` to a resource's `with`.
 ///
-/// Only `package` and `command` resources run an external process Sinter gives
-/// an environment to, so only they inherit it (DESIGN §27.1). A name the
+/// Only `package`, `command` and `dnf_module` resources run an external
+/// process Sinter gives a recipe environment to, so only they inherit it
+/// (DESIGN §27.1; `dnf_module` runs dnf like `package`). A name the
 /// resource sets explicitly overrides the recipe default; the default is never
 /// merged into an unrelated resource type, and never passed to a service,
 /// package query, or connection step. The merged map is an ordinary `env`
@@ -1757,7 +1769,7 @@ fn merge_recipe_env(
     with: &BTreeMap<String, Value>,
     recipe: &Value,
 ) -> BTreeMap<String, Value> {
-    if type_ != "package" && type_ != "command" {
+    if type_ != "package" && type_ != "command" && type_ != "dnf_module" {
         return with.clone();
     }
     let Some(defaults) = recipe.as_map() else {
@@ -2496,6 +2508,78 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                                 }
                             }
                             fr.path = Some(file);
+                        }
+                    }
+                }
+                "dnf_module" => {
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(&r.with, crate::dnfmod::FIELDS, &resource_ctx)?;
+                        if let Some(v) = r.with.get("env") {
+                            validate_env_map(v, &resource_ctx)?;
+                        }
+                        crate::dnfmod::ModuleSpec::check_literals(&r.with, &resource_ctx)
+                    })?;
+                    // `name`, `stream` and `state` are static: resolved and
+                    // checked here, before any target is reached.
+                    let mut parts: Vec<Option<String>> = Vec::new();
+                    for key in ["name", "stream", "state"] {
+                        parts.push(staged_field(&mut stage, &tol, key, || {
+                            let v = static_string(
+                                &r.with,
+                                key,
+                                &scope,
+                                &resource_ctx,
+                                key != "stream",
+                                field_sensitive(key),
+                            )?;
+                            let ok = match key {
+                                "state" => matches!(v.as_str(), "enabled" | "disabled" | "reset"),
+                                "stream" if r.with.get(key).is_none_or(Value::is_null) => true,
+                                _ => crate::dnfmod::valid_token(&v),
+                            };
+                            if !ok {
+                                return Err(SinterError::schema(format!(
+                                    "{}: dnf_module {} is not valid",
+                                    resource_ctx, key
+                                )));
+                            }
+                            Ok(v)
+                        })?);
+                    }
+                    if let [Some(name), Some(stream), Some(module_state)] = parts.as_slice() {
+                        let stream = (!r.with.get("stream").is_none_or(Value::is_null))
+                            .then_some(stream.as_str());
+                        // `stream` exactly with `enabled`. May depend on a
+                        // variable in a structure-only check: left unjudged.
+                        if !["name", "stream", "state"]
+                            .iter()
+                            .any(|k| tol.may_depend_on_values(k))
+                        {
+                            staged(&mut stage, Stage::ValueFree, || {
+                                crate::dnfmod::ModuleSpec::from_parts(name, stream, module_state)
+                                    .map(|_| ())
+                                    .map_err(|why| {
+                                        SinterError::schema(format!(
+                                            "{}: dnf_module {}",
+                                            resource_ctx, why
+                                        ))
+                                    })
+                            })?;
+                        }
+                        // One resource per module.
+                        if let Some(owner) = account_name_owner
+                            .insert(("dnf_module".to_string(), name.clone()), r.id.clone())
+                        {
+                            if !ownership_may_depend_on_values(&tol, &peer_refs, "name", &owner) {
+                                stage = Stage::Ownership {
+                                    field: "name",
+                                    peer: owner.clone(),
+                                };
+                                return Err(SinterError::schema(format!(
+                                    "conflicting ownership of DNF module {} by resources {} and {}",
+                                    name, owner, r.id
+                                )));
+                            }
                         }
                     }
                 }

@@ -147,7 +147,10 @@ pub(crate) fn ev_list_str(
     }
 }
 
-fn ev_env(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<(BTreeMap<String, String>, bool)> {
+pub(crate) fn ev_env(
+    m: &BTreeMap<String, EvalVal>,
+    key: &str,
+) -> Result<(BTreeMap<String, String>, bool)> {
     let Some(v) = m.get(key) else {
         return Ok((BTreeMap::new(), false));
     };

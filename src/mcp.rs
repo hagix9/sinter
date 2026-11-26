@@ -406,6 +406,18 @@ fn check_mcp_manifest_authority(doc: &Document) -> Result<(), ToolError> {
                     .to_string(),
             });
         }
+        // `dnf_module` reads DNF's module state file and runs `dnf module`;
+        // neither is measured on real hosts yet, so MCP does not offer it.
+        if r.type_ == "dnf_module" {
+            return Err(ToolError {
+                category: "invalid_manifest",
+                kind: Some("schema"),
+                message: "MCP manifests may not use the dnf_module resource type \
+                          yet — its DNF module state observation is not measured on \
+                          real hosts"
+                    .to_string(),
+            });
+        }
         if r.type_ == "systemd_timer" {
             return Err(ToolError {
                 category: "invalid_manifest",

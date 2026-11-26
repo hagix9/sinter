@@ -152,6 +152,7 @@ pub const BUILTIN_RESOURCE_TYPES: &[&str] = &[
     "file_merge",
     "nm_connection",
     "dnf_repository",
+    "dnf_module",
     "postgresql_role",
     "user",
     "group",

@@ -3006,6 +3006,8 @@ pub struct FakeTarget {
     /// Scripted NetworkManager reached through `/usr/bin/nmcli` and
     /// `/usr/bin/busctl` (`nm_connection`, DESIGN §45).
     pub nm: Option<std::sync::Arc<std::sync::Mutex<crate::fakesys::FakeNm>>>,
+    /// Scripted Red Hat family tools (`dnf module`), see [`crate::fake_el`].
+    pub el: crate::fake_el::FakeElHandle,
 }
 
 /// One change of the scripted filesystem, applied by [`FsEvent`].
@@ -3187,6 +3189,7 @@ impl FakeTarget {
             pg: crate::fakesys::FakePostgres::default(),
             firewalld: None,
             nm: None,
+            el: Default::default(),
         }
     }
 
@@ -3262,6 +3265,7 @@ impl FakeTarget {
             pg: crate::fakesys::FakePostgres::default(),
             firewalld: None,
             nm: None,
+            el: Default::default(),
         }
     }
 
@@ -3323,6 +3327,7 @@ impl FakeTarget {
             pg: crate::fakesys::FakePostgres::default(),
             firewalld: None,
             nm: None,
+            el: Default::default(),
         }
     }
 
@@ -3387,6 +3392,7 @@ impl FakeTarget {
             pg: crate::fakesys::FakePostgres::default(),
             firewalld: None,
             nm: None,
+            el: Default::default(),
         }
     }
 
@@ -3445,6 +3451,7 @@ impl FakeTarget {
             pg: crate::fakesys::FakePostgres::default(),
             firewalld: None,
             nm: None,
+            el: Default::default(),
         }
     }
 
@@ -3914,6 +3921,12 @@ impl FakeExecutor {
             }
             "rpm" => self.run_rpm(&req.args),
             "dpkg-query" => self.run_dpkg_query(&req.args),
+            "dnf" if crate::fake_el::is_dnf_module(&req.args) => crate::fake_el::dnf_module(
+                &self.target.el,
+                self.target.fs.as_mut(),
+                self.sudo || self.target.uid == 0,
+                &req.args,
+            ),
             "dnf" | "apt-get" => self.run_manager(&prog, &req.args),
             "systemctl" => self.run_systemctl(&req.args),
             "ss" if self.target.manager.net.ss_program() == Some(req.program.as_str()) => {

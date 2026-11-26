@@ -402,6 +402,7 @@ fn refused_manifests() -> Vec<(&'static str, String)> {
         ("nm_connection", r("nm_connection", "name: lan, ifname: eth1")),
         ("file_merge", r("file_merge", "path: /etc/x, merge: line, line: x")),
         ("dnf_repository", r("dnf_repository", "name: crb, file: /etc/yum.repos.d/rocky.repo, enabled: true")),
+        ("dnf_module", r("dnf_module", "name: nodejs, stream: \"20\", state: enabled")),
         ("malformed", "version: 1\nresources: [\n".to_string()),
         ("not a mapping", "- just\n- a list\n".to_string()),
     ]
@@ -430,6 +431,7 @@ fn refused_manifests_never_reach_the_host() {
                 "nm_connection" => "nm_connection",
                 "file_merge" => "file_merge",
                 "dnf_repository" => "dnf_repository",
+                "dnf_module" => "dnf_module",
                 _ => "",
             };
             assert!(

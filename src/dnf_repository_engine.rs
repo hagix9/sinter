@@ -5,7 +5,8 @@
 //! is made by the pure [`crate::dnf_repository`] code, and a change is
 //! published through the `file` resource's own publication path. No DNF
 //! command is run: the only other target reads are the `lstat` and
-//! `readlink` of `/usr/bin/dnf` that tell DNF 4 from DNF 5.
+//! `readlink` of `/usr/bin/dnf` that tell DNF 4 from DNF 5 (the check
+//! shared with `dnf_module`, [`crate::dnfgen`]).
 
 use std::collections::BTreeMap;
 
@@ -15,14 +16,10 @@ use crate::error::{Result, SinterError};
 use crate::expressions::EvalVal;
 use crate::inifile;
 use crate::model::FrozenResource;
-use crate::platform::PackageBackend;
 use crate::resources::{unchanged_result, PARTIAL_EDIT_MAX_BYTES};
 use crate::result::{Change, ResourceResult};
 use crate::targetfs::ObjKind;
 use crate::value::Value;
-
-/// The program whose link target tells the DNF generation.
-const DNF_BIN: &str = "/usr/bin/dnf";
 
 /// What audit learned about a `dnf_repository`.
 pub(crate) struct RepoAudit {
@@ -72,41 +69,6 @@ fn any_sensitive(res: &FrozenResource, vals: &BTreeMap<String, EvalVal>) -> bool
 }
 
 impl Engine {
-    /// Refuse a target this type does not support: one whose package manager
-    /// is not DNF, and one whose `/usr/bin/dnf` is DNF 5 or cannot be told
-    /// apart. Read-only (`stat`, `readlink`).
-    fn dnf_repo_platform(&mut self, res: &FrozenResource) -> Result<()> {
-        if self.fs.pkg_backend != Some(PackageBackend::Dnf) {
-            return Err(SinterError::apply(format!(
-                "{}: dnf_repository is not supported on this host (its package manager is not DNF)",
-                res.id
-            )));
-        }
-        let unknown = || {
-            SinterError::apply(format!(
-                "{}: dnf_repository is not supported on this host: {} is not a symbolic link to \
-                 a DNF 4 program, so the DNF generation cannot be told (only DNF 4 is supported)",
-                res.id, DNF_BIN
-            ))
-        };
-        if self.fs.inspect(DNF_BIN)?.kind != ObjKind::Symlink {
-            return Err(unknown());
-        }
-        let target = self.fs.readlink(DNF_BIN)?;
-        let base = target.rsplit('/').next().unwrap_or("");
-        if base == "dnf5" {
-            return Err(SinterError::apply(format!(
-                "{}: dnf_repository is not supported on this host: it uses DNF 5, whose \
-                 repository configuration is not supported in this release",
-                res.id
-            )));
-        }
-        if base.starts_with("dnf-") || base.starts_with("dnf4") {
-            return Ok(());
-        }
-        Err(unknown())
-    }
-
     pub(crate) fn run_dnf_repository(
         &mut self,
         res: &FrozenResource,
@@ -115,7 +77,7 @@ impl Engine {
         let vals = self.eval_with(res, item)?;
         let declared_sensitive = any_sensitive(res, &vals);
         let spec = evaluated_spec(res, &vals)?;
-        self.dnf_repo_platform(res)?;
+        self.require_dnf4(&res.id, "dnf_repository")?;
         let (stat, bytes) = self.partial_observe(res, &spec.file)?;
         let decision = match &bytes {
             None => repo::decide(&spec, None),
@@ -196,7 +158,7 @@ impl Engine {
         let vals = self.eval_with(res, item)?;
         let declared_sensitive = any_sensitive(res, &vals);
         let spec = evaluated_spec(res, &vals)?;
-        self.dnf_repo_platform(res)?;
+        self.require_dnf4(&res.id, "dnf_repository")?;
         let bytes = crate::audit::audit_partial_read(self, &spec.file)?;
         let decision = match &bytes {
             None => repo::audit(&spec, None),

@@ -1072,6 +1072,7 @@ impl Engine {
             "file_merge" => self.run_file_merge(res, item),
             "nm_connection" => self.run_nm_connection(res, item),
             "dnf_repository" => self.run_dnf_repository(res, item),
+            "dnf_module" => self.run_dnf_module(res, item),
             "group" => self.run_group(res, item),
             "user" => self.run_user(res, item),
             "postgresql_role" => self.run_postgresql_role(res, item),
@@ -1095,7 +1096,12 @@ impl Engine {
                     && r.change == Change::Changed
                     && matches!(
                         res.type_.as_str(),
-                        "package" | "user" | "group" | "systemd_timer" | "nm_connection"
+                        "package"
+                            | "user"
+                            | "group"
+                            | "systemd_timer"
+                            | "nm_connection"
+                            | "dnf_module"
                     )
                     && !self.fs.runs_as_root()
                 {

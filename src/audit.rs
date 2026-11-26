@@ -388,6 +388,7 @@ fn audit_resource(engine: &mut Engine, res: &FrozenResource) -> AuditResourceRes
         }
         "nm_connection" => audit_nm_connection(engine, res, item.as_ref(), sensitive),
         "dnf_repository" => audit_dnf_repository(engine, res, item.as_ref(), sensitive),
+        "dnf_module" => audit_dnf_module(engine, res, item.as_ref(), sensitive),
         "group" => audit_group(engine, res, item.as_ref(), sensitive),
         "user" => audit_user(engine, res, item.as_ref(), sensitive),
         "postgresql_role" => audit_postgresql_role(engine, res, item.as_ref(), sensitive),
@@ -1382,6 +1383,32 @@ fn audit_dnf_repository(
         });
     }
     r
+}
+
+/// Audit a `dnf_module`: the recorded module state against the declared
+/// one (`state`, and `stream` when enabled). An unsupported host, an
+/// unreadable or unparseable state file and a symlink are errors, never
+/// drift. Read-only: DNF's state file is read, `dnf` is not run.
+fn audit_dnf_module(
+    engine: &mut Engine,
+    res: &FrozenResource,
+    item: Option<&EvalVal>,
+    sensitive: bool,
+) -> AuditResourceResult {
+    let drift = match obs_or_error(res, sensitive, engine.dnf_module_audit(res, item)) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let details = drift
+        .into_iter()
+        .map(|(f, o, d)| AuditDriftDetail::new(&f, o, d, sensitive))
+        .collect();
+    finish_drift(
+        res,
+        sensitive,
+        details,
+        "module state matches the declared state",
+    )
 }
 
 /// Audit a `systemd_timer` (DESIGN §42.5): the checks that would stop plan

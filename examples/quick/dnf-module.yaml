@@ -1,23 +1,28 @@
-# A package that lives in a DNF module stream.
+# A package that lives in a DNF module stream (DNF 4: Rocky Linux, RHEL and
+# AlmaLinux 9; EL 10 ships no module streams, so this fails there at apply).
 #
 # Sinter's `package` resource installs whatever the enabled repositories and
 # module state resolve. When a package is only reachable through a *non-default*
-# module stream, enable that stream first with a `command` — the same thing an
-# operator does by hand — and declare `depends_on` so the install runs after it.
-# (A package on the module's default stream needs no enable step.)
+# module stream, declare the stream with a `dnf_module` resource and list it in
+# the package's `depends_on`, so the install runs after the stream is enabled.
+# (A package on the module's default stream needs no `dnf_module`.)
 #
-# `changed_when: "false"` keeps the enable step out of the change report:
-# enabling an already-enabled stream changes nothing. `dnf module enable` is
-# idempotent, so a second apply is a no-op.
+# `dnf_module` reads DNF's own module state (/etc/dnf/modules.d/nodejs.module):
+# when the stream is already enabled, plan and apply report no change and dnf
+# is not run. Whether `nodejs:20` exists in the enabled repositories is checked
+# by dnf at apply; plan does not read repository metadata.
+#
+# A module that is already enabled with ANOTHER stream is not switched: plan
+# fails and asks for an explicit reset first (state: reset, in an earlier run).
 version: 1
 
 resources:
   - id: enable-nodejs-stream
-    type: command
+    type: dnf_module
     with:
-      program: /usr/bin/dnf
-      args: ["-y", "module", "enable", "nodejs:20"]
-      changed_when: "false"
+      name: nodejs
+      stream: "20"
+      state: enabled
 
   - id: install-nodejs
     type: package
