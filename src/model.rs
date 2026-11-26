@@ -1161,6 +1161,17 @@ fn validate_declaration_shape(
         "directory" => {
             validate_with_fields(&d.with, DIR_FIELDS, ctx)?;
             validate_path_state(&d.with, "directory", ctx)?;
+            // A literal: whether missing parents may be created is decided
+            // by the recipe text, never by a value computed at run time.
+            if !matches!(
+                d.with.get("parents"),
+                None | Some(Value::Null) | Some(Value::Bool(_))
+            ) {
+                return Err(SinterError::schema(format!(
+                    "{}: directory parents must be true or false",
+                    ctx
+                )));
+            }
             require_static_string_field(&d.with, "path", ctx, field_sensitive("path"))?;
             require_optional_mode(
                 &d.with,
@@ -1178,17 +1189,6 @@ fn validate_declaration_shape(
             validate_path_state(&d.with, "link", ctx)?;
             // Execution requires `target` unless `state` is `absent`
             // (`run_link`). Enforce it here whenever the state is statically
-            // A literal: whether missing parents may be created is decided
-            // by the recipe text, never by a value computed at run time.
-            if !matches!(
-                d.with.get("parents"),
-                None | Some(Value::Null) | Some(Value::Bool(_))
-            ) {
-                return Err(SinterError::schema(format!(
-                    "{}: directory parents must be true or false",
-                    ctx
-                )));
-            }
             // known; an interpolated state is still checked when evaluated.
             let state_present = match d.with.get("state") {
                 None | Some(Value::Null) => true,
@@ -1309,6 +1309,7 @@ fn validate_declaration_shape(
             if let Some(v) = d.with.get("env") {
                 validate_env_map(v, ctx)?;
             }
+            package_accounts(&d.with, ctx)?;
             require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
             if let Some(Value::Str(s)) = d.with.get("name") {
                 // Literal names are validated here; interpolated names are
@@ -1802,7 +1803,6 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
     let declared_backups: Vec<String> = state.backups.iter().map(|(p, _)| p.clone()).collect();
     crate::backup::check_declared_overlap(&declared_backups)?;
     crate::backup::check_declared_stores(&declared_backups, &state.backup_stores)?;
-
     // A backup declared for resources must name resources of this recipe
     // (an id, or the id of a loop for all its instances).
     for (path, ids) in &state.backup_resources {
@@ -1815,6 +1815,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
             }
         }
     }
+
     // A required variable needs a value from a variables file. A recipe no host
     // runs is not asked (`structure_only`), and nothing about its default is said.
     if !overrides.structure_only {
@@ -2289,6 +2290,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         if let Some(v) = r.with.get("env") {
                             validate_env_map(v, &resource_ctx)?;
                         }
+                        package_accounts(&r.with, &resource_ctx)?;
                         Ok(())
                     })?;
                     let name_sensitive = field_sensitive("name");
@@ -2744,37 +2746,6 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         })?;
                         let mut names = BTreeSet::new();
                         collect_register_refs(&expr, &mut body_regs, &mut names);
-                    }
-                    for reg in &body_regs {
-                        let producer = register_producers.get(reg).ok_or_else(|| {
-                            if template_sensitive {
-                                SinterError::schema(format!(
-                                    "{}: template references unknown register (value redacted)",
-                                    resource_ctx
-                                ))
-                            } else {
-                                SinterError::schema(format!(
-                                    "{}: template references unknown register {}",
-                                    resource_ctx, reg
-                                ))
-                            }
-                        })?;
-                        if !r.depends_on.contains(producer) {
-                            return Err(if template_sensitive {
-                                SinterError::schema(format!(
-                                "{}: template register must be listed directly in depends_on (value redacted)",
-                                resource_ctx
-                            ))
-                            } else {
-                                SinterError::schema(format!(
-                                "{}: template register {} must be listed directly in depends_on",
-                                resource_ctx, reg
-                            ))
-                            });
-                        }
-                    }
-                }
-            }
                         // A template body may only name what the recipe
                         // declares: a variable of the recipe, or a key of
                         // this resource's `vars` map. Checked here, before
@@ -2812,6 +2783,37 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                                 )
                             }));
                         }
+                    }
+                    for reg in &body_regs {
+                        let producer = register_producers.get(reg).ok_or_else(|| {
+                            if template_sensitive {
+                                SinterError::schema(format!(
+                                    "{}: template references unknown register (value redacted)",
+                                    resource_ctx
+                                ))
+                            } else {
+                                SinterError::schema(format!(
+                                    "{}: template references unknown register {}",
+                                    resource_ctx, reg
+                                ))
+                            }
+                        })?;
+                        if !r.depends_on.contains(producer) {
+                            return Err(if template_sensitive {
+                                SinterError::schema(format!(
+                                "{}: template register must be listed directly in depends_on (value redacted)",
+                                resource_ctx
+                            ))
+                            } else {
+                                SinterError::schema(format!(
+                                "{}: template register {} must be listed directly in depends_on",
+                                resource_ctx, reg
+                            ))
+                            });
+                        }
+                    }
+                }
+            }
 
             // Full conservative static sensitivity: explicit flag, any sensitive
             // variable referenced by interpolated fields, or a sensitive variable in
@@ -2941,12 +2943,30 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
         register_producers,
         backups: state.backups.into_iter().map(|(p, _)| p).collect(),
         backup_stores: state.backup_stores,
-        targets: state.targets,
-        warnings,
         backup_resources: state.backup_resources,
         backups_skipped: Vec::new(),
+        targets: state.targets,
+        warnings,
         plugins: state.plugins,
     })
+}
+
+/// The `vars.<name>` and `template.<name>` references of an expression.
+fn collect_template_refs(e: &Expr, vars: &mut BTreeSet<String>, template: &mut BTreeSet<String>) {
+    match e {
+        Expr::Or(a, b) | Expr::And(a, b) | Expr::Cmp(a, _, b) => {
+            collect_template_refs(a, vars, template);
+            collect_template_refs(b, vars, template);
+        }
+        Expr::Not(a) => collect_template_refs(a, vars, template),
+        Expr::Var(name) => {
+            vars.insert(name.clone());
+        }
+        Expr::TemplateVar(name) => {
+            template.insert(name.clone());
+        }
+        _ => {}
+    }
 }
 
 /// Whether a value (or any string nested in it) carries `{{ ... }}`.
@@ -2982,24 +3002,6 @@ fn detect_dependency_cycle(resources: &[(&str, &[String])]) -> Result<()> {
         for d in resources[i].1 {
             let di = *index.get(d.as_str()).ok_or_else(|| {
                 SinterError::schema(format!("{}: unknown dependency {}", resources[i].0, d))
-/// The `vars.<name>` and `template.<name>` references of an expression.
-fn collect_template_refs(e: &Expr, vars: &mut BTreeSet<String>, template: &mut BTreeSet<String>) {
-    match e {
-        Expr::Or(a, b) | Expr::And(a, b) | Expr::Cmp(a, _, b) => {
-            collect_template_refs(a, vars, template);
-            collect_template_refs(b, vars, template);
-        }
-        Expr::Not(a) => collect_template_refs(a, vars, template),
-        Expr::Var(name) => {
-            vars.insert(name.clone());
-        }
-        Expr::TemplateVar(name) => {
-            template.insert(name.clone());
-        }
-        _ => {}
-    }
-}
-
             })?;
             match marks[di] {
                 Mark::Gray => {
@@ -3364,6 +3366,73 @@ fn validate_command_fields(
 
 pub(crate) const RESERVED_ENV: &[&str] = &["PATH", "LANG", "LC_ALL", "HOME"];
 
+/// The accounts a `package` resource declares that installing it creates
+/// (`creates_accounts: { users: [...], groups: [...] }`, DESIGN §49.2).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct PackageAccounts {
+    pub(crate) users: Vec<String>,
+    pub(crate) groups: Vec<String>,
+}
+
+/// Read and check `creates_accounts` of a package's `with` map. Only the keys
+/// `users` and `groups` exist; each is a list of literal account names (no
+/// expression: plan must know them without evaluating anything). A missing
+/// or null `creates_accounts` declares nothing.
+pub(crate) fn package_accounts(
+    with: &BTreeMap<String, Value>,
+    ctx: &str,
+) -> Result<PackageAccounts> {
+    let mut out = PackageAccounts::default();
+    let m = match with.get("creates_accounts") {
+        None | Some(Value::Null) => return Ok(out),
+        Some(Value::Map(m)) => m,
+        Some(_) => {
+            return Err(SinterError::schema(format!(
+                "{}: creates_accounts must be a map with the keys users and groups",
+                ctx
+            )))
+        }
+    };
+    for (key, val) in m {
+        let into = match key.as_str() {
+            "users" => &mut out.users,
+            "groups" => &mut out.groups,
+            _ => {
+                return Err(SinterError::schema(format!(
+                    "{}: creates_accounts has no key {:?} (only users and groups)",
+                    ctx, key
+                )))
+            }
+        };
+        let list = match val {
+            Value::Null => continue,
+            Value::List(l) => l,
+            _ => {
+                return Err(SinterError::schema(format!(
+                    "{}: creates_accounts.{} must be a list of account names",
+                    ctx, key
+                )))
+            }
+        };
+        for item in list {
+            match item {
+                Value::Str(name) if crate::accounts::valid_account_name(name) => {
+                    if !into.contains(name) {
+                        into.push(name.clone());
+                    }
+                }
+                _ => {
+                    return Err(SinterError::schema(format!(
+                        "{}: creates_accounts.{} must list literal account names ([a-z_][a-z0-9_-]*, at most 32 bytes)",
+                        ctx, key
+                    )))
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn validate_env_map(value: &Value, ctx: &str) -> Result<()> {
     match value {
         Value::Null => Ok(()),
@@ -3639,7 +3708,7 @@ pub const COMMAND_FIELDS: &[&str] = &[
     "changed_when",
     "register",
 ];
-pub const PACKAGE_FIELDS: &[&str] = &["name", "state", "env"];
+pub const PACKAGE_FIELDS: &[&str] = &["name", "state", "env", "creates_accounts"];
 pub const SERVICE_FIELDS: &[&str] = &["name", "state", "enabled"];
 pub const SYSTEMD_TIMER_FIELDS: &[&str] = &[
     "name",

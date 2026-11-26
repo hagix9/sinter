@@ -1208,6 +1208,35 @@ impl Engine {
                 )
             })));
         }
+        // An account that a resource planned earlier creates: a package
+        // planned to be installed that declares it in `creates_accounts`, or a
+        // user/group resource of an earlier recipe of the bundle (DESIGN
+        // §49.1, §49.2). Deferred only on a confirmed absence, like above.
+        let planned = if type_ == "user" {
+            self.planned.users.get(spec)
+        } else {
+            self.planned.groups.get(spec)
+        };
+        if let Some(by) = planned.cloned() {
+            let sensitive = res.sensitive || res.derived_sensitive;
+            let absent = if type_ == "user" {
+                lookup_user(&mut self.fs, spec, sensitive).map(|l| l == Lookup::Absent)
+            } else {
+                lookup_group(&mut self.fs, spec, sensitive).map(|l| l == Lookup::Absent)
+            };
+            if matches!(absent, Ok(true)) {
+                return Ok(Some(SinterError::unknown(format!(
+                    "{} {} is created when {} applies; deferred until then",
+                    type_,
+                    shown(spec, sensitive),
+                    if sensitive {
+                        "an earlier resource"
+                    } else {
+                        by.as_str()
+                    }
+                ))));
+            }
+        }
         Ok(None)
     }
 
@@ -1514,6 +1543,11 @@ impl Engine {
                 .missing_groups
                 .iter()
                 .filter(|g| !producers.iter().any(|p| &p.name == *g))
+                // A group a package planned earlier declares in `creates_accounts`,
+                // or a group resource of an earlier recipe of the bundle
+                // (DESIGN §49.1, §49.2). `missing_groups` are confirmed
+                // absent by the observation above.
+                .filter(|g| !(self.opts.mode == Mode::Plan && self.planned.groups.contains_key(*g)))
                 .collect();
             if self.opts.mode == Mode::Plan && uncovered.is_empty() {
                 // Every missing group is created by a resource that applies

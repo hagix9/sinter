@@ -879,9 +879,9 @@ impl Engine {
         SinterError {
             message: format!(
                 "{} (plan cannot see an account that an earlier resource such as a package \
-                 creates; declare the {} with a {} resource before that resource, using the \
-                 attributes the package uses)",
-                e.message, kind, kind
+                 creates; name it in that package's creates_accounts.{}s, or declare the {} with a {} \
+                 resource before that resource, using the attributes the package uses)",
+                e.message, kind, kind, kind
             ),
             ..e
         }
@@ -2151,6 +2151,12 @@ impl Engine {
                         },
                     });
                     r.notes.extend(note);
+                    if !missing.is_empty() {
+                        r.notes.push(format!(
+                            "apply also creates the missing parent directories {} (mode 0755, owned by the account apply runs as; existing directories are not changed)",
+                            missing.join(", ")
+                        ));
+                    }
                     r.notes.extend(self.plan_privilege_note(res, &path));
                     return Ok(r);
                 }
@@ -5177,6 +5183,18 @@ impl Engine {
             );
             return Ok(r);
         }
+        // The same across the recipes of a bundle (DESIGN §49.1): an earlier
+        // recipe plans to change managed systemd input on this host.
+        if !apply {
+            if let Some(by) = &self.planned.prior_manager_input {
+                let mut r = unknown_result(res);
+                r.reason = Some(format!(
+                    "deferred/unknown until manager synchronization at apply: {} plans managed systemd input changes",
+                    by
+                ));
+                return Ok(r);
+            }
+        }
         // Apply: synchronize the manager (pending input / NeedDaemonReload)
         // BEFORE any early return or state decision, and decide only from the
         // fresh observation taken afterwards. A failed initial observation is
@@ -5314,6 +5332,21 @@ impl Engine {
                 r.reason = Some("deferred/unknown until dependency apply".into());
                 r.verification = Verification::NotPerformed;
                 return Ok(r);
+            }
+            // A bundle cannot express `depends_on` across recipes: the order
+            // of the recipes is the dependency. A unit that is not found
+            // while an earlier recipe plans to install a package on this
+            // host is decided at apply (DESIGN §49.1).
+            if self.opts.mode == Mode::Plan {
+                if let Some(by) = self.planned.prior_package_install.clone() {
+                    let mut r = unknown_result(res);
+                    r.reason = Some(format!(
+                        "deferred/unknown until apply: the unit was not found and {} is planned to be installed first",
+                        by
+                    ));
+                    r.verification = Verification::NotPerformed;
+                    return Ok(r);
+                }
             }
             let unit_disp = if sensitive {
                 "[redacted]"

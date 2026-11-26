@@ -1341,6 +1341,7 @@ mod tests {
             manager_reloads: vec![],
             fake_fs: None,
             fake_pg: None,
+            plan_carry: None,
         };
         // Host boundary: no content, whatever the caller's sensitive flags.
         let host = serde_json::to_string(&plan_report_json(&report, true)).unwrap();
@@ -1394,6 +1395,7 @@ mod tests {
             ],
             fake_fs: None,
             fake_pg: None,
+            plan_carry: None,
         };
         let v = plan_report_json(&report, true);
         let m = v["manager_reloads"].as_array().unwrap();

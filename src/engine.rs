@@ -92,6 +92,9 @@ pub struct RunReport {
     /// The scripted PostgreSQL server at the end of the run (test support).
     /// `None` on a real target.
     pub fake_pg: Option<crate::fakesys::FakePostgres>,
+    /// Plan only: what this plan (and the earlier recipes it was seeded
+    /// with) may change on the host, for the next recipe of a bundle.
+    pub plan_carry: Option<PlanCarry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,7 +112,7 @@ pub enum AggregateStatus {
 /// the changes of every resource before it. A plan-time refusal of the parent
 /// path check (DESIGN §23) is therefore decisive only when none of those
 /// changes can alter what plan observed (see `Engine::plan_parent_check`).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct PlannedEffects {
     /// Path and resource ID of each earlier `file`, `directory`, `link` and
     /// `template` that is planned to change or is unknown. Such a change
@@ -119,12 +122,64 @@ pub(crate) struct PlannedEffects {
     /// service, user) that is planned to change or is unknown. Plan cannot
     /// know which paths it creates or changes. A group changes no path.
     pub(crate) opaque: Option<String>,
+    /// Accounts an earlier resource is planned to create: a `user` or
+    /// `group` resource planned to change towards `present`, or a `package`
+    /// planned to be installed that declares the account in `creates_accounts`
+    /// (DESIGN §49.2). Name -> the resource that creates it.
+    pub(crate) users: BTreeMap<String, String>,
+    pub(crate) groups: BTreeMap<String, String>,
+    /// The first `package` an EARLIER RECIPE of the bundle plans to install
+    /// on this host (DESIGN §49.1). Never set by a resource of the recipe
+    /// being planned: inside one recipe a service is deferred only through
+    /// its direct `depends_on` (DESIGN §29).
+    pub(crate) prior_package_install: Option<String>,
+    /// Managed systemd input an EARLIER RECIPE of the bundle plans to
+    /// change on this host: the manager's answer about a unit is not
+    /// meaningful for plan until apply has synchronized it.
+    pub(crate) prior_manager_input: Option<String>,
+}
+
+/// Whether a resource's `state` is literally `present` (or unset, which is
+/// `present` for the types this is asked about). An expression is not
+/// evaluated here and counts as "not known to be present".
+fn literally_present(res: &FrozenResource) -> bool {
+    match res.with.get("state") {
+        None | Some(Value::Null) => true,
+        Some(Value::Str(s)) => s == "present",
+        _ => false,
+    }
 }
 
 impl PlannedEffects {
     fn record(&mut self, res: &FrozenResource, r: &ResourceResult) {
         if r.change == Change::None && !r.unknown {
             return;
+        }
+        if literally_present(res) {
+            match res.type_.as_str() {
+                "user" | "group" => {
+                    if let Some(name) = &res.account_name {
+                        let map = if res.type_ == "user" {
+                            &mut self.users
+                        } else {
+                            &mut self.groups
+                        };
+                        map.entry(name.clone()).or_insert_with(|| res.id.clone());
+                    }
+                }
+                "package" => {
+                    // Checked at load; a value that does not parse declares
+                    // nothing.
+                    let p = crate::model::package_accounts(&res.with, &res.id).unwrap_or_default();
+                    for u in p.users {
+                        self.users.entry(u).or_insert_with(|| res.id.clone());
+                    }
+                    for g in p.groups {
+                        self.groups.entry(g).or_insert_with(|| res.id.clone());
+                    }
+                }
+                _ => {}
+            }
         }
         match (res.type_.as_str(), &res.path) {
             ("file" | "directory" | "link" | "template", Some(p)) => {
@@ -187,6 +242,43 @@ impl PlannedEffects {
     }
 }
 
+/// What the recipes of a bundle planned so far for ONE host may change
+/// before apply reaches the next recipe on that host (plan only, DESIGN
+/// §49.1). It is produced by a plan ([`RunReport::plan_carry`]) and handed to
+/// the plan of the next recipe for the same host
+/// ([`Engine::with_plan_carry`]). It only ever turns a plan-time refusal that
+/// an earlier planned change can invalidate into a deferral to apply; apply
+/// and audit never see it and observe the host for themselves.
+#[derive(Debug, Default, Clone)]
+pub struct PlanCarry {
+    effects: PlannedEffects,
+}
+
+impl PlanCarry {
+    /// The plan of the recipe `label` did not complete for this host, so
+    /// what it would change is not known: any path may change.
+    pub fn after_incomplete_plan(mut self, label: &str) -> Self {
+        if self.effects.opaque.is_none() {
+            self.effects.opaque = Some(format!(
+                "recipe {} (its plan did not complete, so its changes are not known)",
+                label
+            ));
+        }
+        self
+    }
+
+    /// Whether nothing is carried (no earlier recipe planned a change).
+    pub fn is_empty(&self) -> bool {
+        let e = &self.effects;
+        e.paths.is_empty()
+            && e.opaque.is_none()
+            && e.users.is_empty()
+            && e.groups.is_empty()
+            && e.prior_package_install.is_none()
+            && e.prior_manager_input.is_none()
+    }
+}
+
 pub struct Engine {
     pub(crate) model: Model,
     pub(crate) fs: TargetFs,
@@ -212,6 +304,9 @@ pub struct Engine {
     pub(crate) planned: PlannedEffects,
     /// Connection-risk control state (DESIGN §43).
     pub(crate) risk: crate::risk::engine::RiskState,
+    /// Plan only: what earlier recipes of the bundle planned for this host,
+    /// and the label of the recipe being planned (DESIGN §49.1).
+    pub(crate) carry: Option<(PlanCarry, String)>,
 }
 
 impl Engine {
@@ -383,6 +478,7 @@ impl Engine {
             progress,
             planned: PlannedEffects::default(),
             risk: Default::default(),
+            carry: None,
         })
     }
 
@@ -390,6 +486,16 @@ impl Engine {
     /// resource that names a secret cannot be planned, applied or audited.
     pub fn with_secrets(mut self, source: crate::secret_source::SharedSecrets) -> Self {
         self.secrets = Some(source);
+        self
+    }
+
+    /// Plan this recipe (`label`) as one that runs after the earlier recipes
+    /// of a bundle on the same host: `carry` is what those recipes planned
+    /// (DESIGN §49.1). Ignored outside plan mode.
+    pub fn with_plan_carry(mut self, carry: PlanCarry, label: String) -> Self {
+        if self.opts.mode == Mode::Plan {
+            self.carry = Some((carry, label));
+        }
         self
     }
 
@@ -482,6 +588,7 @@ impl Engine {
                 Some(named.as_deref().unwrap_or(&default)),
             ))
         };
+        let backup = crate::backup::with_skipped(backup, &self.model.backups_skipped);
         let mut results: BTreeMap<String, usize> = BTreeMap::new();
         let mut out_results: Vec<ResourceResult> = Vec::new();
         // Handlers queued for the handler phase. The bool records whether the
@@ -498,7 +605,11 @@ impl Engine {
         let mut stop_outcome = StageOutcome::Failed;
 
         let mut stage = StageTracker::start(&*progress, Stage::Resources, Some(order.len()));
-        self.planned = PlannedEffects::default();
+        self.planned = match &self.carry {
+            Some((carry, _)) => carry.effects.clone(),
+            None => PlannedEffects::default(),
+        };
+        let seed = self.planned.clone();
         if self.opts.mode == Mode::Plan && !self.model.backups.is_empty() {
             self.record_backup_store_change();
         }
@@ -588,7 +699,6 @@ impl Engine {
             let mut dep_failure: Option<String> = None;
             let mut dep_unknown = false;
             for dep in &res.depends_on {
-        let backup = crate::backup::with_skipped(backup, &self.model.backups_skipped);
                 match results.get(dep).and_then(|i| out_results.get(*i)) {
                     Some(dr) if dr.satisfies_dependency() => {}
                     Some(dr) if dr.is_unknown_dependency() => {
@@ -781,6 +891,8 @@ impl Engine {
                 )
             });
         self.fs.set_stats_scope("manager");
+        let plan_carry = (self.opts.mode == Mode::Plan)
+            .then(|| self.export_plan_carry(seed, &order, &out_results));
         self.manager_finish(run_stopped);
         let manager_failed =
             self.opts.mode == Mode::Apply && self.manager.reloads.iter().any(|m| m.is_failure());
@@ -829,7 +941,56 @@ impl Engine {
             manager_reloads,
             fake_fs,
             fake_pg,
+            plan_carry,
         })
+    }
+
+    /// What this plan and the recipes before it may change on this host, for
+    /// the plan of the next recipe of the bundle (DESIGN §49.1). `seed` is
+    /// what the earlier recipes carried in. Every resource of this recipe is
+    /// recorded, named with its recipe so a later message can say where the
+    /// change comes from.
+    fn export_plan_carry(
+        &self,
+        seed: PlannedEffects,
+        order: &[usize],
+        results: &[ResourceResult],
+    ) -> PlanCarry {
+        let label = self.carry.as_ref().map(|(_, l)| l.as_str());
+        let named = |id: &str| match label {
+            Some(l) => format!("{} (recipe {})", id, l),
+            None => id.to_string(),
+        };
+        let mut out = seed;
+        for (pos, r) in results.iter().enumerate() {
+            let Some(res) = order.get(pos).map(|i| &self.model.resources[*i]) else {
+                continue;
+            };
+            let mut res = res.clone();
+            res.id = named(&res.id);
+            out.record(&res, r);
+            if res.type_ == "package"
+                && literally_present(&res)
+                && (r.change != Change::None || r.unknown)
+                && out.prior_package_install.is_none()
+            {
+                out.prior_package_install = Some(res.id.clone());
+            }
+        }
+        // A guarded command that may run after all (`guarded_command_may_run`)
+        // is opaque without a result that says so.
+        if out.opaque.is_none() {
+            if let Some(id) = &self.planned.opaque {
+                out.opaque = Some(named(id));
+            }
+        }
+        if out.prior_manager_input.is_none() && !self.manager.pending.is_empty() {
+            out.prior_manager_input = Some(match label {
+                Some(l) => format!("recipe {}", l),
+                None => "an earlier recipe".to_string(),
+            });
+        }
+        PlanCarry { effects: out }
     }
 
     /// Evaluate a resource's `when` condition. Returns:

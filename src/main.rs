@@ -2355,7 +2355,7 @@ fn run_one_target(
             let session = progress.begin(unit_info(phase, u));
             let executed = single_target(a, Some(&session)).and_then(|target| {
                 risk_gate(phase, a, &[(target.name.clone(), model.clone())])?;
-                execute(phase, model, &target, a, None, session.sink())
+                execute(phase, model, &target, a, None, session.sink(), None)
             });
             session.end(run_outcome_of(&executed));
             let outcome = executed?;
@@ -3553,20 +3553,25 @@ fn run_executions(
     let run_id = sinter::backup::new_run_id();
     let mut results: Vec<ExecResult> = Vec::new();
     let mut stopped_by: Option<String> = None;
+    // Plan of a bundle (DESIGN §49.1): what the earlier recipes planned for a
+    // host is handed to the plan of the next recipe for that same host, so a
+    // later recipe is not refused for something an earlier one creates. One
+    // entry per host; nothing crosses hosts. Apply and audit carry nothing.
+    let mut plan_carries: BTreeMap<String, sinter::engine::PlanCarry> = BTreeMap::new();
     for mut ex in plan.executions {
         let u = &units[ex.unit];
         let what = format!("{} @ {}", u.label, ex.target.name);
-        if let Some(culprit) = &stopped_by {
-            results.push(ExecResult {
-                unit: ex.unit,
-                target: ex.target,
-                exit_code: None,
         let model = ex.model.take().unwrap_or_else(|| u.model.clone());
         let model = match a.exec.skips() {
             Some(s) => s.filter(ex.unit, model),
             None => model,
         };
         let backup_view = BackupView::of(&model);
+        if let Some(culprit) = &stopped_by {
+            results.push(ExecResult {
+                unit: ex.unit,
+                target: ex.target,
+                exit_code: None,
                 label: "not_run",
                 json: serde_json::json!({ "reason": format!("apply stopped after {} failed", culprit) }),
                 backup: backup_record(phase, &backup_view, None),
@@ -3581,12 +3586,49 @@ fn run_executions(
         // anything of this execution is rendered. Executions that are not run
         // have no scope.
         let session = progress.begin(unit_info(phase, u));
-        let model = ex.model.take().unwrap_or_else(|| u.model.clone());
-        let model = match a.exec.skips() {
-            Some(s) => s.filter(ex.unit, model),
-            None => model,
-        };
-        let executed = execute(phase, model, &ex.target, a, Some(&id), session.sink());
+        let carry_in = (phase == Phase::Plan).then(|| {
+            (
+                plan_carries
+                    .get(&ex.target.name)
+                    .cloned()
+                    .unwrap_or_default(),
+                u.label.clone(),
+            )
+        });
+        let executed = execute(
+            phase,
+            model,
+            &ex.target,
+            a,
+            Some(&id),
+            session.sink(),
+            carry_in.clone(),
+        );
+        #[cfg(test)]
+        if let Ok(Outcome::Run(report)) = &executed {
+            tests::RUN_RESULTS.with(|r| {
+                r.borrow_mut().extend(report.resources.iter().map(|x| {
+                    (
+                        format!("{}@{}:{}", u.label, ex.target.name, x.id),
+                        x.unknown,
+                        format!(
+                            "{} | {}",
+                            x.reason.clone().unwrap_or_default(),
+                            x.notes.join(" | ")
+                        ),
+                    )
+                }))
+            });
+        }
+        if let Some((prior, label)) = carry_in {
+            let next = match &executed {
+                Ok(Outcome::Run(report)) => report.plan_carry.clone().unwrap_or(prior),
+                // What a recipe whose plan did not complete would change is
+                // not known.
+                _ => prior.after_incomplete_plan(&label),
+            };
+            plan_carries.insert(ex.target.name.clone(), next);
+        }
         session.end(run_outcome_of(&executed));
         let backup = backup_record(phase, &backup_view, Some(&executed));
         let (code, label, json) = match executed {
@@ -3761,6 +3803,7 @@ fn execute(
     a: &TargetArgs,
     backup_run_id: Option<&str>,
     progress: Arc<dyn ProgressSink>,
+    plan_carry: Option<(sinter::engine::PlanCarry, String)>,
 ) -> Result<Outcome, SinterError> {
     let host = target.name.as_str();
     let loopback = target.loopback;
@@ -3847,6 +3890,9 @@ fn execute(
         engine = engine.with_backup_run_id(id.to_string());
     }
     engine = engine.with_backup_store(a.exec.backup_store());
+    if let (Phase::Plan, Some((carry, label))) = (phase, plan_carry) {
+        engine = engine.with_plan_carry(carry, label);
+    }
     if phase != Phase::Audit {
         engine = engine.with_risk(risk_ctx(approval.clone()));
     }
@@ -4390,6 +4436,10 @@ mod tests {
         /// (compiled in tests only).
         pub(super) static FAKE_TARGETS: std::cell::RefCell<std::collections::VecDeque<sinter::executor::FakeTarget>> =
             const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+        /// `recipe@host:id`, whether it is unknown, and its reason and notes,
+        /// for every resource result of a plan or apply (tests only).
+        pub(super) static RUN_RESULTS: std::cell::RefCell<Vec<(String, bool, String)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
         /// Every model [`execute`] received, in order (compiled in tests only).
         pub(super) static EXECUTED_MODELS: std::cell::RefCell<Vec<Model>> =
             const { std::cell::RefCell::new(Vec::new()) };
@@ -4579,6 +4629,209 @@ mod tests {
         );
     }
 
+    // ---- Plan and audit of a bundle on a host nothing is applied to yet
+    // (DESIGN §49.1, §49.2) -------------------------------------------------
+
+    const PG_PACKAGE: &str = "version: 1\nresources:\n  - id: server\n    type: package\n    with:\n      name: postgresql-server\n      state: present\n      creates_accounts:\n        users: [postgres]\n        groups: [postgres]\n";
+    const PG_PACKAGE_PLAIN: &str = "version: 1\nresources:\n  - id: server\n    type: package\n    with:\n      name: postgresql-server\n      state: present\n";
+    const PG_DIRECTORY: &str = "version: 1\nresources:\n  - id: conf_d\n    type: directory\n    with:\n      path: /var/lib/pgsql/data/conf.d\n      owner: postgres\n      group: postgres\n      mode: \"0700\"\n";
+    const PG_CONFIG: &str = "version: 1\nresources:\n  - id: site\n    type: file\n    with:\n      path: /var/lib/pgsql/data/conf.d/90-site.conf\n      content: \"shared_buffers = 256MB\\n\"\n      owner: postgres\n      group: postgres\n      mode: \"0600\"\n";
+    const PG_SERVICE: &str = "version: 1\nresources:\n  - id: db\n    type: service\n    with:\n      name: postgresql\n      state: running\n      enabled: true\n";
+
+    /// `recipe@host:id`, unknown, reason and notes (see `RUN_RESULTS`).
+    type ResultRow = (String, bool, String);
+
+    fn fresh_el9() -> FakeTarget {
+        FakeTarget::rocky9().with_fake_fs().as_root()
+    }
+
+    fn pg_bundle(dir: &tempfile::TempDir, package: &str) -> String {
+        write(dir, "03_package.yaml", package);
+        write(dir, "04_directory.yaml", PG_DIRECTORY);
+        write(dir, "05_config.yaml", PG_CONFIG);
+        write(dir, "07_service.yaml", PG_SERVICE);
+        write(
+            dir,
+            "site.yaml",
+            "version: 1\nrecipes: [03_package.yaml, 04_directory.yaml, 05_config.yaml, 07_service.yaml]\n",
+        )
+    }
+
+    fn drive_results(
+        phase: Phase,
+        argv: &[&str],
+        targets: Vec<FakeTarget>,
+    ) -> (Result<u8, SinterError>, Vec<ResultRow>) {
+        RUN_RESULTS.with(|r| r.borrow_mut().clear());
+        let w = wiring(ProgressMode::Disabled);
+        let code = drive(phase, argv, &w, targets);
+        (code, RUN_RESULTS.with(|r| r.borrow_mut().split_off(0)))
+    }
+
+    fn result<'a>(rows: &'a [ResultRow], key: &str) -> &'a ResultRow {
+        rows.iter()
+            .find(|r| r.0 == key)
+            .unwrap_or_else(|| panic!("no result {key} in {rows:?}"))
+    }
+
+    #[test]
+    fn a_bundle_plans_on_a_fresh_host_what_its_earlier_recipes_create() {
+        let dir = fixture();
+        let bundle = pg_bundle(&dir, PG_PACKAGE);
+        let (code, rows) = drive_results(
+            Phase::Plan,
+            &[&bundle, "--format", "json"],
+            vec![fresh_el9(), fresh_el9(), fresh_el9(), fresh_el9()],
+        );
+        assert_eq!(code.unwrap(), 0, "{rows:?}");
+        // The package is a plain planned change; everything after it is
+        // decided at apply, and says which earlier resource it waits for.
+        assert!(!result(&rows, "03_package@localhost:server").1);
+        let d = result(&rows, "04_directory@localhost:conf_d");
+        assert!(d.1, "{d:?}");
+        assert!(d.2.contains("server (recipe 03_package)"), "{d:?}");
+        let f = result(&rows, "05_config@localhost:site");
+        assert!(f.1, "{f:?}");
+        let s = result(&rows, "07_service@localhost:db");
+        assert!(s.1, "{s:?}");
+        assert!(
+            s.2.contains("server (recipe 03_package) is planned to be installed first"),
+            "{s:?}"
+        );
+    }
+
+    #[test]
+    fn without_creates_accounts_a_package_created_account_is_still_a_plan_error() {
+        // DESIGN §14: an account is never guessed from a package. The error
+        // names the two supported ways.
+        let dir = fixture();
+        let bundle = pg_bundle(&dir, PG_PACKAGE_PLAIN);
+        RUN_RESULTS.with(|r| r.borrow_mut().clear());
+        let (code, _) = drive_results(
+            Phase::Plan,
+            &[&bundle, "--format", "json"],
+            vec![fresh_el9(), fresh_el9(), fresh_el9(), fresh_el9()],
+        );
+        assert_eq!(code.unwrap(), 4);
+    }
+
+    #[test]
+    fn a_later_recipe_alone_is_not_deferred() {
+        // Nothing is carried into a recipe that is planned on its own.
+        let dir = fixture();
+        pg_bundle(&dir, PG_PACKAGE);
+        for recipe in ["04_directory.yaml", "07_service.yaml"] {
+            let path = dir.path().join(recipe).to_string_lossy().into_owned();
+            let (code, _) =
+                drive_results(Phase::Plan, &[&path, "--format", "json"], vec![fresh_el9()]);
+            let code = match code {
+                Ok(c) => c,
+                Err(e) => e.kind.exit_code() as u8,
+            };
+            assert_eq!(code, 4, "{recipe}");
+        }
+    }
+
+    #[test]
+    fn an_installed_package_defers_nothing() {
+        // The package is already installed, so apply will not create the
+        // account or the unit: what is missing stays a plan error.
+        let dir = fixture();
+        let bundle = pg_bundle(&dir, PG_PACKAGE);
+        let installed = || fresh_el9().with_package("postgresql-server");
+        let (code, rows) = drive_results(
+            Phase::Plan,
+            &[&bundle, "--format", "json"],
+            vec![installed(), installed(), installed(), installed()],
+        );
+        assert_eq!(code.unwrap(), 4, "{rows:?}");
+    }
+
+    #[test]
+    fn what_one_host_plans_is_not_carried_to_another_host() {
+        let dir = fixture();
+        let kh = write(&dir, "known_hosts", "");
+        let inv = write(
+            &dir,
+            "hosts.yaml",
+            &format!(
+                "hosts:\n  db01:\n    address: 127.0.0.1\n    port: 20101\n    user: root\n    known_hosts: {kh}\n  db02:\n    address: 127.0.0.1\n    port: 20102\n    user: root\n    known_hosts: {kh}\ngroups:\n  db:\n    hosts: [db01, db02]\n"
+            ),
+        );
+        let targets = "targets:\n  groups: [db]\n";
+        let with_targets =
+            |body: &str| body.replacen("version: 1\n", &format!("version: 1\n{targets}"), 1);
+        write(&dir, "03_package.yaml", &with_targets(PG_PACKAGE));
+        write(&dir, "04_directory.yaml", &with_targets(PG_DIRECTORY));
+        let bundle = write(
+            &dir,
+            "site.yaml",
+            "version: 1\nrecipes: [03_package.yaml, 04_directory.yaml]\n",
+        );
+        // Recipe-major, host-minor: db01 is fresh, db02 already has the
+        // package (so nothing on db02 creates the account).
+        let installed = || fresh_el9().with_package("postgresql-server");
+        let (code, rows) = drive_results(
+            Phase::Plan,
+            &[
+                &bundle,
+                "--inventory",
+                &inv,
+                "--no-ssh-config",
+                "--format",
+                "json",
+            ],
+            vec![fresh_el9(), installed(), fresh_el9(), installed()],
+        );
+        assert_eq!(code.unwrap(), 4, "{rows:?}");
+        assert!(result(&rows, "04_directory@db01:conf_d").1);
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r.0 == "04_directory@db02:conf_d" && r.1),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_recipe_whose_plan_did_not_complete_makes_later_paths_unknown_and_the_run_fail() {
+        let dir = fixture();
+        // The first recipe names an account nothing creates: its plan fails.
+        write(&dir, "01_broken.yaml", "version: 1\nresources:\n  - id: d\n    type: directory\n    with:\n      path: /etc/perf\n      owner: nobody-synthetic\n");
+        write(&dir, "02_file.yaml", "version: 1\nresources:\n  - id: f\n    type: file\n    with:\n      path: /srv/synthetic/app/a.conf\n      content: x\n");
+        let bundle = write(
+            &dir,
+            "site.yaml",
+            "version: 1\nrecipes: [01_broken.yaml, 02_file.yaml]\n",
+        );
+        let (code, rows) = drive_results(
+            Phase::Plan,
+            &[&bundle, "--format", "json"],
+            vec![fresh_el9().with_fs_dir("/etc/perf"), fresh_el9()],
+        );
+        assert_eq!(code.unwrap(), 4);
+        let f = result(&rows, "02_file@localhost:f");
+        assert!(
+            f.2.contains("recipe 01_broken (its plan did not complete"),
+            "{f:?}"
+        );
+    }
+
+    #[test]
+    fn audit_of_a_bundle_on_a_fresh_host_is_drift_and_changes_nothing() {
+        let dir = fixture();
+        let bundle = pg_bundle(&dir, PG_PACKAGE);
+        let w = wiring(ProgressMode::Disabled);
+        let code = drive(
+            Phase::Audit,
+            &[&bundle, "--format", "json"],
+            &w,
+            vec![fresh_el9(), fresh_el9(), fresh_el9(), fresh_el9()],
+        );
+        // Not applied is drift (7), never "could not audit" (6).
+        assert_eq!(code.unwrap(), 7);
+    }
+
     #[test]
     fn strict_audit_multi_host_aggregates_policy_failure() {
         let dir = fixture();
@@ -4627,6 +4880,7 @@ mod tests {
             &a,
             None,
             Arc::new(sinter::progress::NoopSink),
+            None,
         )
         .unwrap();
         FAKE_TARGETS.with(|f| f.borrow_mut().clear());
