@@ -383,6 +383,17 @@ fn check_mcp_manifest_authority(doc: &Document) -> Result<(), ToolError> {
                     .to_string(),
             });
         }
+        // `file_merge` is not offered over MCP in this release: the MCP
+        // boundary does not widen with a new resource type.
+        if r.type_ == "file_merge" {
+            return Err(ToolError {
+                category: "invalid_manifest",
+                kind: Some("schema"),
+                message: "MCP manifests may not use the file_merge resource type \
+                          yet — it is not offered over MCP in this release"
+                    .to_string(),
+            });
+        }
         if r.type_ == "systemd_timer" {
             return Err(ToolError {
                 category: "invalid_manifest",

@@ -383,6 +383,9 @@ fn audit_resource(engine: &mut Engine, res: &FrozenResource) -> AuditResourceRes
         "package" => audit_package(engine, res, item.as_ref(), sensitive),
         "service" => audit_service(engine, res, item.as_ref(), sensitive),
         "systemd_timer" => audit_systemd_timer(engine, res, item.as_ref(), sensitive),
+        "file_merge" => {
+            crate::filemerge_engine::audit_file_merge(engine, res, item.as_ref(), sensitive)
+        }
         "nm_connection" => audit_nm_connection(engine, res, item.as_ref(), sensitive),
         "group" => audit_group(engine, res, item.as_ref(), sensitive),
         "user" => audit_user(engine, res, item.as_ref(), sensitive),

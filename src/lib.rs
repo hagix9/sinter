@@ -12,6 +12,8 @@ pub mod expressions;
 pub mod facts;
 pub mod fakepkg;
 pub mod fakesys;
+pub mod filemerge;
+pub(crate) mod filemerge_engine;
 pub mod fsbackup;
 pub mod fsstage;
 pub mod inventory;

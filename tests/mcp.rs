@@ -523,6 +523,36 @@ fn systemd_timer_is_refused_by_every_manifest_tool() {
 }
 
 #[test]
+fn file_merge_is_refused_by_every_manifest_tool() {
+    // The MCP boundary does not widen with the new resource type.
+    let mut m = Mcp::start();
+    init(&mut m);
+    let manifest = "version: 1\nresources:\n  - id: m\n    type: file_merge\n    with: { path: /etc/hosts, merge: line, line: \"192.0.2.1 a.example.invalid\" }\n";
+    let calls = [
+        ("sinter_validate_manifest", json!({"manifest": manifest})),
+        ("sinter_inspect_manifest", json!({"manifest": manifest})),
+        (
+            "sinter_plan",
+            json!({"manifest": manifest, "target": "rocky9"}),
+        ),
+        (
+            "sinter_plan_host",
+            json!({"manifest": manifest, "target": "web01"}),
+        ),
+        (
+            "sinter_audit_host",
+            json!({"manifest": manifest, "target": "web01"}),
+        ),
+    ];
+    for (i, (tool, args)) in calls.into_iter().enumerate() {
+        let (is_err, v) = Mcp::payload(&m.tool(10 + i as u64, tool, args));
+        assert!(is_err, "{tool} accepted a file_merge manifest: {v}");
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("file_merge"), "{tool}: {msg}");
+    }
+}
+
+#[test]
 fn nm_connection_is_refused_by_every_manifest_tool() {
     // DESIGN §45.10: NetworkManager observations are not measured on real
     // hosts; MCP does not offer the type (and stays read-only either way).

@@ -182,7 +182,7 @@ impl PlannedEffects {
             }
         }
         match (res.type_.as_str(), &res.path) {
-            ("file" | "directory" | "link" | "template", Some(p)) => {
+            ("file" | "directory" | "link" | "template" | "file_merge", Some(p)) => {
                 self.paths.push((p.clone(), res.id.clone()))
             }
             // Neither a group nor a database role changes any path.
@@ -1068,6 +1068,7 @@ impl Engine {
             "package" => self.run_package(res, item),
             "service" => self.run_service(res, item),
             "systemd_timer" => self.run_systemd_timer(res, item),
+            "file_merge" => self.run_file_merge(res, item),
             "nm_connection" => self.run_nm_connection(res, item),
             "group" => self.run_group(res, item),
             "user" => self.run_user(res, item),

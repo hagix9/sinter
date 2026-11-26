@@ -9,6 +9,8 @@ use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+mod file_merge;
+
 #[derive(Debug, Clone)]
 pub struct VarDef {
     pub name: String,
@@ -1364,6 +1366,7 @@ fn validate_declaration_shape(
             require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
             crate::nm::NmSpec::check(&d.with, ctx, true)?;
         }
+        "file_merge" => file_merge::check_shape(d, sensitive_var_names)?,
         "systemd_timer" => {
             validate_with_fields(&d.with, SYSTEMD_TIMER_FIELDS, ctx)?;
             require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
@@ -1911,6 +1914,8 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
     let mut path_owner: BTreeMap<String, String> = BTreeMap::new();
     // `nm_connection` names: one resource per profile name (DESIGN §45.2).
     let mut nm_owner: BTreeMap<String, String> = BTreeMap::new();
+    // `file_merge` resources by path: they share a path, not a part of it.
+    let mut merge_owners = file_merge::MergeOwners::default();
     let mut account_name_owner: BTreeMap<(String, String), String> = BTreeMap::new();
     // Recipe-wide default environment, applied to `package`/`command`
     // resources as a base their own `env` overrides (DESIGN §27.1).
@@ -2373,6 +2378,15 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         Ok(())
                     })?;
                 }
+                "file_merge" => file_merge::freeze_fields(
+                    r,
+                    &scope,
+                    &resource_ctx,
+                    &mut fr,
+                    &sensitive_var_names,
+                    &mut stage,
+                    &tol,
+                )?,
                 "systemd_timer" => {
                     staged(&mut stage, Stage::ValueFree, || {
                         validate_with_fields(&r.with, SYSTEMD_TIMER_FIELDS, &resource_ctx)
@@ -2665,6 +2679,19 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                     }
                 }
             }
+
+            // A whole-path resource against `file_merge`, and `file_merge`
+            // resources of one path among themselves.
+            file_merge::check_ownership(
+                &mut merge_owners,
+                &path_owner,
+                r,
+                &fr,
+                &scope,
+                &mut stage,
+                &tol,
+                &peer_refs,
+            )?;
 
             // Conservative static sensitivity used for early diagnostics. Computed
             // BEFORE template body validation so body-derived values are redacted
