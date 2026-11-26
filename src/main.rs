@@ -4894,7 +4894,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let (code, _) = drive_results(Phase::Plan, &[&alone, "--format", "json"], vec![host()]);
-        assert_eq!(code.map_or_else(|e| e.kind.exit_code() as u8, |c| c), 4);
+        assert_eq!(code.unwrap_or_else(|e| e.kind.exit_code() as u8), 4);
     }
 
     #[test]
