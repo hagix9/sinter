@@ -391,6 +391,7 @@ fn audit_resource(engine: &mut Engine, res: &FrozenResource) -> AuditResourceRes
         "dnf_module" => audit_dnf_module(engine, res, item.as_ref(), sensitive),
         "crypto_policy" => audit_crypto_policy(engine, res, item.as_ref(), sensitive),
         "sysctl" => audit_sysctl(engine, res, item.as_ref(), sensitive),
+        "hostname" => audit_hostname(engine, res, item.as_ref(), sensitive),
         "group" => audit_group(engine, res, item.as_ref(), sensitive),
         "user" => audit_user(engine, res, item.as_ref(), sensitive),
         "postgresql_role" => audit_postgresql_role(engine, res, item.as_ref(), sensitive),
@@ -1494,6 +1495,35 @@ fn audit_sysctl(
         details,
         "matches the declared state; whether another file overrides the value at boot is not evaluated",
     )
+}
+
+/// Audit a `hostname`: the static name `hostnamectl --static` reports
+/// against the declared one (dimension `static`). A transient name that is
+/// not the declared one is a note in the reason, never drift. A host without
+/// the tool and every observation failure are errors, never drift.
+fn audit_hostname(
+    engine: &mut Engine,
+    res: &FrozenResource,
+    item: Option<&EvalVal>,
+    sensitive: bool,
+) -> AuditResourceResult {
+    let (drift, note) =
+        match obs_or_error(res, sensitive, engine.hostname_audit(res, item, sensitive)) {
+            Ok(v) => v,
+            Err(r) => return *r,
+        };
+    let details = drift
+        .into_iter()
+        .map(|(o, d)| AuditDriftDetail::new("static", o, d, sensitive))
+        .collect();
+    let mut r = finish_drift(res, sensitive, details, "the static host name matches");
+    if let Some(note) = note {
+        r.reason = Some(match r.reason.take() {
+            Some(why) => format!("{}; {}", why, note),
+            None => note,
+        });
+    }
+    r
 }
 
 /// Audit a `systemd_timer` (DESIGN §42.5): the checks that would stop plan

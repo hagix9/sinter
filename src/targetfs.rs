@@ -1553,6 +1553,14 @@ impl TargetFs {
         )
     }
 
+    /// One host name the host reports (`hostname`): `hostnamectl --static`
+    /// or `hostnamectl --transient` prints it and changes nothing.
+    /// Read-only, fixed argv without any recipe value; no mutation permit
+    /// is needed.
+    pub fn hostnamectl_show(&mut self, which: crate::hostname::Which) -> Result<Output> {
+        self.run_argv(crate::hostname::TOOL, &[which.flag().to_string()])
+    }
+
     /// Check one `OnCalendar` expression with the target's own systemd
     /// (`systemd_timer`, DESIGN §42.4). The expression was checked by Sinter
     /// first (printable ASCII, no leading `-`, no `\` or `%`), so it cannot

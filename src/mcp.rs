@@ -443,6 +443,17 @@ fn check_mcp_manifest_authority(doc: &Document) -> Result<(), ToolError> {
                     .to_string(),
             });
         }
+        // `hostname` runs `hostnamectl` on the target; until that is
+        // measured on real hosts, MCP does not offer the type.
+        if r.type_ == "hostname" {
+            return Err(ToolError {
+                category: "invalid_manifest",
+                kind: Some("schema"),
+                message: "MCP manifests may not use the hostname resource type yet — \
+                          its hostnamectl observation is not measured on real hosts"
+                    .to_string(),
+            });
+        }
         if r.type_ == "systemd_timer" {
             return Err(ToolError {
                 category: "invalid_manifest",

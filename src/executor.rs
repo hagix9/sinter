@@ -3938,6 +3938,16 @@ impl FakeExecutor {
                     &req.args,
                 )
             }
+            "hostnamectl"
+                if req.program == crate::hostname::TOOL
+                    && self.target.executables.contains(&req.program) =>
+            {
+                crate::fake_host::hostnamectl(
+                    &self.target.el,
+                    self.sudo || self.target.uid == 0,
+                    &req.args,
+                )
+            }
             "sysctl"
                 if req.program == crate::sysctl::TOOL
                     && self.target.executables.contains(&req.program) =>

@@ -25,6 +25,8 @@ pub mod filemerge;
 pub(crate) mod filemerge_engine;
 pub mod fsbackup;
 pub mod fsstage;
+pub mod hostname;
+pub(crate) mod hostname_engine;
 pub mod inifile;
 pub mod inventory;
 pub mod inventory_detect;

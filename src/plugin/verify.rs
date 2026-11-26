@@ -155,6 +155,7 @@ pub const BUILTIN_RESOURCE_TYPES: &[&str] = &[
     "dnf_module",
     "crypto_policy",
     "sysctl",
+    "hostname",
     "postgresql_role",
     "user",
     "group",

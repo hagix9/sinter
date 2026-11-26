@@ -1,6 +1,7 @@
 //! Scripted host tools for the in-process fake target (test support):
 //! `sysctl -n -- <name>` and `sysctl -w -- <name>=<value>` over a map of
-//! kernel parameters.
+//! kernel parameters, and `hostnamectl --static|--transient|set-hostname`
+//! over two names.
 //!
 //! The model is deliberately small. It answers only the commands Sinter
 //! sends, refuses everything else with a non-zero exit so a test notices an
@@ -53,6 +54,20 @@ pub struct FakeHostTools {
     pub sysctl_stores: BTreeMap<String, String>,
     /// Every `sysctl` argv received, in order.
     pub sysctl_calls: Vec<Vec<String>>,
+    /// The static host name (`/etc/hostname`); empty: not set.
+    pub static_name: String,
+    /// The transient (running) host name.
+    pub transient_name: String,
+    /// How `hostnamectl set-hostname` behaves.
+    pub hostname_set: FakeChange,
+    /// Another source (DHCP) owns the running name: `set-hostname` leaves
+    /// the transient name as it is.
+    pub hostname_transient_kept: bool,
+    /// Answers of the next `hostnamectl --static` / `--transient` calls, in
+    /// order; `Normal` once empty.
+    pub hostname_reads: VecDeque<FakeRead>,
+    /// Every `hostnamectl` argv received, in order.
+    pub hostnamectl_calls: Vec<Vec<String>>,
 }
 
 fn exited(code: i32, stdout: &str, stderr: &str) -> Output {
@@ -179,7 +194,58 @@ pub(crate) fn sysctl(el: &FakeElHandle, is_root: bool, args: &[String]) -> Outpu
     }
 }
 
+/// Serve `hostnamectl --static`, `hostnamectl --transient` and
+/// `hostnamectl set-hostname <name>`.
+pub(crate) fn hostnamectl(el: &FakeElHandle, is_root: bool, args: &[String]) -> Output {
+    let mut el = el.lock().unwrap_or_else(|e| e.into_inner());
+    let host = &mut el.host;
+    host.hostnamectl_calls.push(args.to_vec());
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    match a.as_slice() {
+        [which @ ("--static" | "--transient")] => {
+            let mode = host.hostname_reads.pop_front().unwrap_or_default();
+            let name = if *which == "--static" {
+                &host.static_name
+            } else {
+                &host.transient_name
+            };
+            read(mode, "hostnamectl", &format!("{}\n", name))
+        }
+        ["set-hostname", name] => {
+            if !is_root {
+                return exited(
+                    1,
+                    "",
+                    "Could not set static hostname: Interactive authentication required.\n",
+                );
+            }
+            let mode = host.hostname_set;
+            let keep_transient = host.hostname_transient_kept;
+            scripted(mode, "hostnamectl", || {
+                host.static_name = name.to_string();
+                if !keep_transient {
+                    host.transient_name = name.to_string();
+                }
+                exited(0, "", "")
+            })
+        }
+        _ => exited(2, "", "fake hostnamectl: unmodeled command\n"),
+    }
+}
+
 impl FakeTarget {
+    /// A host with `/usr/bin/hostnamectl` and these static and transient
+    /// names (an empty static name: not set).
+    pub fn with_hostnamectl(mut self, static_name: &str, transient: &str) -> Self {
+        self.executables.insert(crate::hostname::TOOL.to_string());
+        {
+            let mut el = self.el.lock().unwrap_or_else(|e| e.into_inner());
+            el.host.static_name = static_name.to_string();
+            el.host.transient_name = transient.to_string();
+        }
+        self
+    }
+
     /// A host with `/usr/sbin/sysctl`, the directory `/etc/sysctl.d` and
     /// these kernel parameters (`name`, text as the kernel prints it). Needs
     /// `with_fake_fs` first.

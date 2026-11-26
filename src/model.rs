@@ -1389,6 +1389,11 @@ fn validate_declaration_shape(
             crate::cryptopol::PolicySpec::check_literals(&d.with, ctx, field_sensitive("policy"))?;
             require_static_string_field(&d.with, "policy", ctx, field_sensitive("policy"))?;
         }
+        "hostname" => {
+            validate_with_fields(&d.with, crate::hostname::FIELDS, ctx)?;
+            crate::hostname::check_literals(&d.with, ctx, field_sensitive("name"))?;
+            require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
+        }
         "sysctl" => {
             validate_with_fields(&d.with, crate::sysctl::FIELDS, ctx)?;
             crate::sysctl::SysctlSpec::check_literals(&d.with, ctx, field_sensitive("value"))?;
@@ -2623,6 +2628,33 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         stage = Stage::ValueFree;
                         return Err(SinterError::schema(format!(
                             "conflicting ownership of the system-wide crypto policy by resources {} and {} (a recipe may hold one crypto_policy)",
+                            owner, r.id
+                        )));
+                    }
+                }
+                "hostname" => {
+                    let redact = field_sensitive("name");
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(&r.with, crate::hostname::FIELDS, &resource_ctx)?;
+                        crate::hostname::check_literals(&r.with, &resource_ctx, redact)
+                    })?;
+                    // `name` is static: resolved here and held to the name
+                    // grammar before any target is reached.
+                    staged_field(&mut stage, &tol, "name", || {
+                        let name =
+                            static_string(&r.with, "name", &scope, &resource_ctx, true, redact)?;
+                        let mut resolved = BTreeMap::new();
+                        resolved.insert("name".to_string(), Value::Str(name));
+                        crate::hostname::name_from_values(&resolved, &resource_ctx, redact)
+                            .map(|_| ())
+                    })?;
+                    // One host name: one resource per recipe.
+                    if let Some(owner) = account_name_owner
+                        .insert(("hostname".to_string(), String::new()), r.id.clone())
+                    {
+                        stage = Stage::ValueFree;
+                        return Err(SinterError::schema(format!(
+                            "conflicting ownership of the host name by resources {} and {} (a recipe may hold one hostname)",
                             owner, r.id
                         )));
                     }
