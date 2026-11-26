@@ -1,0 +1,39 @@
+# Server configuration, validated by postgres itself before it is published,
+# and client authentication.
+version: 1
+
+vars:
+  datadir: { value: /var/lib/pgsql/17/data }
+  port: { value: 5432 }
+
+resources:
+  - id: pg_conf
+    type: template
+    notify: [restart_pg]
+    with:
+      path: /var/lib/pgsql/17/data/postgresql.conf
+      source: files/postgresql.conf.tmpl
+      owner: postgres
+      group: postgres
+      mode: "0600"
+      validate:
+        program: /usr/pgsql-17/bin/postgres
+        args: ["-C", "port", "-D", "/var/lib/pgsql/17/data", "--config-file={{ staged }}"]
+
+  - id: pg_hba
+    type: file
+    notify: [reload_pg]
+    with:
+      path: /var/lib/pgsql/17/data/pg_hba.conf
+      source: files/pg_hba.conf
+      owner: postgres
+      group: postgres
+      mode: "0600"
+
+handlers:
+  - id: restart_pg
+    service: postgresql-17
+    action: restart
+  - id: reload_pg
+    service: postgresql-17
+    action: reload

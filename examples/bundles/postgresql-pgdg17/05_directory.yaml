@@ -1,0 +1,11 @@
+# The directory postgresql.conf includes (include_dir = 'conf.d').
+version: 1
+
+resources:
+  - id: pg_confd
+    type: directory
+    with:
+      path: /var/lib/pgsql/17/data/conf.d
+      owner: postgres
+      group: postgres
+      mode: "0700"

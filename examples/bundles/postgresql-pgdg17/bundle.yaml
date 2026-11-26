@@ -1,0 +1,25 @@
+# PostgreSQL 17 from the PostgreSQL project's repository (PGDG) on Rocky Linux,
+# RHEL or AlmaLinux 9 and 10, as a bundle: one small recipe per step, run in
+# this order. (examples/recipes/postgresql-pgdg17.yaml is the same server as a
+# single recipe.)
+#
+# The whole bundle can be planned and audited on a host where nothing is
+# installed yet:
+#
+#   sinter plan  examples/bundles/postgresql-pgdg17 --host <host> --sudo
+#   sinter audit examples/bundles/postgresql-pgdg17 --host <host> --sudo   # drift, exit 7
+#   sinter apply examples/bundles/postgresql-pgdg17 --host <host> --sudo
+#   sinter apply examples/bundles/postgresql-pgdg17 --host <host> --sudo   # no change
+#
+# Plan reports what an earlier recipe creates (the postgres account, the data
+# directory, the service unit) as "decided at apply" in the later recipes.
+version: 1
+name: postgresql-pgdg17
+recipes:
+  - 01_repository.yaml
+  - 02_module.yaml
+  - 03_package.yaml
+  - 04_initdb.yaml
+  - 05_directory.yaml
+  - 06_config.yaml
+  - 07_service.yaml

@@ -46,7 +46,13 @@ fn every_example_recipe_loads() {
     )
     .unwrap();
     let mut loaded = 0;
-    for sub in ["quick", "start", "multihost", "recipes"] {
+    for sub in [
+        "quick",
+        "start",
+        "multihost",
+        "recipes",
+        "bundles/postgresql-pgdg17",
+    ] {
         for e in std::fs::read_dir(dir.join(sub)).unwrap() {
             let p = e.unwrap().path();
             if p.extension().and_then(|x| x.to_str()) != Some("yaml") {
@@ -56,7 +62,7 @@ fn every_example_recipe_loads() {
             // bundle, not recipes (`sinter validate` checks the bundle).
             if matches!(
                 p.file_name().and_then(|x| x.to_str()),
-                Some("hosts.yaml" | "web-stack.yaml")
+                Some("hosts.yaml" | "web-stack.yaml" | "bundle.yaml")
             ) {
                 continue;
             }

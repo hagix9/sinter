@@ -1,0 +1,41 @@
+# The PGDG signing key (a file, pinned in the recipe) and the two repositories
+# that are needed, with package and metadata signature checking on.
+# Fingerprint of the key: D4BF 08AE 67A0 B4C7 A1DB  CCD2 40BC A2B4 08B4 0D20
+# (compare with https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-RHEL).
+version: 1
+
+resources:
+  - id: pgdg_key
+    type: file
+    with:
+      path: /etc/pki/rpm-gpg/PGDG-RPM-GPG-KEY-RHEL
+      source: files/PGDG-RPM-GPG-KEY-RHEL
+      owner: root
+      group: root
+      mode: "0644"
+
+  - id: pgdg_common
+    type: dnf_repository
+    depends_on: [pgdg_key]
+    with:
+      name: pgdg-common
+      file: /etc/yum.repos.d/pgdg-17.repo
+      description: "PostgreSQL common RPMs for RHEL / Rocky Linux / AlmaLinux $releasever - $basearch"
+      baseurl: "https://download.postgresql.org/pub/repos/yum/common/redhat/rhel-$releasever-$basearch"
+      enabled: true
+      gpgcheck: true
+      repo_gpgcheck: true
+      gpgkey: "file:///etc/pki/rpm-gpg/PGDG-RPM-GPG-KEY-RHEL"
+
+  - id: pgdg17
+    type: dnf_repository
+    depends_on: [pgdg_common]
+    with:
+      name: pgdg17
+      file: /etc/yum.repos.d/pgdg-17.repo
+      description: "PostgreSQL 17 for RHEL / Rocky Linux / AlmaLinux $releasever - $basearch"
+      baseurl: "https://download.postgresql.org/pub/repos/yum/17/redhat/rhel-$releasever-$basearch"
+      enabled: true
+      gpgcheck: true
+      repo_gpgcheck: true
+      gpgkey: "file:///etc/pki/rpm-gpg/PGDG-RPM-GPG-KEY-RHEL"

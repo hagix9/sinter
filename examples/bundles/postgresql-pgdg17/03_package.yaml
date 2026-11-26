@@ -1,0 +1,13 @@
+# The server package. Installing it creates the postgres account; saying so
+# lets plan defer, instead of refuse, what the later recipes give to postgres.
+version: 1
+
+resources:
+  - id: pg_pkg
+    type: package
+    with:
+      name: postgresql17-server
+      state: present
+      creates_accounts:
+        users: [postgres]
+        groups: [postgres]

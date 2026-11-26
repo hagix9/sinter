@@ -4832,6 +4832,70 @@ mod tests {
         assert_eq!(code.unwrap(), 7);
     }
 
+    /// The shipped PostgreSQL bundle (repository -> module -> package ->
+    /// initdb -> directory -> config -> service) on a host where nothing of
+    /// it exists: the whole bundle plans, the audit is drift, and neither
+    /// dispatches a change.
+    #[test]
+    fn the_postgresql_example_bundle_plans_and_audits_on_a_fresh_host() {
+        let bundle = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/bundles/postgresql-pgdg17/bundle.yaml")
+            .to_string_lossy()
+            .into_owned();
+        let fresh = || {
+            let mut t = FakeTarget::rocky9()
+                .with_fake_fs()
+                .as_root()
+                .with_fs_dir("/etc")
+                .with_fs_dir("/etc/pki")
+                .with_fs_dir("/etc/pki/rpm-gpg")
+                .with_fs_dir("/etc/yum.repos.d")
+                .with_fs_dir("/etc/dnf")
+                .with_fs_dir("/etc/dnf/modules.d")
+                .with_fs_dir("/usr")
+                .with_fs_dir("/usr/bin");
+            t.fs.as_mut()
+                .unwrap()
+                .put_symlink("/usr/bin/dnf", "dnf-3", 0, 0);
+            t
+        };
+        let hosts = || (0..7).map(|_| fresh()).collect::<Vec<_>>();
+        let (code, rows) = drive_results(
+            Phase::Plan,
+            &[&bundle, "--sudo", "--format", "json"],
+            hosts(),
+        );
+        assert_eq!(code.unwrap(), 0, "{rows:?}");
+        assert_eq!(rows.len(), 10, "{rows:?}");
+        // The first three recipes are plain planned changes on the host as it is.
+        for id in [
+            "01_repository@localhost:pgdg_key",
+            "01_repository@localhost:pgdg_common",
+            "02_module@localhost:pg_module_off",
+            "03_package@localhost:pg_pkg",
+        ] {
+            assert!(!result(&rows, id).1, "{id}: {:?}", result(&rows, id));
+        }
+        // What needs the package's account, the cluster directory or the
+        // unit is decided at apply.
+        for id in [
+            "05_directory@localhost:pg_confd",
+            "06_config@localhost:pg_conf",
+            "06_config@localhost:pg_hba",
+            "07_service@localhost:pg_service",
+        ] {
+            assert!(result(&rows, id).1, "{id}: {:?}", result(&rows, id));
+        }
+        let w = wiring(ProgressMode::Disabled);
+        let code = drive(
+            Phase::Audit,
+            &[&bundle, "--sudo", "--format", "json"],
+            &w,
+            hosts(),
+        );
+        assert_eq!(code.unwrap(), 7);
+    }
+
     // ---- Declared backups in a partial run of a bundle (DESIGN §49.6) -----
 
     const BK_WEB: &str = "version: 1\ntargets:\n  groups: [web]\nbackup:\n  paths: [/etc/perf/a, /etc/perf/b]\nresources:\n  - id: a\n    type: file\n    with: { path: /etc/perf/a, content: a }\n  - id: b\n    type: file\n    with: { path: /etc/perf/b, content: b }\n";

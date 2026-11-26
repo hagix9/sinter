@@ -1,0 +1,10 @@
+# Create the database cluster once (the guard makes a second apply a no-op).
+version: 1
+
+resources:
+  - id: pg_initdb
+    type: command
+    with:
+      program: /usr/pgsql-17/bin/postgresql-17-setup
+      args: ["initdb"]
+      creates: /var/lib/pgsql/17/data/PG_VERSION

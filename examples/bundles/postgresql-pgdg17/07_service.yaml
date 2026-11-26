@@ -1,0 +1,9 @@
+version: 1
+
+resources:
+  - id: pg_service
+    type: service
+    with:
+      name: postgresql-17
+      state: running
+      enabled: true

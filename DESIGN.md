@@ -3510,7 +3510,7 @@ Release acceptance may record a check as NOT APPLICABLE only for an `nm_connecti
 
 48. DNF repository and module management (v1.15.0 P6.5 feasibility)
 
-DEFERRED to a later release (P6.5, 2026-11-20); nothing is implemented, registered or released. This records why, and what a later release needs.
+DEFERRED to a later release (P6.5, 2026-11-20); nothing is implemented, registered or released. This records why, and what a later release needs. Superseded in part after v1.15.0: `dnf_repository` (§51) and `dnf_module` (§52) are implemented as built-in types with Core parsers of DNF's own files, not released and not yet measured on real hosts; the plugin-form decisions below stand as the record of why a data-only plugin could not express them, and module profiles stay rejected.
 
 48.1 Scope looked at
 
@@ -3582,3 +3582,373 @@ The rule. A recipe that runs without an exclusion takes every declared backup, e
 A path that is left out moves from `backups` to `backups_skipped` of the model that runs. Plan and apply receive the same model, so they choose the same backups. For a skipped path nothing is observed, no store or run directory is created and no store check runs; when every backup is skipped the backup stage does not run at all. The report lists skipped paths with status `skipped` (text `[skipped]`, JSON `status: "skipped"` and `reason: "SKIPPED_BY_USER"`; the `reason` key exists only on such an entry). A backup that is still needed and fails stops the apply before any resource runs, as before. Audit takes no backup in any case. Each (recipe, host) execution of a bundle or an inventory run gets its own filtered model, so the choice is per recipe and identical for every host of that recipe.
 
 Not changed: the backup guarantee of a full apply; the overlap and store checks of the declaration (they are checks of the recipe text and run on the whole declaration at load); what `--skip-recipe` validates.
+
+50. `file_merge` resource (next release; NOT RELEASED)
+
+IMPLEMENTED (development after v1.15.0, not released): §50.1–§50.9 as written. The labels of §1.2 apply.
+
+50.1 Purpose and reuse
+
+`file` and `template` manage a whole file; their meaning does not change. `file_merge` manages one declared part of an existing text file and keeps every other byte: one exact line (`merge: line`), the lines between two marker lines (`merge: block`), or the one line that sets a key (`merge: key_value`). The motivating uses are one public key in `~/.ssh/authorized_keys`, a managed block in `/etc/hosts`, and one setting of a flat configuration file.
+
+It is a built-in type. It adds no command to the target: it reuses, without a second implementation,
+
+- the gated observation of the `file` resource (`Engine::partial_observe`: `lstat` through the parent walk of §23, then `/bin/cat -- <path>`; a symlink or another object type is refused, a file over 256 KiB is refused before it is read, and a read whose length differs from the `lstat` size is refused);
+- the publication of the `file` resource (`Engine::partial_publish` → `file_present`): parent checks, the FS-2 staging script, atomic replacement, the identity re-check against the observation taken before the read, the metadata rules of §24, the tree identity of FS-3, the diff and the post-change verification (§24–§26);
+- handler notification (§18) and `PlannedEffects` (a planned `file_merge` change touches exactly its own path, like `file`).
+
+The edit itself is a pure function (`src/filemerge.rs`, `apply_edit(current, spec) -> new content | unchanged | refusal`) that reads and writes nothing.
+
+50.2 Fields
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | required, static | Absolute path, the rules of `file.path` |
+| `merge` | required, static | `line`, `block` or `key_value` |
+| `state` | `present` (default) or `absent` | State of the managed part, not of the file |
+| `create` | boolean, default `false` | Whether an absent file may be created (`present` only) |
+| `owner`, `group`, `mode` | optional | As `file`: unset keeps an existing file's values; used for a newly created file |
+| `line` | `line`: required | Exactly one line: no `\n`, `\r`, NUL; not empty, not only whitespace |
+| `marker` | `block`: required, static | `[A-Za-z0-9_.-]{1,64}` |
+| `content` | `block`: required when present | Lines of the block; no `\r`, no NUL; no line that carries the words of a marker line |
+| `comment_prefix` | `block`: optional, static | `#` (default), `;`, `//`, `--` |
+| `key` | `key_value`: required, static | `[A-Za-z0-9_.-]{1,128}`, case-sensitive |
+| `value` | `key_value`: required when present | One line (no `\r`, `\n`, NUL), may be empty; no leading or trailing space or tab; with the space separator not starting with `=` or `:` |
+| `separator` | `key_value`: optional, static | `=` (default), ` = `, `:`, `: `, one space |
+
+Static fields may use `vars.*` and `item` but not facts, registers or sensitive values (§4.9). `line`, `content` and `value` may use any expression; they are checked when the recipe is loaded if literal and again once evaluated. A field of another merge is exit 2. Unknown fields, wrong types and bad literal values are exit 2 at load. No diagnostic of these checks echoes a value.
+
+50.3 Text rules
+
+For every merge the existing file must be valid UTF-8 without NUL and without `\r` (a CRLF file is refused, not converted) and at most 256 KiB (`PARTIAL_EDIT_MAX_BYTES`, equal to the diff limit); the result must fit the same limit. A line is the text between line feeds; the last line may lack its line feed, and that is preserved. Only when a part is appended to a non-empty file that does not end with `\n` is one `\n` added first. When the managed part is already as declared, no content is published at all (the file keeps its inode); declared metadata is still enforced through the metadata-only path of `file`.
+
+50.4 The three edits
+
+`line`. Identity is the whole line, byte-exact, compared with each existing line without its line feed. present: no equal line → append `line\n`; one or more equal lines → no change (a duplicate is never added). absent: remove every equal line with its terminator; nothing else. No regex, prefix or fuzzy matching.
+
+`block`. The marker lines are exactly `<prefix> BEGIN SINTER MANAGED BLOCK <marker>` and `<prefix> END SINTER MANAGED BLOCK <marker>`. present: no block → append BEGIN, the content lines, END; block with other content → replace only the lines between the markers; same content → no change. absent: remove the block including both marker lines. One trailing `\n` of `content` ends its last line; empty `content` is a block with no line. Blocks of other marker names are unmanaged content. Refused (nothing changed): a second BEGIN or a second END of the marker; a BEGIN without END; an END without or before its BEGIN; a well-formed marker line of another block between this block's BEGIN and END (overlap); a marker line of this marker with another comment prefix than declared; any line that contains `BEGIN SINTER MANAGED BLOCK` or `END SINTER MANAGED BLOCK` without being a well-formed marker line (a damaged marker is not guessed at). The same words are refused in `content`, so a written block can always be read back.
+
+`key_value`. A non-comment line (first non-blank character not `#` or `;`) sets `key` when, after optional leading blanks, it starts with the key and the key is followed by optional blanks and `=` (equals style), by optional blanks and `:` (colon style), or by a blank or the end of the line (space style). The current value is the text after the separator without surrounding blanks. Lines of the declared separator's style are the matches. present: no match → append `key<separator>value`; one match → replace that whole line with `key<separator>value` only when the current value differs from `value` (other spacing with the same value is not rewritten); two or more → refused ("the key appears N times; Sinter does not guess which one is in effect"). absent: one match → remove it; none → no change; two or more → refused. Also refused: a file with a line that is only `[...]` (a section header; INI-aware editing is a later feature), and a line that sets the key in another style than the declared one (Sinter does not guess which syntax the file uses, and never writes a second syntax beside the first).
+
+50.5 Absent file and parent
+
+File absent, `state: absent` → nothing to do (compliant, unchanged), whatever `create` says. File absent, `state: present`, `create: false` → plan error (exit 4) and apply failure naming `create: true`; when an earlier planned change of the run may create the path (`PlannedEffects::affecting`), plan reports the resource unknown (deferred to apply) instead. File absent, `state: present`, `create: true` → the file is created with the managed part only, with the `file` defaults (the applying identity, or the tree's account under FS-3; mode `0644`, or `0600` when sensitive) unless `owner`/`group`/`mode` are declared. An absent or refused parent directory is decided by the `file` code unchanged.
+
+50.6 Conflicts inside one recipe (exit 2)
+
+`file_merge` is not an exclusive path owner. Checked while the model is frozen:
+
+- a `file`, `template`, `directory`, `link` or `systemd_timer` on the same path as a `file_merge`, in either order;
+- two `file_merge` of one path with the same identity: (`line`, exact line), (`block`, marker), (`key_value`, key). A `line` that is not statically known (a register, a fact, a sensitive value) is not compared. The message never echoes a line;
+- two `file_merge` of one path that both declare `owner`, `group` or `mode` with different statically known text (`root` against `0` counts as different).
+
+Under a structure-only check (§19.2) a conflict or a static value that a variable decides is left unjudged; with a variables file the failing check is attributed to the field that references the variable, so its value is withheld (§19.5).
+
+50.7 Plan, apply, audit
+
+Plan and apply evaluate `with`, check the spec, observe (`partial_observe`), compute the edit and hand the result to `partial_publish`. Plan shows the `file` diff (redacted when sensitive) and never mutates. Apply publishes only when the edit produced new content; a file that changed between the read and the publication fails the identity re-check and is not overwritten. Every refusal of §50.3–§50.5 is a plan error and an apply failure with `change: none`.
+
+Audit (`audit_file_merge`, read-only through `audit::audit_partial_read`): Compliant when the managed part is as declared and declared metadata matches; unmanaged content is never drift. Drift dimensions: `line`, `block`, `value`, `owner`, `group`, `mode`, and `state` (`absent -> present`) when the file is absent and the part should be present, regardless of `create`. File absent with `state: absent` is Compliant. Damaged markers, duplicate keys, sections, CRLF, non-UTF-8, NUL, oversize, a symlink or other object, a refused parent and a failed or truncated read are Error, never drift and never absence. An unknown value (a register) is NotAuditable.
+
+50.8 Sensitivity
+
+The resource is sensitive when `sensitive: true` is set, when a field references a sensitive variable, or when an evaluated field carries a sensitive value. Then the plan diff is redacted, audit details are `[redacted]`, audit reasons are withheld, and a new file defaults to mode `0600`. Independently of sensitivity, no refusal built by the edit names file content or a declared `line`, `content` or `value`; refusals name line numbers, counts and the static identifiers `marker` and `key`.
+
+50.9 Unchanged, limits, not verified
+
+- No existing type, field, exit code or JSON key changes. `file_merge` is added to the built-in type list. Command statistics and progress label it `other`. `sinter discover` is not extended. It is not a connection-risk type (§43): removing the key the connection itself uses is not detected.
+- MCP: every manifest tool refuses a manifest with a `file_merge` resource; the MCP boundary does not widen in this release.
+- Limits: no regex or pattern matching; no sections; no structured merge of YAML, JSON or TOML; LF and UTF-8 only; 256 KiB; new parts go to the end of the file (no positioned insertion); comments are never edited or uncommented; no `validate` command; the file is not removed when its last managed part is removed. `key_value` is not safe for order-sensitive files, for files that include other files, or for formats with legitimately repeated keys (for example `sshd_config` with `Match` blocks); the documentation says so.
+- Code: `src/filemerge.rs` (fields, pure edit), `src/filemerge_engine.rs` (plan, apply, audit), `src/model/file_merge.rs` (load-time checks and conflicts). No new `TargetFs` method and no new fake-target command.
+- NOT VERIFIED on a real host: nothing of `file_merge` has run against a real target. It issues only the commands of the `file` resource (`stat`, `cat`, `sha256sum`, the staging script, `chown`/`chmod`, and `setpriv` under FS-3), which were accepted for `file`; a real-host run editing a real `authorized_keys` (as root in a user's home, and as the user), `/etc/hosts` and a flat configuration file on each supported OS is the open acceptance item.
+
+51. `dnf_repository`: one section of a DNF repository file (next release; NOT RELEASED)
+
+(§48 stays as the record of the plugin feasibility study; this section supersedes its `dnf_repository` decisions and is followed by `dnf_module` in §52.)
+
+IMPLEMENTED as a built-in resource type, not released; tested against the scripted target only (§51.10).
+
+51.1 Scope and how the §48 reasons are resolved
+
+`dnf_repository` manages the declared keys of one `[id]` section of a `.repo` file under `/etc/yum.repos.d/`: enabling or disabling an existing repository, defining a repository, changing declared keys, and removing the section. It keeps every other section, key, comment and blank line of the file byte for byte.
+
+§48 deferred or rejected this as a data-driven plugin for four reasons; the built-in type answers each:
+
+- Observation (§48.2): DNF's own reports are free-text tables that the plugin mechanism's closed maps cannot read, and their exit codes do not separate enabled from disabled. The built-in type does not run DNF at all. It observes the repository file with a strict, closed parser in Core (`src/inifile.rs`). No exit code is mapped to a state, and no error becomes a state: a file that cannot be read with certainty is a refusal.
+- Mutation (§48.2): whether `dnf config-manager --set-enabled` keeps the rest of a `.repo` file was not measured. The built-in type does not run `config-manager`; it computes the new file itself and proves in unit tests that every untouched line is reproduced byte for byte.
+- File content (§48.3): a plugin cannot write file content. A built-in type can, through the `file` resource's own publication path (`Engine::partial_publish`).
+- Signature checking (§48.3, §48.4: "whether enabling requires the repository to have `gpgcheck=1` observed first"; "Sinter does not add a path that weakens package signature checking"): decided in §51.6. Enabling requires an explicit `gpgcheck=1` in the section after the edit; `gpgcheck=0` cannot be written; credentials in URLs are refused.
+
+The safety property of §48.3 is kept unchanged: Sinter does not add a path that weakens package signature checking.
+
+51.2 Fields
+
+`name` (required, static): the repository id, `[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}`; `main` is refused (DNF's configuration section). `state`: `present` (default) or `absent`. `file` (static): a plain file name directly inside `/etc/yum.repos.d/` ending in `.repo` (`[A-Za-z0-9][A-Za-z0-9_.:+-]*`, at most 255 bytes; no subdirectory, no `..`, no hidden file); default `/etc/yum.repos.d/<name>.repo`. `description` (one line, 1–256 bytes, no control character, no leading or trailing space) is the section's `name` key. `baseurl` (string or list), `mirrorlist`, `metalink`, `enabled` (boolean → `1`/`0`), `gpgcheck` and `repo_gpgcheck` (boolean, only `true`), `gpgkey` (string or list).
+
+`state: present` needs at least one field from `description` to `gpgkey`; `state: absent` allows only `name` and `file`. Only declared keys are managed; an undeclared key of the section is neither changed nor drift. `baseurl`, `mirrorlist` and `metalink` are alternatives a section may hold together; declaring one does not remove another.
+
+Value rules, checked at load for literals and again once evaluated, failing closed:
+
+- URL fields: `https://`, `http://` or `file:///`; printable ASCII only (so no whitespace, control character, CR or LF), at most 2048 bytes, no backslash, a non-empty host for `http(s)`. `$releasever`, `$basearch` and other `$var` tokens pass. A userinfo part (`@` in the authority) is refused with "credentials in repository URLs are not supported".
+- `gpgkey`: `file:///` or `https://` only. `http://` is refused: the trust root must not come over an unauthenticated channel.
+- List entries (`baseurl`, `gpgkey`) may not contain a comma, because DNF splits list values at commas and the written value would not be the value read; at most 32 entries.
+- No refusal quotes the refused value (it may hold a credential).
+- A value from a sensitive variable makes the result sensitive (diff and audit details redacted), as for every type.
+
+51.3 Observation
+
+The repository file is read with `Engine::partial_observe` (the `file` resource's parent gate, `lstat` then `cat`, no symlink followed, at most `PARTIAL_EDIT_MAX_BYTES` = 256 KiB, a read whose length differs from the `lstat` size is refused). Text rules: valid UTF-8, no NUL, no CR.
+
+Only the target section is parsed, strictly (`src/inifile.rs`):
+
+- line kinds in the section: blank (spaces and tabs only); comment (`#` or `;` in column one); `key=value` or `key = value` starting in column one, key `[A-Za-z0-9_.-]+`; continuation (starts with space or tab, directly after a key line or another continuation);
+- refused: two headers for the id; a header that equals the id only after removing spaces; a key twice in the section; a line without `=`; an indented line starting with `#` or `;` (a comment for some readers, part of a value for others); a continuation after a blank or comment line; a control character other than tab; a key that differs from a managed key only in letter case;
+- anywhere in the file, a line starting with `[` that is not `[id]` followed only by spaces or tabs is refused, because where a section ends would otherwise be a guess. Other lines outside the target section are not validated and are kept verbatim.
+
+Observed booleans: `1`, `true`, `yes` are true and `0`, `false`, `no` are false, in any letter case; anything else (including `on`/`off`, which DNF may accept) is "no usable state". This is stricter than DNF on purpose: an unrecognized `gpgcheck` value never counts as on, and an unrecognized `enabled` value never counts as already enabled.
+
+Limit, stated in the user documentation: the observation is the file, not DNF's effective configuration. Command-line overrides (`--enablerepo`, `--disablerepo`, `--setopt`), a second definition of the same id in another file, and DNF 5 override directories are not observed.
+
+Platform: the target's package backend must be DNF (`PackageBackend::Dnf`); otherwise "dnf_repository is not supported on this host". The DNF generation is told read-only from `/usr/bin/dnf`: it must be a symbolic link (`lstat`) whose target's base name (`readlink`) starts with `dnf-` or `dnf4` (DNF 4, the same rule the `package` resource uses for removal). A target of `dnf5` is refused as unsupported in this release; anything else (a regular file, another target, absent) is refused because the generation cannot be told. Nothing about DNF 5 override semantics is guessed.
+
+51.4 Change
+
+A key is compared by meaning: booleans by value, lists (`baseurl`, `gpgkey`) as sequences of whitespace-separated entries over the key line and its continuation lines, everything else as text. Formatting alone is never a change.
+
+- Existing key with a different value: its line and continuation lines are replaced in place by `key=value` (lists: one entry per line, later entries indented by eight spaces). A replaced last line without a line feed stays without one.
+- Missing key: added after the section's last key or continuation line (so before blank or comment lines that precede the next header), in the fixed order `name`, `baseurl`, `mirrorlist`, `metalink`, `enabled`, `gpgcheck`, `repo_gpgcheck`, `gpgkey`.
+- Missing section: needs `baseurl`, `mirrorlist` or `metalink`; otherwise the resource fails and says to set `file` to the file that defines the repository. The new section is appended at the end of the file after one blank line (none is added when the file already ends with a blank line); an absent or empty file becomes exactly the section. It always holds `gpgcheck=1`, and `enabled=1` unless `enabled` is declared.
+- `state: absent`: the header and every line up to the section's last key line are removed. Comment lines above the header stay, and so do the blank and comment lines after the last key (they may belong to the next section; this is the same boundary as for an added key). The file is never deleted, also when no section is left. A missing section or file is nothing to do.
+
+The new content is published with `Engine::partial_publish`: the `file` resource's parent checks, staging, atomic replacement, identity re-check against the observation taken before the read (a file changed in between is not overwritten), metadata rules, verification and plan diff. A new file is `root:root` `0644`; an existing file keeps owner, group and mode. The planned change is recorded in `PlannedEffects` as a path change, like `file`.
+
+Sinter does not refresh repository metadata after a change, and runs no DNF command for this type. A later `package` resource builds its own metadata snapshot (§27).
+
+In plan, a refusal that depends on the file's content (missing section, signature rule, unreadable section) becomes Unknown ("deferred to apply") when an earlier planned change can alter the file (`PlannedEffects::affecting`), for example a package that installs the repository file.
+
+51.5 Audit
+
+Read-only (`audit::audit_partial_read`, then the same parser and comparison). Compliant: the section exists and every declared key has the declared value, or the section is absent for `state: absent`. Drift: one detail per differing field (`description`, `baseurl`, `mirrorlist`, `metalink`, `enabled`, `gpgcheck`, `repo_gpgcheck`, `gpgkey`), or `state` for a missing or unwanted section; a missing file with `state: present` is drift. Error, never drift: a parse refusal, a symlink or other object, an oversized or unreadable file, a refused parent, and an unsupported platform (the `package` resource's audit also reports an unsupported platform as Error). The rules of §51.6 that refuse an edit do not apply to audit (it decides no change); the note of §51.6 is appended to the result's reason.
+
+51.6 Rules that keep signature checking from being weakened
+
+1. `gpgcheck: false` and `repo_gpgcheck: false` are load-time errors. Sinter never writes `gpgcheck=0` or `repo_gpgcheck=0`. An unsigned repository stays a `file` resource with the operator's own content.
+2. A section Sinter creates always contains `gpgcheck=1`.
+3. An edit that enables a repository (`enabled: true` while the section's `enabled` is not an observed true value), or that writes `baseurl`, `mirrorlist` or `metalink` into an existing section, requires that the section contains an explicit true `gpgcheck` after the edit (observed, or declared `gpgcheck: true` in the same resource). Otherwise plan and apply refuse: "declare gpgcheck: true; Sinter does not enable a repository whose packages are not signature-checked". The source-key part goes beyond the enabling rule on purpose: without it, a pre-existing stub section with `gpgcheck=0` would let Sinter define an unsigned repository's source.
+4. A repository that is not explicitly disabled and has no explicit true `gpgcheck`, and that the resource neither enables nor re-points, is not Sinter's decision: no error, and a note in plan, apply and audit that signature checking is not on for it.
+5. URLs with credentials are refused; `gpgkey` over `http://` is refused (§51.2).
+6. Sinter writes the `gpgkey=` setting only. It never downloads, imports (`rpm --import`) or trusts a key; a key file is a `file` resource, and DNF imports the configured key when a package of the repository is first installed.
+7. `[main]` cannot be managed, so no global DNF option is reachable through this type.
+
+51.7 Secrets
+
+If the existing file contains, in any section and also in a comment, a `password`, `username`, `proxy_password`, `proxy_username` or `sslclientkey` key, or a URL with a userinfo part, the result is sensitive: the plan diff is redacted and audit details are placeholders, so unrelated credentials in the same file never appear in output. Parser and decision refusals name rules, line numbers, the repository id and the file path only, never file content or declared values; for a resource declared `sensitive: true` they are withheld altogether.
+
+51.8 Conflicts and wiring
+
+Load time: two `dnf_repository` with the same `name` are refused; a `dnf_repository` whose file is also the path of a `file`, `template`, `link` or `directory` (in either order) is refused; several `dnf_repository` in one file are allowed. `name` and `file` are static (variables, not facts or registers) and are resolved and checked at load.
+
+Root: changing a repository file needs root. Plan carries the `file` path's "needs root" note (or the type's own when the path gives none); apply without root fails at the operating system, as for a `file` under `/etc`.
+
+MCP: the type is refused over MCP, like `systemd_timer` and `nm_connection`; the MCP boundary is not widened. `sinter discover` is not extended.
+
+Code: `src/inifile.rs` (pure reader and editor), `src/dnf_repository.rs` (fields, value rules, the decision), `src/dnf_repository_engine.rs` (platform check, plan/apply, audit observation); arms in `src/model.rs`, `src/engine.rs`, `src/audit.rs`, `src/mcp.rs`, `src/plugin/verify.rs`. Tests: unit tests in the two pure modules, `tests/dnf_repository.rs`, and the MCP refusal tests.
+
+51.9 Limits
+
+- DNF 4 only (Rocky Linux, RHEL and AlmaLinux 9 and 10). Not APT hosts, not DNF 5.
+- The file, not DNF's effective configuration, is observed (§51.3).
+- Keys other than the eight managed ones cannot be declared (`sslverify`, `priority`, `module_hotfixes`, `exclude`, …); they stay as they are. Credentials in URLs and credential keys cannot be written.
+- A declared key cannot be removed from a section (only the whole section).
+- A `.repo` file with CR line endings, an encoding other than UTF-8, or more than 256 KiB is refused.
+- Metadata is not refreshed, keys are not imported, and no repository is probed for reachability.
+- `dnf_module` stays deferred (§48).
+
+51.10 NOT VERIFIED (real-host measurement needed before release)
+
+- That `/usr/bin/dnf` is a symbolic link whose target base name is `dnf-3` on Rocky Linux, RHEL and AlmaLinux 9 and 10, and `dnf5` on DNF 5 hosts (the `package` resource's removal path relies on the same reading through `readlink -f`).
+- How DNF 4 (libdnf's configuration parser) reads the constructs the strict reader accepts and writes: `key = value` spacing, multi-line list values written as indented continuation lines, a section appended after a blank line, a last line without a line feed, and the true/false words. In particular that an indented continuation is read as part of the list value, and that an edited file loads without warnings (`dnf repolist`, `dnf config-manager --dump <id>`).
+- That the distribution files (`rocky.repo`, `almalinux-*.repo`, `redhat.repo`) parse under the strict rules (no duplicate keys, no indented comments in the managed section); a file that does not is refused, not misread.
+- That a `package` resource installs from a repository defined or enabled by a preceding `dnf_repository` in the same run (the scripted DNF does not read `.repo` files; the test proves order and non-interference only), including the first-use key import under Sinter's non-interactive `dnf -y` invocation.
+- Apply as a non-root user without `--sudo` (the scripted filesystem does not refuse the write).
+- SELinux context and other security metadata of a newly created file under `/etc/yum.repos.d/` (the `file` resource's rules apply; not measured for this directory).
+
+52. `dnf_module` resource (DNF module state)
+
+IMPLEMENTED, NOT RELEASED, NOT VERIFIED ON A REAL HOST. A built-in type. It resolves the reasons §48.3 gave for deferring `dnf_module` as a data-driven plugin: no `name:stream` plugin operand class is needed (the built-in type validates `name` and `stream` itself and joins them into one argv word), observation is DNF's own state file read by a closed Core parser instead of a `dnf module list` table or an exit code, and an exit code alone never decides success (§52.4). §48's decisions on `dnf_repository`, on module profiles and on DNF 5 are unchanged.
+
+52.1 Scope
+
+One DNF module on a DNF 4 target: enabled with exactly one stream, disabled, or reset to the distribution default. Out of scope: module profiles (`dnf module install|remove` are package transactions and belong to `package`, §27; §48.3), switching an enabled stream, repositories, DNF 5, listing modules, `sinter discover`.
+
+52.2 Fields (`with`)
+
+- `name` (required, static): `[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}`.
+- `stream` (static string, same grammar): required when `state` is `enabled`, refused otherwise. A YAML number is refused with the advice to quote it.
+- `state` (required, static): `enabled`, `disabled` or `reset`.
+- `env` (optional map of strings): environment of the `dnf module` command only, with the recipe-wide `env` as its base exactly as for `package` (§27.1). It is not an audit dimension.
+
+Static means: variables may be used, facts, registers and sensitive values may not; the values are resolved and checked at load (schema error, exit 2). Unknown fields are refused. The grammar excludes a leading `-`, `:`, `/`, whitespace and glob characters, so neither value can become an option, a second operand or a path component. Two `dnf_module` resources with the same resolved `name` in one recipe are a load-time ownership conflict.
+
+52.3 Observation (read-only)
+
+DNF 4 (libdnf) persists what `dnf module enable|disable|reset` decided in `/etc/dnf/modules.d/<name>.module`:
+
+    [nodejs]
+    name=nodejs
+    stream=20
+    profiles=
+    state=enabled
+
+Sinter reads this file through the shared partial-read helpers (`Engine::partial_observe` in plan and apply, `audit::audit_partial_read` in audit): the parent path walk of §23, `lstat`, no symlink followed, a size limit, and a read whose length must equal the `lstat` size. `dnf` is not run to observe.
+
+Closed parser (`src/dnfmod.rs`, pure, unit-tested). Accepted: UTF-8 without NUL and without CR; empty lines; exactly one section `[<name>]`; the keys `name`, `stream`, `profiles`, `state`, each at most once, as `key=value` with blanks around key and value dropped. Refused, each with a reason: a comment, a second section or a section for another module, a key outside the four, a repeated key, a line starting with a blank, a line without `=`, a `name` value other than the module, a `stream` or profile that is not a plain token, a `state` other than `enabled`, `disabled` or empty, and `state=enabled` without a stream. No file, or no `/etc/dnf/modules.d` at all, is the default state; a missing or empty `state` key is the default state. Everything refused is an observation error in plan, apply and audit; it is never read as "default" and never as drift.
+
+Mapping. Desired `enabled` with stream S holds iff state is `enabled` and stream is S. Desired `disabled` holds iff state is `disabled`. Desired `reset` holds iff there is no file or the state is default (a leftover `stream=` text does not matter).
+
+Platform. The check is shared with `dnf_repository` (`Engine::require_dnf4`, `src/dnfgen.rs`), with identical wording apart from the type name. The package backend comes from the detected OS identity as for `package` (§8 phase F): anything but DNF is "<type> is not supported on this host (its package manager is not DNF)". For a DNF backend, `/usr/bin/dnf` must be a symbolic link (`lstat`) whose target (`readlink`, last path component) is a DNF 4 program name (`dnf-3`, another `dnf-<n>`, `dnf4...`); `dnf5` is "it uses DNF 5, which this type does not support in this release"; anything else, including a regular `/usr/bin/dnf` and a missing one, is "the DNF generation cannot be told" and stops the resource. No `dnf` command is run for this, and no new read-only command shape is needed (`stat` and `readlink -n --` exist).
+
+52.4 Change (apply)
+
+Refusals come first and run nothing (plan fails with the same reason):
+
+- Stream switch: the module is enabled with a different stream and the recipe wants it enabled. Sinter does not switch an enabled stream; the operator reviews the installed packages and resets the module explicitly in an earlier run. There is no override option.
+- Installed profiles: `profiles=` is not empty and the recipe wants `disabled` or `reset`. What happens to those packages is a package decision.
+- Not root at apply: the resource fails before dnf is run (plan adds the "needs root" note, FS-0d).
+- Changed meanwhile (apply): right before the command the state file is observed once more; if it differs from the observation the decision rests on, nothing is run and the resource fails.
+
+The change is one command through the mutation channel (mutation permit, no shell), program `/usr/bin/dnf`, argv fixed:
+
+- `-y module enable <name>:<stream>`
+- `-y module disable <name>`
+- `-y module reset <name>`
+
+Environment: the baseline environment plus `env`; timeout 300 s as for a package mutation; the request is recorded redacted when the resource is sensitive. No progress parser is attached.
+
+Outcome:
+
+- Completion cannot be established (timeout, lost connection): Indeterminate, change Possible, verification Unknown. Nothing else is sent to the target for this resource (the remote dnf may still run), as for a package mutation (R2-02).
+- Terminated by a signal: Failed, change Possible, verification Unknown.
+- Non-zero exit: Failed, change Possible, verification Unknown. dnf's output is withheld (it can carry repository URLs with credentials, R-8); the reason gives the exit code, the byte count and the advice to run `dnf module list <name>` on the target.
+- Exit zero: the state file is observed again by the same parser and must satisfy the mapping. Then Changed and Verified. If it does not: Failed with "dnf reported success but the module state is ..." (verification Failed; change Changed when the observation differs from the one before, Possible when it is the same). If the file cannot be read again: Failed (or Indeterminate), change Possible.
+
+Plan cannot know whether `<name>:<stream>` exists in the enabled repositories: that needs repository metadata, which plan does not refresh or read. Plan reports the intended change and a note that dnf checks availability at apply. `dnf module` may refresh metadata over the network at apply.
+
+`PlannedEffects`: the type is an opaque change (it changes what later `package` resources resolve). Order in one recipe is the recipe's order with `depends_on`: `dnf_module` (enable), then `package`, then `service`; the existing deferral rules let plan pass on a host where none of the three exists yet.
+
+52.5 Audit
+
+Compliant iff the mapping holds. Otherwise Drift with the dimensions `state` and, for a desired `enabled`, `stream` (observed, desired). A refused or unreadable state file, a symlink, a refused parent and an unsupported platform are Error (the convention of `package` for an unsupported platform). Audit runs the platform check (`stat`, `readlink` of `/usr/bin/dnf`) and the file observation only.
+
+52.6 Safety rules
+
+- Plan and audit send read-only commands only; the change needs the mutation permit and exists only in apply.
+- Fixed absolute program, fixed argv, validated operands, no shell.
+- An exit code never decides success; the state file does.
+- An observation that is not fully understood is an error.
+- No stream switch, no profile handling, no override option.
+- A sensitive resource (`sensitive: true`, or a sensitive `env` value) hides the module, the stream, the diff and failure details in results; the change command is recorded redacted.
+- MCP refuses the type (the MCP boundary does not widen in this release).
+
+52.7 Limits
+
+- Sinter does not lock DNF. The second observation right before the command narrows the window in which another administrator can change the module, but does not close it; in what remains dnf decides on the state it finds (it refuses a stream switch itself), and the re-observation must still show the declared state.
+- A `.module` file with comments or keys other than the four is refused, although DNF may read it.
+- EL 10 distributions ship no module streams. The OS version is not special-cased: enabling a stream there fails at apply when dnf finds no such module and is not claimed as supported.
+- EL 8 targets are outside the supported package platforms (SSH target only) and are not addressed.
+- DNF 5 is refused.
+
+52.8 Not verified on a real host
+
+Everything above is tested against the scripted target only. To measure on Rocky Linux, RHEL and AlmaLinux 9 (and EL 10 for the failure):
+
+- the exact bytes of `/etc/dnf/modules.d/<name>.module` after `dnf -y module enable <name>:<stream>`, `disable <name>` and `reset <name>`; whether `reset` leaves `state=` empty or removes the file; whether any supported DNF 4 version writes keys other than `name`, `stream`, `profiles`, `state`, or uses blanks around `=`;
+- that `/usr/bin/dnf` is a symbolic link whose target ends in `dnf-3` on every supported release;
+- exit codes and messages of `dnf module enable` for a missing module or stream, for a second stream (switch), and on EL 10;
+- that `dnf -y module enable|disable|reset` needs no further confirmation and whether it refreshes metadata;
+- the one-run order: enable a stream, then install a package from it through the `package` resource's private metadata snapshot (§27).
+
+53. `crypto_policy` resource (system-wide cryptographic policy)
+
+IMPLEMENTED, NOT RELEASED, NOT VERIFIED ON A REAL HOST. A built-in type for RHEL-family hosts, on top of the vendor tool `update-crypto-policies`.
+
+53.1 Scope
+
+The system-wide cryptographic policy of one host: a base policy and optional subpolicies, as `update-crypto-policies --set` takes them. Out of scope: FIPS mode (either direction), writing policy or subpolicy definition files (a `file` resource does that), per-application policies and opt-outs, restarting services, rebooting, `sinter discover`.
+
+53.2 Fields (`with`)
+
+- `policy` (required, static): `BASE[:SUBPOLICY...]`; each part `[A-Z0-9][A-Z0-9_-]{0,31}`; at most 8 subpolicies; no subpolicy twice. Variables may be used; facts, registers and sensitive values may not. Resolved and checked at load.
+- `allow_weaker` (optional, default false): a literal boolean only. It cannot come from a variable, so the flag is visible in the recipe text.
+
+Unknown fields are refused. A recipe may hold one `crypto_policy` resource; a second one is a load-time ownership conflict (whatever its `when`). The grammar excludes a leading `-`, lower case, `/`, whitespace and glob characters, so the value cannot become an option or a path component.
+
+53.3 Rules against silently weakening cryptography
+
+At load (static, schema error, exit 2):
+
+- Base `FIPS` is refused with or without `allow_weaker`: switching FIPS mode needs `fips-mode-setup` and a reboot.
+- Base `LEGACY` is refused unless `allow_weaker: true`.
+- Subpolicies: the allow-list `NO-SHA1`, `NO-CAMELLIA`, `OSPP` (vendor modules that only remove algorithms) is accepted without the flag. Any other subpolicy (`SHA1`, `AD-SUPPORT`, `AD-SUPPORT-LEGACY`, `NO-ENFORCE-EMS`, a site-defined module) is refused unless `allow_weaker: true`, with the message that Sinter cannot tell whether it weakens the policy. `NO-ENFORCE-EMS` is not hardening and is not on the list.
+
+In plan and apply, against the observed current policy, when it differs from the declared one:
+
+- If the current base is `FIPS`, the change is refused with or without the flag.
+- Base order `LEGACY < DEFAULT < FUTURE`: a current base stronger than the declared one is refused unless `allow_weaker: true`.
+- A base outside that order (custom, `EMPTY`) is not ordered: changing from or to it is refused unless `allow_weaker: true`.
+- A hardening subpolicy of the allow-list (`NO-SHA1`, `NO-CAMELLIA`, `OSPP`) that is applied on the host and missing from the declared policy is refused unless `allow_weaker: true`: removing it weakens the policy. Removing an applied subpolicy that is not on the allow-list (for example `DEFAULT:SHA1` to `DEFAULT`) needs no flag: the declared policy passed the static rules on its own, so the result is a known base with at most hardening modules. The base rules above still apply to such a change.
+
+53.4 Observation (read-only)
+
+- Tool presence: `/usr/bin/test -x /usr/bin/update-crypto-policies` (the existing `executable_present`). Absent: plan and apply fail with "crypto_policy is not supported on this host (update-crypto-policies was not found)"; audit reports Error (the convention of `package` on an unsupported platform). In plan only, when an earlier planned change of the same run may bring the tool (an opaque change such as a `package`), the resource is deferred/unknown instead, and apply decides.
+- Current policy: a new fixed-argv read-only target method runs `/usr/bin/update-crypto-policies --show`. Accepted only: exit 0, no truncation of either stream, standard output exactly one line in the policy grammar (a final newline allowed). Any other exit, a signal, a timeout, extra lines, blanks, empty output or lower case is an observation error, never a state. Standard error is not interpreted. This adds one shape to the read-only command shapes of §28.
+- Definitions (only when a change is needed): the base must exist as a regular file `<BASE>.pol`, each subpolicy as `modules/<SUB>.pmod`, under `/usr/share/crypto-policies/policies` or `/etc/crypto-policies/policies`, observed by `lstat` through the parent walk of §23. A missing definition is a plan error naming the policy or module, so an invalid policy is refused before anything runs. A path that exists as something other than a regular file is refused. In plan, a definition that an earlier planned change may still create is a note instead; apply checks again before it runs the tool.
+
+Comparison is the exact policy text, subpolicy order included.
+
+53.5 Change (apply)
+
+Root is required (the resource fails before the tool is run; plan adds the "needs root" note). Right before the change the policy is observed once more: if it is not the policy the rules of §53.3 were judged against, nothing is run and the resource fails (another administrator changed it meanwhile; the window is narrowed, not closed, since the tool offers no compare-and-set). One command through the mutation channel (mutation permit, no shell): `/usr/bin/update-crypto-policies --set <POLICY>`, baseline environment, timeout 300 s.
+
+- Completion cannot be established (timeout, lost connection): Indeterminate, change Possible, verification Unknown; the reason says the policy may or may not have been applied; nothing else is sent for this resource.
+- Terminated by a signal: Failed, change Possible, verification Unknown, same wording.
+- Non-zero exit: Failed, change Possible (the tool rewrites several back-end files), verification Unknown; the first line of standard error is quoted, sanitized and capped.
+- Exit zero: the policy is observed again and must equal the declared text exactly; then Changed and Verified. Otherwise Failed: "update-crypto-policies reported success but the applied policy is ...". An observation that fails then is Failed (or Indeterminate) with change Possible.
+
+Sinter never restarts a service and never reboots here. Every plan and apply result that changes the policy carries a note: running services (including sshd) keep the previous policy until they are restarted; a stricter policy can make new SSH connections fail (old key types or algorithms), so a second connection should be verified before the current one is closed; the vendor recommends a reboot. `notify` works as for every resource (for example a `service` handler that restarts an application); restarting sshd that way is the operator's explicit choice. §43 (connection-risk control) is not extended to this type in this release: the note is the only safeguard for the management connection, and the current SSH session itself is not affected by the change.
+
+`PlannedEffects`: an opaque change.
+
+53.6 Audit
+
+Compliant iff the observed policy equals the declared one. Otherwise Drift with the dimension `policy` (observed, desired). An observation error and a missing tool are Error. The audit text says it compares the configured system-wide policy only: it claims nothing about running services, which may still use the policy that was in force when they started.
+
+53.7 Safety rules
+
+- Plan and audit send read-only commands only (`test -x`, `--show`, `stat`).
+- Fixed absolute program, fixed argv, validated operand, no shell.
+- An exit code never decides success; the re-observed policy does.
+- Weakening is never implicit (§53.3); FIPS is never touched.
+- No service restart, no reboot.
+- A `sensitive: true` resource hides the policy, the diff and failure details; the change command is recorded redacted.
+- MCP refuses the type (the MCP boundary does not widen in this release).
+
+53.8 Limits
+
+- The allow-list of hardening modules is fixed in Core; a release that ships another pure-hardening module needs a code change or `allow_weaker: true`.
+- The base order knows three names. `FUTURE` to `DEFAULT:NO-SHA1` is a lowering and needs the flag.
+- `allow_weaker: true` relaxes all weakening rules of the resource at once, not one of them.
+- Policies are compared as text; `DEFAULT:A:B` and `DEFAULT:B:A` differ.
+- Sinter cannot tell whether a new SSH connection will still work under the new policy.
+- Whether `--show` reports the configured policy or the last applied one when the two differ (an edited `/etc/crypto-policies/config` without `--set`) is not measured; the type reports what the tool prints.
+
+53.9 Not verified on a real host
+
+Everything above is tested against the scripted target only. To measure on RHEL, Rocky Linux and AlmaLinux 9 and 10:
+
+- `update-crypto-policies --show`: that it changes nothing, its exact output (one line, upper case, subpolicies as set), exit code, and behaviour for a non-root user;
+- `update-crypto-policies --set <POLICY>`: exit codes and messages for success, an unknown policy, an unknown module and a non-root caller; its run time; that it needs no confirmation;
+- the definition file locations (`/usr/share/crypto-policies/policies/<BASE>.pol`, `.../modules/<SUB>.pmod`, the `/etc/crypto-policies/policies` tree) and which modules each release ships (`NO-SHA1`, `NO-CAMELLIA`, `OSPP`, `SHA1`, `AD-SUPPORT`, `NO-ENFORCE-EMS`);
+- which package ships `/usr/bin/update-crypto-policies` on a minimal installation (`crypto-policies-scripts`);
+- the effect on new SSH connections after `FUTURE` and after `DEFAULT:NO-SHA1`, with and without an sshd restart;
+- a `notify` to a `service` handler after a policy change on a real systemd.

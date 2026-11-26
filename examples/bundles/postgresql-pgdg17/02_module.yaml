@@ -1,0 +1,11 @@
+# EL9: the distribution's postgresql module would shadow the PGDG packages, so
+# it is disabled. EL10 ships no module streams; the step is skipped there.
+version: 1
+
+resources:
+  - id: pg_module_off
+    type: dnf_module
+    when: "facts.os.version_major < 10"
+    with:
+      name: postgresql
+      state: disabled
