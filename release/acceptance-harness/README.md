@@ -119,13 +119,16 @@ disabled `file:///` section; refused off DNF 4), `dnf_module` (`nodejs` on EL 9)
 `crypto_policy` (EL 9 `DEFAULT:NO-SHA1` and back; EL 10 the missing module
 refused), `sysctl` (`vm.dirty_expire_centisecs`, the `boot` dimension with a
 later file), `hostname`, `tuned`, `timezone`, `locale`, `kernel_module`
-(`dummy`), the shipped PostgreSQL bundle (PGDG over the network) and
-`v116-no-residue`. The bundle is read from `postgresql-pgdg17/` beside the
-script and used only when every file matches the SHA-256 pinned in the
-script (`V6PGSUMS`); `run-target.sh` does not upload it yet (an Owner decision,
-because its repository host and account names do not pass the publication
-scan of bundled harness files), so until then the four `v116-pg-*` checks fail
-on the RHEL-family targets. Each block records what it changes first and
+(`dummy`), the shipped PostgreSQL bundle (embedded byte for byte as heredocs
+written into the work directory; PGDG over the network) and `v116-no-residue`.
+Screening exception for the embedded bundle (`SCREENING_EXCEPTIONS` in
+`release/tests/test_acceptance_harness.py`, the publishable-harness scan): the
+exact literals `download.postgresql.org` (hostname) and `postgres` (account
+name), in `acceptance-target.sh` only; reason "v1.16.0 acceptance: PostgreSQL
+bundle (PGDG) on RHEL-family targets"; approval "Owner decision 2026-11-27";
+expiry "at the completion of the v1.16.0 publication, at the latest
+2026-12-31". After that date the scan fails again; the exception covers no
+other file, category or value. Each block records what it changes first and
 puts it back at its end, also after a failure; restores still armed run from an
 EXIT/TERM trap. A disposable name that exists before is a failed prerequisite
 and is never removed. The `== observe v116-*` lines record the raw facts of the

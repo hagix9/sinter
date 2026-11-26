@@ -6,6 +6,7 @@ held in environment variables. Every identifier is synthetic.
 
 Run: python3 -m unittest discover -s release/tests
 """
+import datetime
 import hashlib
 import json
 import os
@@ -441,23 +442,106 @@ class CollectorAndApproval(HarnessCase):
         self.assertFalse(any(l.strip().startswith("- rocky10:") for l in self.collect().splitlines()))
 
 
+# Screening exceptions (AGENTS.md hygiene item 15): each one names the exact
+# file, the exact (category, value) literals, the reason, the approval source
+# and an expiry date. A literal is exempted only in that file, only in that
+# category, only as that whole value, and only up to and including the expiry
+# date; after it the scan fails again (fail closed). No pattern, no blanket.
+SCREENING_EXCEPTIONS = (
+    {
+        "file": "acceptance-target.sh",   # release/acceptance-harness/acceptance-target.sh
+        "literals": (("hostname", "download.postgresql.org"), ("username", "postgres")),
+        "reason": "v1.16.0 acceptance: PostgreSQL bundle (PGDG) on RHEL-family targets",
+        "approval": "Owner decision 2026-11-27",
+        "expiry": "at the completion of the v1.16.0 publication, at the latest 2026-12-31",
+        "expires": "2026-12-31",   # the last day the exception applies
+    },
+)
+
+
+def load_checker():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "release_checker", os.path.join(os.path.dirname(HARNESS), "check_acceptance_manifest.py"))
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    return checker
+
+
+def screen(checker, text, name, today, exceptions=SCREENING_EXCEPTIONS):
+    """The release checker's scan (checker.scan with nothing allowed), except
+    the findings an exception in force on `today` lists for this file name."""
+    allowed = set()
+    for e in exceptions:
+        if e["file"] == name and today <= datetime.date.fromisoformat(e["expires"]):
+            allowed.update(e["literals"])
+    errors, seen = [], set()
+    for lineno, line in enumerate(text.splitlines(), 1):
+        for cat, rx, group, kind in checker.RULES:
+            for m in rx.finditer(line):
+                value = m.group(group)
+                if not checker._is_finding(kind, value, set()) or (cat, value) in allowed:
+                    continue
+                if (lineno, cat) not in seen:
+                    seen.add((lineno, cat))
+                    errors.append(f"harness/{name}:{lineno}: sensitive content ({cat})")
+    return errors
+
+
 class PublishableHarness(unittest.TestCase):
     """Every harness file that runs in steps 7-9 is bundled verbatim, so it must
-    pass the release checker's sensitive-content scan as it is."""
+    pass the release checker's sensitive-content scan as it is (with only the
+    recorded, unexpired SCREENING_EXCEPTIONS)."""
     BUNDLED = ["acceptance-target.sh", "run-acceptance-wrapper.sh", "remote-cleanup.sh", "target-prep.sh",
                "raw-verdict.py", "expected-check-ids.txt", "run-all.sh", "run-target.sh", "sanitize.py"]
 
     def test_bundled_harness_files_pass_the_checker_scan(self):
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "release_checker", os.path.join(os.path.dirname(HARNESS), "check_acceptance_manifest.py"))
-        checker = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(checker)
+        checker = load_checker()
+        today = datetime.date.today()
         for name in self.BUNDLED:
             with self.subTest(file=name):
-                errors = []
-                checker.scan(read(os.path.join(HARNESS, name)), f"harness/{name}", set(), set(), errors)
-                self.assertEqual(errors, [])
+                self.assertEqual(screen(checker, read(os.path.join(HARNESS, name)), name, today), [])
+
+    def test_screen_without_exceptions_is_the_checker_scan(self):
+        checker = load_checker()
+        for name in self.BUNDLED:
+            text = read(os.path.join(HARNESS, name))
+            errors = []
+            checker.scan(text, f"harness/{name}", set(), set(), errors)
+            self.assertEqual(screen(checker, text, name, datetime.date(2026, 11, 27), exceptions=()), errors, name)
+
+    def test_the_exception_record_is_exact(self):
+        self.assertEqual(SCREENING_EXCEPTIONS, ({
+            "file": "acceptance-target.sh",
+            "literals": (("hostname", "download.postgresql.org"), ("username", "postgres")),
+            "reason": "v1.16.0 acceptance: PostgreSQL bundle (PGDG) on RHEL-family targets",
+            "approval": "Owner decision 2026-11-27",
+            "expiry": "at the completion of the v1.16.0 publication, at the latest 2026-12-31",
+            "expires": "2026-12-31"},))
+        # the exception is needed: without it the bundled script does not pass
+        checker = load_checker()
+        text = read(os.path.join(HARNESS, "acceptance-target.sh"))
+        self.assertNotEqual(screen(checker, text, "acceptance-target.sh", datetime.date(2026, 11, 27), exceptions=()), [])
+
+    def test_the_exception_fails_closed_after_its_expiry(self):
+        checker = load_checker()
+        text = read(os.path.join(HARNESS, "acceptance-target.sh"))
+        self.assertEqual(screen(checker, text, "acceptance-target.sh", datetime.date(2026, 12, 31)), [])
+        late = screen(checker, text, "acceptance-target.sh", datetime.date(2027, 1, 1))
+        self.assertTrue(late and all(e.endswith(("(hostname)", "(username)")) for e in late), late)
+
+    def test_the_exception_covers_only_its_file_categories_and_values(self):
+        checker = load_checker()
+        day = datetime.date(2026, 11, 27)
+        text = read(os.path.join(HARNESS, "acceptance-target.sh"))
+        for other in ("run-target.sh", "target-prep.sh", "sanitize.py", "README.md"):
+            self.assertNotEqual(screen(checker, text, other, day), [], other)   # same text, another file
+        for line, cat in (('baseurl: "https://mirror.postgresql.org/x"', "hostname"),   # another host of the domain
+                          ("owner: postgresx", "username"), ("owner: pg", "username"),   # another account
+                          ("fqdn=postgres", "hostname"),                                  # the account name as a host
+                          ("server=download.postgresql.org.attacker.com", "hostname")):
+            self.assertEqual(screen(checker, line + "\n", "acceptance-target.sh", day),
+                             ["harness/acceptance-target.sh:1: sensitive content (%s)" % cat], line)
 
 
 class Sanitizer(HarnessCase):

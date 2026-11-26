@@ -24,12 +24,10 @@ writes is also loaded by that binary (`sinter validate`, no target needed).
 
 Run: python3 -m unittest discover -s release/tests
 """
-import hashlib
 import importlib.util
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -1288,7 +1286,7 @@ class Run:
 PG_EXAMPLE = os.path.join(REPO, "examples", "bundles", "postgresql-pgdg17")
 
 
-def run_section(label, defect="", table=TABLE_PATH, keep=None, grab="", pg_source="copy", **over):
+def run_section(label, defect="", table=TABLE_PATH, keep=None, grab="", **over):
     with tempfile.TemporaryDirectory(prefix="v1160-") as d:
         os.chmod(d, 0o700)
         b = os.path.join(d, "bin"); os.mkdir(b)
@@ -1321,15 +1319,6 @@ def run_section(label, defect="", table=TABLE_PATH, keep=None, grab="", pg_sourc
         body = section()
         assert body.count('V6ROOT=""   #') == 1
         body = body.replace('V6ROOT=""   #', "V6ROOT='%s'   #" % root)
-        pgs = os.path.join(d, "harness", "postgresql-pgdg17")
-        if pg_source != "none":
-            shutil.copytree(PG_EXAMPLE, pgs)
-            if pg_source == "changed":
-                with open(os.path.join(pgs, "03_package.yaml"), "a") as f:
-                    f.write("# changed\n")
-        line = 'V6PGSRC="$(dirname "$0")/postgresql-pgdg17"   #'
-        assert body.count(line) == 1
-        body = body.replace(line, "V6PGSRC='%s'   #" % pgs)
         env = dict(os.environ, FAKE_ROOT=root, FAKE_STATE=sp, FAKE_DEFECT=defect, FAKE_GRAB=grab, PATH=b + os.pathsep + os.environ["PATH"])
         p = subprocess.run(["bash", "-c", prelude + body + '\necho "== section end passed=$PASS failed=$FAIL na=$NA"\n'],
                            capture_output=True, text=True, env=env, timeout=900, cwd=d)
@@ -1492,14 +1481,6 @@ class ShortCircuits(unittest.TestCase):
             self.assertIn(c, r.bad, r.out)
         self.assertIn("sinteracc", r.state["users"])
         self.assertIn("sinter-acc-v116", r.root_left)
-
-    def test_a_missing_or_changed_bundle_fails_the_four_pg_checks(self):
-        for src in ("none", "changed"):
-            with self.subTest(source=src):
-                r = run_section("rocky9", pg_source=src)
-                self.assertEqual(sorted(r.bad), sorted(PG), r.out)
-                self.assertIn("V116_PG_SOURCE %s" % ("missing" if src == "none" else "mismatch"), r.out)
-                self.assertNotIn("postgresql17-server", r.state["packages"])
 
     def test_restores_run_from_the_trap_when_the_harness_stops(self):
         """Killed in the middle (after the hostname change): the EXIT trap puts the name back."""
@@ -1693,17 +1674,27 @@ class Static(unittest.TestCase):
         self.assertIn("trap v6_restore_all EXIT", text)
         self.assertIn("trap - EXIT TERM HUP INT", text)
 
-    def test_the_pinned_postgresql_bundle_is_the_example(self):
+    def test_the_embedded_postgresql_bundle_is_the_example(self):
+        """Byte for byte: every file of examples/bundles/postgresql-pgdg17, and nothing else."""
         text = section()
-        pins = re.search(r"^V6PGSUMS='(.*?)'$", text, re.S | re.M).group(1).splitlines()
-        want = []
+        emb = dict(re.findall(r"^v6_emb (\S+) <<'V116EOF'\n(.*?)^V116EOF$", text, re.S | re.M))
+        files = {}
         for root, _, fs in os.walk(PG_EXAMPLE):
             for f in fs:
                 path = os.path.join(root, f)
                 with open(path, "rb") as fh:
-                    want.append("%s  %s" % (hashlib.sha256(fh.read()).hexdigest(), os.path.relpath(path, PG_EXAMPLE)))
-        self.assertEqual(sorted(pins), sorted(want))
-        self.assertNotIn("postgresql.org", text)   # the bundle's own text stays out of the bundled script
+                    files[os.path.relpath(path, PG_EXAMPLE)] = fh.read()
+        self.assertEqual(sorted(emb), sorted(files))
+        for k, b in files.items():
+            self.assertEqual(emb[k].encode("ascii"), b, k)
+        self.assertNotIn("V6PGSRC", text)
+
+    def test_a_changed_embedded_bundle_is_detected(self):
+        # the comparison above is not vacuous: one changed byte is a difference
+        text = section().replace("name: postgresql17-server", "name: postgresql17-serveR", 1)
+        emb = dict(re.findall(r"^v6_emb (\S+) <<'V116EOF'\n(.*?)^V116EOF$", text, re.S | re.M))
+        with open(os.path.join(PG_EXAMPLE, "03_package.yaml")) as fh:
+            self.assertNotEqual(emb["03_package.yaml"], fh.read())
 
     def test_shell_syntax(self):
         p = subprocess.run(["bash", "-n", TARGET], capture_output=True, text=True)

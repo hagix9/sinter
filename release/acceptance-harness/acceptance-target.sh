@@ -1695,36 +1695,272 @@ else
   else check v116-tuned-off FAIL "$US3 $(v6e tu7)"; fi
 fi
 
-# ---- PostgreSQL bundle (§56.3): examples/bundles/postgresql-pgdg17 on a fresh
-# RHEL-family system, plan with the deferrals, audit drift, apply (PGDG over the
-# network), re-apply unchanged, audit compliant; then the service is stopped and
-# what the bundle installed is removed again. The bundle is not part of this
-# script (its public repository host and account names are content the
-# publication scan of bundled harness files refuses): it is read from the
-# directory V6PGSRC and used only when every file matches the SHA-256 pinned
-# here (the stand-in tests compare the pins with the repository); missing or
-# different, the four checks fail.
+# ---- PostgreSQL bundle (§56.3): examples/bundles/postgresql-pgdg17, embedded
+# here byte for byte (a stand-in test compares it with the repository), on a
+# fresh RHEL-family system: plan with the deferrals, audit drift, apply (PGDG
+# over the network), re-apply unchanged, audit compliant; then the service is
+# stopped and what the bundle installed is removed again. Its repository host
+# and account name are covered by the screening exception recorded in
+# release/tests/test_acceptance_harness.py (Owner decision 2026-11-27).
 PGIDS="v116-pg-plan v116-pg-apply v116-pg-reapply v116-pg-audit"
-V6PGSRC="$(dirname "$0")/postgresql-pgdg17"   # beside this script; the stand-in tests replace this line only
-V6PGSUMS='0f8627d94833d487cdd03a43c55cfdae0d93a31e9f8703856108d7fd66c40df2  01_repository.yaml
-c4e6bf5914210f942d6419429ddb7db7b51e805b80b8022d7c1e8570f62560c8  02_module.yaml
-315e3eae64ea91d2e3f24500de6701efe333790dfeab651e4ca8fca1b46807c5  03_package.yaml
-a70d592b8ef60980c87d3854ebdd348582347d0929390f9325e6f7196637fcc3  04_initdb.yaml
-efaffec852b04f74aaad1a84ff761170fe3e275f85613212671e165f9377afe3  05_directory.yaml
-07d50d15f6b073b5f3c177e6a1a5ef8c39a920005736524739556922c17041ba  06_config.yaml
-7386447f0b5901f92456730b091c6e185ebe543c19845958e01a13abcd0f6719  07_service.yaml
-c1fec798b1635a1ec0a69beeff47fbb590b8690a14216604e0a3e3166bb15767  bundle.yaml
-a70c9527426017d00fa4e6f9d2941d515357a27a7be82e155248ece53bbe5453  files/PGDG-RPM-GPG-KEY-RHEL
-9c0208991d6da83bd2d21727f7626a8a031598121e3843c36421d94c1611b4bf  files/pg_hba.conf
-685bd02fa6dd69737d4042c066e26973222ea482066a4157c68eae04b93a1460  files/postgresql.conf.tmpl'
-PG="$V6/pg"; mkdir -p "$PG"
-PGSRC=ok
-if [ "$(cd "$V6PGSRC" 2> /dev/null && find . -type f | sed 's|^\./||' | LC_ALL=C sort | tr '\n' ' ')" != "$(printf '%s\n' "$V6PGSUMS" | awk '{print $2}' | LC_ALL=C sort | tr '\n' ' ')" ]; then PGSRC=missing
-else
-  (cd "$V6PGSRC" && find . -type f -exec sh -c 'mkdir -p "$1/$(dirname "$2")" && cp "$2" "$1/$2"' sh "$PG" {} \;)
-  (cd "$PG" && printf '%s\n' "$V6PGSUMS" | sha256sum -c --quiet > /dev/null 2>&1) || PGSRC=mismatch
-fi
-echo "V116_PG_SOURCE $PGSRC"
+PG="$V6/pg"; mkdir -p "$PG/files"
+v6_emb() { cat > "$PG/$1"; }
+# BEGIN embedded postgresql-pgdg17
+v6_emb 01_repository.yaml <<'V116EOF'
+# The PGDG signing key (a file, pinned in the recipe) and the two repositories
+# that are needed, with package and metadata signature checking on.
+# Fingerprint of the key: D4BF 08AE 67A0 B4C7 A1DB  CCD2 40BC A2B4 08B4 0D20
+# (compare with https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-RHEL).
+version: 1
+
+resources:
+  - id: pgdg_key
+    type: file
+    with:
+      path: /etc/pki/rpm-gpg/PGDG-RPM-GPG-KEY-RHEL
+      source: files/PGDG-RPM-GPG-KEY-RHEL
+      owner: root
+      group: root
+      mode: "0644"
+
+  - id: pgdg_common
+    type: dnf_repository
+    depends_on: [pgdg_key]
+    with:
+      name: pgdg-common
+      file: /etc/yum.repos.d/pgdg-17.repo
+      description: "PostgreSQL common RPMs for RHEL / Rocky Linux / AlmaLinux $releasever - $basearch"
+      baseurl: "https://download.postgresql.org/pub/repos/yum/common/redhat/rhel-$releasever-$basearch"
+      enabled: true
+      gpgcheck: true
+      repo_gpgcheck: true
+      gpgkey: "file:///etc/pki/rpm-gpg/PGDG-RPM-GPG-KEY-RHEL"
+
+  - id: pgdg17
+    type: dnf_repository
+    depends_on: [pgdg_common]
+    with:
+      name: pgdg17
+      file: /etc/yum.repos.d/pgdg-17.repo
+      description: "PostgreSQL 17 for RHEL / Rocky Linux / AlmaLinux $releasever - $basearch"
+      baseurl: "https://download.postgresql.org/pub/repos/yum/17/redhat/rhel-$releasever-$basearch"
+      enabled: true
+      gpgcheck: true
+      repo_gpgcheck: true
+      gpgkey: "file:///etc/pki/rpm-gpg/PGDG-RPM-GPG-KEY-RHEL"
+V116EOF
+v6_emb 02_module.yaml <<'V116EOF'
+# EL9: the distribution's postgresql module would shadow the PGDG packages, so
+# it is disabled. EL10 ships no module streams; the step is skipped there.
+version: 1
+
+resources:
+  - id: pg_module_off
+    type: dnf_module
+    when: "facts.os.version_major < 10"
+    with:
+      name: postgresql
+      state: disabled
+V116EOF
+v6_emb 03_package.yaml <<'V116EOF'
+# The server package. Installing it creates the postgres account; saying so
+# lets plan defer, instead of refuse, what the later recipes give to postgres.
+version: 1
+
+resources:
+  - id: pg_pkg
+    type: package
+    with:
+      name: postgresql17-server
+      state: present
+      creates_accounts:
+        users: [postgres]
+        groups: [postgres]
+V116EOF
+v6_emb 04_initdb.yaml <<'V116EOF'
+# Create the database cluster once (the guard makes a second apply a no-op).
+version: 1
+
+resources:
+  - id: pg_initdb
+    type: command
+    with:
+      program: /usr/pgsql-17/bin/postgresql-17-setup
+      args: ["initdb"]
+      creates: /var/lib/pgsql/17/data/PG_VERSION
+V116EOF
+v6_emb 05_directory.yaml <<'V116EOF'
+# The directory postgresql.conf includes (include_dir = 'conf.d').
+version: 1
+
+resources:
+  - id: pg_confd
+    type: directory
+    with:
+      path: /var/lib/pgsql/17/data/conf.d
+      owner: postgres
+      group: postgres
+      mode: "0700"
+V116EOF
+v6_emb 06_config.yaml <<'V116EOF'
+# Server configuration, validated by postgres itself before it is published,
+# and client authentication.
+version: 1
+
+vars:
+  datadir: { value: /var/lib/pgsql/17/data }
+  port: { value: 5432 }
+
+resources:
+  - id: pg_conf
+    type: template
+    notify: [restart_pg]
+    with:
+      path: /var/lib/pgsql/17/data/postgresql.conf
+      source: files/postgresql.conf.tmpl
+      owner: postgres
+      group: postgres
+      mode: "0600"
+      validate:
+        program: /usr/pgsql-17/bin/postgres
+        args: ["-C", "port", "-D", "/var/lib/pgsql/17/data", "--config-file={{ staged }}"]
+
+  - id: pg_hba
+    type: file
+    notify: [reload_pg]
+    with:
+      path: /var/lib/pgsql/17/data/pg_hba.conf
+      source: files/pg_hba.conf
+      owner: postgres
+      group: postgres
+      mode: "0600"
+
+handlers:
+  - id: restart_pg
+    service: postgresql-17
+    action: restart
+  - id: reload_pg
+    service: postgresql-17
+    action: reload
+V116EOF
+v6_emb 07_service.yaml <<'V116EOF'
+version: 1
+
+resources:
+  - id: pg_service
+    type: service
+    with:
+      name: postgresql-17
+      state: running
+      enabled: true
+V116EOF
+v6_emb bundle.yaml <<'V116EOF'
+# PostgreSQL 17 from the PostgreSQL project's repository (PGDG) on Rocky Linux,
+# RHEL or AlmaLinux 9 and 10, as a bundle: one small recipe per step, run in
+# this order. (examples/recipes/postgresql-pgdg17.yaml is the same server as a
+# single recipe.)
+#
+# The whole bundle can be planned and audited on a host where nothing is
+# installed yet:
+#
+#   sinter plan  examples/bundles/postgresql-pgdg17/bundle.yaml --host <host> --sudo
+#   sinter audit examples/bundles/postgresql-pgdg17/bundle.yaml --host <host> --sudo   # drift, exit 7
+#   sinter apply examples/bundles/postgresql-pgdg17/bundle.yaml --host <host> --sudo
+#   sinter apply examples/bundles/postgresql-pgdg17/bundle.yaml --host <host> --sudo   # no change
+#
+# Plan reports what an earlier recipe creates (the postgres account, the data
+# directory, the service unit) as "decided at apply" in the later recipes.
+version: 1
+name: postgresql-pgdg17
+recipes:
+  - 01_repository.yaml
+  - 02_module.yaml
+  - 03_package.yaml
+  - 04_initdb.yaml
+  - 05_directory.yaml
+  - 06_config.yaml
+  - 07_service.yaml
+V116EOF
+v6_emb files/PGDG-RPM-GPG-KEY-RHEL <<'V116EOF'
+-----BEGIN PGP PUBLIC KEY BLOCK-----
+
+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
+=Elfg
+-----END PGP PUBLIC KEY BLOCK-----
+V116EOF
+v6_emb files/pg_hba.conf <<'V116EOF'
+# Managed by Sinter. Local socket: peer (the OS account must match the role;
+# Sinter's postgresql_role connects this way as postgres). TCP on loopback:
+# SCRAM-SHA-256 passwords only.
+# TYPE  DATABASE  USER  ADDRESS        METHOD
+local   all       all                  peer
+host    all       all   127.0.0.1/32   scram-sha-256
+host    all       all   ::1/128        scram-sha-256
+V116EOF
+v6_emb files/postgresql.conf.tmpl <<'V116EOF'
+# Managed by Sinter (examples/recipes/postgresql-pgdg17.yaml). Settings not listed
+# keep PostgreSQL's built-in defaults; add your own in conf.d/.
+listen_addresses = 'localhost'
+port = {{ vars.port }}
+max_connections = 100
+shared_buffers = 128MB
+dynamic_shared_memory_type = posix
+password_encryption = scram-sha-256
+logging_collector = on
+log_directory = 'log'
+log_filename = 'postgresql-%a.log'
+log_rotation_age = 1d
+log_rotation_size = 0
+log_truncate_on_rotation = on
+log_line_prefix = '%m [%p] '
+log_timezone = 'UTC'
+datestyle = 'iso, mdy'
+timezone = 'UTC'
+lc_messages = 'C'
+lc_monetary = 'C'
+lc_numeric = 'C'
+lc_time = 'C'
+default_text_search_config = 'pg_catalog.english'
+# Absolute, so the file also validates from its staging location.
+include_dir = '{{ vars.datadir }}/conf.d'
+V116EOF
+# END embedded postgresql-pgdg17
 PGRF=/etc/yum.repos.d/pgdg-17.repo; PGKF=/etc/pki/rpm-gpg/PGDG-RPM-GPG-KEY-RHEL
 if [ "$V6RH" = yes ]; then
   PGP0=$(rpm -qa --qf '%{NAME}\n' 2> /dev/null | grep '^postgresql' | sort | tr '\n' ' ')
@@ -1741,7 +1977,7 @@ if [ "$V6RH" = yes ]; then
     [ "$PGD0" = absent ] && sudo rm -rf "$(v6h /var/lib/pgsql)"
     [ "$PGU0" = absent ] && getent passwd postgres > /dev/null 2>&1 && { sudo userdel postgres > /dev/null 2>&1; sudo groupdel postgres > /dev/null 2>&1; }
     echo "V116_PG_RESTORE packages=[$(rpm -qa --qf '%{NAME}\n' 2> /dev/null | grep '^postgresql' | sort | tr '\n' ' ')] repo=$(v6ex "$PGRF" && echo left || echo none) datadir=$(v6ex /var/lib/pgsql && echo left || echo none) service=$(systemctl is-active postgresql-17 2> /dev/null)"; }
-  if [ "$PGSRC" = ok ] && [ "$PGPRE" = absent/absent/none ] && [ "$PGD0" = absent ]; then
+  if [ "$PGPRE" = absent/absent/none ] && [ "$PGD0" = absent ]; then
     v6_arm v6r_pg
     timeout "$V6TMO_PG" "$EXE" plan "$PG/bundle.yaml" --sudo --format json > "$V6/pg1.json" 2> "$V6/pg1.err"; G1=$?
     GD=$(v6j "$V6/pg1.json" '[(r["id"], r["unknown"]) for r in R(d) if r["id"] in ("pgdg_key", "pgdg_common", "pg_pkg", "pg_confd", "pg_conf", "pg_hba", "pg_service")]')
@@ -1770,7 +2006,7 @@ if [ "$V6RH" = yes ]; then
     if [ "$GU" = "$GUW" ]; then check v116-pg-audit ok "audit of the applied bundle: compliant (the initdb command not auditable, the module step not applicable on EL 10)"
     else check v116-pg-audit FAIL "$GU $(v6e pg5)"; fi
     v6_restore v6r_pg
-  else for id in $PGIDS; do check "$id" FAIL "prerequisite: bundle=$PGSRC (beside the script, pinned), existing PostgreSQL or PGDG files=$PGPRE datadir=$PGD0"; done; fi
+  else for id in $PGIDS; do check "$id" FAIL "prerequisite: existing PostgreSQL or PGDG files=$PGPRE datadir=$PGD0 (never removed)"; done; fi
 elif [ "$V6FAM" = debian ] && [ "$V6DNF" = absent ] && na_allowed v116-pg-plan NOT_DNF_HOST && na_allowed v116-pg-apply NOT_DNF_HOST \
      && na_allowed v116-pg-reapply NOT_DNF_HOST && na_allowed v116-pg-audit NOT_DNF_HOST; then
   for id in $PGIDS; do not_applicable "$id" NOT_DNF_HOST "the bundle installs PGDG RPMs; $LABEL is not a DNF host"; done
