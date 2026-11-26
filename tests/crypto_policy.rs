@@ -356,7 +356,8 @@ fn unordered_bases_removed_hardening_subpolicies_and_fips_hosts_are_refused() {
         ("EMPTY", "cannot order"),
         ("SITE1", "cannot order"),
         ("DEFAULT:NO-SHA1", "hardening subpolicy NO-SHA1"),
-        ("DEFAULT:OSPP", "hardening subpolicy OSPP"),
+        // Not on the allow-list any more, but a restriction that would be lost.
+        ("DEFAULT:OSPP", "cannot tell whether removing it weakens"),
         (
             "FUTURE:SHA1",
             "FUTURE is stronger than the declared DEFAULT",
@@ -452,6 +453,19 @@ fn a_policy_or_module_that_is_not_defined_is_refused_before_anything_runs() {
 #[test]
 fn a_definition_an_earlier_resource_writes_is_a_plan_note_and_checked_at_apply() {
     let yaml = "version: 1\nresources:\n  - id: def\n    type: file\n    with:\n      path: /etc/crypto-policies/policies/modules/NO-CAMELLIA.pmod\n      content: \"cipher = -CAMELLIA-256-GCM\\n\"\n  - id: c\n    type: crypto_policy\n    depends_on: [def]\n    with:\n      policy: \"DEFAULT:NO-CAMELLIA\"\n";
+    // A module of an allow-listed name that the site defines itself is not
+    // the vendor's module: without the flag it is refused, in plan (the
+    // earlier resource is planned to write it) and in apply (it is there).
+    let unflagged = recipe("cp-x-deffile", yaml);
+    for mode in [Mode::Plan, Mode::Apply] {
+        let (why, _) = refused(&unflagged, mode, fake("DEFAULT"));
+        assert!(
+            why.contains("subpolicy NO-CAMELLIA is also defined locally")
+                && why.contains("allow_weaker: true"),
+            "{mode:?}: {why}"
+        );
+    }
+    let yaml = &format!("{yaml}      allow_weaker: true\n");
     let r = recipe("cp-a-deffile", yaml);
     let p = plan(&r, fake("DEFAULT"));
     assert_eq!(p.status, AggregateStatus::Success, "{:?}", p.resources);
@@ -913,4 +927,157 @@ fn the_documented_toml_examples_load_and_plan() {
         assert_success(&apply(&r, t.clone()));
         assert_eq!(current(&t), want);
     }
+}
+
+// ---------------------------------------------------------------------------
+// audit findings: OSPP, local redefinitions, a warning beside the answer
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ospp_needs_the_flag_to_be_added_and_to_be_removed() {
+    // Adding it: rejected when the recipe is loaded.
+    for p in ["FUTURE:OSPP", "DEFAULT:OSPP", "DEFAULT:NO-SHA1:OSPP"] {
+        let e = load_err(&format!("cp-l-ospp-{}", p.len()), &policy(p, ""));
+        assert!(
+            e.contains("subpolicy OSPP") && e.contains("allow_weaker: true"),
+            "{p}: {e}"
+        );
+        assert!(
+            e.contains("NO-SHA1, NO-CAMELLIA") && !e.contains("NO-CAMELLIA, OSPP"),
+            "{e}"
+        );
+    }
+    let flagged = recipe(
+        "cp-a-ospp",
+        &policy("FUTURE:OSPP", "      allow_weaker: true\n"),
+    );
+    let t = fake("FUTURE");
+    assert_success(&apply(&flagged, t.clone()));
+    assert_eq!(set_calls(&t), ["FUTURE:OSPP"]);
+    // Removing it: refused against the host, in plan and apply.
+    let plain = recipe("cp-x-ospp-drop", &policy("FUTURE", ""));
+    for mode in [Mode::Plan, Mode::Apply] {
+        let (why, _) = refused(&plain, mode, fake("FUTURE:OSPP"));
+        assert!(
+            why.contains("subpolicy OSPP") && why.contains("allow_weaker: true"),
+            "{why}"
+        );
+    }
+    let flagged = recipe(
+        "cp-a-ospp-drop",
+        &policy("FUTURE", "      allow_weaker: true\n"),
+    );
+    let t = fake("FUTURE:OSPP");
+    assert_success(&apply(&flagged, t.clone()));
+    assert_eq!(current(&t), "FUTURE");
+}
+
+#[test]
+fn a_local_definition_of_a_ranked_policy_or_hardening_module_needs_the_flag() {
+    const LOCAL: &str = "/etc/crypto-policies/policies";
+    // (current, declared, the local file that makes the names unreliable)
+    for (label, cur, want, local) in [
+        (
+            "declared-base",
+            "DEFAULT",
+            "FUTURE",
+            format!("{LOCAL}/FUTURE.pol"),
+        ),
+        (
+            "current-base",
+            "DEFAULT",
+            "FUTURE",
+            format!("{LOCAL}/DEFAULT.pol"),
+        ),
+        (
+            "module",
+            "DEFAULT",
+            "DEFAULT:NO-SHA1",
+            format!("{LOCAL}/modules/NO-SHA1.pmod"),
+        ),
+        (
+            "same-base-with-module",
+            "DEFAULT",
+            "DEFAULT:NO-SHA1",
+            format!("{LOCAL}/DEFAULT.pol"),
+        ),
+    ] {
+        let r = recipe(&format!("cp-x-local-{label}"), &policy(want, ""));
+        for mode in [Mode::Plan, Mode::Apply] {
+            let (why, _) = refused(&r, mode, fake(cur).with_fs_file(&local, "# synthetic\n"));
+            assert!(
+                why.contains("also defined locally")
+                    && why.contains(&local)
+                    && why.contains("allow_weaker: true"),
+                "{label}: {why}"
+            );
+        }
+        // Anything at that path counts, also a symlink.
+        let mut t = fake(cur);
+        t.fs.as_mut().unwrap().put_symlink(
+            &local,
+            "/usr/share/crypto-policies/policies/LEGACY.pol",
+            0,
+            0,
+        );
+        let (why, _) = refused(&r, Mode::Apply, t);
+        assert!(why.contains("also defined locally"), "{label}: {why}");
+        // With the flag the operator has taken the decision.
+        let flagged = recipe(
+            &format!("cp-a-local-{label}"),
+            &policy(want, "      allow_weaker: true\n"),
+        );
+        let t = fake(cur).with_fs_file(&local, "# synthetic\n");
+        assert_success(&apply(&flagged, t.clone()));
+        assert_eq!(current(&t), want, "{label}");
+        // Nothing to change: the host is left alone and audit only compares.
+        let t = fake(want).with_fs_file(&local, "# synthetic\n");
+        let rep = apply(&r, t.clone());
+        assert_success(&rep);
+        assert_eq!(find(&rep, "c").change, Change::None);
+        assert!(set_calls(&t).is_empty());
+        let a = audit(&r, fake(want).with_fs_file(&local, "# synthetic\n"));
+        assert_eq!(a.resources[0].status, AuditResourceStatus::Compliant);
+    }
+    // A local file of another name changes nothing.
+    let r = recipe("cp-a-local-other", &policy("FUTURE", ""));
+    let t = fake("DEFAULT").with_fs_file(&format!("{LOCAL}/SITE1.pol"), "# synthetic\n");
+    assert_success(&apply(&r, t.clone()));
+    assert_eq!(current(&t), "FUTURE");
+}
+
+#[test]
+fn a_warning_on_standard_error_beside_the_one_policy_line_is_accepted() {
+    // Decided: the answer is the one line on standard output. A warning on
+    // standard error (as a host in FIPS mode may print) does not make it
+    // unusable, and its text is shown nowhere.
+    let warn = |t: FakeTarget, n: usize| {
+        for _ in 0..n {
+            t.el()
+                .lock()
+                .unwrap()
+                .crypto_show
+                .push_back(FakeShow::WithWarning);
+        }
+        t
+    };
+    let r = recipe("cp-o-warn", &policy("FUTURE", ""));
+    let p = plan(&r, warn(fake("DEFAULT"), 4));
+    assert_success(&p);
+    assert_eq!(find(&p, "c").change, Change::Changed);
+    let t = warn(fake("DEFAULT"), 4);
+    let rep = apply(&r, t.clone());
+    assert_success(&rep);
+    assert_eq!(find(&rep, "c").verification, Verification::Verified);
+    assert_eq!(current(&t), "FUTURE");
+    for s in surfaces(&p, "plan")
+        .iter()
+        .chain(surfaces(&rep, "apply").iter())
+    {
+        assert!(!s.contains("warning: synthetic"), "{s}");
+    }
+    let a = audit(&r, warn(fake("FUTURE"), 4));
+    assert_eq!(a.resources[0].status, AuditResourceStatus::Compliant);
+    let a = audit(&r, warn(fake("DEFAULT"), 4));
+    assert_eq!(a.resources[0].status, AuditResourceStatus::Drift);
 }

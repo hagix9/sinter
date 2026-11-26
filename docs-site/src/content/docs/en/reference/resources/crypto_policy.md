@@ -45,11 +45,13 @@ Checked when the recipe is loaded:
 - Base `FIPS` is refused, with or without `allow_weaker`. Switching FIPS mode
   needs `fips-mode-setup` and a reboot; Sinter does not do that.
 - Base `LEGACY` is refused unless `allow_weaker: true`.
-- Subpolicies `NO-SHA1`, `NO-CAMELLIA` and `OSPP` are accepted. Any other
+- Subpolicies `NO-SHA1` and `NO-CAMELLIA` are accepted. Any other
   subpolicy (for example `SHA1`, `AD-SUPPORT`, `AD-SUPPORT-LEGACY`,
-  `NO-ENFORCE-EMS`, or a module your site defined) is refused unless
+  `NO-ENFORCE-EMS`, `OSPP`, or a module your site defined) is refused unless
   `allow_weaker: true`, because Sinter cannot tell whether it weakens the
-  policy.
+  policy. `OSPP` is a vendor module that restricts the policy, but Sinter
+  has not verified that it only removes algorithms, so it is treated like
+  any other module.
 
 Checked in plan and apply, against the policy the host reports, when it
 differs from the declared one:
@@ -58,11 +60,23 @@ differs from the declared one:
   unless `allow_weaker: true`.
 - A base outside that order (a custom policy, `EMPTY`) is not ordered:
   changing from or to it is refused unless `allow_weaker: true`.
-- Removing a hardening subpolicy (`NO-SHA1`, `NO-CAMELLIA`, `OSPP`) that is
+- Removing a hardening subpolicy (`NO-SHA1`, `NO-CAMELLIA`) that is
   applied on the host is refused unless `allow_weaker: true`: that weakens
-  the policy. Removing any other applied subpolicy needs no flag (for example
-  `DEFAULT:SHA1` to `DEFAULT`): the declared policy passed the rules above on
-  its own, so the result is a base Sinter knows.
+  the policy. Removing `OSPP` is refused unless `allow_weaker: true` as
+  well, because it may be a restriction that is lost. Removing any other
+  applied subpolicy needs no flag (for example `DEFAULT:SHA1` to `DEFAULT`):
+  the declared policy passed the rules above on its own, so the result is a
+  base Sinter knows.
+- **Local definitions of names Sinter ranks.** The rules above judge
+  `LEGACY`, `DEFAULT`, `FUTURE`, `NO-SHA1` and `NO-CAMELLIA` by their names,
+  which is only right for the vendor's definitions. If the base of the
+  current or of the declared policy is one of the three ranked bases and
+  `/etc/crypto-policies/policies/<BASE>.pol` exists, or a declared
+  `NO-SHA1` / `NO-CAMELLIA` has
+  `/etc/crypto-policies/policies/modules/<NAME>.pmod`, the change is refused
+  unless `allow_weaker: true`: Sinter cannot rank a definition it does not
+  know. Anything at that path counts (a file, a symlink), and so does a
+  `file` resource earlier in the same plan that writes it.
 - A host whose current policy is `FIPS` is never changed.
 
 ## Expected behavior
@@ -70,7 +84,9 @@ differs from the declared one:
 - **Observation.** Sinter runs `/usr/bin/update-crypto-policies --show`
   (read-only). Only an exit of zero with exactly one policy line on standard
   output is accepted. Any other exit, extra lines, empty or truncated output
-  or a timeout is an error; Sinter does not guess the policy.
+  or a timeout is an error; Sinter does not guess the policy. Standard error
+  is not part of the answer: a warning printed there beside the one policy
+  line does not make the answer unusable, and its text is not shown.
 - **Plan** compares that line with `policy` exactly (subpolicy order
   included). If they differ, plan checks that the base exists as
   `<BASE>.pol` and every subpolicy as `modules/<SUB>.pmod` under
@@ -148,6 +164,10 @@ not been measured on a real RHEL-family host yet:
   when not root;
 - which subpolicy modules each release ships (for example `NO-CAMELLIA` and
   `OSPP` are not present on every release; a missing one stops the plan);
+- what the vendor's `OSPP` module does exactly (whether it only removes
+  algorithms), and which definition `update-crypto-policies` uses when a
+  policy or module of the same name exists both in the vendor tree and
+  under `/etc/crypto-policies/policies`;
 - how long `--set` takes, and its effect on new SSH connections.
 
 ## Examples

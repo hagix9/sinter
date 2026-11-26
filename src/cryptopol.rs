@@ -25,9 +25,19 @@ pub const POLICY_DIRS: [&str; 2] = [
 
 /// Subpolicies accepted without `allow_weaker`: vendor modules that only
 /// remove algorithms. Everything else (for example `SHA1`, `AD-SUPPORT`,
-/// `NO-ENFORCE-EMS`, a site-defined module) needs the explicit flag,
-/// because Sinter cannot tell whether it weakens the policy.
-pub const HARDENING_MODULES: &[&str] = &["NO-SHA1", "NO-CAMELLIA", "OSPP"];
+/// `NO-ENFORCE-EMS`, `OSPP`, a site-defined module) needs the explicit
+/// flag, because Sinter cannot tell whether it weakens the policy.
+pub const HARDENING_MODULES: &[&str] = &["NO-SHA1", "NO-CAMELLIA"];
+
+/// Vendor modules that restrict the policy in ways Sinter has not
+/// verified (`OSPP` may also assign whole algorithm lists). Adding one
+/// needs `allow_weaker` like any subpolicy outside [`HARDENING_MODULES`];
+/// removing one needs it too, since it may be a restriction that is lost.
+pub const RESTRICTING_MODULES: &[&str] = &["OSPP"];
+
+/// The local tree: a definition there with the name of a policy or module
+/// Sinter ranks by name makes that ranking meaningless.
+pub const LOCAL_POLICY_DIR: &str = "/etc/crypto-policies/policies";
 
 /// At most this many subpolicies.
 pub const MAX_SUBPOLICIES: usize = 8;
@@ -253,7 +263,51 @@ impl PolicySpec {
                 dropped
             ));
         }
+        if let Some(dropped) = current
+            .subs
+            .iter()
+            .find(|s| RESTRICTING_MODULES.contains(&s.as_str()) && !self.policy.subs.contains(s))
+        {
+            return Some(format!(
+                "the subpolicy {} is applied on the host and missing from the declared policy; Sinter cannot tell whether removing it weakens the policy, so it must be explicit (allow_weaker: true)",
+                dropped
+            ));
+        }
         None
+    }
+
+    /// The local definition files that would make the names this change
+    /// was judged by unreliable: `(what, path)` for the ranked base policy
+    /// of either side and for every declared module of
+    /// [`HARDENING_MODULES`]. If one of them exists, the name no longer says
+    /// what the policy does, and the change needs `allow_weaker: true`.
+    /// Empty when the flag is set.
+    pub fn local_redefinitions(&self, current: &Policy) -> Vec<(String, String)> {
+        if self.allow_weaker {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut bases = vec![&self.policy.base];
+        if current.base != self.policy.base {
+            bases.push(&current.base);
+        }
+        for b in bases {
+            if base_rank(b).is_some() {
+                out.push((
+                    format!("policy {}", b),
+                    format!("{}/{}.pol", LOCAL_POLICY_DIR, b),
+                ));
+            }
+        }
+        for s in &self.policy.subs {
+            if HARDENING_MODULES.contains(&s.as_str()) {
+                out.push((
+                    format!("subpolicy {}", s),
+                    format!("{}/modules/{}.pmod", LOCAL_POLICY_DIR, s),
+                ));
+            }
+        }
+        out
     }
 
     /// The definition files the declared policy needs: what it is (for the
@@ -374,10 +428,20 @@ mod tests {
             "DEFAULT",
             "FUTURE",
             "DEFAULT:NO-SHA1",
-            "FUTURE:NO-CAMELLIA:OSPP",
+            "FUTURE:NO-CAMELLIA:NO-SHA1",
             "SITE1",
         ] {
             assert!(PolicySpec::from_parts(ok, false).is_ok(), "{ok}");
+        }
+        // OSPP is a vendor module, but not one that only removes algorithms
+        // as far as Sinter has verified: it needs the flag like any other.
+        for p in ["FUTURE:OSPP", "FUTURE:NO-CAMELLIA:OSPP"] {
+            let e = PolicySpec::from_parts(p, false).unwrap_err();
+            assert!(
+                e.contains("subpolicy OSPP") && e.contains("allow_weaker: true"),
+                "{e}"
+            );
+            assert!(PolicySpec::from_parts(p, true).is_ok());
         }
         // FIPS is refused with and without the flag.
         for flag in [false, true] {
@@ -486,12 +550,35 @@ mod tests {
     }
 
     #[test]
+    fn names_sinter_ranks_must_not_be_defined_locally() {
+        let spec = |text: &str, flag: bool| PolicySpec::from_parts(text, flag).unwrap();
+        let paths = |s: &PolicySpec, cur: &str| -> Vec<String> {
+            s.local_redefinitions(&p(cur))
+                .into_iter()
+                .map(|x| x.1)
+                .collect()
+        };
+        assert_eq!(
+            paths(&spec("FUTURE:NO-SHA1", false), "DEFAULT:SITE-MODULE"),
+            [
+                "/etc/crypto-policies/policies/FUTURE.pol",
+                "/etc/crypto-policies/policies/DEFAULT.pol",
+                "/etc/crypto-policies/policies/modules/NO-SHA1.pmod",
+            ]
+        );
+        // A base Sinter does not rank is refused by the ordering rule, not
+        // by this one; with the flag nothing is checked.
+        assert!(paths(&spec("SITE1", false), "SITE1:X").is_empty());
+        assert_eq!(paths(&spec("DEFAULT", false), "DEFAULT:SHA1").len(), 1);
+        assert!(paths(&spec("FUTURE:NO-SHA1", true), "DEFAULT").is_empty());
+    }
+
+    #[test]
     fn removing_an_applied_hardening_subpolicy_must_be_explicit() {
         let spec = |text: &str, flag: bool| PolicySpec::from_parts(text, flag).unwrap();
         for (current, named) in [
             ("DEFAULT:NO-SHA1", "NO-SHA1"),
             ("DEFAULT:NO-CAMELLIA", "NO-CAMELLIA"),
-            ("DEFAULT:OSPP:NO-SHA1", "OSPP"),
             ("DEFAULT:SHA1:NO-SHA1", "NO-SHA1"),
         ] {
             let why = spec("DEFAULT", false).change_refusal(&p(current)).unwrap();
@@ -503,9 +590,20 @@ mod tests {
             assert!(spec("DEFAULT", true).change_refusal(&p(current)).is_none());
         }
         // Keeping one hardening module while dropping another still needs it.
-        assert!(spec("DEFAULT:NO-SHA1", false)
-            .change_refusal(&p("DEFAULT:NO-SHA1:OSPP"))
+        assert!(spec("DEFAULT:NO-CAMELLIA", false)
+            .change_refusal(&p("DEFAULT:NO-SHA1:NO-CAMELLIA"))
             .is_some());
+        // OSPP restricts in ways Sinter has not verified: removing it needs
+        // the flag too, with its own reason.
+        for current in ["DEFAULT:OSPP", "DEFAULT:NO-SHA1:OSPP"] {
+            let declared = current.trim_end_matches(":OSPP");
+            let why = spec(declared, false).change_refusal(&p(current)).unwrap();
+            assert!(
+                why.contains("subpolicy OSPP") && why.contains("cannot tell"),
+                "{why}"
+            );
+            assert!(spec(declared, true).change_refusal(&p(current)).is_none());
+        }
         // A module outside the hardening list may be removed without the
         // flag: the declared policy passed the static rules on its own.
         for current in [

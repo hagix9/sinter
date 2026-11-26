@@ -1,7 +1,9 @@
 //! Plan, apply and audit of `crypto_policy`.
 //!
 //! Observation is `update-crypto-policies --show` (read-only, fixed argv);
-//! only a clean exit with exactly one policy line is a state. The change is
+//! only a clean exit with exactly one policy line on standard output is a
+//! state. Standard error is not part of the answer: a warning there beside
+//! the one line is accepted (and never shown). The change is
 //! `update-crypto-policies --set <POLICY>`; its exit code never decides
 //! success: the policy is observed again and must equal the declared one.
 //! Nothing here restarts a service or reboots.
@@ -172,6 +174,31 @@ impl Engine {
         Ok(notes)
     }
 
+    /// A base policy or hardening module Sinter ranks by its name must not
+    /// be defined again in the local tree: whatever is at that path (a
+    /// file, a symlink, anything) makes the name unreliable, and the change
+    /// is refused unless `allow_weaker: true` is set. Read-only.
+    fn crypto_policy_local_redefinitions(
+        &mut self,
+        res: &FrozenResource,
+        spec: &PolicySpec,
+        current: &Policy,
+    ) -> Result<()> {
+        for (what, path) in spec.local_redefinitions(current) {
+            // Plan: a file resource planned earlier in this run that writes
+            // exactly this path defines it as surely as a file that exists.
+            let planned =
+                self.opts.mode == Mode::Plan && self.planned.paths.iter().any(|(p, _)| *p == path);
+            if planned || self.observe_stat(res, &path)?.kind != ObjKind::Absent {
+                return Err(SinterError::apply(format!(
+                    "{}: the {} is also defined locally ({}); Sinter knows only the vendor's definition of that name and cannot tell whether the change weakens the policy, so it must be explicit (allow_weaker: true)",
+                    res.id, what, path
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Audit: observe and compare, nothing else. Returns the drift
     /// dimensions (at most `policy`).
     pub(crate) fn crypto_policy_audit(
@@ -224,6 +251,8 @@ impl Engine {
         if let Some(why) = spec.change_refusal(&current) {
             return Err(hide(SinterError::apply(format!("{}: {}", res.id, why))));
         }
+        self.crypto_policy_local_redefinitions(res, &spec, &current)
+            .map_err(hide)?;
         let definition_notes = self.crypto_policy_definitions(res, &spec).map_err(hide)?;
         let diff = Diff {
             body: if sensitive {

@@ -46,6 +46,9 @@ pub enum FakeShow {
     Empty,
     /// Exit 0 with a diagnostic on standard error only.
     StderrOnly,
+    /// Exit 0 with the policy on standard output and a warning on standard
+    /// error.
+    WithWarning,
     /// Exit 0 with the policy, but the capture was truncated.
     Truncated,
     /// The completion cannot be established (a timeout).
@@ -252,6 +255,7 @@ pub(crate) fn update_crypto_policies(
                 FakeShow::ExtraLines => exited(0, &format!("{}note: synthetic\n", line), ""),
                 FakeShow::Empty => exited(0, "", ""),
                 FakeShow::StderrOnly => exited(0, "", "warning: synthetic\n"),
+                FakeShow::WithWarning => exited(0, &line, "warning: synthetic\n"),
                 FakeShow::Truncated => {
                     let mut out = exited(0, &line, "");
                     out.stdout_truncated = true;
