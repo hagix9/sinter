@@ -1527,6 +1527,14 @@ impl TargetFs {
         )
     }
 
+    /// The system-wide crypto policy the host reports (`crypto_policy`):
+    /// `update-crypto-policies --show` prints it and changes nothing.
+    /// Read-only, fixed argv without any recipe value; no mutation permit
+    /// is needed.
+    pub fn update_crypto_policies_show(&mut self) -> Result<Output> {
+        self.run_argv(crate::cryptopol::TOOL, &["--show".to_string()])
+    }
+
     /// Check one `OnCalendar` expression with the target's own systemd
     /// (`systemd_timer`, DESIGN §42.4). The expression was checked by Sinter
     /// first (printable ASCII, no leading `-`, no `\` or `%`), so it cannot

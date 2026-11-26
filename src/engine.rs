@@ -1073,6 +1073,7 @@ impl Engine {
             "nm_connection" => self.run_nm_connection(res, item),
             "dnf_repository" => self.run_dnf_repository(res, item),
             "dnf_module" => self.run_dnf_module(res, item),
+            "crypto_policy" => self.run_crypto_policy(res, item),
             "group" => self.run_group(res, item),
             "user" => self.run_user(res, item),
             "postgresql_role" => self.run_postgresql_role(res, item),
@@ -1102,6 +1103,7 @@ impl Engine {
                             | "systemd_timer"
                             | "nm_connection"
                             | "dnf_module"
+                            | "crypto_policy"
                     )
                     && !self.fs.runs_as_root()
                 {

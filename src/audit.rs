@@ -389,6 +389,7 @@ fn audit_resource(engine: &mut Engine, res: &FrozenResource) -> AuditResourceRes
         "nm_connection" => audit_nm_connection(engine, res, item.as_ref(), sensitive),
         "dnf_repository" => audit_dnf_repository(engine, res, item.as_ref(), sensitive),
         "dnf_module" => audit_dnf_module(engine, res, item.as_ref(), sensitive),
+        "crypto_policy" => audit_crypto_policy(engine, res, item.as_ref(), sensitive),
         "group" => audit_group(engine, res, item.as_ref(), sensitive),
         "user" => audit_user(engine, res, item.as_ref(), sensitive),
         "postgresql_role" => audit_postgresql_role(engine, res, item.as_ref(), sensitive),
@@ -1409,6 +1410,40 @@ fn audit_dnf_module(
         details,
         "module state matches the declared state",
     )
+}
+
+/// Audit a `crypto_policy`: the policy `update-crypto-policies --show`
+/// reports against the declared one. Only the configured system-wide policy
+/// is compared; nothing is claimed about running services. A host without
+/// the tool and every observation failure are errors, never drift.
+fn audit_crypto_policy(
+    engine: &mut Engine,
+    res: &FrozenResource,
+    item: Option<&EvalVal>,
+    sensitive: bool,
+) -> AuditResourceResult {
+    let drift = match obs_or_error(
+        res,
+        sensitive,
+        engine.crypto_policy_audit(res, item, sensitive),
+    ) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let details = drift
+        .into_iter()
+        .map(|(f, o, d)| AuditDriftDetail::new(&f, o, d, sensitive))
+        .collect();
+    let mut r = finish_drift(res, sensitive, details, "");
+    r.reason = Some(
+        if r.status == AuditResourceStatus::Compliant {
+            "the configured system-wide policy matches; running services are not checked (a service started before the last policy change may still use the previous policy)"
+        } else {
+            "only the configured system-wide policy is compared; running services are not checked"
+        }
+        .to_string(),
+    );
+    r
 }
 
 /// Audit a `systemd_timer` (DESIGN §42.5): the checks that would stop plan

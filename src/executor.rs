@@ -3927,6 +3927,17 @@ impl FakeExecutor {
                 self.sudo || self.target.uid == 0,
                 &req.args,
             ),
+            "update-crypto-policies"
+                if req.program == crate::cryptopol::TOOL
+                    && self.target.executables.contains(&req.program) =>
+            {
+                crate::fake_el::update_crypto_policies(
+                    &self.target.el,
+                    self.target.fs.as_ref(),
+                    self.sudo || self.target.uid == 0,
+                    &req.args,
+                )
+            }
             "dnf" | "apt-get" => self.run_manager(&prog, &req.args),
             "systemctl" => self.run_systemctl(&req.args),
             "ss" if self.target.manager.net.ss_program() == Some(req.program.as_str()) => {

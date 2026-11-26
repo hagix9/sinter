@@ -2,6 +2,8 @@ pub mod accounts;
 pub mod audit;
 pub mod backup;
 pub mod bundle;
+pub mod cryptopol;
+pub(crate) mod cryptopol_engine;
 pub mod diff;
 pub mod discover;
 pub mod dnf_repository;

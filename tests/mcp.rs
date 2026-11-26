@@ -615,6 +615,37 @@ fn dnf_module_is_refused_by_every_manifest_tool() {
 }
 
 #[test]
+fn crypto_policy_is_refused_by_every_manifest_tool() {
+    // `update-crypto-policies --show` is not confirmed read-only on real
+    // hosts; MCP does not offer the type (and stays read-only either way).
+    let mut m = Mcp::start();
+    init(&mut m);
+    let manifest = "version: 1\nresources:\n  - id: n\n    type: crypto_policy\n    with: { policy: FUTURE }\n";
+    let calls = [
+        ("sinter_validate_manifest", json!({"manifest": manifest})),
+        ("sinter_inspect_manifest", json!({"manifest": manifest})),
+        (
+            "sinter_plan",
+            json!({"manifest": manifest, "target": "rocky9"}),
+        ),
+        (
+            "sinter_plan_host",
+            json!({"manifest": manifest, "target": "web01"}),
+        ),
+        (
+            "sinter_audit_host",
+            json!({"manifest": manifest, "target": "web01"}),
+        ),
+    ];
+    for (i, (tool, args)) in calls.into_iter().enumerate() {
+        let (is_err, v) = Mcp::payload(&m.tool(10 + i as u64, tool, args));
+        assert!(is_err, "{tool} accepted a crypto_policy manifest: {v}");
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("crypto_policy"), "{tool}: {msg}");
+    }
+}
+
+#[test]
 fn dnf_repository_is_refused_by_every_manifest_tool() {
     // The repository file handling is not measured on real hosts; MCP does
     // not offer the type (and stays read-only either way).

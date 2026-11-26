@@ -1,12 +1,13 @@
 //! Scripted Red Hat family tools for the in-process fake target (test
-//! support): `dnf module enable|disable|reset` as DNF 4 persists it.
+//! support): `dnf module enable|disable|reset` as DNF 4 persists it, and
+//! `update-crypto-policies --show|--set` with one policy string.
 //!
 //! The model is deliberately small. It answers only the commands Sinter
 //! sends, refuses everything else with a non-zero exit so a test notices an
 //! unexpected command, and its texts and exit codes are NOT confirmed on a
 //! real host.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use crate::executor::{Completion, FakeTarget, Output};
@@ -29,6 +30,28 @@ pub enum FakeChange {
     IndeterminateAfterChange,
 }
 
+/// What one scripted `update-crypto-policies --show` answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FakeShow {
+    /// The current policy on one line.
+    #[default]
+    Normal,
+    /// Exit 1 with a diagnostic.
+    Fail,
+    /// Exit 0 with text that is not a policy.
+    Garbage,
+    /// Exit 0 with the policy and a second line.
+    ExtraLines,
+    /// Exit 0 with no output at all.
+    Empty,
+    /// Exit 0 with a diagnostic on standard error only.
+    StderrOnly,
+    /// Exit 0 with the policy, but the capture was truncated.
+    Truncated,
+    /// The completion cannot be established (a timeout).
+    Indeterminate,
+}
+
 /// The shared scripted state. Clones of a [`FakeTarget`] share it, so a test
 /// keeps a handle and reads what a run left behind.
 #[derive(Debug, Default)]
@@ -43,6 +66,17 @@ pub struct FakeEl {
     pub module_reset_removes_file: bool,
     /// Every `dnf module ...` argv received, in order.
     pub module_calls: Vec<Vec<String>>,
+    /// The system-wide crypto policy `update-crypto-policies` reports.
+    pub crypto_policy: String,
+    /// Answers of the next `--show` calls, in order; `Normal` once empty.
+    pub crypto_show: VecDeque<FakeShow>,
+    /// How `--set` behaves.
+    pub crypto_set: FakeChange,
+    /// Another administrator: right before the n-th (0-based) `--show`
+    /// call, the policy becomes this.
+    pub crypto_external_change: Option<(usize, String)>,
+    /// Every `update-crypto-policies` argv received, in order.
+    pub crypto_calls: Vec<Vec<String>>,
 }
 
 /// The handle type stored in [`FakeTarget`].
@@ -184,7 +218,148 @@ pub(crate) fn dnf_module(
     })
 }
 
+/// Serve `update-crypto-policies --show` and `--set <POLICY>`.
+pub(crate) fn update_crypto_policies(
+    el: &FakeElHandle,
+    fs: Option<&FakeFs>,
+    is_root: bool,
+    args: &[String],
+) -> Output {
+    let mut el = el.lock().unwrap_or_else(|e| e.into_inner());
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    match a.as_slice() {
+        ["--show"] => {
+            let nth = el
+                .crypto_calls
+                .iter()
+                .filter(|c| c.first().map(String::as_str) == Some("--show"))
+                .count();
+            el.crypto_calls.push(args.to_vec());
+            if let Some((when, policy)) = el.crypto_external_change.clone() {
+                if when == nth {
+                    el.crypto_policy = policy;
+                    el.crypto_external_change = None;
+                }
+            }
+            let line = format!("{}\n", el.crypto_policy);
+            match el.crypto_show.pop_front().unwrap_or_default() {
+                FakeShow::Normal => exited(0, &line, ""),
+                FakeShow::Fail => exited(1, "", "update-crypto-policies: injected failure\n"),
+                FakeShow::Garbage => exited(0, "Traceback (most recent call last):\n", ""),
+                FakeShow::ExtraLines => exited(0, &format!("{}note: synthetic\n", line), ""),
+                FakeShow::Empty => exited(0, "", ""),
+                FakeShow::StderrOnly => exited(0, "", "warning: synthetic\n"),
+                FakeShow::Truncated => {
+                    let mut out = exited(0, &line, "");
+                    out.stdout_truncated = true;
+                    out
+                }
+                FakeShow::Indeterminate => interrupted(Completion::Indeterminate {
+                    started: true,
+                    reason: "injected timeout".to_string(),
+                }),
+            }
+        }
+        ["--set", policy] => {
+            el.crypto_calls.push(args.to_vec());
+            if !is_root {
+                return exited(1, "", "You must be root to run update-crypto-policies.\n");
+            }
+            let Ok(parsed) = crate::cryptopol::Policy::parse(policy) else {
+                return exited(1, "", "fake update-crypto-policies: bad policy\n");
+            };
+            let defined = |file: String| {
+                fs.is_some_and(|fs| {
+                    crate::cryptopol::POLICY_DIRS
+                        .iter()
+                        .any(|d| fs.file_bytes(&format!("{}/{}", d, file)).is_some())
+                })
+            };
+            if !defined(format!("{}.pol", parsed.base))
+                || !parsed
+                    .subs
+                    .iter()
+                    .all(|s| defined(format!("modules/{}.pmod", s)))
+            {
+                return exited(
+                    1,
+                    "",
+                    "Unknown policy or subpolicy: the definition file was not found\n",
+                );
+            }
+            let mode = el.crypto_set;
+            let policy = policy.to_string();
+            scripted(mode, "update-crypto-policies", || {
+                el.crypto_policy = policy.clone();
+                exited(
+                    0,
+                    &format!(
+                        "Setting system policy to {}\nNote: System-wide crypto policies are applied on application start-up.\nIt is recommended to restart the system for the change of policies\nto fully take place.\n",
+                        policy
+                    ),
+                    "",
+                )
+            })
+        }
+        _ => {
+            el.crypto_calls.push(args.to_vec());
+            exited(2, "", "fake update-crypto-policies: unmodeled command\n")
+        }
+    }
+}
+
 impl FakeTarget {
+    /// A RHEL-family host with `update-crypto-policies`, the vendor policy
+    /// definitions (`DEFAULT`, `LEGACY`, `FUTURE`, `FIPS`, `EMPTY` and the
+    /// modules `NO-SHA1`, `SHA1`, `OSPP`, `AD-SUPPORT`, `AD-SUPPORT-LEGACY`,
+    /// `NO-ENFORCE-EMS`) and `current` as the applied policy. Needs
+    /// `with_fake_fs` first.
+    pub fn with_crypto_policies(mut self, current: &str) -> Self {
+        self.executables.insert(crate::cryptopol::TOOL.to_string());
+        self.el
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .crypto_policy = current.to_string();
+        let fs = self
+            .fs
+            .as_mut()
+            .expect("with_crypto_policies needs with_fake_fs first");
+        for dir in [
+            "/usr/share",
+            "/usr/share/crypto-policies",
+            "/usr/share/crypto-policies/policies",
+            "/usr/share/crypto-policies/policies/modules",
+            "/etc/crypto-policies",
+            "/etc/crypto-policies/policies",
+            "/etc/crypto-policies/policies/modules",
+        ] {
+            if !fs.nodes.contains_key(dir) {
+                fs.mkdir_node(dir, 0o755, 0, 0);
+            }
+        }
+        let vendor = crate::cryptopol::POLICY_DIRS[0];
+        for base in ["DEFAULT", "LEGACY", "FUTURE", "FIPS", "EMPTY"] {
+            let path = format!("{}/{}.pol", vendor, base);
+            if !fs.nodes.contains_key(&path) {
+                fs.put_file(&path, b"# synthetic policy\n", 0o644, 0, 0);
+            }
+        }
+        for module in [
+            "NO-SHA1",
+            "SHA1",
+            "OSPP",
+            "AD-SUPPORT",
+            "AD-SUPPORT-LEGACY",
+            "NO-ENFORCE-EMS",
+        ] {
+            let path = format!("{}/modules/{}.pmod", vendor, module);
+            if !fs.nodes.contains_key(&path) {
+                fs.put_file(&path, b"# synthetic module\n", 0o644, 0, 0);
+            }
+        }
+        self
+    }
+
     /// The scripted Red Hat family tools of this target (shared with every
     /// clone of it).
     pub fn el(&self) -> FakeElHandle {

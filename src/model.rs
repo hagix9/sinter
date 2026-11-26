@@ -1384,6 +1384,11 @@ fn validate_declaration_shape(
             }
             require_optional_static_string(&d.with, "stream", ctx, field_sensitive("stream"))?;
         }
+        "crypto_policy" => {
+            validate_with_fields(&d.with, crate::cryptopol::FIELDS, ctx)?;
+            crate::cryptopol::PolicySpec::check_literals(&d.with, ctx, field_sensitive("policy"))?;
+            require_static_string_field(&d.with, "policy", ctx, field_sensitive("policy"))?;
+        }
         "systemd_timer" => {
             validate_with_fields(&d.with, SYSTEMD_TIMER_FIELDS, ctx)?;
             require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
@@ -2581,6 +2586,40 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                                 )));
                             }
                         }
+                    }
+                }
+                "crypto_policy" => {
+                    let redact = field_sensitive("policy");
+                    let allow_weaker = staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(&r.with, crate::cryptopol::FIELDS, &resource_ctx)?;
+                        crate::cryptopol::PolicySpec::check_literals(
+                            &r.with,
+                            &resource_ctx,
+                            redact,
+                        )?;
+                        crate::cryptopol::PolicySpec::literal_allow_weaker(&r.with, &resource_ctx)
+                    })?;
+                    // `policy` is static: resolved here and held to the
+                    // rules against silent weakening before any target is
+                    // reached.
+                    staged_field(&mut stage, &tol, "policy", || {
+                        let policy =
+                            static_string(&r.with, "policy", &scope, &resource_ctx, true, redact)?;
+                        let mut resolved = BTreeMap::new();
+                        resolved.insert("policy".to_string(), Value::Str(policy));
+                        resolved.insert("allow_weaker".to_string(), Value::Bool(allow_weaker));
+                        crate::cryptopol::PolicySpec::from_values(&resolved, &resource_ctx, redact)
+                            .map(|_| ())
+                    })?;
+                    // One system-wide policy: one resource per recipe.
+                    if let Some(owner) = account_name_owner
+                        .insert(("crypto_policy".to_string(), String::new()), r.id.clone())
+                    {
+                        stage = Stage::ValueFree;
+                        return Err(SinterError::schema(format!(
+                            "conflicting ownership of the system-wide crypto policy by resources {} and {} (a recipe may hold one crypto_policy)",
+                            owner, r.id
+                        )));
                     }
                 }
                 "nm_connection" => {

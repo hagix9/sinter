@@ -418,6 +418,19 @@ fn check_mcp_manifest_authority(doc: &Document) -> Result<(), ToolError> {
                     .to_string(),
             });
         }
+        // `crypto_policy` runs `update-crypto-policies --show` on the
+        // target; until that is confirmed read-only on real hosts, MCP does
+        // not offer the type.
+        if r.type_ == "crypto_policy" {
+            return Err(ToolError {
+                category: "invalid_manifest",
+                kind: Some("schema"),
+                message: "MCP manifests may not use the crypto_policy resource type \
+                          yet — its update-crypto-policies observation is not \
+                          confirmed read-only on real hosts"
+                    .to_string(),
+            });
+        }
         if r.type_ == "systemd_timer" {
             return Err(ToolError {
                 category: "invalid_manifest",

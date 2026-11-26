@@ -153,6 +153,7 @@ pub const BUILTIN_RESOURCE_TYPES: &[&str] = &[
     "nm_connection",
     "dnf_repository",
     "dnf_module",
+    "crypto_policy",
     "postgresql_role",
     "user",
     "group",
