@@ -8273,13 +8273,15 @@ fn parents_hint(e: SinterError, parents: bool) -> SinterError {
     {
         return e;
     }
-    SinterError {
-        message: format!(
-            "{} (set parents: true on this directory to create its missing parent directories)",
-            e.message
-        ),
-        ..e
-    }
+    const HINT: &str =
+        " (set parents: true on this directory to create its missing parent directories)";
+    // Plan appends its own remark to the reason apply gives: the hint is
+    // part of that reason, so it goes before the remark.
+    let message = match e.message.find(" (plan: ") {
+        Some(at) => format!("{}{}{}", &e.message[..at], HINT, &e.message[at..]),
+        None => format!("{}{}", e.message, HINT),
+    };
+    SinterError { message, ..e }
 }
 
 pub(crate) fn unchanged_result(res: &FrozenResource, reason: &str) -> ResourceResult {
