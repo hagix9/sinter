@@ -1094,6 +1094,7 @@ impl Engine {
             "hostname" => self.run_hostname(res, item),
             "timezone" => self.run_timezone(res, item),
             "locale" => self.run_locale(res, item),
+            "kernel_module" => self.run_kernel_module(res, item),
             "tuned" => self.run_tuned(res, item),
             "group" => self.run_group(res, item),
             "user" => self.run_user(res, item),
@@ -1129,6 +1130,7 @@ impl Engine {
                             | "hostname"
                             | "timezone"
                             | "locale"
+                            | "kernel_module"
                             | "tuned"
                     )
                     && !self.fs.runs_as_root()

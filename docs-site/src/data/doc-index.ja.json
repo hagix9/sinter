@@ -46,6 +46,7 @@
     {"title": "tuned リソース", "path": "reference/resources/tuned", "description": "tuned リソース（未リリース）: 選択する TuneD プロファイル。", "keywords": "tuned tuned-adm profile recommend verify active_profile performance tuning"},
     {"title": "timezone リソース", "path": "reference/resources/timezone", "description": "timezone リソース（未リリース）: システムタイムゾーン。", "keywords": "timezone time zone timedatectl localtime zoneinfo tz"},
     {"title": "locale リソース", "path": "reference/resources/locale", "description": "locale リソース（未リリース）: システム既定ロケール（LANG と LC_*）。", "keywords": "locale localectl LANG LC_TIME locale.conf default locale language"},
+    {"title": "kernel_module リソース", "path": "reference/resources/kernel_module", "description": "kernel_module リソース（未リリース）: 今と起動時に読み込む、またはブラックリストに入れるカーネルモジュール。", "keywords": "kernel_module modprobe modules-load.d modprobe.d blacklist module load boot"},
     { "title": "group リソース", "path": "reference/resources/group", "description": "group リソース: ローカル Linux グループ。", "keywords": "group gid groupadd groupdel local linux" },
     { "title": "user リソース", "path": "reference/resources/user", "description": "user リソース: ローカル Linux ユーザー。", "keywords": "user uid shell home groups useradd userdel local linux password_hash chpasswd shadow" },
     { "title": "postgresql_role リソース", "path": "reference/resources/postgresql_role", "description": "postgresql_role リソース: ローカルの PostgreSQL サーバーのロール。", "keywords": "postgresql postgres ロール scram verifier パスワード シークレット psql pg_authid" },

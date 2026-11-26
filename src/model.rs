@@ -1411,6 +1411,11 @@ fn validate_declaration_shape(
             crate::locale::LocaleSpec::check_literals(&d.with, ctx, redact)?;
             require_optional_static_string(&d.with, "lang", ctx, field_sensitive("lang"))?;
         }
+        "kernel_module" => {
+            validate_with_fields(&d.with, crate::kmod::FIELDS, ctx)?;
+            crate::kmod::ModuleSpec::check_literals(&d.with, ctx)?;
+            require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
+        }
         "sysctl" => {
             validate_with_fields(&d.with, crate::sysctl::FIELDS, ctx)?;
             crate::sysctl::SysctlSpec::check_literals(&d.with, ctx, field_sensitive("value"))?;
@@ -2797,6 +2802,63 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                                 peer,
                             };
                             return Err(SinterError::schema(message));
+                        }
+                    }
+                }
+                "kernel_module" => {
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(&r.with, crate::kmod::FIELDS, &resource_ctx)?;
+                        crate::kmod::ModuleSpec::check_literals(&r.with, &resource_ctx)
+                    })?;
+                    // `name` is static: it names the module and Sinter's
+                    // files before any target is reached. `-` and `_` are
+                    // the same module.
+                    let name = staged_field(&mut stage, &tol, "name", || {
+                        let name = static_string(
+                            &r.with,
+                            "name",
+                            &scope,
+                            &resource_ctx,
+                            true,
+                            field_sensitive("name"),
+                        )?;
+                        crate::kmod::ModuleSpec::check_name(&name, &resource_ctx)?;
+                        Ok(crate::kmod::normalize(&name))
+                    })?;
+                    if let Some(name) = name {
+                        // One resource per module.
+                        if let Some(owner) = account_name_owner
+                            .insert(("kernel_module".to_string(), name.clone()), r.id.clone())
+                        {
+                            if !ownership_may_depend_on_values(&tol, &peer_refs, "name", &owner) {
+                                stage = Stage::Ownership {
+                                    field: "name",
+                                    peer: owner.clone(),
+                                };
+                                return Err(SinterError::schema(format!(
+                                    "conflicting ownership of kernel module {} by resources {} and {}",
+                                    name, owner, r.id
+                                )));
+                            }
+                        }
+                        // Both of its files, whatever the state.
+                        let paths = crate::kmod::owned_paths(&name);
+                        if let Some((peer, message)) = owned::claim(
+                            &mut path_owner,
+                            &merge_owners,
+                            &paths,
+                            &r.id,
+                            "kernel_module",
+                        ) {
+                            if !ownership_may_depend_on_values(&tol, &peer_refs, "path", &peer)
+                                && !ownership_may_depend_on_values(&tol, &peer_refs, "name", &peer)
+                            {
+                                stage = Stage::Ownership {
+                                    field: "path",
+                                    peer,
+                                };
+                                return Err(SinterError::schema(message));
+                            }
                         }
                     }
                 }

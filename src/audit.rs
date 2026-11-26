@@ -394,6 +394,7 @@ fn audit_resource(engine: &mut Engine, res: &FrozenResource) -> AuditResourceRes
         "hostname" => audit_hostname(engine, res, item.as_ref(), sensitive),
         "timezone" => audit_timezone(engine, res, item.as_ref(), sensitive),
         "locale" => audit_locale(engine, res, item.as_ref(), sensitive),
+        "kernel_module" => audit_kernel_module(engine, res, item.as_ref(), sensitive),
         "tuned" => audit_tuned(engine, res, item.as_ref(), sensitive),
         "group" => audit_group(engine, res, item.as_ref(), sensitive),
         "user" => audit_user(engine, res, item.as_ref(), sensitive),
@@ -1596,6 +1597,59 @@ fn audit_locale(
         sensitive,
         details,
         "the declared default locale settings match; sessions and services started before the last change may still use the previous locale",
+    )
+}
+
+/// Audit a `kernel_module`: Sinter's boot-time file (dimension
+/// `persistent`) and blacklist file (`blacklist`) as `file`s, each only when
+/// the declared state manages it, and whether the module is loaded
+/// (`loaded`, with `present` and `runtime`). Every observation failure is
+/// an error, never drift. Other files in the two directories and the
+/// kernel command line are not evaluated.
+fn audit_kernel_module(
+    engine: &mut Engine,
+    res: &FrozenResource,
+    item: Option<&EvalVal>,
+    sensitive: bool,
+) -> AuditResourceResult {
+    let found = match obs_or_error(res, sensitive, engine.kmod_audit(res, item)) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let mut details = Vec::new();
+    for (dimension, file) in [
+        ("persistent", found.load_file),
+        ("blacklist", found.blacklist_file),
+    ] {
+        let Some(file) = file else { continue };
+        let p = audit_file(engine, &file, None, sensitive);
+        match p.status {
+            AuditResourceStatus::Compliant => {}
+            AuditResourceStatus::Drift => details.extend(p.details.into_iter().map(|d| {
+                AuditDriftDetail::new(
+                    dimension,
+                    format!("{}: {}", d.dimension, d.observed),
+                    format!("{}: {}", d.dimension, d.desired),
+                    sensitive,
+                )
+            })),
+            _ => {
+                let mut r = AuditResourceResult::base(res, p.status, sensitive);
+                r.reason = p.reason;
+                return r;
+            }
+        }
+    }
+    if let Some((observed, desired)) = found.loaded {
+        details.push(AuditDriftDetail::new(
+            "loaded", observed, desired, sensitive,
+        ));
+    }
+    finish_drift(
+        res,
+        sensitive,
+        details,
+        "matches the declared state; other files in /etc/modules-load.d and /etc/modprobe.d and the kernel command line are not evaluated",
     )
 }
 

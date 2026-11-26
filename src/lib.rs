@@ -32,6 +32,8 @@ pub mod inifile;
 pub mod inventory;
 pub mod inventory_detect;
 pub mod ir;
+pub mod kmod;
+pub(crate) mod kmod_engine;
 pub mod locale;
 pub(crate) mod locale_engine;
 pub mod manager;

@@ -158,6 +158,7 @@ pub const BUILTIN_RESOURCE_TYPES: &[&str] = &[
     "hostname",
     "timezone",
     "locale",
+    "kernel_module",
     "tuned",
     "postgresql_role",
     "user",

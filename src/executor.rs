@@ -3971,6 +3971,17 @@ impl FakeExecutor {
                     &req.args,
                 )
             }
+            "modprobe"
+                if req.program == crate::kmod::TOOL
+                    && self.target.executables.contains(&req.program) =>
+            {
+                crate::fake_osbase::modprobe(
+                    &self.target.el,
+                    self.target.fs.as_mut(),
+                    self.sudo || self.target.uid == 0,
+                    &req.args,
+                )
+            }
             "localectl"
                 if req.program == crate::locale::TOOL
                     && self.target.executables.contains(&req.program) =>

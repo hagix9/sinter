@@ -1579,6 +1579,20 @@ impl TargetFs {
         self.run_argv(crate::locale::LIST_TOOL, &["-a".to_string()])
     }
 
+    /// Whether `modprobe` could load a kernel module (`kernel_module`):
+    /// `modprobe -n -v -- <name>` is modprobe's documented dry run. Fixed
+    /// argv; `name` passed the module name grammar (letters, digits, `_`,
+    /// `-`) and follows `--`. No mutation permit is needed. That the dry run
+    /// changes nothing on every OS is NOT proven (DESIGN §62).
+    pub fn modprobe_dry_run(&mut self, name: &str) -> Result<Output> {
+        if !crate::kmod::valid_name(name) {
+            return Err(SinterError::apply(
+                "refusing to ask about a kernel module whose name is not in the accepted form",
+            ));
+        }
+        self.run_argv(crate::kmod::TOOL, &crate::kmod::dry_run_args(name))
+    }
+
     /// The profile TuneD recommends for the host (`tuned`):
     /// `tuned-adm recommend` prints it and changes nothing. Read-only, fixed
     /// argv without any recipe value; no mutation permit is needed.

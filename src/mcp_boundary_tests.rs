@@ -409,6 +409,7 @@ fn refused_manifests() -> Vec<(&'static str, String)> {
         ("tuned", r("tuned", "profile: balanced")),
         ("timezone", r("timezone", "name: Asia/Tokyo")),
         ("locale", r("locale", "lang: en_US.UTF-8")),
+        ("kernel_module", r("kernel_module", "name: dummy")),
         ("malformed", "version: 1\nresources: [\n".to_string()),
         ("not a mapping", "- just\n- a list\n".to_string()),
     ]
@@ -444,6 +445,7 @@ fn refused_manifests_never_reach_the_host() {
                 "tuned" => "tuned",
                 "timezone" => "timezone",
                 "locale" => "locale",
+                "kernel_module" => "kernel_module",
                 _ => "",
             };
             assert!(

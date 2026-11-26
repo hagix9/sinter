@@ -1,14 +1,16 @@
 //! Scripted OS base-setting tools for the in-process fake target (test
 //! support): `timedatectl set-timezone`, over the link `/etc/localtime` on
 //! the scripted filesystem; `localectl set-locale` over the locale file on
-//! the scripted filesystem and `locale -a` over a list.
+//! the scripted filesystem and `locale -a` over a list; `modprobe -n -v`
+//! and `modprobe` over a set of available modules and the directories
+//! `/sys/module/<name>` on the scripted filesystem.
 //!
 //! The model is deliberately small. It answers only the commands Sinter
 //! sends, refuses everything else with a non-zero exit so a test notices an
 //! unexpected command, and its texts and exit codes are NOT confirmed on a
 //! real host.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::executor::{Completion, FakeTarget, Output};
 use crate::fake_el::{FakeChange, FakeElHandle};
@@ -44,6 +46,15 @@ pub struct FakeOsBase {
     pub localectl_calls: Vec<Vec<String>>,
     /// Every `locale` argv received, in order.
     pub locale_calls: Vec<Vec<String>>,
+    /// Modules `modprobe` can load (normalized names).
+    pub modules: BTreeSet<String>,
+    /// How `modprobe -- <name>` behaves.
+    pub module_load: FakeChange,
+    /// Answers of the next `modprobe -n -v` calls, in order; `Normal`
+    /// once empty.
+    pub module_dry_reads: VecDeque<FakeRead>,
+    /// Every `modprobe` argv received, in order.
+    pub modprobe_calls: Vec<Vec<String>>,
 }
 
 pub(crate) fn exited(code: i32, stdout: &str, stderr: &str) -> Output {
@@ -234,6 +245,75 @@ pub(crate) fn localectl(
     })
 }
 
+/// Serve `modprobe -n -v -- <name>` (a dry run) and `modprobe -- <name>`
+/// (the load: `/sys/module/<name>` appears).
+pub(crate) fn modprobe(
+    el: &FakeElHandle,
+    fs: Option<&mut FakeFs>,
+    is_root: bool,
+    args: &[String],
+) -> Output {
+    const DIR: &str = "/lib/modules/6.0.0-synthetic";
+    let mut el = el.lock().unwrap_or_else(|e| e.into_inner());
+    let st = &mut el.osbase;
+    st.modprobe_calls.push(args.to_vec());
+    let Some(fs) = fs else {
+        return exited(1, "", "fake modprobe: no modeled filesystem\n");
+    };
+    let not_found = |name: &str| {
+        exited(
+            1,
+            "",
+            &format!(
+                "modprobe: FATAL: Module {} not found in directory {}\n",
+                name, DIR
+            ),
+        )
+    };
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    match a.as_slice() {
+        ["-n", "-v", "--", name] => {
+            let mode = st.module_dry_reads.pop_front().unwrap_or_default();
+            if mode != FakeRead::Normal {
+                return read(mode, "modprobe", "synthetic\n");
+            }
+            let norm = crate::kmod::normalize(name);
+            if !st.modules.contains(&norm) {
+                return not_found(name);
+            }
+            exited(
+                0,
+                &format!("insmod {}/kernel/synthetic/{}.ko.xz \n", DIR, norm),
+                "",
+            )
+        }
+        ["--", name] => {
+            let norm = crate::kmod::normalize(name);
+            if !st.modules.contains(&norm) {
+                return not_found(name);
+            }
+            if !is_root {
+                return exited(
+                    1,
+                    "",
+                    &format!(
+                        "modprobe: ERROR: could not insert '{}': Operation not permitted\n",
+                        norm
+                    ),
+                );
+            }
+            scripted(st.module_load, "modprobe", || {
+                let path = crate::kmod::sys_path(&norm);
+                if !fs.nodes.contains_key(&path) {
+                    fs.mkdir_node(&path, 0o755, 0, 0);
+                }
+                exited(0, "", "")
+            })
+        }
+        _ => exited(2, "", "fake modprobe: unmodeled command\n"),
+    }
+}
+
 /// Create `path` and its missing parents as root-owned 0755 directories.
 fn mkdirs(fs: &mut FakeFs, path: &str) {
     let mut cur = String::new();
@@ -247,6 +327,36 @@ fn mkdirs(fs: &mut FakeFs, path: &str) {
 }
 
 impl FakeTarget {
+    /// A host with `/usr/sbin/modprobe` that can load `available`, the
+    /// directories `/etc/modules-load.d`, `/etc/modprobe.d` and
+    /// `/sys/module`, and `loaded` loaded (`/sys/module/<name>`). Needs
+    /// `with_fake_fs` first.
+    pub fn with_modules(mut self, available: &[&str], loaded: &[&str]) -> Self {
+        self.executables.insert(crate::kmod::TOOL.to_string());
+        {
+            let mut el = self.el.lock().unwrap_or_else(|e| e.into_inner());
+            el.osbase.modules = available
+                .iter()
+                .map(|m| crate::kmod::normalize(m))
+                .collect();
+        }
+        let fs = self
+            .fs
+            .as_mut()
+            .expect("with_modules needs with_fake_fs first");
+        for dir in [
+            crate::kmod::LOAD_DIR,
+            crate::kmod::BLACKLIST_DIR,
+            crate::kmod::SYS_MODULE,
+        ] {
+            mkdirs(fs, dir);
+        }
+        for m in loaded {
+            mkdirs(fs, &crate::kmod::sys_path(&crate::kmod::normalize(m)));
+        }
+        self
+    }
+
     /// A host with `/usr/bin/localectl` and `/usr/bin/locale`, these
     /// locales in `locale -a`, and the locale file of the target's OS
     /// family (`/etc/default/locale` for Ubuntu, `/etc/locale.conf`
