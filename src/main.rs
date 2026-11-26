@@ -4832,6 +4832,141 @@ mod tests {
         assert_eq!(code.unwrap(), 7);
     }
 
+    // ---- Declared backups in a partial run of a bundle (DESIGN §49.6) -----
+
+    const BK_WEB: &str = "version: 1\ntargets:\n  groups: [web]\nbackup:\n  paths: [/etc/perf/a, /etc/perf/b]\nresources:\n  - id: a\n    type: file\n    with: { path: /etc/perf/a, content: a }\n  - id: b\n    type: file\n    with: { path: /etc/perf/b, content: b }\n";
+    const BK_APP: &str = "version: 1\ntargets:\n  groups: [web]\nbackup:\n  paths: [/etc/perf/c, /etc/perf/d]\nresources:\n  - id: c\n    type: file\n    with: { path: /etc/perf/c, content: c }\n  - id: d\n    type: file\n    with: { path: /etc/perf/d, content: d }\n";
+
+    /// A root host with the default backup store's parents.
+    fn bk_host() -> FakeTarget {
+        FakeTarget::rocky9()
+            .with_fake_fs()
+            .as_root()
+            .with_fs_dir("/etc")
+            .with_fs_dir("/etc/perf")
+            .with_fs_dir("/var")
+            .with_fs_dir("/var/lib")
+    }
+
+    #[test]
+    fn each_recipe_and_host_of_a_bundle_takes_only_the_backups_its_run_needs() {
+        let dir = fixture();
+        let inv = inventory(&dir);
+        write(&dir, "web.yaml", BK_WEB);
+        write(&dir, "app.yaml", BK_APP);
+        let bundle = write(
+            &dir,
+            "site.yaml",
+            "version: 1\nrecipes: [web.yaml, app.yaml]\n",
+        );
+        for phase in [Phase::Plan, Phase::Apply] {
+            EXECUTED_MODELS.with(|m| m.borrow_mut().clear());
+            let w = wiring(ProgressMode::Disabled);
+            let code = drive(
+                phase,
+                &[
+                    &bundle,
+                    "--inventory",
+                    &inv,
+                    "--no-ssh-config",
+                    "--format",
+                    "json",
+                    "--sudo",
+                    "--skip-resource",
+                    "web/b",
+                    "--skip-resource",
+                    "app/c",
+                ],
+                &w,
+                vec![bk_host(), bk_host(), bk_host(), bk_host()],
+            );
+            assert_eq!(code.unwrap(), 0, "{phase:?}");
+            let seen: Vec<(Vec<String>, Vec<String>)> = EXECUTED_MODELS.with(|m| {
+                m.borrow()
+                    .iter()
+                    .map(|m| (m.backups.clone(), m.backups_skipped.clone()))
+                    .collect()
+            });
+            // web on web01 and web02, then app on web01 and web02: the same
+            // choice for both hosts of a recipe, a different one per recipe.
+            let web = (
+                vec!["/etc/perf/a".to_string()],
+                vec!["/etc/perf/b".to_string()],
+            );
+            let app = (
+                vec!["/etc/perf/d".to_string()],
+                vec!["/etc/perf/c".to_string()],
+            );
+            assert_eq!(seen, [web.clone(), web, app.clone(), app], "{phase:?}");
+        }
+    }
+
+    #[test]
+    fn a_skipped_recipe_of_a_bundle_takes_no_backup_and_the_other_takes_all_of_its_own() {
+        let dir = fixture();
+        let inv = inventory(&dir);
+        write(&dir, "web.yaml", BK_WEB);
+        write(&dir, "app.yaml", BK_APP);
+        let bundle = write(
+            &dir,
+            "site.yaml",
+            "version: 1\nrecipes: [web.yaml, app.yaml]\n",
+        );
+        EXECUTED_MODELS.with(|m| m.borrow_mut().clear());
+        let w = wiring(ProgressMode::Disabled);
+        let code = drive(
+            Phase::Apply,
+            &[
+                &bundle,
+                "--inventory",
+                &inv,
+                "--no-ssh-config",
+                "--format",
+                "json",
+                "--sudo",
+                "--skip-recipe",
+                "web",
+            ],
+            &w,
+            vec![bk_host(), bk_host()],
+        );
+        assert_eq!(code.unwrap(), 0);
+        let seen: Vec<(Vec<String>, Vec<String>)> = EXECUTED_MODELS.with(|m| {
+            m.borrow()
+                .iter()
+                .map(|m| (m.backups.clone(), m.backups_skipped.clone()))
+                .collect()
+        });
+        // Only app ran, on both hosts, with both of its backups.
+        let app = (
+            vec!["/etc/perf/c".to_string(), "/etc/perf/d".to_string()],
+            Vec::new(),
+        );
+        assert_eq!(seen, [app.clone(), app]);
+    }
+
+    #[test]
+    fn the_backup_record_of_an_execution_lists_taken_and_skipped_paths() {
+        let mut m = Model::unfrozen_stub(None);
+        m.backups = vec!["/etc/perf/a".into()];
+        m.backups_skipped = vec!["/etc/perf/b".into()];
+        let view = BackupView::of(&m);
+        // An execution that was not run: the path it would back up is
+        // not_run, the one the partial run leaves out is skipped.
+        let v = backup_record(Phase::Apply, &view, None);
+        let entries = v["entries"].as_array().unwrap();
+        assert_eq!(entries[0]["status"], "not_run");
+        assert!(entries[0].get("reason").is_none());
+        assert_eq!(entries[1]["path"], "/etc/perf/b");
+        assert_eq!(entries[1]["status"], "skipped");
+        assert_eq!(entries[1]["reason"], "SKIPPED_BY_USER");
+        // Audit reports no backup at all.
+        assert!(backup_record(Phase::Audit, &view, None).is_null());
+        // Nothing declared, nothing skipped: no backup object.
+        let none = BackupView::of(&Model::unfrozen_stub(None));
+        assert!(backup_record(Phase::Apply, &none, None).is_null());
+    }
+
     #[test]
     fn strict_audit_multi_host_aggregates_policy_failure() {
         let dir = fixture();

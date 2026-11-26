@@ -2134,7 +2134,9 @@ impl Engine {
                             self.planned.paths.push((first.clone(), res.id.clone()));
                             note
                         }
-                        None => self.plan_parent_check(res, &path)?,
+                        None => self
+                            .plan_parent_check(res, &path)
+                            .map_err(|e| parents_hint(e, parents))?,
                     };
                     let explicit = meta.manage_owner.then_some(meta.owner_uid).flatten();
                     if let Some(e) = self.fs.tree_owner_conflict(&path, explicit, None) {
@@ -2188,7 +2190,9 @@ impl Engine {
                 }
                 let parents_made = !created.is_empty();
                 let leaf_checks = (|| {
-                    self.fs.check_trusted_parents(&path)?;
+                    self.fs
+                        .check_trusted_parents(&path)
+                        .map_err(|e| parents_hint(e, parents))?;
                     let explicit = meta.manage_owner.then_some(meta.owner_uid).flatten();
                     if let Some(e) = self.fs.tree_owner_conflict(&path, explicit, None) {
                         return Err(e);
@@ -8258,6 +8262,24 @@ pub(crate) struct ServiceObs {
     /// `NeedDaemonReload` as the manager reported it. `false` is a limited
     /// observation, not proof that the loaded definition matches the disk.
     pub(crate) need_daemon_reload: bool,
+}
+
+/// A `directory` refused because a parent is missing says how to have it
+/// created (DESIGN §49.3). Nothing else about the error changes.
+fn parents_hint(e: SinterError, parents: bool) -> SinterError {
+    if parents
+        || !(e.message.contains("does not exist") || e.message.contains("may be missing"))
+        || e.message.contains("parents: true")
+    {
+        return e;
+    }
+    SinterError {
+        message: format!(
+            "{} (set parents: true on this directory to create its missing parent directories)",
+            e.message
+        ),
+        ..e
+    }
 }
 
 pub(crate) fn unchanged_result(res: &FrozenResource, reason: &str) -> ResourceResult {

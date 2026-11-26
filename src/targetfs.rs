@@ -3265,7 +3265,7 @@ pub(crate) fn interpret_stat_batch(out: &Output, path: &str, dirs: &[String]) ->
         Completion::Exited(0) => {}
         Completion::Exited(c) => {
             return Err(SinterError::apply(format!(
-                "cannot inspect {}: stat exited with status {} (a parent directory may be missing or inaccessible; a directory resource with parents: true creates missing parent directories)",
+                "cannot inspect {}: stat exited with status {} (a parent directory may be missing or inaccessible)",
                 what, c
             )))
         }
