@@ -235,6 +235,10 @@ impl ModuleSpec {
         f.depends_on = Vec::new();
         f.when = None;
         f.register = None;
+        // As for sysctl and systemd_timer: the file part decides redaction by
+        // `sensitive` alone, so carry what a sensitive variable gives the
+        // declaring resource.
+        f.sensitive = res.sensitive || res.derived_sensitive;
         f.path = Some(path.clone());
         let mut with = BTreeMap::new();
         with.insert("path".to_string(), Value::Str(path));
