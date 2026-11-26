@@ -2224,6 +2224,14 @@ impl Engine {
                     if let Some(e) = self.fs.shared_owner_conflict(subject, owner) {
                         return Err(e);
                     }
+                    // The declared directory lies in the same account tree as
+                    // the first created parent: who may own an entry there is
+                    // known already, and apply refuses the same owner.
+                    if !missing.is_empty() {
+                        if let Some(e) = self.fs.tree_owner_conflict(&path, explicit, None) {
+                            return Err(e);
+                        }
+                    }
                     let mut r = changed_result(res);
                     r.diff = Some(Diff {
                         body: DiffBody::Summary {
@@ -2247,6 +2255,20 @@ impl Engine {
                 // failure that reports the change.
                 let mut created: Vec<String> = Vec::new();
                 if parents {
+                    // Before anything is created: an owner the account tree of
+                    // the first missing parent does not allow for the declared
+                    // directory is refused now, so a refusal never leaves
+                    // created parents behind (the check plan makes).
+                    let missing = self.missing_parents(res, &path)?;
+                    if let Some(first) = missing.first() {
+                        self.fs
+                            .check_trusted_parents_observed(first)
+                            .map_err(|e| parents_hint(e, parents))?;
+                        let explicit = meta.manage_owner.then_some(meta.owner_uid).flatten();
+                        if let Some(e) = self.fs.tree_owner_conflict(&path, explicit, None) {
+                            return Err(e);
+                        }
+                    }
                     if let Err(e) = self.create_parents(res, &path, &mut created) {
                         if created.is_empty() {
                             return Err(e);

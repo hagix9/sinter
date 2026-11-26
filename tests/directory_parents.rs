@@ -329,3 +329,53 @@ fn a_created_parent_is_made_private_first_and_never_with_the_umask_mode() {
         "{parents:?}"
     );
 }
+
+#[test]
+fn in_another_accounts_tree_an_owner_it_cannot_have_is_refused_before_anything_is_created() {
+    // /home/app belongs to uid 1500; Sinter works there as that account, so
+    // an entry owned by another uid is refused. With missing parents, plan
+    // and apply must both refuse, and apply must create nothing.
+    let t = || {
+        let mut t =
+            host()
+                .with_group("bob", 1600)
+                .with_user("bob", 1600, 1600, "/home/bob", "/bin/sh");
+        let fs = t.fs.as_mut().unwrap();
+        fs.mkdir_node("/home", 0o755, 0, 0);
+        fs.mkdir_node("/home/app", 0o755, 1500, 1500);
+        t
+    };
+    let body = DEEP
+        .replace("/srv/app/var/data", "/home/app/x/y")
+        .replace("owner: app", "owner: bob")
+        .replace("group: app", "group: bob");
+    let p = recipe("dp-tree-other", &body);
+    assert!(
+        try_run_recipe_fake(&p, Mode::Plan, true, t()).is_err(),
+        "plan refuses"
+    );
+    match try_run_recipe_fake(&p, Mode::Apply, true, t()) {
+        Err(_) => {}
+        Ok(r) => {
+            assert_ne!(r.status, AggregateStatus::Success);
+            assert_eq!(find(&r, "data").change, Change::None);
+            assert!(!r
+                .fake_fs
+                .as_ref()
+                .unwrap()
+                .nodes
+                .contains_key("/home/app/x"));
+        }
+    }
+    // The tree's own account is accepted by both, as before.
+    let own = DEEP.replace("/srv/app/var/data", "/home/app/x/y");
+    let p = recipe("dp-tree-own", &own);
+    assert_eq!(
+        run_recipe_fake(&p, Mode::Plan, true, t()).status,
+        AggregateStatus::Success
+    );
+    assert_eq!(
+        run_recipe_fake(&p, Mode::Apply, true, t()).status,
+        AggregateStatus::Success
+    );
+}
