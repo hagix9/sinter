@@ -157,6 +157,7 @@ pub const BUILTIN_RESOURCE_TYPES: &[&str] = &[
     "sysctl",
     "hostname",
     "timezone",
+    "locale",
     "tuned",
     "postgresql_role",
     "user",

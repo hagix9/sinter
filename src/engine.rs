@@ -1093,6 +1093,7 @@ impl Engine {
             "sysctl" => self.run_sysctl(res, item),
             "hostname" => self.run_hostname(res, item),
             "timezone" => self.run_timezone(res, item),
+            "locale" => self.run_locale(res, item),
             "tuned" => self.run_tuned(res, item),
             "group" => self.run_group(res, item),
             "user" => self.run_user(res, item),
@@ -1127,6 +1128,7 @@ impl Engine {
                             | "sysctl"
                             | "hostname"
                             | "timezone"
+                            | "locale"
                             | "tuned"
                     )
                     && !self.fs.runs_as_root()

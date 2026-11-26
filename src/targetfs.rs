@@ -1572,6 +1572,13 @@ impl TargetFs {
         self.run_argv(crate::hostname::TOOL, &[which.flag().to_string()])
     }
 
+    /// The locales the host has (`locale`): `locale -a` lists them and
+    /// changes nothing. Read-only, fixed argv without any recipe value; no
+    /// mutation permit is needed.
+    pub fn locale_list(&mut self) -> Result<Output> {
+        self.run_argv(crate::locale::LIST_TOOL, &["-a".to_string()])
+    }
+
     /// The profile TuneD recommends for the host (`tuned`):
     /// `tuned-adm recommend` prints it and changes nothing. Read-only, fixed
     /// argv without any recipe value; no mutation permit is needed.

@@ -465,6 +465,17 @@ fn check_mcp_manifest_authority(doc: &Document) -> Result<(), ToolError> {
                     .to_string(),
             });
         }
+        // `locale` reads the locale file and runs `locale -a`; until that
+        // is measured on every supported OS, MCP does not offer the type.
+        if r.type_ == "locale" {
+            return Err(ToolError {
+                category: "invalid_manifest",
+                kind: Some("schema"),
+                message: "MCP manifests may not use the locale resource type yet — \
+                          its observation is not measured on every supported OS"
+                    .to_string(),
+            });
+        }
         // `tuned` reads TuneD's state and runs `tuned-adm`; no form of it
         // is measured on real hosts, so MCP does not offer the type.
         if r.type_ == "tuned" {

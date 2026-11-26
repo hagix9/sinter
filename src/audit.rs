@@ -393,6 +393,7 @@ fn audit_resource(engine: &mut Engine, res: &FrozenResource) -> AuditResourceRes
         "sysctl" => audit_sysctl(engine, res, item.as_ref(), sensitive),
         "hostname" => audit_hostname(engine, res, item.as_ref(), sensitive),
         "timezone" => audit_timezone(engine, res, item.as_ref(), sensitive),
+        "locale" => audit_locale(engine, res, item.as_ref(), sensitive),
         "tuned" => audit_tuned(engine, res, item.as_ref(), sensitive),
         "group" => audit_group(engine, res, item.as_ref(), sensitive),
         "user" => audit_user(engine, res, item.as_ref(), sensitive),
@@ -1568,6 +1569,33 @@ fn audit_timezone(
         sensitive,
         details,
         "the system time zone matches; programs started before the last change may still use the previous zone",
+    )
+}
+
+/// Audit a `locale`: every declared key of the OS's locale file against
+/// its declared value (one dimension per key: `LANG`, `LC_TIME`, ...). Keys
+/// that are not declared are not compared. An unknown OS family, a file
+/// outside the closed grammar and every observation failure are errors,
+/// never drift.
+fn audit_locale(
+    engine: &mut Engine,
+    res: &FrozenResource,
+    item: Option<&EvalVal>,
+    sensitive: bool,
+) -> AuditResourceResult {
+    let drift = match obs_or_error(res, sensitive, engine.locale_audit(res, item, sensitive)) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let details = drift
+        .into_iter()
+        .map(|(k, o, d)| AuditDriftDetail::new(&k, o, d, sensitive))
+        .collect();
+    finish_drift(
+        res,
+        sensitive,
+        details,
+        "the declared default locale settings match; sessions and services started before the last change may still use the previous locale",
     )
 }
 

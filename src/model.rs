@@ -1405,6 +1405,12 @@ fn validate_declaration_shape(
             crate::timezone::check_literals(&d.with, ctx, field_sensitive("name"))?;
             require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
         }
+        "locale" => {
+            validate_with_fields(&d.with, crate::locale::FIELDS, ctx)?;
+            let redact = field_sensitive("lang") || field_sensitive("lc");
+            crate::locale::LocaleSpec::check_literals(&d.with, ctx, redact)?;
+            require_optional_static_string(&d.with, "lang", ctx, field_sensitive("lang"))?;
+        }
         "sysctl" => {
             validate_with_fields(&d.with, crate::sysctl::FIELDS, ctx)?;
             crate::sysctl::SysctlSpec::check_literals(&d.with, ctx, field_sensitive("value"))?;
@@ -2735,6 +2741,55 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                     let paths = [crate::timezone::LOCALTIME.to_string()];
                     if let Some((peer, message)) =
                         owned::claim(&mut path_owner, &merge_owners, &paths, &r.id, "timezone")
+                    {
+                        if !ownership_may_depend_on_values(&tol, &peer_refs, "path", &peer) {
+                            stage = Stage::Ownership {
+                                field: "path",
+                                peer,
+                            };
+                            return Err(SinterError::schema(message));
+                        }
+                    }
+                }
+                "locale" => {
+                    let redact = field_sensitive("lang") || field_sensitive("lc");
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(&r.with, crate::locale::FIELDS, &resource_ctx)?;
+                        crate::locale::LocaleSpec::check_literals(&r.with, &resource_ctx, redact)
+                    })?;
+                    // `lang` is static: resolved here and held to the locale
+                    // grammar before any target is reached (`lc` holds
+                    // literals, checked above).
+                    if !r.with.get("lang").is_none_or(Value::is_null) {
+                        staged_field(&mut stage, &tol, "lang", || {
+                            let lang = static_string(
+                                &r.with,
+                                "lang",
+                                &scope,
+                                &resource_ctx,
+                                true,
+                                redact,
+                            )?;
+                            let mut resolved = r.with.clone();
+                            resolved.insert("lang".to_string(), Value::Str(lang));
+                            crate::locale::LocaleSpec::from_values(&resolved, &resource_ctx, redact)
+                                .map(|_| ())
+                        })?;
+                    }
+                    // One system default: one resource per recipe.
+                    if let Some(owner) = account_name_owner
+                        .insert(("locale".to_string(), String::new()), r.id.clone())
+                    {
+                        stage = Stage::ValueFree;
+                        return Err(SinterError::schema(format!(
+                            "conflicting ownership of the system default locale by resources {} and {} (a recipe may hold one locale)",
+                            owner, r.id
+                        )));
+                    }
+                    // Both locale files, whatever the OS.
+                    let paths = crate::locale::owned_paths();
+                    if let Some((peer, message)) =
+                        owned::claim(&mut path_owner, &merge_owners, &paths, &r.id, "locale")
                     {
                         if !ownership_may_depend_on_values(&tol, &peer_refs, "path", &peer) {
                             stage = Stage::Ownership {

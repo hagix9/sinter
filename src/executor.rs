@@ -3971,6 +3971,23 @@ impl FakeExecutor {
                     &req.args,
                 )
             }
+            "localectl"
+                if req.program == crate::locale::TOOL
+                    && self.target.executables.contains(&req.program) =>
+            {
+                crate::fake_osbase::localectl(
+                    &self.target.el,
+                    self.target.fs.as_mut(),
+                    self.sudo || self.target.uid == 0,
+                    &req.args,
+                )
+            }
+            "locale"
+                if req.program == crate::locale::LIST_TOOL
+                    && self.target.executables.contains(&req.program) =>
+            {
+                crate::fake_osbase::locale(&self.target.el, &req.args)
+            }
             "hostnamectl"
                 if req.program == crate::hostname::TOOL
                     && self.target.executables.contains(&req.program) =>
