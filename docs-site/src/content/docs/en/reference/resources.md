@@ -3,7 +3,7 @@ title: Resource Reference
 description: All built-in Sinter resource types implemented in v1.15.0.
 ---
 
-Sinter v1.15.0 implements twelve built-in resource types (`postgresql_role` is new in v1.5.1; `systemd_timer` and `nm_connection` are new in v1.15.0). Seven more are added after v1.15.0 and are **not in a release yet**: `file_merge`, `dnf_repository`, `dnf_module`, `crypto_policy`, `sysctl`, `hostname` and `tuned`; [Resource Plugins](/en/reference/resource-plugins/) can add more. Parameters below are the
+Sinter v1.15.0 implements twelve built-in resource types (`postgresql_role` is new in v1.5.1; `systemd_timer` and `nm_connection` are new in v1.15.0). Ten more are added after v1.15.0 and are **not in a release yet**: `file_merge`, `dnf_repository`, `dnf_module`, `crypto_policy`, `sysctl`, `hostname`, `tuned`, `timezone`, `locale` and `kernel_module`; [Resource Plugins](/en/reference/resource-plugins/) can add more. Parameters below are the
 complete supported set — unknown `with` fields are schema errors.
 
 | Type | Purpose | Key parameters |
@@ -26,6 +26,9 @@ complete supported set — unknown `with` fields are schema errors.
 | [sysctl](/en/reference/resources/sysctl/) | One kernel parameter: running value and persistent setting (unreleased) | `name`, `value`, `state`, `runtime`, `persist` |
 | [hostname](/en/reference/resources/hostname/) | The static host name (unreleased) | `name` |
 | [tuned](/en/reference/resources/tuned/) | The selected TuneD profile (unreleased) | `profile` / `recommended` / `state: off`, `verify` |
+| [timezone](/en/reference/resources/timezone/) | The system time zone (unreleased) | `name` |
+| [locale](/en/reference/resources/locale/) | The system default locale (unreleased) | `lang`, `lc` |
+| [kernel_module](/en/reference/resources/kernel_module/) | A kernel module loaded now and at boot, or blacklisted (unreleased) | `name`, `state`, `runtime`, `persist` |
 | [postgresql_role](/en/reference/resources/postgresql_role/) | Role of a local PostgreSQL server (since v1.5.1) | `name`, `state`, `login`, `superuser`, …, `connection_limit`, `password_verifier` |
 
 ## Shared conventions

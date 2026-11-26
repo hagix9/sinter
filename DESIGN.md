@@ -4309,7 +4309,7 @@ An approved budget for disposable hosts of every supported OS in BIOS and UEFI v
 
 59. How the OS base-setting types relate to each other
 
-Types added after v1.15.0 (not released): `sysctl` (§54), `hostname` (§55), `tuned` (§57), `crypto_policy` (§53); in development at the time of writing: `timezone`, `locale`, `kernel_module` (their sections are added when they are integrated); designed only: `kernel_args`, `grub` (§58). One instance per host is checked within one recipe only: two recipes of a bundle that declare different values of a host-wide setting (`hostname`, `tuned`, `timezone`, `locale`, `crypto_policy`, the same `sysctl` key) are not detected and would switch it on every apply.
+Types added after v1.15.0 (not released): `sysctl` (§54), `hostname` (§55), `tuned` (§57), `crypto_policy` (§53); `timezone` (§60), `locale` (§61), `kernel_module` (§62); designed only: `kernel_args`, `grub` (§58). One instance per host is checked within one recipe only: two recipes of a bundle that declare different values of a host-wide setting (`hostname`, `tuned`, `timezone`, `locale`, `crypto_policy`, the same `sysctl` key) are not detected and would switch it on every apply.
 
 - One owner per setting. Each type owns either a whole file of its own (`sysctl`: `/etc/sysctl.d/90-sinter-<name>.conf`; `kernel_module`: its files in `/etc/modules-load.d` and `/etc/modprobe.d`) or one named setting behind the OS's own tool (`hostname`, `timezone`, `locale`, `crypto_policy`, `tuned`). A `file`, `template` or `file_merge` on a path a type owns in the same recipe is a load-time error. Sinter never edits files it does not own to make its value win.
 - `sysctl` and other sysctl files: Sinter observes the boot-time order (`systemd-analyze cat-config sysctl.d`, §54.4a) and reports when another file sets the key after its own; audit reports the value the files give at boot as the dimension `boot`; it never re-applies unrelated settings (`sysctl --system` is not run).
@@ -4320,3 +4320,240 @@ Types added after v1.15.0 (not released): `sysctl` (§54), `hostname` (§55), `t
 - Packages and services first: a type whose tool or data a package provides (`tuned`, `locale`, `timezone`, `crypto_policy`) defers in plan only under the existing rule (an earlier planned change may provide it), inside a recipe and across the recipes of a bundle (§49.1). No type installs a package, starts a service or reboots.
 - Partial runs: every one of these types is "not path-only" for §49.6, so with one of them running every declared backup is kept, unless the backup is declared for other resources.
 - Persistent versus running: `sysctl` (`runtime`, `persist`, and the boot-time value), `kernel_module` (file and loaded), `tuned` (selected and applied), `locale` and `timezone` (the default for new sessions and programs) report the two separately; none reports a state it could not observe as compliant.
+
+60. `timezone` resource (the system time zone)
+
+IMPLEMENTED, NOT RELEASED, NOT VERIFIED ON A REAL HOST (one read-only look at Rocky Linux 10.2 only). A built-in type for every supported OS, on top of the link `/etc/localtime` and `/usr/bin/timedatectl` (systemd-timedated).
+
+Why a native type: a data-only Resource Plugin cannot compare a free-form observed value with a wanted one (§38.10). "The zone the target of `/etc/localtime` names equals the declared zone", for a zone the recipe chooses, is not expressible with fixed observation forms, and a plugin cannot read a link target at all.
+
+60.1 Scope
+
+The system time zone of one host: the zone the symbolic link `/etc/localtime` names below `/usr/share/zoneinfo`. Out of scope: the clock, NTP synchronization (`timedatectl set-ntp`), the RTC mode (`set-local-rtc`), installing time zone data, `/etc/timezone` (Debian) as a file of its own, restarting services, the `TZ` variable of programs, `sinter discover`.
+
+60.2 Fields (`with`)
+
+- `name` (required, static): an IANA zone name. Grammar `[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+){0,2}`, at most 64 bytes, no component starting with `-` (so the operand cannot become an option, and the change needs no `--`). The grammar has no `.`, so a `.` or `..` component and a leading `/` are impossible. The trees `posix/...` and `right/...` (first component `posix` or `right`) and the names `posixrules` and `localtime` are refused with a reason: they are not zones of their own. Variables may be used; facts, registers and sensitive values may not. Resolved and checked at load.
+
+Unknown fields are refused. A recipe may hold one `timezone` resource; a second one is a load-time ownership conflict (whatever its `when`). The type owns the path `/etc/localtime` (§59): a `file`, `template`, `directory`, `link`, `systemd_timer`, `sysctl` or `file_merge` on it in the same recipe is a load-time conflict, in either order (`src/model/owned.rs`).
+
+60.3 Observation (read-only)
+
+- `lstat` of `/etc/localtime` through the parent gate of §23 (`observe_stat`), never followed. Only a symbolic link is a state. A regular file (a copied zone file) is the error "… is a regular file (a copied zone file), not a symbolic link into /usr/share/zoneinfo; Sinter does not guess a zone from a copied file"; a missing `/etc/localtime` and any other object type are errors too. Never "absent", never drift.
+- The link text (`readlink -n`, the existing strict observation). Accepted forms: the absolute prefix `/usr/share/zoneinfo/`, or one or more leading `../` followed by `usr/share/zoneinfo/`; the remainder must match the zone grammar of 60.2 (observed names are judged by the grammar only, so `posix/UTC` is a state that differs from `UTC`). Any other target is an error ("is not understood"); Sinter does not resolve further links.
+- Measured (Rocky Linux 10.2, read-only): `/etc/localtime` is a symbolic link with the target `/usr/share/zoneinfo/Asia/Tokyo`; `timedatectl show` reports `Timezone=Asia/Tokyo` (not used by Sinter).
+
+60.4 Validity (plan and apply, read-only)
+
+Only when the zone differs: `/usr/share/zoneinfo/<name>` must exist as a regular file (`observe_stat`, parent gate). Missing: error "time zone <name> is not installed on this host (… does not exist); install the time zone data (tzdata) first — Sinter does not do that". In plan only, when an earlier planned change may provide the path (`PlannedEffects::affecting`, e.g. a `tzdata` package), a note instead, and apply checks again. Another object type (a directory, a symlink) is an error.
+
+Then the tool: `/usr/bin/test -x /usr/bin/timedatectl` (`executable_present`). Absent: "timezone is not supported on this host (/usr/bin/timedatectl was not found)", deferred in plan under the same rule. A host already in the declared zone needs neither the zone file check nor the tool, in plan, apply and audit.
+
+60.5 Change (apply)
+
+1. Observe (60.3). A failure here is never "indeterminate": nothing was sent.
+2. Equal: unchanged, nothing else is run.
+3. Zone file and tool (60.4).
+4. Not root (and no `--sudo`): "timezone needs root"; nothing was changed.
+5. `/usr/bin/timedatectl set-timezone <name>` through `exec` with a mutation permit; fixed absolute program, fixed argv, no shell, baseline environment, 60 s timeout; recorded redacted for a sensitive resource. Then:
+   - timeout / lost connection, or a signal: indeterminate, change possible, verification unknown; nothing else is sent;
+   - non-zero exit: failed, change possible, with the first line of standard error (withheld when sensitive);
+   - exit 0: `/etc/localtime` is observed again (60.3). Names the declared zone: changed, verified. Another zone: failed, verification failed (change `possible` if it still is the old zone, `changed` otherwise). Observation failed: failed (indeterminate if the observation was), change possible.
+
+Sinter never writes `/etc/localtime` itself. Every plan and apply result that changes the zone carries the note: programs already running keep the zone they started with until restarted, Sinter restarts nothing, the clock, NTP and the RTC mode are not changed. `PlannedEffects` treats a planned `timezone` change as opaque (the conservative default).
+
+60.6 Plan and audit
+
+Plan runs 60.3 and, when the zone differs, 60.4; the diff is the summary current/desired. When the target user is not root, the usual "needs root" note is added.
+
+Audit: dimension `timezone` (observed -> desired). Every observation failure (copied file, missing link, unknown target, failed `lstat`/`readlink`, refused parent) is Error, never drift. Audit runs neither the zone file check nor the tool check.
+
+60.7 Safety rules
+
+- Plan and audit dispatch only `stat`, `readlink`, `test -x` and the parent-walk commands of §23.
+- No shell; the operand grammar excludes a leading `-`, whitespace, `.`, `/` at the start and every shell or glob character.
+- The exit code of `set-timezone` never decides success.
+- A sensitive resource (`sensitive: true`) shows no zone in the diff, notes, reasons or audit details; the change is recorded redacted. The record of the read-only `stat` of the zone file names its path, as the record of a sensitive `file` names its path.
+- MCP refuses the type; the MCP boundary is unchanged.
+
+60.8 Limits
+
+- `/etc/localtime` as a copied file, or a link that does not point into `/usr/share/zoneinfo`, must be replaced by the administrator first.
+- A zone whose file is a symbolic link on some systems (backward-compatible names) is refused by 60.4.
+- Programs already running, and services, keep their zone until they are restarted.
+
+60.9 Not verified on a real host
+
+Exercised against the scripted target only, plus the read-only measurement of 60.3 on Rocky Linux 10.2. Assumed and to be measured on Ubuntu 24.04/26.04 and Rocky Linux / RHEL / AlmaLinux 9/10:
+
+- `/etc/localtime` is a symbolic link into `/usr/share/zoneinfo` on every supported OS (only Rocky 10.2 measured), in the absolute or `../` form.
+- `timedatectl set-timezone Asia/Tokyo` exits 0 and replaces the link (the form it writes on each OS is not measured; Sinter accepts both forms); an unknown zone exits non-zero; as a non-root user it exits non-zero.
+- On Ubuntu, `timedatectl set-timezone` also updates `/etc/timezone` (not observed by Sinter).
+- Every zone a recipe names is a regular file below `/usr/share/zoneinfo` on each OS.
+- Behaviour in containers without `systemd-timedated`.
+
+61. `locale` resource (the system default locale)
+
+IMPLEMENTED, NOT RELEASED, NOT VERIFIED ON A REAL HOST (one read-only look at Rocky Linux 10.2 only). A built-in type for the Red Hat and Debian families, on top of the OS's locale file, `/usr/bin/locale -a` and `/usr/bin/localectl` (systemd-localed).
+
+Why a native type: a data-only Resource Plugin cannot compare a free-form observed value with a wanted one and cannot parse a file (§38.10). "Every declared key of the locale file has the declared value, other keys are left alone" and "the declared locale is in the list `locale -a` prints" are not expressible with fixed observation forms.
+
+61.1 Scope
+
+The system default locale: `LANG` and the single `LC_*` categories, as the OS keeps them for new logins and services. Out of scope: installing or generating locales (no package, no `locale-gen`, no `localedef`), `LC_ALL`, `LANGUAGE`, the console keymap and X11 layout (`localectl set-keymap`, `set-x11-keymap`), per-user locales, restarting sessions or services, `sinter discover`.
+
+61.2 Fields (`with`)
+
+- `lang` (optional, static): the value of `LANG`. Variables may be used; facts, registers and sensitive values may not. Resolved and checked at load.
+- `lc` (optional): a map from `LC_*` keys to values. Keys only from the fixed list `LC_CTYPE`, `LC_NUMERIC`, `LC_TIME`, `LC_COLLATE`, `LC_MONETARY`, `LC_MESSAGES`, `LC_PAPER`, `LC_NAME`, `LC_ADDRESS`, `LC_TELEPHONE`, `LC_MEASUREMENT`, `LC_IDENTIFICATION`. `LC_ALL` (it overrides every other setting and is not a system default), `LANGUAGE` (a list of languages, not a locale) and `LANG` (declare it as `lang`) are refused with a reason. Values are literal strings: an interpolation under `lc` is refused at load (the structure-only checks of a recipe judge single static fields, not map members).
+- At least one setting. Value grammar: `C` or `POSIX` (optionally `.codeset`), or `ll[_CC][.codeset][@modifier]` with `ll` 2–3 lower-case letters, `CC` 2 upper-case letters or 3 digits, codeset `[A-Za-z0-9-]+`, modifier `[A-Za-z0-9]+`; characters only from `[A-Za-z0-9_.@-]`, at most 64 bytes, so no operand can start with `-`, contain `=` or whitespace.
+
+Unknown fields are refused. A recipe may hold one `locale` resource (load-time ownership conflict otherwise). The type owns both `/etc/locale.conf` and `/etc/default/locale` whatever the OS (§59): a `file`, `template`, `directory`, `link`, `systemd_timer`, `sysctl` or `file_merge` on either in the same recipe is a load-time conflict, in either order (`src/model/owned.rs`).
+
+61.3 Where the default lives
+
+By `Facts::os_family` (the family Sinter already derives from `/etc/os-release`): `redhat` -> `/etc/locale.conf` (measured on Rocky Linux 10.2: `LANG=en_US.UTF-8\n`; `/etc/default/locale` absent); `debian` -> `/etc/default/locale` (NOT measured). Any other family: plan, apply and audit refuse with "locale is not supported on this host: Sinter knows where the default locale is kept only on the Red Hat family … and the Debian family …".
+
+61.4 Observation (read-only)
+
+- The file through `Engine::partial_observe` (plan, apply) or `audit::audit_partial_read` (audit): parent gate of §23, `lstat` never followed (a symlink is refused), at most 256 KiB, length and hard-link re-checks. Absent: no key is set.
+- A closed parser: lines `KEY=value` or `KEY="value"` (`KEY` `[A-Z_][A-Z0-9_]*`; the value printable ASCII without `"`, `'`, `\`, `$`, backtick, `#`, `;`, `&`, `|`, and without spaces unless quoted), blank lines, lines whose first non-blank character is `#`. A duplicate key, single quotes, `export`, a trailing comment, a carriage return, invalid UTF-8 or anything else is an observation error ("… is not understood"): never "not set", never drift. Keys outside the declared ones are read (to keep the parse closed) but never compared.
+- Values are compared exactly (`en_US.utf8` in the file differs from a declared `en_US.UTF-8`, and the change writes the declared spelling).
+
+61.5 Availability (plan and apply, read-only)
+
+Only when a declared key differs. Every declared value other than `C`/`POSIX` must be listed by a new fixed-argv read-only target method, `/usr/bin/locale -a` (tool presence by `test -x`; missing: an error, nothing is assumed). Accepted only: exit 0, no truncation; one name per line, printable ASCII, no empty line, at most 20 000 lines. Both sides are compared after normalising the codeset (lower case, `-` removed; `en_US.UTF-8` == `en_US.utf8`; measured list entries include `C`, `C.utf8`, `en_US`, `en_US.iso885915`, `en_US.utf8`). Not listed: "locale X is not installed on this host; install or generate it first (a language-pack / glibc-langpack package, or locale-gen) — Sinter does not do that". In plan only, when an earlier planned change may affect `/usr/lib/locale` or is opaque (a package), a note instead, and apply checks again. A failed, signalled, truncated or empty answer is an error.
+
+Then the tool: `/usr/bin/test -x /usr/bin/localectl`; absent: "locale is not supported on this host (/usr/bin/localectl was not found)", deferred in plan under the same rule as §54.
+
+61.6 Change (apply)
+
+1. Observe (61.4); never "indeterminate" before anything was sent.
+2. Every declared key as declared: unchanged; neither `locale -a` nor `localectl` is run.
+3. Availability and tool (61.5).
+4. Not root (and no `--sudo`): "locale needs root"; nothing was changed.
+5. `/usr/bin/localectl set-locale KEY=value ...` with EVERY declared key (each `KEY=value` one operand, `LANG` first then the `LC_*` keys in name order), through `exec` with a mutation permit; fixed absolute program, no shell, baseline environment, 60 s timeout; recorded redacted for a sensitive resource. Declared keys that already match are passed too: if the tool replaces the whole set with what it is given (NOT VERIFIED either way), they are kept. Then:
+   - timeout / lost connection, or a signal: indeterminate, change possible; nothing else is sent;
+   - non-zero exit: failed, change possible, first line of standard error (withheld when sensitive);
+   - exit 0: the file is read again (61.4). Every declared key at its value: changed, verified. Otherwise: failed, verification failed, naming the keys. Observation failed: failed (or indeterminate), change possible.
+   Unmanaged keys are not checked; when one that was there before is gone or changed, a note names it ("declare them to keep them").
+
+Sinter never writes the locale file itself. Every plan and apply result that changes the default carries the note: the default applies to new logins and services started afterwards; existing sessions and running services keep their locale; Sinter restarts nothing. `PlannedEffects` treats a planned `locale` change as opaque.
+
+61.7 Plan and audit
+
+Plan runs 61.4 and, when a key differs, 61.5; the diff summary lists the declared keys only (`LANG=en_US.UTF-8 LC_TIME=(not set)` -> `LANG=ja_JP.UTF-8 LC_TIME=en_GB.UTF-8`). "needs root" is noted as for the other types.
+
+Audit: one dimension per declared key that differs (`LANG`, `LC_TIME`, …; observed `(not set)` when absent). Audit runs neither `locale -a` nor `localectl`. Unknown family and every observation failure are Error, never drift.
+
+61.8 Safety rules
+
+- Plan and audit dispatch only the read commands of the partial-edit observation, `test -x` and `locale -a`.
+- No shell; every operand of the change begins with `L` and matches `KEY=[A-Za-z0-9_.@-]+`.
+- The exit code of `set-locale` never decides success.
+- A sensitive resource shows no value in diff, notes, reasons or audit details; the change is recorded redacted.
+- MCP refuses the type; the MCP boundary is unchanged.
+
+61.9 Limits
+
+- Only the two families above; only files in the closed grammar.
+- Exact value comparison: a file that spells the codeset differently from the recipe is changed to the recipe's spelling.
+- Whether unmanaged keys and comments survive `localectl set-locale` depends on the tool (see 61.10); the result reports a key that was lost.
+
+61.10 Not verified on a real host
+
+Exercised against the scripted target only, plus the read-only measurement of 61.3/61.5 on Rocky Linux 10.2. Assumed and to be measured on Ubuntu 24.04/26.04 and Rocky Linux / RHEL / AlmaLinux 9/10:
+
+- Ubuntu keeps the default in `/etc/default/locale`, and `localectl set-locale` (systemd-localed with the Debian patch) writes there, in a form inside the closed grammar.
+- `localectl set-locale LANG=… LC_TIME=…` exits 0 and writes exactly the given keys; whether it keeps keys it is not given, and comments, on each OS; its exit code and message for an unknown locale and as a non-root user.
+- `locale -a` exits 0 with one name per line on every OS; codesets are printed as `utf8` (measured on Rocky 10.2 only).
+- Behaviour in containers without `systemd-localed`.
+
+62. `kernel_module` resource (a kernel module loaded now and at boot, or blacklisted)
+
+IMPLEMENTED, NOT RELEASED, NOT VERIFIED ON A REAL HOST (one read-only look at Rocky Linux 10.2 only). A built-in type for every supported OS, on top of `/sys/module`, `/usr/sbin/modprobe` (kmod) and two files of Sinter's own.
+
+Why a native type: a data-only Resource Plugin cannot write file content and cannot compare a free-form observed value with a wanted one (§38.10). Sinter's own whole files must go through the `file` publication path, and "the directory named after the declared module exists in `/sys/module`" for a name the recipe chooses is not expressible with fixed observation forms.
+
+62.1 Scope
+
+One kernel module of one host, in two independent parts: whether the running kernel has it loaded, and whether it is loaded at boot (Sinter's file in `/etc/modules-load.d`) or kept out of alias-based autoloading (Sinter's blacklist file in `/etc/modprobe.d`). Out of scope: unloading (`modprobe -r` is not run by any state: unloading a module in use and dependency handling need their own design), module parameters, `install`/`options`/`softdep` lines, evaluating other files in `/etc/modules-load.d`, `/usr/lib/modules-load.d`, `/run/modules-load.d` or `/etc/modprobe.d`, the kernel command line (`modprobe.blacklist=`, `module.param=`: a later `kernel_args` type, §58), installing module packages, rebuilding the initramfs, `sinter discover`.
+
+62.2 Fields (`with`)
+
+- `name` (required, static): `[A-Za-z0-9_-]{1,64}`. `-` and `_` are the same module to the kernel: the name is normalised to `_` and the normalised form is used for `/sys/module`, both file names and contents, the argv of both `modprobe` calls and every comparison. Variables may be used; facts, registers and sensitive values may not. Resolved and checked at load. The grammar excludes `/`, `.`, `=`, whitespace and every shell or glob character; a leading `-` is possible, which is why both `modprobe` calls put the name after `--`.
+- `state` (optional): the literal `present` (default), `absent` or `blacklisted`. Not from a variable.
+- `runtime` (optional, default true), `persist` (optional, default true): literal booleans, accepted only with `present`; at least one is true (the shape of `sysctl`, §54).
+
+Unknown fields are refused. Two `kernel_module` resources with the same normalised name in one recipe are a load-time ownership conflict. Both of a module's files (62.3) are owned whatever the state (§59): a `file`, `template`, `directory`, `link`, `systemd_timer`, `sysctl` or `file_merge` on either path in the same recipe is a load-time conflict, in either order (`src/model/owned.rs`). Files of other names in the two directories are not claimed.
+
+62.3 The files Sinter owns
+
+- `/etc/modules-load.d/sinter-<name>.conf`: `# Managed by Sinter (kernel_module). Local changes are replaced.\n<name>\n`.
+- `/etc/modprobe.d/sinter-blacklist-<name>.conf`: the same comment line and `blacklist <name>\n`.
+
+`root:root`, mode 0644, planned, written, removed and audited through a synthetic `file` resource each (the construction of `sysctl`, §54.3): parent walk of §23, atomic staged publication with its compare-and-swap, refusal of a symlink at the path, diff, redaction. Which file is managed:
+
+| state | boot-time file | blacklist file | loaded |
+|---|---|---|---|
+| `present` | present (only with `persist`; with `persist: false` not managed) | absent | loaded (only with `runtime`) |
+| `absent` | absent | not managed | not managed (never unloaded) |
+| `blacklisted` | absent | present | not managed (never unloaded) |
+
+A `blacklist` or `install` line in another file, and the order in which modprobe reads its configuration, are not evaluated; every result that changes a file says so, and the state after a reboot is NOT VERIFIED by the resource.
+
+62.4 Loaded state (read-only)
+
+`lstat` of `/sys/module` (must be a directory: otherwise "sysfs is not available", an error) and of `/sys/module/<name>` through `observe_stat`: a directory is loaded, absent is not loaded, anything else is an error. A built-in module that appears there counts as loaded. Measured (Rocky Linux 10.2): `/sys/module/loop` exists; `/sys/module/ext4` and `/sys/module/nosuch` do not ("No such file").
+
+62.5 Availability (plan and apply, read-only, only when a load is needed)
+
+A new fixed-argv read-only target method runs `/usr/sbin/modprobe -n -v -- <name>` (it re-checks the name grammar itself). `-n` is modprobe's documented dry run ("do everything but actually insert or remove the modules"); that it changes nothing on every supported OS is NOT PROVEN, which is one reason MCP refuses the type. Tool presence first (`test -x`; absent: "kernel_module is not supported on this host (/usr/sbin/modprobe was not found)", deferred in plan when an earlier planned change may bring it). Then: exit 0 and no truncation -> available (measured: an `insmod /lib/modules/<kernel>/…/dummy.ko.xz numdummies=0` line); exit 1 -> "module X is not available for the running kernel (…FATAL: Module … not found…); nothing was changed" (measured: exit 1 with `modprobe: FATAL: Module nosuchmod not found in directory /lib/modules/<kernel>`), deferred in plan to a note when an earlier planned change may affect `/lib/modules` or `/usr/lib/modules` or is opaque (a package); any other exit, a signal, a timeout or truncation -> observation error. A loaded module is never asked about; `absent` and `blacklisted` never run `modprobe`.
+
+62.6 Change (apply)
+
+Order for `present`:
+
+1. With `runtime`: observe the loaded state (62.4); not loaded -> availability (62.5). An unknown module or a failed observation stops the resource before anything is written; never "indeterminate".
+2. A load is needed and the connection is not root (no `--sudo`): "kernel_module needs root to load a module"; nothing was changed.
+3. The file parts, through the `file` code: the blacklist file (absent) first, then the boot-time file (with `persist`). If one fails or is indeterminate, the resource ends there and nothing is loaded.
+4. A load is needed: `/usr/sbin/modprobe -- <name>` through `exec` with a mutation permit; fixed absolute program, fixed argv, no shell, baseline environment, 120 s timeout; recorded redacted for a sensitive resource. Then:
+   - timeout / lost connection, or a signal: indeterminate, change possible, verification unknown; nothing else is sent;
+   - non-zero exit: failed, change possible, first line of standard error;
+   - exit 0: `/sys/module/<name>` is observed again. Present: changed, verified. Missing: failed, verification failed ("a built-in module without parameters does not appear there"). Observation failed: failed (or indeterminate), change possible.
+
+The parts are merged as for `sysctl` (the more severe execution and verification, any change): a failed load after a changed file is a failed resource that reports the change, never success and never "no change"; an error raised after a file changed carries the mutation state `changed`.
+
+`absent`: the boot-time file part with `state: absent` only; `blacklisted`: the blacklist file present, then the boot-time file absent. Neither unloads the module; a note on every result that changes a file says so (for `blacklisted` also: after a reboot the module can still be loaded explicitly or as a dependency; `blacklist` only stops alias-based autoloading).
+
+A concurrent change of a file is refused by the `file` publication. `PlannedEffects` treats a planned `kernel_module` change as opaque.
+
+62.7 Plan and audit
+
+Plan runs 62.4, 62.5 when a load is needed, and the read-only part of `file`. It reports the file diffs and, for a load, the summary `not loaded` -> `loaded` with the note `module <name>: not loaded -> loaded`. "needs root" is noted as for the other types.
+
+Audit: dimension `persistent` for every difference the `file` audit reports for the boot-time file, `blacklist` for the blacklist file (observed and desired are prefixed with the file dimension, as `sysctl` does), each only when the state manages that file; `loaded` (`not loaded` -> `loaded`) with `present` and `runtime`. A non-compliant, non-drift outcome of a file audit is the resource's outcome. Every failed observation is Error, never drift. Audit never runs `modprobe`, not even the dry run.
+
+62.8 Safety rules
+
+- Plan dispatches only `stat`, `test -x`, `modprobe -n -v -- <name>` and the read-only commands of `file`; audit the same without `modprobe`.
+- No shell; `--` before the name in both `modprobe` calls.
+- The exit code of `modprobe` never decides success.
+- No state runs `modprobe -r` or `rmmod`.
+- The module name is not a secret: it is shown in notes, file paths and the record of read-only commands even for a sensitive resource (as a `sysctl` name, §54.7); file diffs follow `file`'s redaction and the load is recorded redacted.
+- MCP refuses the type (the dry run is not proven read-only on real hosts); the MCP boundary is unchanged.
+
+62.9 Limits
+
+- No unload: `absent` and `blacklisted` leave a loaded module loaded until a reboot.
+- A built-in module that does not appear in `/sys/module` cannot be declared with `runtime` (the load "succeeds" but is not observed); use `runtime: false`.
+- Only Sinter's own files are evaluated; another file's `blacklist`/`install` line or the kernel command line can still decide the state at boot.
+
+62.10 Not verified on a real host
+
+Exercised against the scripted target only, plus the read-only measurement of 62.4/62.5 on Rocky Linux 10.2 (`/usr/sbin/modprobe` is a symbolic link to `../bin/kmod`; `/etc/modules-load.d` exists and is empty). Assumed and to be measured on Ubuntu 24.04/26.04 and Rocky Linux / RHEL / AlmaLinux 9/10:
+
+- `modprobe -n -v -- <name>` changes nothing (no module loaded, no file written) and exits 0/1 as on Rocky 10.2.
+- `modprobe -- <name>` as root loads the module and exits 0; exits non-zero for an unknown module and as a non-root user.
+- `/sys/module/<name>` appears after a load; how built-in modules appear there on each kernel.
+- systemd-modules-load reads `/etc/modules-load.d/sinter-<name>.conf` at boot, and modprobe honours `/etc/modprobe.d/sinter-blacklist-<name>.conf`; the parent walk of §23 over `/sys` and `/sys/module` (sysfs) behaves like other root-owned directories.

@@ -43,6 +43,16 @@ Linux hosts except where it says so.
 - **`sysctl` resource**: one kernel parameter, as a running value and as a
   file of its own in `/etc/sysctl.d`.
 - **`hostname` resource**: the static host name (`hostnamectl`).
+- **`timezone` resource**: the system time zone (`timedatectl`); never
+  touches the clock or NTP.
+- **`locale` resource**: the system default locale (`LANG` and `LC_*`);
+  refuses a locale that is not installed and never generates one.
+- **`kernel_module` resource**: a kernel module loaded now and at boot from a
+  file of its own, or blacklisted; never unloads a module.
+- **Nested bundles**: a bundle may list other bundles. They are expanded
+  when the bundle is loaded, before anything runs; cycles, duplicates and
+  limits are refused then. A recipe of a nested bundle is named
+  `<bundle>/<recipe>`.
 - **`tuned` resource**: the selected TuneD profile (a named one, the
   recommended one, or off), with the selection and its application reported
   separately. Never installs TuneD or starts its service.
@@ -53,6 +63,11 @@ Linux hosts except where it says so.
 
 ### Changed
 
+- **Bundles may nest** (they could not before). A bundle may list at most 64
+  entries.
+- **`sysctl`** reports, as the audit dimension `boot`, the value the boot-time
+  configuration files give the key, and notes another file that sets it after
+  Sinter's own.
 - **`--skip-resource` and declared backups.** In a recipe with excluded
   resources, a declared backup that nothing that runs can need is no longer
   taken, checked or prepared for; it is reported as `skipped`
@@ -67,6 +82,10 @@ Linux hosts except where it says so.
 - A `directory` refused for a missing parent says how to have it created.
 
 ### Fixed
+
+- `systemd_timer` (released in v1.15.0) showed a value that came from a
+  sensitive variable in the text diff of `plan` when the unit file differed;
+  it is now redacted. The same applied to the new `sysctl`.
 
 - `release/verify_approval_set.py` reads the acceptance end line of the
   v1.15.0 harness (`... skipped=0 not_applicable=<n>`) in every check.

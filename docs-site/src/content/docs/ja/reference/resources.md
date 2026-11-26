@@ -3,7 +3,7 @@ title: リソースリファレンス
 description: v1.15.0 に実装されているすべての組み込み Sinter リソースタイプ。
 ---
 
-Sinter v1.15.0 は 12 の組み込みリソースタイプを実装しています（`postgresql_role` は v1.5.1 で追加、`systemd_timer` と `nm_connection` は v1.15.0 で追加）。v1.15.0 の後に `file_merge`、`dnf_repository`、`dnf_module`、`crypto_policy`、`sysctl`、`hostname`、`tuned` の 7 つを追加しましたが、**まだリリースには含まれていません**。[Resource Plugins](/ja/reference/resource-plugins/) で追加することもできます。以下の
+Sinter v1.15.0 は 12 の組み込みリソースタイプを実装しています（`postgresql_role` は v1.5.1 で追加、`systemd_timer` と `nm_connection` は v1.15.0 で追加）。v1.15.0 の後に `file_merge`、`dnf_repository`、`dnf_module`、`crypto_policy`、`sysctl`、`hostname`、`tuned`、`timezone`、`locale`、`kernel_module` の 10 個を追加しましたが、**まだリリースには含まれていません**。[Resource Plugins](/ja/reference/resource-plugins/) で追加することもできます。以下の
 パラメータはサポートされる完全なセットであり、未知の `with`
 フィールドはスキーマエラーです。
 
@@ -27,6 +27,9 @@ Sinter v1.15.0 は 12 の組み込みリソースタイプを実装していま�
 | [sysctl](/ja/reference/resources/sysctl/) | カーネルパラメータ 1 つ: 実行中の値と永続設定（未リリース） | `name`、`value`、`state`、`runtime`、`persist` |
 | [hostname](/ja/reference/resources/hostname/) | 静的ホスト名（未リリース） | `name` |
 | [tuned](/ja/reference/resources/tuned/) | 選択中の TuneD プロファイル（未リリース） | `profile` / `recommended` / `state: off`、`verify` |
+| [timezone](/ja/reference/resources/timezone/) | システムのタイムゾーン（未リリース） | `name` |
+| [locale](/ja/reference/resources/locale/) | システムの既定ロケール（未リリース） | `lang`、`lc` |
+| [kernel_module](/ja/reference/resources/kernel_module/) | 今と起動時に読み込むカーネルモジュール、または blacklist（未リリース） | `name`、`state`、`runtime`、`persist` |
 | [postgresql_role](/ja/reference/resources/postgresql_role/) | ローカルの PostgreSQL サーバーのロール（v1.5.1 から） | `name`、`state`、`login`、`superuser`、…、`connection_limit`、`password_verifier` |
 
 ## 共通の規約
