@@ -11,10 +11,14 @@
 # only this code and 3 prove that; an ln/mv killed by a signal ends with 1, not 4), 5 done but a second
 # name of the payload remains or the cleanup state is unknown; any other code: a step failed and a
 # publication cannot be ruled out. The cleanup result is the last stdout line:
-# CLEANUP:clean | CLEANUP:left:<path> | CLEANUP:link-remains:<path> | CLEANUP:unknown.
+# CLEANUP:clean | CLEANUP:left:<path> | CLEANUP:link-remains:<path> | CLEANUP:unknown; it is the
+# only CLEANUP line, and a <path> with a control character is printed as "?".
 # S is the private directory ".sinter-stage.XXXXXXXX" made in <dir>. As root its identity is the random
 # group G it was created with (setpriv --regid G); unprivileged, <dir> must be one nobody else can
 # rename entries in. <dir> is pinned as fd 4 and S as fd 5; whether S is gone is read from fd 5.
+# S is removed by name, as one empty directory, where nobody else can rename entries in <dir>; in any
+# other <dir> only as root, and only the entry that is then a directory with S's name, owner, group G
+# and inode (nobody but root can make one); otherwise it is left and reported.
 set -eu
 umask 077
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -71,19 +75,28 @@ check_s() {  # cwd = S ; <G|-> <S-id|-> ; proves that cwd is the staging directo
   if [ "$1" != - ]; then [ "$(stat -c %g .)" = "$1" ] || return 1; fi
   if [ "$2" != - ]; then [ "$(stat -c '%d:%i' .)" = "$2" ] || return 1; fi
 }
+show_s() {  # <s> ; the path of S as fd 5 reaches it, never more than one line
+  p=$(readlink /proc/self/fd/5 2>/dev/null) || p=$1
+  case $p in *[[:cntrl:]]*) p='?';; esac
+  printf '%s' "$p"
+}
 discard_here() {  # cwd = S (proven), fd 5 = S ; <s> <G|-> <S-id> ; prints the CLEANUP line; returns 0, or 5 for link-remains / unknown
   if rm -f -- payload && [ ! -e payload ] && [ ! -L payload ]; then :; else
-    printf 'CLEANUP:link-remains:%s\n' "$(readlink /proc/self/fd/5 2>/dev/null || printf '%s' "$1")"; return 5
+    printf 'CLEANUP:link-remains:%s\n' "$(show_s "$1")"; return 5
   fi
-  if cd -P -- /proc/self/fd/4 2>/dev/null && trusted_dir; then
-    if [ "$2" != - ]; then pred="-gid $2"; else pred="-inum ${3#*:}"; fi
-    find -P . -maxdepth 1 -name "$1" -type d -user "$me" $pred -empty -delete 2>/dev/null || true
+  if cd -P -- /proc/self/fd/4 2>/dev/null; then
+    if trusted_dir; then
+      if [ "$2" != - ]; then pred="-gid $2"; else pred="-inum ${3#*:}"; fi
+      find -P . -maxdepth 1 -name "$1" -type d -user "$me" $pred -empty -delete 2>/dev/null || true
+    elif [ "$me" = 0 ] && [ "$2" != - ] && valid id "$2" && valid devino "$3"; then
+      find -P . -maxdepth 1 -mindepth 1 -name "$1" -type d -user "$me" -gid "$2" -inum "${3#*:}" -empty -delete 2>/dev/null || true
+    fi
   fi
   n=$(stat -L -c %h /proc/self/fd/5 2>/dev/null) || n=
   case $n in
     0) printf 'CLEANUP:clean\n';;
     ''|*[!0-9]*) printf 'CLEANUP:unknown\n'; return 5;;
-    *) printf 'CLEANUP:left:%s\n' "$(readlink /proc/self/fd/5 2>/dev/null || printf '%s' "$1")";;
+    *) printf 'CLEANUP:left:%s\n' "$(show_s "$1")";;
   esac
   return 0
 }

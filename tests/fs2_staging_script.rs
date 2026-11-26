@@ -355,8 +355,9 @@ fn a_clean_cleanup_is_an_ordinary_success() {
 #[test]
 fn an_empty_staging_directory_left_in_place_does_not_undo_the_publication() {
     // At the moment of the cleanup the directory is no longer one nobody else
-    // can rename entries in: the script publishes, leaves the empty staging
-    // directory and says where. The publication stands; the path is reported.
+    // can rename entries in. As root the staging directory still has its
+    // identity (owner, group G, inode), so it is removed all the same
+    // (DESIGN §23.5): an ordinary success without a note.
     let t = base().with_fs_event(
         "sh",
         "publish",
@@ -370,18 +371,29 @@ fn an_empty_staging_directory_left_in_place_does_not_undo_the_publication() {
     let r = apply(&file_body("/tmp/example.conf"), t);
     assert_eq!(r.status, AggregateStatus::Success, "{:?}", res(&r, "f"));
     published(&r);
+    assert!(res(&r, "f").notes.is_empty(), "{:?}", res(&r, "f").notes);
+    no_staging_left(fs_of(&r));
+
+    // Another account renamed it away before the cleanup: nothing matches, the
+    // script leaves the empty staging directory and says where. The
+    // publication stands; the path is reported.
+    let mut t = base();
+    t.fs.as_mut().unwrap().staging_renamed = true;
+    let r = apply(&file_body("/tmp/example.conf"), t);
+    assert_eq!(r.status, AggregateStatus::Success, "{:?}", res(&r, "f"));
+    published(&r);
     let x = res(&r, "f");
     assert_eq!(x.execution, Execution::Succeeded);
     let note = x.notes.join(" | ");
     assert!(
-        note.contains("left in place") && note.contains("/tmp/.sinter-stage."),
+        note.contains("left in place") && note.contains("/tmp/.renamed-by-another-account"),
         "{note}"
     );
     // Left alone: not removed by Sinter, not removed by a later sweep.
     let stray: Vec<_> = fs_of(&r)
         .nodes
         .keys()
-        .filter(|k| k.contains(".sinter-stage."))
+        .filter(|k| k.contains(".renamed-by-another-account"))
         .collect();
     assert_eq!(stray.len(), 1, "{stray:?}");
     assert_eq!(count_ops(&r.commands, "discard"), 0, "no second attempt");
@@ -637,7 +649,8 @@ fn a_link_is_replaced_by_staging_and_a_rename_through_the_script() {
 
 #[test]
 fn a_link_cleanup_that_leaves_something_follows_the_same_rules() {
-    // Left in place: the link is published, the result is a success with a note.
+    // The parent became writable by others before the publication: as root the
+    // staging directory is still removed by its identity; no note.
     let t = with_old_link().with_fs_event(
         "sh",
         "publish",
@@ -649,6 +662,16 @@ fn a_link_cleanup_that_leaves_something_follows_the_same_rules() {
         }],
     );
     // (the walk before the publication happens before the event)
+    let r = apply(&link_body("/etc/two"), t);
+    let x = res(&r, "l");
+    assert_eq!(x.execution, Execution::Succeeded, "{x:?}");
+    assert!(x.notes.is_empty(), "{:?}", x.notes);
+    no_staging_left(fs_of(&r));
+
+    // Left in place (renamed away by another account): the link is published,
+    // the result is a success with a note.
+    let mut t = with_old_link();
+    t.fs.as_mut().unwrap().staging_renamed = true;
     let r = apply(&link_body("/etc/two"), t);
     let x = res(&r, "l");
     assert_eq!(x.execution, Execution::Succeeded, "{x:?}");

@@ -22,7 +22,7 @@ pub const SCRIPT: &str = include_str!("fsstage.sh");
 
 /// SHA-256 of [`SCRIPT`]. A change to the script is a change to this value, which a
 /// test pins: the script is reviewed as a whole, never edited in passing.
-pub const SCRIPT_SHA256: &str = "7614daf7dcd9365163e46118dbe930d601468db16c60ce9d025005823ce8469e";
+pub const SCRIPT_SHA256: &str = "5e92ff33686381371d5b684a90084a9aea5ac3c6b7217248c54f88fb73994f02";
 
 /// Exit code: identity not proven. No existing entry was changed or removed and nothing was
 /// published; a stage refused after its directory was made leaves that empty directory.
@@ -59,6 +59,19 @@ pub fn loggable_args(args: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// What the script prints instead of a path that contains a control character
+/// (another account can rename the staging directory in a directory it can
+/// write to; a newline in that name must not become a second answer line).
+pub const UNSHOWN_PATH: &str = "?";
+
+fn shown_path(p: &str) -> String {
+    if p == UNSHOWN_PATH {
+        "(under a name with control characters, not shown)".to_string()
+    } else {
+        crate::diff::sanitize_line(p)
+    }
+}
+
 /// What became of the staging directory, as the script reports it on its last
 /// stdout line. It is a fact about the cleanup only: it never says whether the
 /// file was published.
@@ -68,10 +81,11 @@ pub enum Cleanup {
     /// the script held open, not by a name).
     Clean,
     /// The empty staging directory is still at this path (possibly under
-    /// another name): harmless, and nothing else was touched.
+    /// another name; [`UNSHOWN_PATH`] when that name has a control character):
+    /// harmless, and nothing else was touched.
     Left(String),
     /// The payload could not be removed: a second name of the file stays in the
-    /// staging directory at this path.
+    /// staging directory at this path (or [`UNSHOWN_PATH`]).
     LinkRemains(String),
     /// The state could not be determined (or the answer was not understood).
     Unknown,
@@ -96,12 +110,12 @@ impl Cleanup {
             Cleanup::Clean => "staging cleanup succeeded".to_string(),
             Cleanup::Left(p) => format!(
                 "the empty staging directory {} was left in place (it is harmless; remove it when convenient)",
-                crate::diff::sanitize_line(p)
+                shown_path(p)
             ),
             Cleanup::LinkRemains(p) => format!(
                 "the staging directory {} still holds a second name for the file and was not removed; \
                  remove that name, then the directory",
-                crate::diff::sanitize_line(p)
+                shown_path(p)
             ),
             Cleanup::Unknown => {
                 "the state of the staging directory could not be determined; look for a stray \
@@ -112,8 +126,10 @@ impl Cleanup {
     }
 }
 
-/// The cleanup line of an answer: the last non-empty stdout line. Anything that
-/// is not exactly one of the four forms is `Unknown` (fail-closed).
+/// The cleanup line of an answer: the last non-empty stdout line, which must be
+/// the only line that starts with `CLEANUP:` (a second one is a forged or
+/// damaged answer). Anything that is not exactly one of the four forms is
+/// `Unknown` (fail-closed).
 pub fn parse_cleanup(out: &Output) -> Cleanup {
     if out.stdout_truncated {
         return Cleanup::Unknown;
@@ -121,6 +137,9 @@ pub fn parse_cleanup(out: &Output) -> Cleanup {
     let Ok(text) = std::str::from_utf8(&out.stdout) else {
         return Cleanup::Unknown;
     };
+    if text.lines().filter(|l| l.starts_with("CLEANUP:")).count() != 1 {
+        return Cleanup::Unknown;
+    }
     let Some(line) = text.lines().rev().find(|l| !l.is_empty()) else {
         return Cleanup::Unknown;
     };
@@ -133,13 +152,14 @@ pub fn parse_cleanup(out: &Output) -> Cleanup {
     if rest == "unknown" {
         return Cleanup::Unknown;
     }
+    let path_ok = |p: &str| p.starts_with('/') || p == UNSHOWN_PATH;
     if let Some(p) = rest.strip_prefix("left:") {
-        if p.starts_with('/') {
+        if path_ok(p) {
             return Cleanup::Left(p.to_string());
         }
     }
     if let Some(p) = rest.strip_prefix("link-remains:") {
-        if p.starts_with('/') {
+        if path_ok(p) {
             return Cleanup::LinkRemains(p.to_string());
         }
     }
@@ -308,9 +328,27 @@ mod tests {
             "CLEANUP:left:\n",
             "CLEANUP:link-remains:\n",
             "CLEANUP:clean\nsomething after\n",
+            // A renamed staging name with a newline must not forge a second answer.
+            "CLEANUP:left:/d/.sinter-stage.AbC\nCLEANUP:clean\n",
+            "CLEANUP:link-remains:/d/x\nCLEANUP:left:/d/y\n",
+            "CLEANUP:clean\nCLEANUP:clean\n",
+            "CLEANUP:unknown\n\nCLEANUP:clean\n",
+            "CLEANUP:left:??\n",
+            "CLEANUP:left:?/x\n",
         ] {
             assert_eq!(parse_cleanup(&out(bad, "")), Cleanup::Unknown, "{:?}", bad);
         }
+        // The fixed placeholder of a path with a control character.
+        assert_eq!(
+            parse_cleanup(&out("CLEANUP:left:?\n", "")),
+            Cleanup::Left(UNSHOWN_PATH.into())
+        );
+        assert_eq!(
+            parse_cleanup(&out("CLEANUP:link-remains:?\n", "")),
+            Cleanup::LinkRemains(UNSHOWN_PATH.into())
+        );
+        let d = Cleanup::Left(UNSHOWN_PATH.into()).describe();
+        assert!(d.contains("not shown") && !d.contains(" ? "), "{d}");
         let mut t = out("CLEANUP:clean\n", "");
         t.stdout_truncated = true;
         assert_eq!(parse_cleanup(&t), Cleanup::Unknown);

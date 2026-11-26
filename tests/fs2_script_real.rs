@@ -545,6 +545,13 @@ fn a_cleanup_check_that_fails_after_the_publication_does_not_undo_it() {
     );
     assert_eq!(p.code, 0, "{:?} {:?}", p.stdout, p.stderr);
     assert_eq!(fs::read(d.join("t.conf")).unwrap(), b"DATA\n", "published");
+    if is_root() {
+        // As root the staging directory is removed by its identity (owner, group G,
+        // inode) whatever the parent is (DESIGN §23.5).
+        assert_eq!(p.stdout, "CLEANUP:clean\n");
+        assert!(strays(&d).is_empty());
+        return;
+    }
     assert!(
         last_line(&p).starts_with("CLEANUP:left:/"),
         "{:?}",
@@ -565,7 +572,10 @@ fn the_cleanup_line_carries_the_path_verbatim() {
     let d = t.path().canonicalize().unwrap().join("a\\nb\\tc");
     fs::create_dir(&d).unwrap();
     fs::set_permissions(&d, fs::Permissions::from_mode(0o700)).unwrap();
-    let st = stage(&d, b"DATA\n");
+    let mut st = stage(&d, b"DATA\n");
+    // Without the group (as root too) nothing is removed where the parent cannot be
+    // classified, so the directory is left and its path printed.
+    st.g = "-".into();
     let v = with_failing_stat("[ \"${FAILTRUSTED-}\" = 1 ] && [ \"$2\" = '%u %a' ]");
     let p = publish_with(
         &v,
@@ -761,4 +771,76 @@ fn a_link_is_staged_and_published_by_the_script() {
         PathBuf::from("/etc/two")
     );
     assert!(entries(&target).is_empty());
+}
+
+#[test]
+fn as_root_the_staging_directory_is_removed_in_a_writable_parent_by_its_identity() {
+    // DESIGN §63.2: in a directory others can write to without the sticky bit, root removes
+    // only the entry with the staging directory's name, owner, group G and inode, and only
+    // when it is empty; the outcome is read from the directory held open. This is the real
+    // GNU `find -inum -empty -delete` and the real link count of /proc/self/fd/5.
+    if !is_root() {
+        return;
+    }
+    for kind in ["new", "replace"] {
+        let (_t, d) = work();
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o777)).unwrap();
+        let st = stage(&d, b"DATA\n");
+        assert_ne!(st.g, "-");
+        let p = publish(kind, &d, &st, "t.conf");
+        assert_eq!(p.code, 0, "{kind}: {:?} {:?}", p.stdout, p.stderr);
+        assert_eq!(p.stdout, "CLEANUP:clean\n", "{kind}");
+        assert_eq!(entries(&d), vec!["t.conf".to_string()], "{kind}");
+    }
+    // Renamed away after it was entered: nothing matches, it is left and reported where it is.
+    let anchor = "  rc=0; discard_here \"$s\" \"$G\" \"$sid\" || rc=$?\n";
+    assert_eq!(SCRIPT.matches(anchor).count(), 1, "the publish arm changed");
+    let variant = SCRIPT.replacen(
+        anchor,
+        &format!("  mv -- \"/proc/self/fd/4/$s\" /proc/self/fd/4/moved\n{anchor}"),
+        1,
+    );
+    let (_t, d) = work();
+    fs::set_permissions(&d, fs::Permissions::from_mode(0o777)).unwrap();
+    let st = stage(&d, b"DATA\n");
+    let p = publish_with(&variant, &[], "new", "file", &d, &st, "t.conf");
+    assert_eq!(p.code, 0, "{:?}", p.stderr);
+    assert_eq!(p.stdout, format!("CLEANUP:left:{}/moved\n", d.display()));
+    assert!(d.join("moved").is_dir());
+    // ... and a decoy of the same name made by another owner is not removed.
+    let variant = SCRIPT.replacen(
+        anchor,
+        &format!(
+            "  mv -- \"/proc/self/fd/4/$s\" /proc/self/fd/4/moved; mkdir -- \"/proc/self/fd/4/$s\"; \
+             chown 65534:65534 -- \"/proc/self/fd/4/$s\"\n{anchor}"
+        ),
+        1,
+    );
+    let (_t, d) = work();
+    fs::set_permissions(&d, fs::Permissions::from_mode(0o777)).unwrap();
+    let st = stage(&d, b"DATA\n");
+    let p = publish_with(&variant, &[], "new", "file", &d, &st, "t.conf");
+    assert_eq!(p.code, 0, "{:?}", p.stderr);
+    assert_eq!(p.stdout, format!("CLEANUP:left:{}/moved\n", d.display()));
+    assert!(d.join(&st.s).is_dir(), "the decoy stays");
+}
+
+#[test]
+fn a_renamed_staging_name_with_a_newline_cannot_forge_a_cleanup_line() {
+    // The path printed is the one fd 5 reaches; a name with a control character is printed
+    // as the fixed placeholder, so the answer stays one line.
+    let anchor = "  rc=0; discard_here \"$s\" \"$G\" \"$sid\" || rc=$?\n";
+    let variant = SCRIPT.replacen(
+        anchor,
+        &format!("  mv -- \"/proc/self/fd/4/$s\" \"/proc/self/fd/4/x\nCLEANUP:clean\"\n{anchor}"),
+        1,
+    );
+    let (_t, d) = work();
+    if is_root() {
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o777)).unwrap();
+    }
+    let st = stage(&d, b"DATA\n");
+    let p = publish_with(&variant, &[], "new", "file", &d, &st, "t.conf");
+    assert_eq!(p.code, 0, "{:?}", p.stderr);
+    assert_eq!(p.stdout, "CLEANUP:left:?\n");
 }

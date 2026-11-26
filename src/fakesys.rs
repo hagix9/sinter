@@ -387,6 +387,11 @@ pub struct FakeFs {
     /// The staging script cannot tell whether the staging directory is gone
     /// (test knob).
     pub cleanup_unknown: bool,
+    /// Another account renames the staging directory to
+    /// `<dir>/.renamed-by-another-account` between the publication and the
+    /// cleanup (possible in a directory it can write to): nothing matches the
+    /// name, so the script leaves it and reports where it is (test knob).
+    pub staging_renamed: bool,
     /// No payload name can be removed (an immutable file, a read-only mount):
     /// the staging script then reports `link-remains` (test knob).
     pub payload_undeletable: bool,
@@ -408,6 +413,7 @@ impl Default for FakeFs {
             staging_counter: 0,
             undeletable: BTreeSet::new(),
             cleanup_unknown: false,
+            staging_renamed: false,
             payload_undeletable: false,
             no_hard_links: false,
             setpriv_missing: false,
@@ -673,10 +679,19 @@ impl FakeFs {
     }
 
     /// The script's `discard_here`: remove the payload name, remove the staging
-    /// directory by name only in a directory nobody else can change, and read
-    /// the result from the directory itself (its inode), not from a name.
-    /// Returns the cleanup line and whether it needs attention (exit code 5).
-    fn fs_cleanup(&mut self, dir: &str, s_path: &str, s_ino: u64, me: u32) -> (String, bool) {
+    /// directory by name in a directory nobody else can change, or, in any
+    /// other directory, only as root and only when the entry there has the
+    /// staging directory's owner, group G and inode; read the result from the
+    /// directory itself (its inode), not from a name. Returns the cleanup line
+    /// and whether it needs attention (exit code 5).
+    fn fs_cleanup(
+        &mut self,
+        dir: &str,
+        s_path: &str,
+        s_ino: u64,
+        g: &str,
+        me: u32,
+    ) -> (String, bool) {
         let payload = format!("{}/payload", s_path);
         if let Some(n) = self.nodes.get(&payload) {
             if self.payload_undeletable || self.undeletable.contains(&n.ino) {
@@ -687,14 +702,30 @@ impl FakeFs {
         if self.cleanup_unknown {
             return ("CLEANUP:unknown\n".to_string(), true);
         }
-        if self.trusted_node(dir, me) {
-            let ours = matches!(
+        if self.staging_renamed {
+            if let Some(n) = self.nodes.remove(s_path) {
+                self.nodes
+                    .insert(format!("{}/.renamed-by-another-account", dir), n);
+            }
+        }
+        let ours = if self.trusted_node(dir, me) {
+            matches!(
                 self.nodes.get(s_path),
                 Some(n) if n.ino == s_ino && matches!(n.kind, FakeKind::Dir) && n.uid == me
-            );
-            if ours && !self.has_children(s_path) {
-                self.nodes.remove(s_path);
-            }
+            )
+        } else if me == 0 && g != "-" {
+            matches!(
+                self.nodes.get(s_path),
+                Some(n) if n.ino == s_ino
+                    && matches!(n.kind, FakeKind::Dir)
+                    && n.uid == me
+                    && g.parse::<u32>().ok() == Some(n.gid)
+            )
+        } else {
+            false
+        };
+        if ours && !self.has_children(s_path) {
+            self.nodes.remove(s_path);
         }
         // Where is our directory now?
         let at = self
@@ -765,7 +796,7 @@ impl FakeFs {
             }
         };
         if let Some(why) = failure {
-            let (line, _) = self.fs_cleanup(dir, &s_path, s_ino, me);
+            let (line, _) = self.fs_cleanup(dir, &s_path, s_ino, g, me);
             return exited(4, line, format!("{}\n", why));
         }
         if kind == "new" {
@@ -778,7 +809,7 @@ impl FakeFs {
             self.nodes.insert(dst.clone(), n);
         }
         touched.push((dst, is_link, true));
-        let (line, attention) = self.fs_cleanup(dir, &s_path, s_ino, me);
+        let (line, attention) = self.fs_cleanup(dir, &s_path, s_ino, g, me);
         exited(if attention { 5 } else { 0 }, line, String::new())
     }
 
@@ -787,7 +818,7 @@ impl FakeFs {
             Ok(v) => v,
             Err(o) => return o,
         };
-        let (line, attention) = self.fs_cleanup(dir, &s_path, s_ino, me);
+        let (line, attention) = self.fs_cleanup(dir, &s_path, s_ino, g, me);
         exited(if attention { 5 } else { 0 }, line, String::new())
     }
 }

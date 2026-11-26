@@ -252,9 +252,14 @@ Rules:
   are kept) or declare the existing ones; a narrower mode is allowed. When the
   file does not exist yet, the declared `owner`, `group` and `mode` apply.
 - Every result that used the field carries the note "parent … is writable by
-  other accounts; allowed by allow_writable_parents" (text and JSON), and each
-  publication leaves its empty `.sinter-stage.*` directory in the listed
-  directory (reported in a note; remove it when convenient).
+  other accounts; allowed by allow_writable_parents" (text and JSON). Each
+  publication removes its own empty `.sinter-stage.*` directory: Sinter removes
+  only the one entry with that name that is empty and has the staging
+  directory's owner (root), random group and inode, which no other account can
+  make. If another account renamed, filled or replaced it in the meantime, it is
+  left and a note says where (the publication stands; remove it when
+  convenient). This removal has not yet been measured on a real host (GNU
+  `find -inum -empty -delete`, the link count of a removed directory).
 
 What you accept by listing a directory: any account that can write to it can
 replace, rename or remove the file after Sinter wrote it, can read what the

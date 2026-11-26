@@ -269,6 +269,23 @@ fn note_in_text_and_json(r: &RunReport) {
     assert!(v.to_string().contains(NOTE), "JSON lacks the note: {json}");
 }
 
+/// The publication in D removed its staging directory (as root it is proven by
+/// owner, group G and inode, DESIGN §23.5): no note says one was left, and none
+/// is in D.
+fn staging_removed(r: &RunReport, id: &str) {
+    let notes = &res(r, id).notes;
+    assert!(
+        !notes.iter().any(|n| n.contains("left in place")),
+        "{notes:?}"
+    );
+    let left: Vec<_> = fs_of(r)
+        .nodes
+        .keys()
+        .filter(|k| k.contains(".sinter-stage."))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
 fn apply_failure(r: &RunReport, id: &str) -> String {
     let x = res(r, id);
     assert_eq!(x.execution, Execution::Failed, "{x:?}");
@@ -361,6 +378,7 @@ fn a_listed_direct_parent_creates_a_file_as_root_in_both_walks() {
         assert_eq!(r.change, Change::Changed);
         assert!(r.notes.iter().any(|n| n == NOTE), "{:?}", r.notes);
         note_in_text_and_json(&applied);
+        staging_removed(&applied, "f");
         let fs = fs_of(&applied);
         assert_eq!(bytes(fs, "/opt/app/x.conf").unwrap(), b"new\n");
         let n = &fs.nodes["/opt/app/x.conf"];
@@ -400,6 +418,7 @@ fn a_listed_direct_parent_replaces_a_file_and_keeps_its_owner_and_mode() {
             applied.resources
         );
         assert!(res(&applied, "f").notes.iter().any(|n| n == NOTE));
+        staging_removed(&applied, "f");
         let fs = fs_of(&applied);
         assert_eq!(bytes(fs, "/opt/app/x.conf").unwrap(), b"new\n");
         assert_eq!(fs.nodes["/opt/app/x.conf"].mode & 0o7777, 0o640);
@@ -439,6 +458,7 @@ fn a_listed_direct_parent_publishes_a_template_and_a_file_merge() {
     );
     for id in ["t", "m"] {
         assert!(res(&applied, id).notes.iter().any(|n| n == NOTE), "{id}");
+        staging_removed(&applied, id);
     }
     nothing_followed(&applied.commands, "/opt/app/m.conf");
 }

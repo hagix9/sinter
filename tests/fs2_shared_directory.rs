@@ -3029,12 +3029,21 @@ fn model_a_staging_directory_that_is_not_the_one_made_is_refused_and_nothing_is_
 }
 
 #[test]
-fn model_the_cleanup_removes_by_name_only_where_nobody_else_can_rename() {
+fn model_the_cleanup_removes_by_name_where_nobody_else_can_rename_and_by_identity_as_root() {
     // Trusted directory: the staging directory is removed (CLEANUP:clean).
-    // A directory others can write to: it is left and reported; the exit code
-    // is still 0 for a publication that took place.
-    for (dir, trusted) in [("/plain", true), ("/tmp", true), ("/open", false)] {
+    // A directory others can write to: as root it is removed too, by its
+    // owner, group G and inode (DESIGN §23.5); renamed away by another
+    // account it is left and reported, and the exit code is still 0 for a
+    // publication that took place.
+    for (dir, renamed) in [
+        ("/plain", false),
+        ("/tmp", false),
+        ("/open", false),
+        ("/open", true),
+    ] {
+        let clean = !renamed;
         let mut fs = model_fs();
+        fs.staging_renamed = renamed;
         let f = staged(&mut fs, 0, dir);
         let (out, err, code) = script_run(
             &mut fs,
@@ -3047,12 +3056,14 @@ fn model_the_cleanup_removes_by_name_only_where_nobody_else_can_rename() {
         );
         assert_eq!(code, 0, "{dir}: {err}");
         assert!(fs.nodes.contains_key(&format!("{dir}/target")), "{dir}");
-        if trusted {
+        if clean {
             assert_eq!(out, "CLEANUP:clean\n", "{dir}");
             no_staging_left(&fs);
         } else {
-            assert_eq!(out, format!("CLEANUP:left:{dir}/{}\n", f[0]), "{dir}");
-            assert!(fs.nodes.contains_key(&format!("{dir}/{}", f[0])));
+            let at = format!("{dir}/.renamed-by-another-account");
+            assert_eq!(out, format!("CLEANUP:left:{at}\n"), "{dir}");
+            assert!(fs.nodes.contains_key(&at));
+            assert!(!fs.nodes.contains_key(&format!("{dir}/{}", f[0])));
         }
     }
 }
