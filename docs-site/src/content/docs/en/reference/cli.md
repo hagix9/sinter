@@ -604,8 +604,72 @@ Each recipe is resolved against its **own** `targets`: `common` on
 `groups: [linux]` and `nginx` on `groups: [web]` give different host sets —
 never "every recipe on every host". A recipe without `targets` fails the
 whole bundle before anything runs. Every listed recipe must exist and
-validate; a recipe may be listed once; bundles do not nest. Without an
+validate; a recipe may be listed once. Without an
 inventory, each recipe runs in order on the one `--host` (or localhost).
+
+### Nested bundles
+
+An entry of `recipes` may itself be a bundle. When the bundle is loaded, before
+any host is resolved, every nested bundle is expanded where it is listed (depth
+first, in the declared order) into one ordered list of recipes, and the run
+works on that list exactly as on a flat bundle: one plan sequence per host
+across the sub-bundles, `--limit`, partial runs, backups and `recipe_vars`.
+
+```yaml
+# site/bundle.yaml
+version: 1
+name: site
+recipes:
+  - os                                  # a bundle directory: site/os/bundle.yaml
+  - ../postgresql-pgdg17/bundle.yaml    # a bundle file, relative to this file
+  - 90_backup.yaml                      # a recipe of this bundle
+```
+
+The same bundle in TOML (`bundle.toml`):
+
+```toml
+version = 1
+name = "site"
+recipes = ["os", "../postgresql-pgdg17/bundle.yaml", "90_backup.yaml"]
+```
+
+```text
+$ sinter validate examples/bundles/site/bundle.yaml
+ok: bundle site: 10 recipe(s) from 2 nested bundle(s)
+  ok  os/10_sysctl: 1 resource(s), 0 handler(s), 0 var(s); targets: none
+  ok  os/20_motd: 1 resource(s), 0 handler(s), 0 var(s); targets: none
+  ok  postgresql-pgdg17/01_repository: 3 resource(s), 0 handler(s), 0 var(s); targets: none
+  ...
+  ok  90_backup: 1 resource(s), 0 handler(s), 0 var(s); targets: none
+```
+
+- **Paths.** Each entry is relative to the bundle file that lists it (absolute
+  paths are allowed). A directory is listed only by a name without an
+  extension (`os`, `sub/os`) and must hold exactly one `bundle.yaml`,
+  `bundle.yml` or `bundle.toml`, as on the command line; `./os` or `../os`
+  is refused: list the bundle file instead.
+- **Labels.** A recipe of the top bundle keeps its label (its file name
+  without the extension). A recipe of a nested bundle is labelled
+  `<bundle>/<file stem>`, where `<bundle>` is the nested bundle's `name`
+  (default: its file name without the extension, or the directory's name for
+  a bundle directory); deeper levels are joined with `/` (`os/net/10_hosts`).
+  The top bundle's name is never part of a label. Labels appear in the text
+  output and as `recipe` in JSON.
+- **Naming recipes** (`--skip-recipe`, `--skip-resource recipe/id`,
+  `recipe_vars` keys): the full label always works. A bare file stem
+  (`03_package`) works as long as exactly one recipe of the run has it;
+  when several have it, Sinter refuses and lists their full labels.
+  `--skip-recipe <bundle label>` (`--skip-recipe os`) excludes every recipe of
+  that nested bundle. `--skip-resource os/net/10_hosts/h1` is split at the last
+  `/` (resource ids never contain `/`).
+- **Refused, exit 2, before anything runs:** a cycle (the message names the
+  chain, `site.yaml -> os/bundle.yaml -> site.yaml`; symbolic links and other
+  spellings of a path cannot hide it), the same recipe or the same nested
+  bundle reached twice anywhere in the expansion (both chains are named;
+  nothing is de-duplicated silently), more than 8 bundle levels below the top
+  bundle, more than 256 recipes in total, more than 64 entries in one bundle.
+- A nested bundle has no `targets` and no `vars`, like any bundle; with an
+  inventory every recipe is resolved against its own `targets`.
 
 ### Execution and failures
 
@@ -923,7 +987,9 @@ environment variables are not expanded.
   ```
 
   A key is a recipe's label: its file name without the extension, the rule of `--skip-recipe`, for a
-  recipe given alone or as a member of a bundle. Each recipe gets exactly the files under its label,
+  recipe given alone or as a member of a bundle. A recipe of a [nested bundle](#nested-bundles) is
+  named by its full label (`postgresql-pgdg17/03_package`) or by its stem while that is unique in the
+  run; a stem several recipes share, a nested bundle's label and two keys for one recipe are refused. Each recipe gets exactly the files under its label,
   merged in the order listed, and the layer precedence below is unchanged; no file of one recipe
   reaches another, even when both declare the same variable. A recipe that is not listed runs with
   its defaults, and a key that names no recipe of the run is ignored and its files are not read. Only
@@ -940,7 +1006,9 @@ stderr with `--format json`, whose document has a `resolved` object.
 *From v1.10.0.* `--skip-recipe NAME` and `--skip-resource ID` may be repeated, on
 `validate`, `plan`, `apply` and `audit`, with one meaning: what is excluded is not observed, changed
 or reported as passed. `ID` is a resource id, a loop's base id or one instance (`id[2]`), or
-`recipe/id` in a bundle.
+`recipe/id` in a bundle. In a [nested bundle](#nested-bundles) `NAME` is a full label
+(`os/20_motd`), a file stem one recipe alone has, or a nested bundle's label, which excludes every
+recipe below it.
 
 ```text
 $ sinter plan bundle.yaml --skip-recipe ssh-hardening --skip-resource nginx/extra
@@ -1603,9 +1671,9 @@ document for the whole invocation once every execution has been attempted:
 |-------|------|--------|
 | `mode` | string | `"plan"`, `"apply"` or `"audit"` |
 | `exit_code` | integer | The invocation exit code. |
-| `bundle` | object or null | `name`, `path` for a bundle. |
+| `bundle` | object or null | `name`, `path` for a bundle, and `recipes`: per recipe in run order, `recipe` (its label), `path` (relative to the bundle's directory when the file is below it, else the full path) and `bundle` (the label of the nested bundle it came from, or `null`). |
 | `inventory` | string or null | Inventory path. |
-| `resolution` | array or null | With an inventory: per recipe, `recipe`, `path`, and `hosts` (every inventory host: `name`, `selected` boolean, `reasons` such as `"group:web"`; `excluded_by`, `"limit"`, only on a host that `--limit` left out, whose `selected` is then false and whose `reasons` are kept; the recipe entry itself carries `excluded_by: "limit"` when `--limit` leaves it no host and it is skipped). |
+| `resolution` | array or null | With an inventory: per recipe, `recipe`, `path`, `bundle` (as in `bundle.recipes`), and `hosts` (every inventory host: `name`, `selected` boolean, `reasons` such as `"group:web"`; `excluded_by`, `"limit"`, only on a host that `--limit` left out, whose `selected` is then false and whose `reasons` are kept; the recipe entry itself carries `excluded_by: "limit"` when `--limit` leaves it no host and it is skipped). |
 | `limit` | array | Only with `--limit`: the items as given, without repeats. |
 | `executions` | array | One object per (recipe, host), in execution order. |
 
@@ -1629,8 +1697,9 @@ content. For a completed run it repeats `result.backup`. A problem found before 
 exits as described in [Framing and errors](#framing-and-errors).
 
 `validate` on a bundle adds `bundle` (string) and `recipes` (per recipe:
-`recipe`, `path`, `resources`, `handlers`, `vars`, `targets`) to its document;
-`resources`, `handlers` and `vars` are then totals.
+`recipe`, `path`, `bundle`, `resources`, `handlers`, `vars`, `targets`) to its document;
+`resources`, `handlers` and `vars` are then totals. A nested bundle adds
+`nested_bundles` (`bundle`, its label, and `path`).
 
 A [selector](#selecting-hosts-on-the-command-line) (from v1.10.0)
 always gives this aggregate document, with `selector` (the items) instead of

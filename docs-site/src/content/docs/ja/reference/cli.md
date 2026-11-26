@@ -555,9 +555,65 @@ sinter apply web-stack.yaml --inventory hosts.yaml
 `groups: [linux]`、`nginx` が `groups: [web]` なら対象ホストは別々で、
 「全レシピを全ホストへ」にはなりません。`targets` のないレシピが 1 つでも
 あると、何も実行せずにバンドル全体がエラーになります。列挙したレシピは
-すべて存在し検証に通る必要があり、同じレシピは 1 度だけ、バンドルの
-入れ子は不可です。インベントリなしでは、各レシピを順に 1 つの `--host`
+すべて存在し検証に通る必要があり、同じレシピは 1 度だけです。インベントリなしでは、各レシピを順に 1 つの `--host`
 （または localhost）で実行します。
+
+### 入れ子のバンドル
+
+`recipes` の項目には、別のバンドルも書けます。バンドルを読み込むとき（ホストを解決する前）に、
+入れ子のバンドルは書かれた位置で展開され（深さ優先、宣言順）、1 つの順序付きレシピ一覧になります。
+実行はその一覧に対して、平らなバンドルとまったく同じように進みます。ホストごとの plan の流れは
+サブバンドルをまたいで続き、`--limit`、部分実行、バックアップ、`recipe_vars` も同じです。
+
+```yaml
+# site/bundle.yaml
+version: 1
+name: site
+recipes:
+  - os                                  # バンドルディレクトリ: site/os/bundle.yaml
+  - ../postgresql-pgdg17/bundle.yaml    # バンドルファイル（このファイルからの相対パス）
+  - 90_backup.yaml                      # このバンドル自身のレシピ
+```
+
+同じバンドルを TOML（`bundle.toml`）で書くと次のとおりです。
+
+```toml
+version = 1
+name = "site"
+recipes = ["os", "../postgresql-pgdg17/bundle.yaml", "90_backup.yaml"]
+```
+
+```text
+$ sinter validate examples/bundles/site/bundle.yaml
+ok: bundle site: 10 recipe(s) from 2 nested bundle(s)
+  ok  os/10_sysctl: 1 resource(s), 0 handler(s), 0 var(s); targets: none
+  ok  os/20_motd: 1 resource(s), 0 handler(s), 0 var(s); targets: none
+  ok  postgresql-pgdg17/01_repository: 3 resource(s), 0 handler(s), 0 var(s); targets: none
+  ...
+  ok  90_backup: 1 resource(s), 0 handler(s), 0 var(s); targets: none
+```
+
+- **パス。** 各項目は、それを書いたバンドルファイルからの相対パスです（絶対パスも使えます）。
+  ディレクトリは拡張子のない名前（`os`、`sub/os`）でだけ書け、コマンドラインと同じく
+  `bundle.yaml`・`bundle.yml`・`bundle.toml` のいずれか 1 つだけを含む必要があります。
+  `./os` や `../os` は拒否します。その場合はバンドルファイルを書いてください。
+- **ラベル。** トップのバンドルのレシピは、これまでどおりのラベル（拡張子を除いたファイル名）です。
+  入れ子のバンドルのレシピは `<バンドル>/<ファイル名>` で、`<バンドル>` はその入れ子のバンドルの
+  `name`（既定はファイル名から拡張子を除いたもの、バンドルディレクトリならディレクトリ名）です。
+  さらに深い階層は `/` でつなぎます（`os/net/10_hosts`）。トップのバンドルの名前はラベルに入りません。
+  ラベルはテキスト出力と、JSON の `recipe` に出ます。
+- **レシピの指定**（`--skip-recipe`、`--skip-resource recipe/id`、`recipe_vars` のキー）：
+  完全なラベルは常に使えます。拡張子を除いたファイル名だけ（`03_package`）は、実行するレシピの
+  うち 1 つだけがその名前を持つ間は使えます。複数あるときは拒否し、完全なラベルを一覧で示します。
+  `--skip-recipe <バンドルのラベル>`（`--skip-recipe os`）は、その入れ子のバンドルのレシピを
+  すべて除外します。`--skip-resource os/net/10_hosts/h1` は最後の `/` で区切ります
+  （リソース ID は `/` を含みません）。
+- **実行前に拒否するもの（exit 2）：** 循環（メッセージは `site.yaml -> os/bundle.yaml -> site.yaml`
+  のように経路を示します。シンボリックリンクや別の書き方でも隠せません）、展開全体で同じレシピや
+  同じ入れ子のバンドルに 2 回たどり着くこと（両方の経路を示し、黙って重複を除くことはしません）、
+  トップより下に 8 階層を超える入れ子、合計 256 を超えるレシピ、1 つのバンドルで 64 を超える項目。
+- 入れ子のバンドルも、ほかのバンドルと同じく `targets` と `vars` を持ちません。インベントリを
+  使うときは、各レシピがそれぞれ自身の `targets` で解決されます。
 
 ### 実行と失敗
 
@@ -857,7 +913,9 @@ strict_vars: false
   届くことはありません。記載のないレシピは既定値で動き、実行するどのレシピにも当たらないキーは無視して、
   そのファイルは読みません。検査（上の規則）と読み込みの対象は、実行するレシピのファイルだけです。
   同じファイルの `vars_files` と、`--vars-file` との併用は拒否します（exit 2）。実行する 2 つのレシピが、
-  キーに書かれた同じラベルを持つ場合も拒否します。各レシピのファイルは最初に表示します
+  キーに書かれた同じラベルを持つ場合も拒否します。[入れ子のバンドル](#入れ子のバンドル)のレシピは完全なラベル
+  （`postgresql-pgdg17/03_package`）か、実行の中で一意な間はファイル名で指定します。複数のレシピが持つファイル名、
+  入れ子のバンドルのラベル、1 つのレシピを指す 2 つのキーは拒否します。各レシピのファイルは最初に表示します
   （`vars: recipe 20_web: ...`、`vars: none for recipe 30_c (not listed in recipe_vars)`）。
 
 有効な設定は最初に表示します（`config:`、`recipe:`、`inventory:`、`vars:`、`backup store:`）。`--format json` では stderr に出し、
@@ -867,7 +925,8 @@ strict_vars: false
 
 *v1.10.0 から利用できます。* `--skip-recipe NAME` と `--skip-resource ID` は繰り返し指定でき、`validate`、`plan`、`apply`、
 `audit` で同じ意味です。除外したものは観測も変更もせず、合格としても報告しません。`ID` はリソース ID、ループの基底 ID か 1 つのインスタンス
-（`id[2]`）、バンドルでは `recipe/id` です。
+（`id[2]`）、バンドルでは `recipe/id` です。[入れ子のバンドル](#入れ子のバンドル)では `NAME` は完全なラベル
+（`os/20_motd`）、1 つのレシピだけが持つファイル名、または入れ子のバンドルのラベル（その下のレシピをすべて除外）です。
 
 ```text
 $ sinter plan bundle.yaml --skip-recipe ssh-hardening --skip-resource nginx/extra
@@ -1501,9 +1560,9 @@ handler オブジェクトのフィールド:
 |-----------|----|----|
 | `mode` | 文字列 | `"plan"`、`"apply"`、`"audit"` |
 | `exit_code` | 整数 | 実行全体の終了コード。 |
-| `bundle` | オブジェクトまたは null | バンドルの `name`、`path`。 |
+| `bundle` | オブジェクトまたは null | バンドルの `name`、`path` と `recipes`（実行順のレシピごとに `recipe`（ラベル）、`path`（バンドルのディレクトリの下ならそこからの相対パス、そうでなければ完全なパス）、`bundle`（取り出し元の入れ子のバンドルのラベル、または `null`））。 |
 | `inventory` | 文字列または null | インベントリのパス。 |
-| `resolution` | 配列または null | インベントリ使用時、レシピごとに `recipe`、`path`、`hosts`（インベントリの全ホスト: `name`、`selected`（真偽値）、`reasons`（例 `"group:web"`）。`--limit` が除外したホストにだけ `excluded_by`（`"limit"`）が付き、その `selected` は false、`reasons` は残ります。`--limit` によってホストがなくなりスキップしたレシピの項目自体にも `excluded_by: "limit"` が付きます）。 |
+| `resolution` | 配列または null | インベントリ使用時、レシピごとに `recipe`、`path`、`bundle`（`bundle.recipes` と同じ）、`hosts`（インベントリの全ホスト: `name`、`selected`（真偽値）、`reasons`（例 `"group:web"`）。`--limit` が除外したホストにだけ `excluded_by`（`"limit"`）が付き、その `selected` は false、`reasons` は残ります。`--limit` によってホストがなくなりスキップしたレシピの項目自体にも `excluded_by: "limit"` が付きます）。 |
 | `limit` | 配列 | `--limit` があるときだけ: 指定された項目（重複を除く）。 |
 | `executions` | 配列 | （レシピ, ホスト）ごとに 1 オブジェクト、実行順。 |
 
@@ -1527,8 +1586,9 @@ targets、解決、重複ホスト）ではドキュメントを出力せず、
 [出力形式とエラー](#出力形式とエラー)のとおり終了します。
 
 バンドルに対する `validate` は、ドキュメントに `bundle`（文字列）と
-`recipes`（レシピごとの `recipe`、`path`、`resources`、`handlers`、`vars`、
-`targets`）を追加し、`resources`・`handlers`・`vars` は合計値になります。
+`recipes`（レシピごとの `recipe`、`path`、`bundle`、`resources`、`handlers`、`vars`、
+`targets`）を追加し、`resources`・`handlers`・`vars` は合計値になります。入れ子のバンドルでは
+`nested_bundles`（`bundle`（ラベル）と `path`）も加わります。
 
 [選択引数](#コマンドラインでホストを選ぶ)（v1.10.0 から）は常にこの
 集約文書を出力します。`limit` の代わりに `selector`（項目）を出力し、`inventory_source`
