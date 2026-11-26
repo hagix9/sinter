@@ -90,6 +90,33 @@ LABELS = ["ubuntu2404", "ubuntu2604", "rocky9", "rocky10", "rhel9", "rhel10", "a
 ALL_LABELS = list(LABELS)
 
 
+# The acceptance end line. Harnesses up to v1.14 end it at `skipped=<n>`; the
+# v1.15.0 harness always appends ` not_applicable=<n>` (DESIGN §47.3). Both
+# forms are read by the one pattern below, with no trailing text allowed, so
+# checks G, K and M cannot disagree about what an end line is.
+_END_COUNTS = r"passed=(\d+) failed=(\d+) skipped=(\d+)(?: not_applicable=(\d+))?"
+END_LINE_RE = re.compile(r"(?m)^== acceptance end \S+ " + _END_COUNTS + r"$")
+# A PASS row of collect.txt: every count but `passed` and `not_applicable`
+# must be zero.
+G_ROW_RE = re.compile(r"^[a-z0-9]+\t\S+\tPASS\tPASS\tyes\tyes\t"
+                      r"== acceptance end \S+ passed=\d+ failed=0 skipped=0(?: not_applicable=\d+)?$")
+
+
+def end_line_checks(groups):
+    """The manifest `checks` object one end line stands for.
+
+    An end line without the field stands for the four-key object, one with
+    the field for the five-key object whose total includes it. The two are
+    never interchangeable: a manifest that adds or drops `not_applicable`
+    against its raw log does not match.
+    """
+    p_, f_, s_ = (int(x) for x in groups[:3])
+    if groups[3] == "":
+        return {"total": p_ + f_ + s_, "passed": p_, "failed": f_, "skipped": s_}
+    n_ = int(groups[3])
+    return {"total": p_ + f_ + s_ + n_, "passed": p_, "failed": f_, "skipped": s_, "not_applicable": n_}
+
+
 def docs_allowed(path, version):
     """The paths the post-publish docs commit D may change (§4.3)."""
     return (path.startswith("docs-site/") or path in ("README.md", "README.ja.md",
@@ -383,7 +410,7 @@ def verify(a):
         v.ok(plines == ["problems: none"] and not any(ln.startswith("  - ") for ln in out_t.splitlines()),
              f"G run {rid} (last): no problems")
         rows = [ln.split("\t") for ln in out_t.splitlines()
-                if re.match(r"^[a-z0-9]+\t\S+\tPASS\tPASS\tyes\tyes\t== acceptance end \S+ passed=\d+ failed=0 skipped=0$", ln)]
+                if G_ROW_RE.match(ln)]
         v.ok(sorted(x[0] for x in rows) == sorted(LABELS), f"G run {rid} (last): one PASS row per label",
              str(sorted(x[0] for x in rows)))
         dig = {last(out_t, "evidence_digest: "), last(sum_t, "evidence_digest: "),
@@ -392,8 +419,7 @@ def verify(a):
     # ---- K: logs vs manifest counts ---------------------------------------------
     for t in man.get("targets", []):
         lp = t.get("log", {}).get("path")
-        ends = re.findall(r"^== acceptance end \S+ passed=(\d+) failed=(\d+) skipped=(\d+)(?: not_applicable=(\d+))?$",
-                          bundle.get(lp, b"").decode("utf-8", "replace"), re.M)
+        ends = END_LINE_RE.findall(bundle.get(lp, b"").decode("utf-8", "replace"))
         ch = t.get("checks", {})
         want_k = [ch.get("passed"), ch.get("failed"), ch.get("skipped"), ch.get("not_applicable", 0)]
         v.ok(len(ends) == 1 and [int(x) if x else 0 for x in ends[0]] == want_k,
@@ -627,7 +653,7 @@ def record_fields(v, ev, man):
             return m.group(1) if m else None
 
         osl = re.search(r"(?m)^OS_NAME=(.*) OS_VERSION=(\S+) ARCH=(\S+)$", raw)
-        end = re.findall(r"(?m)^== acceptance end \S+ passed=(\d+) failed=(\d+) skipped=(\d+)$", raw)
+        end = END_LINE_RE.findall(raw)
         want = {"os_name": osl and osl.group(1), "os_version": osl and osl.group(2), "arch": osl and osl.group(3),
                 "artifact_sha256": g("OBSERVED_ARTIFACT_SHA"), "executable_sha256": g("OBSERVED_EXECUTABLE_SHA"),
                 "version_output": g("OBSERVED_VERSION"), "started_at": rj.get("started_at"),
@@ -636,9 +662,7 @@ def record_fields(v, ev, man):
             v.ok(w is not None and t.get(k) == w, f"M {lb}: {k} == recorded value")
         v.ok(rj.get("verdict") == "PASS" and t.get("verdict") == "PASS", f"M {lb}: recorded run and manifest PASS")
         if len(end) == 1:
-            p_, f_, s_ = (int(x) for x in end[0])
-            v.ok(t.get("checks") == {"total": p_ + f_ + s_, "passed": p_, "failed": f_, "skipped": s_},
-                 f"M {lb}: checks == raw end line")
+            v.ok(t.get("checks") == end_line_checks(end[0]), f"M {lb}: checks == raw end line")
         else:
             v.ok(False, f"M {lb}: checks == raw end line", "no single end line")
         starts.append(rj.get("started_at") or "")

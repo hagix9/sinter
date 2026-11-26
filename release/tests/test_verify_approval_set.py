@@ -68,7 +68,10 @@ def clean_env(**extra):
 class Fixture:
     """One complete, consistent approval set for a synthetic release candidate."""
 
-    def __init__(self, root, earlier_failure=False, marker="first"):
+    def __init__(self, root, earlier_failure=False, marker="first", na=None):
+        # na: None writes the end line of harnesses up to v1.14 (no field);
+        # a number writes the v1.15.0 form ` not_applicable=<na>`.
+        self.na = na
         self.marker = marker
         self.root = root
         self.repo = os.path.join(root, "repo")
@@ -123,7 +126,8 @@ class Fixture:
                    f"OBSERVED_VERSION=sinter {VERSION}", f"OS_NAME={OS[lb][0]} OS_VERSION={OS[lb][1]} ARCH=x86_64",
                    f"connected to fixture-vm-{i} in fixture-project"]
             raw += [f"== check {c} ok" for c in ids]
-            raw += [f"== acceptance end 2026-01-01T0{i}:05:00Z passed={len(ids)} failed=0 skipped=0"]
+            raw += [f"== acceptance end 2026-01-01T0{i}:05:00Z passed={len(ids)} failed=0 skipped=0"
+                    + ("" if self.na is None else f" not_applicable={self.na}")]
             raw_b = ("\n".join(raw) + "\n").encode()
             write(os.path.join(d, "raw.log"), raw_b)
             os.makedirs(os.path.join(d, "scripts"))
@@ -193,7 +197,7 @@ class Fixture:
                             "image": rj["source_image"], "started_at": rj["started_at"],
                             "finished_at": rj["finished_at"], "artifact_sha256": self.art_sha,
                             "executable_sha256": EXE, "version_output": f"sinter {VERSION}",
-                            "checks": {"total": n, "passed": n, "failed": 0, "skipped": 0}, "verdict": "PASS",
+                            "checks": self.checks(n), "verdict": "PASS",
                             "log": {"path": f"logs/{lb}.log", "sha256": H(files[f"logs/{lb}.log"])}})
         files["validation/linux-gate.log"] = b"== step root-test start\n== step root-test rc=0 end\n"
         man = {"schema": "sinter-acceptance-manifest/1",
@@ -239,6 +243,12 @@ class Fixture:
                 ti.uname = ti.gname = owner[0]
                 tf.addfile(ti, io.BytesIO(b))
         return buf.getvalue()
+
+    def checks(self, n):
+        c = {"total": n, "passed": n, "failed": 0, "skipped": 0}
+        if self.na is not None:
+            c.update(total=n + self.na, not_applicable=self.na)
+        return c
 
     # ---- helpers for tampering ------------------------------------------------
     def relist(self):
@@ -673,6 +683,95 @@ class RejectedSets(Base):
               f"{H(man_b)}  sinter-v{VERSION}-acceptance-manifest.json\n{H(bun)}  {stem}.tar.gz\n")
         f.relist()
         self.assertInvalid(verify(self.set), "E sanitize.py: bundle_form")
+
+
+class NotApplicableEndLine(unittest.TestCase):
+    """The v1.15.0 end line (`... skipped=0 not_applicable=<n>`) and its manifest."""
+
+    def full(self, f, *extra):
+        return verify(f.set, "--rc-repo", f.repo, "--evidence", f.evidence, "--artifact", f.artifact,
+                      *extra, env=clean_env(**SANITIZE_ENV))
+
+    def edit_checks(self, f, change):
+        def mutate(files):
+            man = json.loads(files["acceptance-manifest.json"])
+            for t in man["targets"]:
+                if t["label"] == "rocky10":
+                    change(t["checks"])
+            files["acceptance-manifest.json"] = (json.dumps(man, indent=2) + "\n").encode()
+        f.rebuild_bundle(mutate)
+        f.relist()
+
+    def test_new_end_line_is_read_by_g_k_and_m(self):
+        # A non-zero count needs the applicability table and its proof lines,
+        # which the collector tests cover; here the count is 0 and the
+        # arithmetic for larger counts is checked on end_line_checks below.
+        for na in (0,):
+            with self.subTest(na=na), tempfile.TemporaryDirectory(prefix="approval-set-test-") as t:
+                f = Fixture(t, na=na)
+                p = self.full(f)
+                self.assertEqual(p.returncode, 3, p.stdout + p.stderr)
+                self.assertNotIn("FAIL", p.stderr)
+                for label in ("G run 01 (last): one PASS row per label", "K rocky10: bundle log end line",
+                              "M rocky10: checks == raw end line"):
+                    self.assertIn(label, p.stdout)
+                self.assertEqual(verify(f.set, "--approved-digest", f.digest).returncode, 0)
+                self.assertEqual(verify(f.set, "--approved-digest", "0" * 64).returncode, 1)
+
+    def test_manifest_count_must_equal_the_end_line(self):
+        with tempfile.TemporaryDirectory(prefix="approval-set-test-") as t:
+            f = Fixture(t, na=0)
+            self.edit_checks(f, lambda c: c.update(not_applicable=1, total=c["total"] + 1))
+            p = self.full(f)
+            self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+            self.assertIn("FAIL K rocky10: bundle log end line == manifest checks", p.stderr)
+            self.assertIn("FAIL M rocky10: checks == raw end line", p.stderr)
+
+    def test_total_must_include_the_not_applicable_checks(self):
+        with tempfile.TemporaryDirectory(prefix="approval-set-test-") as t:
+            f = Fixture(t, na=0)
+            self.edit_checks(f, lambda c: c.update(total=c["total"] + 1))
+            p = self.full(f)
+            self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+            self.assertIn("FAIL M rocky10: checks == raw end line", p.stderr)
+
+    def test_manifest_may_not_drop_the_field_of_a_new_end_line(self):
+        with tempfile.TemporaryDirectory(prefix="approval-set-test-") as t:
+            f = Fixture(t, na=0)
+            self.edit_checks(f, lambda c: c.pop("not_applicable"))
+            p = self.full(f)
+            self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+            self.assertIn("FAIL M rocky10: checks == raw end line", p.stderr)
+
+    def test_manifest_may_not_add_the_field_to_an_old_end_line(self):
+        with tempfile.TemporaryDirectory(prefix="approval-set-test-") as t:
+            f = Fixture(t)
+            self.edit_checks(f, lambda c: c.update(not_applicable=0))
+            p = self.full(f)
+            self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+            self.assertIn("FAIL M rocky10: checks == raw end line", p.stderr)
+
+    def test_failed_skipped_and_trailing_text_are_still_refused_in_a_pass_row(self):
+        sys.path.insert(0, os.path.dirname(VERIFY))
+        try:
+            import verify_approval_set as vas
+        finally:
+            sys.path.pop(0)
+        row = "rocky10\trun\tPASS\tPASS\tyes\tyes\t== acceptance end 2026-01-01T00:00:00Z "
+        for good in ("passed=76 failed=0 skipped=0", "passed=76 failed=0 skipped=0 not_applicable=0",
+                     "passed=75 failed=0 skipped=0 not_applicable=1"):
+            self.assertTrue(vas.G_ROW_RE.match(row + good), good)
+        for bad in ("passed=75 failed=1 skipped=0 not_applicable=0", "passed=75 failed=0 skipped=1 not_applicable=0",
+                    "passed=76 failed=0 skipped=0 not_applicable=", "passed=76 failed=0 skipped=0 not_applicable=x",
+                    "passed=76 failed=0 skipped=0 not_applicable=0 ", "passed=76 failed=0 skipped=0 extra=1",
+                    "passed=76 failed=0 skipped=0 not_applicable=0 not_applicable=0"):
+            self.assertFalse(vas.G_ROW_RE.match(row + bad), bad)
+        two = "== acceptance end t passed=1 failed=0 skipped=0 not_applicable=0\n" * 2
+        self.assertEqual(len(vas.END_LINE_RE.findall(two)), 2)  # callers require exactly one
+        self.assertEqual(vas.end_line_checks(("75", "0", "0", "1")),
+                         {"total": 76, "passed": 75, "failed": 0, "skipped": 0, "not_applicable": 1})
+        self.assertEqual(vas.end_line_checks(("76", "0", "0", "")),
+                         {"total": 76, "passed": 76, "failed": 0, "skipped": 0})
 
 
 class EarlierFailure(unittest.TestCase):
