@@ -4859,6 +4859,61 @@ mod tests {
     }
 
     #[test]
+    fn a_unit_file_an_earlier_recipe_writes_defers_the_service_of_a_later_one() {
+        let dir = fixture();
+        write(&dir, "01_unit.yaml", "version: 1\nresources:\n  - id: unit\n    type: file\n    with:\n      path: /etc/systemd/system/synthetic-app.service\n      content: \"[Service]\\nExecStart=/usr/bin/true\\n\"\n");
+        write(&dir, "02_svc.yaml", "version: 1\nresources:\n  - id: app\n    type: service\n    with:\n      name: synthetic-app\n      state: running\n");
+        let bundle = write(
+            &dir,
+            "site.yaml",
+            "version: 1\nrecipes: [01_unit.yaml, 02_svc.yaml]\n",
+        );
+        let host = || {
+            fresh_el9()
+                .with_fs_dir("/etc")
+                .with_fs_dir("/etc/systemd")
+                .with_fs_dir("/etc/systemd/system")
+        };
+        let (code, rows) = drive_results(
+            Phase::Plan,
+            &[&bundle, "--format", "json"],
+            vec![host(), host()],
+        );
+        assert_eq!(code.unwrap(), 0, "{rows:?}");
+        let s = result(&rows, "02_svc@localhost:app");
+        assert!(
+            s.1 && s
+                .2
+                .contains("recipe 01_unit plans managed systemd input changes"),
+            "{s:?}"
+        );
+        // Alone, the service is refused: its unit does not exist.
+        let alone = dir
+            .path()
+            .join("02_svc.yaml")
+            .to_string_lossy()
+            .into_owned();
+        let (code, _) = drive_results(Phase::Plan, &[&alone, "--format", "json"], vec![host()]);
+        assert_eq!(code.map_or_else(|e| e.kind.exit_code() as u8, |c| c), 4);
+    }
+
+    #[test]
+    fn a_skipped_recipe_carries_nothing() {
+        // The package recipe is excluded: nothing plans to create the
+        // account or the unit, so the later recipes are refused as on a
+        // host where the bundle's first part was never meant to run.
+        let dir = fixture();
+        let bundle = pg_bundle(&dir, PG_PACKAGE);
+        let (code, rows) = drive_results(
+            Phase::Plan,
+            &[&bundle, "--format", "json", "--skip-recipe", "03_package"],
+            vec![fresh_el9(), fresh_el9(), fresh_el9()],
+        );
+        assert_eq!(code.unwrap(), 4, "{rows:?}");
+        assert!(!rows.iter().any(|r| r.1), "{rows:?}");
+    }
+
+    #[test]
     fn audit_of_a_bundle_on_a_fresh_host_is_drift_and_changes_nothing() {
         let dir = fixture();
         let bundle = pg_bundle(&dir, PG_PACKAGE);
