@@ -1023,7 +1023,7 @@ Plan and the accounts a resource uses (F-3). Order is declaration order plus dep
 
 Dependencies also define order. Sinter never reorders resources. A resource that produces systemd manager input (§28.2) must be ordered before the service resource or handler that consumes it, by depends_on or declaration order. A producer declared after its consumer does not cause the consumer to be redone; only the end-of-run synchronization (§28.3) still happens.
 
-Accounts and services created by a package are not inferred. A package resource is not treated as a producer of a user, group or unit: Sinter never guesses from a package name what accounts or units it creates, and it does not add an implicit dependency between a package and a user/group/service that happens to name a matching account or unit. A package creates what its own maintainer scripts create, which differs by package, version and distribution and cannot be proven before it runs; guessing would make plan optimistic and could order resources on a dependency that does not exist. Such a producer is therefore declared explicitly, as a user or group resource, or as a command whose effect is visible through a creates guard, and ordered with depends_on — see the accounts/paths example in examples/quick.
+Accounts and services created by a package are not inferred. A package resource is not treated as a producer of a user, group or unit: Sinter never guesses from a package name what accounts or units it creates, and it does not add an implicit dependency between a package and a user/group/service that happens to name a matching account or unit. A package creates what its own maintainer scripts create, which differs by package, version and distribution and cannot be proven before it runs; guessing would make plan optimistic and could order resources on a dependency that does not exist. Such a producer is therefore declared explicitly, as a user or group resource, or as a command whose effect is visible through a creates guard, and ordered with depends_on — see the accounts/paths example in examples/quick. Since the release after v1.15.0 the operator can also declare the accounts on the package itself (`creates_accounts`, §49.2); that is a declaration, not an inference, and it only defers a plan-time lookup.
 
 15. Result model
 
@@ -1697,7 +1697,7 @@ owner/group/mode optional
 
 If state=present:
 
-absent => create exactly that directory, parent must already exist in v0.1
+absent => create exactly that directory, parent must already exist in v0.1 (since the release after v1.15.0, `parents: true` also creates the missing parent directories, under the rules of §49.3)
 
 new-directory defaults when omitted: owner = effective target user (root under --sudo), group = that owner's primary group, mode = "0755"
 
@@ -1996,7 +1996,7 @@ status: deferred/unknown until dependency apply
 
 A service resource is likewise reported unknown/deferred when an earlier resource in the plan changes managed systemd manager input, or when the manager currently reports NeedDaemonReload=yes for it (§28.6). Plan runs no daemon-reload.
 
-This exception applies only when the service directly depends on a package resource whose desired state is present.
+This exception applies only when the service directly depends on a package resource whose desired state is present. Across the recipes of a bundle, where `depends_on` cannot be written, recipe order takes that place under the conditions of §49.1.
 Otherwise a missing service unit is a plan error for a requested service state.
 
 Apply re-observes the service after package application. A changed package dependency that leaves the unit not found causes exactly one discovery reload (§28.5).
@@ -3010,7 +3010,7 @@ Refused with exit 2 before `ssh -G` or any connection, in all commands:
 - everything excluded: nothing would run;
 - `--audit-policy strict` with an exclusion: a strict audit answers for the whole recipe.
 
-An excluded recipe is still loaded and validated, and its hosts are not resolved unless another recipe needs them. A declared backup of a recipe that runs is taken in full, also of paths only an excluded resource would change. A handler runs only if an included resource notified it.
+An excluded recipe is still loaded and validated, and its hosts are not resolved unless another recipe needs them. Up to v1.15.0 a declared backup of a recipe that runs was taken in full, also of paths only an excluded resource would change; since the release after v1.15.0 the declared backups follow what runs (§49.6). A handler runs only if an included resource notified it.
 
 Exit codes do not change, so an exclusion must be visible instead: text output always shows `Included`, `Excluded` (`SKIPPED_BY_USER`) and `Blocked dependencies` first and a final `PARTIAL_APPLY`, `PARTIAL_PLAN` or `PARTIAL_AUDIT` line; JSON has `skips` with `partial: true`, the requests and every excluded resource with its reason. There is no `--show-skips`, because `plan` always shows this.
 
@@ -3534,3 +3534,51 @@ DEFERRED to a later release (P6.5, 2026-11-20); nothing is implemented, register
 48.4 What a later release needs
 
 A design decision on the form (built-in type with a Core parser, as for `nm_connection` (§45), versus a new plugin observation form, with its own review of how strict a closed line or block parser must be); the `gpgcheck` rule for enabling; an operand class for module specs; measurement on Rocky Linux, RHEL and AlmaLinux 9 and 10 (DNF 4) of the observation and change commands, their exit codes and their effect on files; and acceptance checks for P8 or the release after. The P8 measurement plan may include the read-only observations (`dnf -C repolist -v`, `dnf -C module list`) as an optional item; changes need their own approval.
+
+49. Planning and auditing what is not applied yet (next release; NOT RELEASED)
+
+Implemented on the development branch after v1.15.0; not released. Linux real-host acceptance has not been run for anything in §49 to §53.
+
+49.1 A bundle is planned as one sequence per host
+
+The problem. A bundle is an ordered list of recipes (§19.3). Apply runs them in order, so a later recipe finds what an earlier one created. Plan used to judge every recipe against the host as it is now, with nothing carried between recipes: on a host where nothing is applied yet, a later recipe was refused for a parent directory, an account or a unit that an earlier recipe of the same bundle creates, and the only way to get a plan of the whole bundle was to apply part of it first. Inside one recipe this was already handled (§14, §23, §29: a refusal that an earlier planned change can invalidate is deferred to apply). The cause was only that the record of planned changes was reset for every recipe and that `depends_on` cannot cross recipes.
+
+The rule. In plan, what the recipes of a bundle planned so far for one host is carried to the plan of the next recipe for that same host (`PlanCarry`). Recipe order is the dependency: it replaces the `depends_on` a single recipe would use. The carry holds exactly what the single-recipe rules already use, and each piece has the same condition as there:
+
+- Paths. Every `file`, `directory`, `link`, `template` (and partial-edit type) an earlier recipe plans to change or cannot decide, with its path; and the first earlier resource of another kind (package, command, service, user) that is planned to change or is unknown, after which plan cannot know which paths change. A parent path refusal (§23), a non-empty-directory or replacement refusal, a guard that may flip and an unobservable PostgreSQL role are deferred under the same conditions as inside one recipe. The note names the resource and its recipe.
+- Accounts. A `user` or `group` resource an earlier recipe plans to create, and an account a package planned to be installed declares in `creates_accounts` (§49.2). An `owner`, `group` or supplementary group that names it is deferred only when the lookup confirms that the account is absent; any other lookup result stays the error it is.
+- Units. A `service` whose unit is not found is deferred when an earlier recipe plans to install at least one package on this host. This is the cross-recipe form of the §29 exception; inside one recipe that exception is unchanged and still needs the direct `depends_on`.
+- systemd input. A `service` is deferred when an earlier recipe plans to change managed systemd input (§28) on this host, as it is for an earlier resource of its own recipe.
+
+What it is not. A resource merely existing in an earlier recipe defers nothing: the earlier resource must be planned to change (or be undecidable), and an account or unit must be confirmed missing. An already installed package, an unchanged file or a `state: absent` producer carries nothing. Nothing is carried between hosts: the carry is keyed by host, and a host is planned only against its own earlier recipes. Nothing is carried into a recipe planned on its own, into apply, or into audit. Apply is unchanged: every recipe re-observes the host and runs every check, so a deferral that turns out wrong is an apply failure of that resource, never a skipped check. A recipe whose plan did not complete for a host has unknown changes: later recipes on that host are planned as after an unknown change, and the run still ends with that recipe's plan error (exit 4). `--skip-recipe` and `--limit` are respected: a recipe that is not planned for a host carries nothing for it. Variables (`recipe_vars`, variables files, inventory layers) are frozen per (recipe, host) before any connection as before (§19.5); the carry holds no variable and no value of any field, only resource ids, recipe labels, paths and account names.
+
+Limits. An approval requested from the plan of a bundle (§43.4) is compared with a re-plan made at apply after the earlier recipes ran; a resource the bundle plan deferred may then be decided, and the digests differ. That is the existing behaviour for anything that changes between plan and apply; approvals for a bundle are best requested per recipe once the earlier recipes are applied. The carry is not available over MCP (MCP plans one recipe).
+
+49.2 `creates_accounts` on `package`
+
+`package` accepts `creates_accounts: { users: [...], groups: [...] }`: literal account names that installing this package creates. It is the declaration §14 asks for, in the place where the operator knows it; Sinter still never infers an account from a package name. In plan, an `owner`, `group` or supplementary group that names a declared account is deferred to apply when (a) the package runs earlier (in the execution order of the recipe, or in an earlier recipe of the bundle on the same host), (b) the package is planned to be installed (it is absent now and its `state` is literally `present`), and (c) the lookup confirms that the account is absent. An installed package provides nothing: apply would not create the account, so plan does not pretend it will. `creates_accounts` has no effect on apply or audit, adds no dependency and changes no order. It accepts no expression, no other key and no service name (a unit is covered by §29 and §49.1). The plan error for an account that does not exist now names both supported ways: `creates_accounts`, or a `user`/`group` resource declared before the package.
+
+49.3 `directory` with `parents: true`
+
+`parents` is a literal boolean, default false. With `parents: true` and `state: present`, a directory that does not exist is created together with every missing directory above it. Each missing parent is created by one plain `mkdir` (never `mkdir -p`), top down, only after the parent path check (§23) accepted everything above it; it gets mode 0755 and the owner and group of the account the operation runs as (root with `--sudo`; inside another account's tree, that account), and is re-observed before the next one is created. The declared `owner`, `group` and `mode` apply to the declared directory only. A parent that exists is never changed: not its mode, not its owner. A component that exists but is not a directory (a file, a symbolic link), a parent that grants group or other write access, and a parent that cannot be observed are refused as before, and nothing is created below them. Plan creates nothing; it names the directories apply will create and their mode. A failure after a parent was created is a failed resource whose result says which directories were created (`change: changed`), never success and never "no change". `parents` does not affect `state: absent` (only the declared directory is removed, and only when empty) and is not accepted by `file`, `template`, `link` or the partial-edit types: they never create a directory, and their refusal names this option. Audit is unchanged: a missing directory is drift.
+
+49.4 Audit of a host nothing is applied to
+
+Audit of a recipe or a bundle on a host where nothing is applied is drift (exit 7), not "could not audit": a missing file, directory, parent directory, account, unit or package is observed as absent and compared with the desired state (`state: absent` is compliant when it is absent). Every resource is observed on its own; one missing object does not stop the others. Added in this release: an existing object whose declared `owner` or `group` names an account that the lookup confirms does not exist is drift on that dimension (the object is certainly not owned by it) and its other dimensions are still compared; before, the resource was an audit error (exit 6). Unchanged: a lookup that fails or is incomplete, a permission problem, a refused parent, an SSH failure or a truncated observation is an error, never absence and never drift; a value that is unknown without running a command is not auditable; strict audit, the status vocabulary, the exit codes and the JSON shape are the same.
+
+49.5 Undefined variables in a template body
+
+A template body may only name what the recipe declares: `vars.<name>` must be a variable of the recipe, `template.<name>` a key of the resource's `vars` map. An undeclared name is a load-time error (exit 2), found by `validate` and before any host is contacted; before, it surfaced only when the body was rendered in plan or apply. The message names the variable unless the resource is sensitive. Change of behaviour: a body that names an undeclared variable only in a part that evaluation never reached (the right side of a short-circuit) used to render and is now refused.
+
+49.6 Declared backups in a partial run
+
+Up to v1.15.0, `--skip-resource` removed resources from the model but left `backup.paths` untouched (§40.8), so the backup of a path only an excluded resource changes was still taken, and its failure (a missing or unsafe parent, no permission, an object that cannot be copied) stopped the resources that did run. A recipe excluded with `--skip-recipe`, and a recipe whose resources are all excluded one by one, are not executed at all and never took a backup; that is unchanged.
+
+The rule. A recipe that runs without an exclusion takes every declared backup, exactly as before. For a recipe with excluded resources the same function that removes the resources (`SkipPlan::filter`) decides, per declared path, whether what still runs can need it:
+
+- A path declared for resources (`backup.paths` entry `{ path, resources: [id, ...] }`, new; an id names a resource of the recipe or a loop) is needed exactly when one of them runs. This is the explicit association; it has no effect on a run without exclusions.
+- Any other path is needed unless every resource that runs provably cannot touch it: each is of a type whose whole effect is its own path (`file`, `template`, `directory`, `link`, `file_merge`), notifies no handler, and its path is neither the backup path, nor below it (a directory backup), nor above it. A package, command, service, user, timer, plugin type, or any resource that notifies a handler (a handler runs a program or restarts a service) may change any path; with one of them running, every such backup stays. The relation is by path containment in both directions, never by string equality alone, and a backup whose need cannot be decided is never left out.
+
+A path that is left out moves from `backups` to `backups_skipped` of the model that runs. Plan and apply receive the same model, so they choose the same backups. For a skipped path nothing is observed, no store or run directory is created and no store check runs; when every backup is skipped the backup stage does not run at all. The report lists skipped paths with status `skipped` (text `[skipped]`, JSON `status: "skipped"` and `reason: "SKIPPED_BY_USER"`; the `reason` key exists only on such an entry). A backup that is still needed and fails stops the apply before any resource runs, as before. Audit takes no backup in any case. Each (recipe, host) execution of a bundle or an inventory run gets its own filtered model, so the choice is per recipe and identical for every host of that recipe.
+
+Not changed: the backup guarantee of a full apply; the overlap and store checks of the declaration (they are checks of the recipe text and run on the whole declaration at load); what `--skip-recipe` validates.

@@ -40,6 +40,7 @@ not configure a persistent host-wide environment.
 | `name` | yes | string | — | Package name (validated). |
 | `state` | yes | string | — | `present` or `absent`. Required. |
 | `env` | no | map of strings | empty | Environment variables for this package operation. |
+| `creates_accounts` | no | map | empty | Accounts that installing this package creates: `{ users: [...], groups: [...] }`. See [Accounts a package creates](#accounts-a-package-creates). |
 
 ## Expected behavior
 
@@ -58,6 +59,56 @@ not configure a persistent host-wide environment.
   `command` resource that runs `/usr/bin/apt-get update` (with
   `changed_when: "false"`) declared before the package.
 - Broken package states (half-configured etc.) fail rather than auto-repair.
+
+## Accounts a package creates
+
+Many packages create a system account when they are installed (`postgres`,
+`apache`, `nginx`). On a host where the package is not installed yet, that
+account does not exist when `plan` runs, so a `file` or `directory` owned by it
+cannot be checked. Sinter never guesses which accounts a package creates. Say
+it on the package:
+
+```yaml
+- id: server
+  type: package
+  with:
+    name: postgresql-server
+    state: present
+    creates_accounts:
+      users: [postgres]
+      groups: [postgres]
+
+- id: conf_d
+  type: directory
+  depends_on: [server]
+  with:
+    path: /var/lib/pgsql/data/conf.d
+    owner: postgres
+    group: postgres
+    mode: "0700"
+```
+
+```toml
+[[resources]]
+id = "server"
+type = "package"
+with = { name = "postgresql-server", state = "present", creates_accounts = { users = ["postgres"], groups = ["postgres"] } }
+```
+
+- In `plan`, a resource that runs after the package and names one of these
+  accounts as `owner`, `group` or a supplementary group is reported as
+  **decided at apply** instead of failing — but only while the package is
+  planned to be installed and the account really is absent.
+- If the package is already installed and the account is still missing, plan
+  reports the error: installing nothing will not create it.
+- `apply` is unchanged. It looks the account up for real after the package was
+  installed and fails if it is not there.
+- `creates_accounts` adds no dependency and does not change the order. Names are
+  literal (no expressions); only `users` and `groups` exist.
+- The same works across the recipes of a [bundle](/en/reference/cli/#bundles):
+  a package in an earlier recipe covers later recipes on the same host.
+- The alternative is unchanged: declare the account with a `user`/`group`
+  resource before the package, using the attributes the package uses.
 
 ## Removal (`state: absent`) on apt and dnf targets
 

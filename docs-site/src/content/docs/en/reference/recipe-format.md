@@ -134,6 +134,30 @@ default store is. `plan` lists each path with its store: read it before running 
 recipe. Do not use a directory a service reads as a store: a service that includes every entry of
 a directory can fail on the run directory it finds there.
 
+A path may also say which resources it is for:
+
+```yaml
+backup:
+  paths:
+    - path: /var/lib/app/data
+      resources: [migrate]        # ids of resources of this recipe
+    - /etc/app/app.conf
+```
+
+```toml
+[backup]
+paths = [
+  { path = "/var/lib/app/data", resources = ["migrate"] },
+  "/etc/app/app.conf",
+]
+```
+
+`resources` changes nothing in a full run: every declared backup is taken. It matters only for a
+[partial run](/en/reference/cli/#partial-runs): the backup is taken when one of the named resources
+runs, and left out (reported as skipped) when all of them are excluded with `--skip-resource`. An id
+names a resource, or a loop (all its instances). Without `resources`, Sinter keeps a backup unless
+it can tell from the paths that nothing that runs can touch it.
+
 ## vars
 
 ```yaml

@@ -133,7 +133,7 @@ needs one only if it is found on the management path, **N** never does.
 After connecting, Sinter finds the interfaces and the firewalld zone that
 carry its own connection; when it cannot determine them, the change is
 refused, with or without an approval. From v1.15.0 the control is enforced for
-firewalld 0.3.0 and `nm_connection`. firewalld 0.2.0 is not enforced in v1.15.0 (Owner decision D-13: it
+firewalld 0.3.0 and `nm_connection`. firewalld 0.2.0 is not enforced in v1.15.0 (it
 behaves as in v1.14.1; use firewalld 0.3.0 for changes that could cut the SSH
 connection; this does not mean 0.2.0 changes are safe), so runs without those
 types are unchanged.
@@ -612,6 +612,23 @@ inventory, each recipe runs in order on the one `--host` (or localhost).
 - Executions are (recipe, host) pairs: recipes in bundle order, hosts in name
   order. They run one at a time.
 - `plan` and `audit` are read-only and attempt every execution.
+- `plan` treats a bundle as one sequence per host: what an earlier recipe
+  plans to change on a host is taken into account when a later recipe is
+  planned for that same host. A parent directory an earlier recipe creates,
+  an account an earlier `user`/`group` resource or a package's
+  [`creates_accounts`](/en/reference/resources/package/#accounts-a-package-creates)
+  creates, and a service unit that is not found while an earlier recipe plans
+  to install a package are reported as **decided at apply** (with the earlier
+  resource and its recipe named) instead of failing the plan. So a whole
+  bundle can be planned on a host nothing is applied to yet. This only applies
+  when the earlier resource is planned to change and the missing thing really
+  is missing; nothing is carried between hosts, and `apply` re-checks
+  everything on the real host.
+- `audit` of a bundle that is not applied yet reports drift (exit 7): a
+  missing file, directory, account, unit or package is a difference from the
+  desired state, and each resource is checked on its own. Only what cannot be
+  observed (permission denied, a failed or incomplete lookup, a lost
+  connection) is an error (exit 6).
 - `apply` is fail-fast: the first execution that exits non-zero, for any
   reason (2 validation, 3 connection, 4 plan, 5 backup or apply failure,
   6 indeterminate), stops the sequence. That execution keeps its own result
@@ -941,8 +958,25 @@ Exit 2 before `ssh -G` or any connection: a name that matches nothing; a recipe 
 share, or an id several recipes have without `recipe/`; a handler id (a handler runs only when an
 included resource notifies it); an included resource whose `depends_on` names an excluded one, since
 nothing is excluded automatically; nothing left to run; and `--audit-policy strict`, which answers for
-the whole recipe. An excluded recipe is still validated. A declared backup of a recipe that runs is
-taken in full.
+the whole recipe. An excluded recipe is still validated, and takes no backup.
+
+Declared backups follow what runs. A recipe that runs without any exclusion takes every declared
+backup, as always. In a recipe with excluded resources, a declared backup is left out only when
+nothing that still runs can need it:
+
+- a backup written with `resources: [id, ...]` (see
+  [recipe format](/en/reference/recipe-format/#backup)) is taken exactly when one of those
+  resources runs;
+- any other backup is left out only if every resource that runs is a `file`, `template`,
+  `directory`, `link` or `file_merge` that notifies no handler and whose path is neither the backup
+  path, nor inside it, nor above it. A package, a command, a service, a plugin type or a resource
+  that notifies a handler can change any path, so with one of them running every such backup stays.
+
+A backup that is left out is not copied, its store is not created and nothing about it is checked,
+so a path only an excluded resource needs cannot stop the rest (a missing parent, no permission).
+`plan` and `apply` choose the same backups. Output lists a left-out backup as `[skipped]`
+(`status: "skipped"`, `reason: "SKIPPED_BY_USER"` in JSON). A backup that is still needed and fails
+stops the apply before any resource runs, as before.
 
 Exit codes do not change, so the exclusion is always visible: the list above comes first, a final
 `PARTIAL_APPLY`, `PARTIAL_PLAN` or `PARTIAL_AUDIT` line ends the output, and JSON has `skips` with

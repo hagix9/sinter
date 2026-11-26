@@ -41,6 +41,7 @@ description: ターゲットのパッケージバックエンドでパッケー�
 | `name` | はい | string | — | パッケージ名（検証される）。 |
 | `state` | はい | string | — | `present` または `absent`。必須。 |
 | `env` | いいえ | string の map | 空 | このパッケージ操作に渡す環境変数。 |
+| `creates_accounts` | いいえ | map | 空 | このパッケージのインストールで作られるアカウント: `{ users: [...], groups: [...] }`。[パッケージが作るアカウント](#パッケージが作るアカウント)を参照してください。 |
 
 ## 期待される動作
 
@@ -60,6 +61,56 @@ description: ターゲットのパッケージバックエンドでパッケー�
   実行する `command` リソース（`changed_when: "false"`）をパッケージより前に宣言します。
 - 壊れたパッケージ状態（設定途中など）は自動修復ではなく失敗と
   なります。
+
+## パッケージが作るアカウント
+
+多くのパッケージは、インストール時にシステムアカウントを作ります
+（`postgres`、`apache`、`nginx` など）。パッケージがまだ入っていないホストでは、
+`plan` の時点でそのアカウントが存在しないため、そのアカウントが所有する
+`file` や `directory` を検査できません。Sinter は、パッケージがどのアカウントを
+作るかを推測しません。パッケージ側に書いてください。
+
+```yaml
+- id: server
+  type: package
+  with:
+    name: postgresql-server
+    state: present
+    creates_accounts:
+      users: [postgres]
+      groups: [postgres]
+
+- id: conf_d
+  type: directory
+  depends_on: [server]
+  with:
+    path: /var/lib/pgsql/data/conf.d
+    owner: postgres
+    group: postgres
+    mode: "0700"
+```
+
+```toml
+[[resources]]
+id = "server"
+type = "package"
+with = { name = "postgresql-server", state = "present", creates_accounts = { users = ["postgres"], groups = ["postgres"] } }
+```
+
+- `plan` では、パッケージより後に実行され、これらのアカウントを `owner`、
+  `group`、補助グループとして指定するリソースは、失敗ではなく
+  **apply で判定**と報告されます。ただし、パッケージがインストール予定で、
+  アカウントが実際に存在しない場合に限ります。
+- パッケージがすでに入っているのにアカウントがない場合、plan はエラーを
+  報告します。何もインストールしなければ、アカウントは作られないためです。
+- `apply` の動作は変わりません。パッケージのインストール後にアカウントを
+  実際に調べ、存在しなければ失敗します。
+- `creates_accounts` は依存関係を追加せず、順序も変えません。名前はリテラルで書きます
+  （式は使えません）。キーは `users` と `groups` だけです。
+- [バンドル](/ja/reference/cli/)のレシピ間でも同じです。前のレシピのパッケージ
+  は、同じホストの後続レシピに効きます。
+- 従来の方法も使えます。パッケージが使う属性で、`user`／`group` リソースを
+  パッケージの前に宣言します。
 
 ## 削除（`state: absent`）— apt / dnf ターゲット
 

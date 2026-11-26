@@ -66,9 +66,12 @@ no handler notification.
 
 ## Failure behavior
 
-- Missing `source` file or template evaluation errors (e.g. undefined
-  variables) fail at validation/apply with a descriptive error — sensitive
-  values are redacted from the message.
+- Missing `source` file or template evaluation errors fail at
+  validation/apply with a descriptive error — sensitive values are redacted
+  from the message.
+- A `{{ vars.<name> }}` that the recipe does not declare, or a
+  `{{ template.<name> }}` that this resource's `vars` does not define, fails
+  validation (exit 2) and names the variable, before any host is contacted.
 - A Jinja tag (`{% if ... %}`, `{% for ... %}`, `{# ... #}`) fails validation
   (exit 2) with the resource, the source file, and the line and column of the
   tag. To publish such a file unchanged, use a [`file`](/en/reference/resources/file/)
