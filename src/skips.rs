@@ -84,7 +84,7 @@ fn below_or_same(a: &str, b: &str) -> bool {
 ///   when one of them is included (an id, or any instance of a loop).
 /// * Otherwise it is needed unless every included resource provably cannot
 ///   touch it: each is a type that changes only its own path, notifies no
-///   handler, and its path is neither the backup path, nor below it, nor
+///   handler, runs no `validate` program, and its path is neither the backup path, nor below it, nor
 ///   above it. Anything else (a package, a command, a service, a plugin
 ///   type, a resource that notifies a handler) may change any path, so the
 ///   backup stays. Nothing is left out on a guess.
@@ -96,7 +96,15 @@ fn backup_needed(path: &str, model: &Model) -> bool {
             .any(|r| ids.iter().any(|id| matches(r, id)));
     }
     model.resources.iter().any(|r| {
-        if !PATH_ONLY_TYPES.contains(&r.type_.as_str()) || !r.notify.is_empty() {
+        // `validate` runs a program on the target before publication: what
+        // that program touches is not known either.
+        if !PATH_ONLY_TYPES.contains(&r.type_.as_str())
+            || !r.notify.is_empty()
+            || !matches!(
+                r.with.get("validate"),
+                None | Some(crate::value::Value::Null)
+            )
+        {
             return true;
         }
         match &r.path {

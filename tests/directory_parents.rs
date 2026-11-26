@@ -266,3 +266,66 @@ fn audit_reports_the_missing_directory_as_drift_and_creates_nothing() {
     assert_eq!(rep.resources[0].status, AuditResourceStatus::Drift);
     assert!(rep.commands.iter().all(|c| c.program != "/bin/mkdir"));
 }
+
+#[test]
+fn below_a_sticky_shared_directory_plan_and_apply_agree() {
+    // /tmp is 1777: the first missing parent is created there by root, and
+    // the declared directory below it gets its declared owner. Plan judges
+    // the directory apply creates first, not the declared one against /tmp.
+    let body = DEEP.replace("/srv/app/var/data", "/tmp/x/y");
+    let p = recipe("dp-sticky", &body);
+    let t = || {
+        let mut t = host();
+        t.fs.as_mut().unwrap().mkdir_node("/tmp", 0o1777, 0, 0);
+        t
+    };
+    let plan = run_recipe_fake(&p, Mode::Plan, true, t());
+    assert_eq!(plan.status, AggregateStatus::Success);
+    let apply = run_recipe_fake(&p, Mode::Apply, true, t());
+    assert_eq!(apply.status, AggregateStatus::Success);
+    let fs = apply.fake_fs.as_ref().unwrap();
+    assert_eq!(node(fs, "/tmp/x"), (0o755, 0, 0));
+    assert_eq!(node(fs, "/tmp/x/y"), (0o750, 1500, 1500));
+}
+
+#[test]
+fn an_existing_parent_is_not_judged_differently_because_parents_is_set() {
+    // The parent exists: `parents: true` changes nothing about how the path
+    // is checked, with or without the option.
+    for parents in ["", "      parents: true\n"] {
+        let body = format!(
+            "version: 1\nresources:\n  - id: y\n    type: directory\n    with:\n      path: /srv/app/y\n      owner: app\n{parents}"
+        );
+        let mut t = host();
+        t.fs.as_mut()
+            .unwrap()
+            .mkdir_node("/srv/app", 0o755, 1500, 1500);
+        let p = recipe("dp-same", &body);
+        let with = try_run_recipe_fake(&p, Mode::Plan, true, t.clone()).map(|r| r.status);
+        let apply = try_run_recipe_fake(&p, Mode::Apply, true, t).map(|r| r.status);
+        assert_eq!(
+            with.is_ok(),
+            apply.is_ok(),
+            "plan and apply agree (parents: {})",
+            !parents.is_empty()
+        );
+    }
+}
+
+#[test]
+fn a_created_parent_is_made_private_first_and_never_with_the_umask_mode() {
+    let rep = run_recipe_fake(&recipe("dp-mode", DEEP), Mode::Apply, true, host());
+    let parents: Vec<&Vec<String>> = rep
+        .commands
+        .iter()
+        .filter(|c| c.program == "/bin/mkdir" && !c.args.iter().any(|a| a.ends_with("/data")))
+        .map(|c| &c.args)
+        .collect();
+    assert_eq!(parents.len(), 2, "{parents:?}");
+    assert!(
+        parents
+            .iter()
+            .all(|a| a.windows(2).any(|w| w == ["-m", "0700"])),
+        "{parents:?}"
+    );
+}

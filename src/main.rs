@@ -4818,6 +4818,47 @@ mod tests {
     }
 
     #[test]
+    fn the_parents_a_directory_creates_are_carried_to_the_next_recipe() {
+        let dir = fixture();
+        write(&dir, "01_dir.yaml", "version: 1\nresources:\n  - id: d\n    type: directory\n    with:\n      path: /srv/synthetic/app/data\n      parents: true\n");
+        write(&dir, "02_file.yaml", "version: 1\nresources:\n  - id: f\n    type: file\n    with:\n      path: /srv/synthetic/app/app.conf\n      content: x\n");
+        let bundle = write(
+            &dir,
+            "site.yaml",
+            "version: 1\nrecipes: [01_dir.yaml, 02_file.yaml]\n",
+        );
+        let host = || fresh_el9().with_fs_dir("/srv");
+        let (code, rows) = drive_results(
+            Phase::Plan,
+            &[&bundle, "--format", "json"],
+            vec![host(), host()],
+        );
+        assert_eq!(code.unwrap(), 0, "{rows:?}");
+        let f = result(&rows, "02_file@localhost:f");
+        assert!(f.2.contains("d (recipe 01_dir)"), "{f:?}");
+    }
+
+    #[test]
+    fn a_package_that_was_not_observed_defers_no_unit_in_a_later_recipe() {
+        // The package's `when` cannot be decided in plan: it was not
+        // observed, so a unit that is not found stays a plan error.
+        let dir = fixture();
+        write(&dir, "01_pkg.yaml", "version: 1\nresources:\n  - id: probe\n    type: command\n    with:\n      program: /usr/bin/true\n      register: probe\n      changed_when: \"false\"\n  - id: server\n    type: package\n    depends_on: [probe]\n    when: \"registers.probe.exit_code == 0\"\n    with: { name: postgresql-server, state: present }\n");
+        write(&dir, "02_svc.yaml", PG_SERVICE);
+        let bundle = write(
+            &dir,
+            "site.yaml",
+            "version: 1\nrecipes: [01_pkg.yaml, 02_svc.yaml]\n",
+        );
+        let (code, rows) = drive_results(
+            Phase::Plan,
+            &[&bundle, "--format", "json"],
+            vec![fresh_el9(), fresh_el9()],
+        );
+        assert_eq!(code.unwrap(), 4, "{rows:?}");
+    }
+
+    #[test]
     fn audit_of_a_bundle_on_a_fresh_host_is_drift_and_changes_nothing() {
         let dir = fixture();
         let bundle = pg_bundle(&dir, PG_PACKAGE);

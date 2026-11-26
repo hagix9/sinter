@@ -968,9 +968,10 @@ nothing that still runs can need it:
   [recipe format](/en/reference/recipe-format/#backup)) is taken exactly when one of those
   resources runs;
 - any other backup is left out only if every resource that runs is a `file`, `template`,
-  `directory`, `link` or `file_merge` that notifies no handler and whose path is neither the backup
-  path, nor inside it, nor above it. A package, a command, a service, a plugin type or a resource
-  that notifies a handler can change any path, so with one of them running every such backup stays.
+  `directory`, `link` or `file_merge` that notifies no handler, has no `validate`, and whose path is
+  neither the backup path, nor inside it, nor above it. A package, a command, a service, a plugin
+  type, a resource with `validate` or one that notifies a handler can change any path, so with one
+  of them running every such backup stays.
 
 A backup that is left out is not copied, its store is not created and nothing about it is checked,
 so a path only an excluded resource needs cannot stop the rest (a missing parent, no permission).

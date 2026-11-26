@@ -413,3 +413,15 @@ fn audit_takes_no_backup_and_reports_none() {
     .unwrap();
     assert!(rep.commands.iter().all(|c| c.program != "/bin/cp"));
 }
+
+#[test]
+fn a_file_that_runs_a_validate_program_keeps_every_backup() {
+    // `validate` runs a program on the target; what it touches is not known.
+    let body = format!(
+        "{BACKUPS}  - id: v\n    type: file\n    with:\n      path: /etc/app/v\n      content: v\n      validate:\n        program: /usr/bin/true\n        args: [\"{{{{ staged }}}}\"]\n"
+    );
+    let (_d, m) = load(&body);
+    let partial = plan_for(&m, &["a", "b", "c"]).filter(0, m);
+    assert_eq!(partial.backups.len(), 3);
+    assert!(partial.backups_skipped.is_empty());
+}

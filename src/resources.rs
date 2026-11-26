@@ -1961,6 +1961,13 @@ impl Engine {
     /// the parent exists). Read-only. The first component that exists but is
     /// not a directory ends the list: the parent path check refuses it.
     fn missing_parents(&mut self, res: &FrozenResource, path: &str) -> Result<Vec<String>> {
+        // The parent exists and the usual walk accepts it: nothing is
+        // missing, and no ancestor is observed on its own (inside a shared
+        // directory that would judge an ancestor as an entry, which the
+        // walk for the directory itself does not).
+        if self.fs.check_trusted_parents_observed(path).is_ok() {
+            return Ok(Vec::new());
+        }
         let mut missing = Vec::new();
         for dir in ancestor_dirs(path) {
             if !missing.is_empty() {
@@ -1987,6 +1994,10 @@ impl Engine {
         path: &str,
         created: &mut Vec<String>,
     ) -> Result<()> {
+        // Nothing is missing (see `missing_parents`).
+        if self.fs.check_trusted_parents(path).is_ok() {
+            return Ok(());
+        }
         for dir in ancestor_dirs(path) {
             if dir == "/" {
                 continue;
@@ -2012,7 +2023,10 @@ impl Engine {
                 return Err(e);
             }
             let permit = self.fs.mutation_permit()?;
-            self.fs.mkdir(&permit, &dir)?;
+            // Created 0700 by the `mkdir` call itself and opened to 0755
+            // only once it is owned as intended: it is never visible with
+            // the mode a permissive umask would give.
+            self.fs.mkdir_private(&permit, &dir)?;
             created.push(dir.clone());
             let (uid, gid) = self.fs.default_owner();
             self.fs.set_metadata(&dir, 0o755, uid, gid)?;
@@ -2142,10 +2156,21 @@ impl Engine {
                             .map_err(|e| parents_hint(e, parents))?,
                     };
                     let explicit = meta.manage_owner.then_some(meta.owner_uid).flatten();
-                    if let Some(e) = self.fs.tree_owner_conflict(&path, explicit, None) {
+                    // What apply checks, in apply's order. With missing
+                    // parents the walk plan made is the one for the first of
+                    // them: that directory is judged as apply will create it
+                    // (no declared owner). The declared directory then lies
+                    // in a parent apply has just created, 0755 and owned by
+                    // the account it runs as, which plan cannot walk yet;
+                    // apply makes that check for real.
+                    let (subject, owner) = match missing.first() {
+                        Some(first) => (first.as_str(), None),
+                        None => (path.as_str(), explicit),
+                    };
+                    if let Some(e) = self.fs.tree_owner_conflict(subject, owner, None) {
                         return Err(e);
                     }
-                    if let Some(e) = self.fs.shared_owner_conflict(&path, explicit) {
+                    if let Some(e) = self.fs.shared_owner_conflict(subject, owner) {
                         return Err(e);
                     }
                     let mut r = changed_result(res);

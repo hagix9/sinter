@@ -167,7 +167,12 @@ impl PlannedEffects {
                         map.entry(name.clone()).or_insert_with(|| res.id.clone());
                     }
                 }
-                "package" => {
+                // Only a package that plan OBSERVED as absent and plans to
+                // install: one whose result is unknown (its `when` or a
+                // dependency cannot be decided) was not observed and may
+                // well be installed already, so it creates nothing plan can
+                // count on (DESIGN §49.2 (b)).
+                "package" if r.change != Change::None && !r.unknown => {
                     // Checked at load; a value that does not parse declares
                     // nothing.
                     let p = crate::model::package_accounts(&res.with, &res.id).unwrap_or_default();
@@ -970,12 +975,23 @@ impl Engine {
             let mut res = res.clone();
             res.id = named(&res.id);
             out.record(&res, r);
+            // As for accounts: only an installation plan observed the need
+            // for, never a package whose result is unknown.
             if res.type_ == "package"
                 && literally_present(&res)
-                && (r.change != Change::None || r.unknown)
+                && r.change != Change::None
+                && !r.unknown
                 && out.prior_package_install.is_none()
             {
                 out.prior_package_install = Some(res.id.clone());
+            }
+        }
+        // Paths the plan itself added (the parents a `directory` with
+        // `parents: true` creates, DESIGN §49.3) are changes of this recipe
+        // too.
+        for (path, id) in &self.planned.paths {
+            if !out.paths.iter().any(|(p, _)| p == path) {
+                out.paths.push((path.clone(), named(id)));
             }
         }
         // A guarded command that may run after all (`guarded_command_may_run`)

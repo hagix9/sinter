@@ -193,3 +193,17 @@ fn creates_accounts_is_checked_when_the_recipe_is_loaded() {
         assert!(e.message.contains(want), "{bad}: {}", e.message);
     }
 }
+
+#[test]
+fn a_package_plan_could_not_observe_creates_nothing_plan_can_count_on() {
+    // The package's `when` depends on a command that plan does not run, so
+    // the package is not observed (it may be installed already): its
+    // creates_accounts defers nothing, and plan refuses the missing account.
+    let dir = trusted_root("ca-unknown");
+    let body = "version: 1\nresources:\n  - id: probe\n    type: command\n    with:\n      program: /usr/bin/true\n      register: probe\n      changed_when: \"false\"\n  - id: httpd\n    type: package\n    depends_on: [probe]\n    when: \"registers.probe.exit_code == 0\"\n    with:\n      name: httpd\n      state: present\n      creates_accounts: { users: [apache], groups: [apache] }\n  - id: docroot\n    type: directory\n    with: { path: /var/www/site, owner: apache, group: apache, mode: \"0750\" }\n";
+    let r = write_recipe(&dir, "r.yaml", body);
+    let Err(e) = run(&r, Mode::Plan) else {
+        panic!("plan must refuse: the package was not observed");
+    };
+    assert!(e.message.contains("unknown user: apache"), "{}", e.message);
+}
