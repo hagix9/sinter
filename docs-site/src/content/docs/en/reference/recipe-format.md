@@ -234,17 +234,36 @@ Rules:
 - The existing entry must be absent, or a regular file owned by root (or the
   connecting user without `--sudo`) with one hard link; a symbolic link or a
   file of another account is refused. An existing file larger than 256 KiB is
-  refused (it is read without following links, up to that size).
+  refused (it is read without following links, up to that size). Each read
+  must see the very file that check passed (same device, inode and change
+  time, still one hard link, still owned by root): a file renamed or linked
+  in after the check is refused, never read.
+- The existing content of a file in the directory is **never shown**: another
+  account can rename any file it can reach on the same file system (a
+  root-only one included) into the managed name, and to the check above it
+  looks like a file Sinter wrote. Plan shows the sizes ("… bytes, content
+  differs (not shown)") with the note "content diff not shown: …", also for a
+  resource that is not `sensitive`; audit never shows content anyway.
+- `file_merge` keeps the existing content, so in such a directory it refuses
+  (in plan and in apply, with the same message) a publication that would make
+  an existing file readable by more accounts: a declared `mode` that adds a
+  read bit the existing mode lacks (`0600` → `0644`), or a declared `owner` or
+  `group` other than the existing one. Leave them unset (the existing values
+  are kept) or declare the existing ones; a narrower mode is allowed. When the
+  file does not exist yet, the declared `owner`, `group` and `mode` apply.
 - Every result that used the field carries the note "parent … is writable by
   other accounts; allowed by allow_writable_parents" (text and JSON), and each
   publication leaves its empty `.sinter-stage.*` directory in the listed
   directory (reported in a note; remove it when convenient).
 
 What you accept by listing a directory: any account that can write to it can
-replace, rename or remove the file after Sinter wrote it, and can read what the
-file's mode allows. Sinter only guarantees that root does not write, read or
-remove anything outside the directory because of it, and that what it published
-was the declared content. Without the field, `sinter audit` still observes such
+replace, rename or remove the file after Sinter wrote it, can read what the
+file's mode allows, and can put another file under the managed name (Sinter
+then replaces it, or `file_merge` edits it without widening who can read it).
+Sinter only guarantees that root does not write, change, follow a link to or
+remove anything outside the directory because of it, that it never shows (and
+`file_merge` never makes more widely readable) the content of a file found in
+it, and that what it published was the declared content. Without the field, `sinter audit` still observes such
 a path read-only (see [audit](/en/reference/cli/)).
 
 ## resources

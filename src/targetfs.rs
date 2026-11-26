@@ -587,6 +587,14 @@ struct IdentityMemo {
     /// the observation runs as that account, and any other accepted chain is
     /// one nobody else can write to.
     walks: BTreeMap<(String, &'static str), GateOutcome>,
+    /// The `lstat` of every present entry the entry gate (FS-2, DESIGN §63)
+    /// passed for the resource being handled, by path. A read of an entry in
+    /// a directory others can write to must see exactly this object (DESIGN
+    /// §63.2 "Reads in D"). Dropped with the walks at the first mutation (the
+    /// resource's own publication changes the entry) and at the start and
+    /// end of every resource ([`TargetFs::clear_identity`]); a read with no
+    /// entry here runs the gate first.
+    gated: BTreeMap<String, Stat>,
 }
 
 /// What the parent walk concluded about one path (L-1/L-2).
@@ -623,6 +631,7 @@ impl IdentityMemo {
     fn clear(&mut self) {
         self.entries.clear();
         self.walks.clear();
+        self.gated.clear();
     }
 }
 
@@ -917,6 +926,7 @@ impl TargetFs {
         self.identity = None;
         self.shared_parent = false;
         self.writable_parent = None;
+        self.identity_memo.gated.clear();
     }
 
     /// Mark the resource being handled as sensitive (or not): the refusals of
@@ -1910,6 +1920,64 @@ impl TargetFs {
         })
     }
 
+    /// DESIGN §63.2: the `lstat` of [`Self::inspect`] and the hard link count
+    /// of the same object in one `stat` call (`%h` appended), so the two
+    /// cannot describe different objects. Absence is `(absent, 0)`.
+    fn inspect_with_links(&mut self, path: &str) -> Result<(Stat, u64)> {
+        let out = self.run_argv(
+            "/usr/bin/stat",
+            &[
+                "-c".to_string(),
+                STAT_WITH_LINKS_FORMAT.to_string(),
+                "--".to_string(),
+                path.to_string(),
+            ],
+        )?;
+        interpret_stat_with_links(&out, path)
+    }
+
+    /// The `lstat` the entry gate passed for `path` while handling this
+    /// resource, or — when there is none (nothing gated it yet, or a mutation
+    /// since) — the verdict of running the gate now.
+    fn gated_entry(&mut self, path: &str) -> Result<Stat> {
+        if let Some(st) = self.identity_memo.gated.get(path) {
+            return Ok(st.clone());
+        }
+        self.entry_gate(path)
+    }
+
+    /// DESIGN §63.2: the `lstat` (with link count) that opens a read of an
+    /// entry in a directory others can write to. The entry must be owned by a
+    /// trusted principal, a regular file must have exactly one link, and it
+    /// must be the very object the entry gate judged for this resource
+    /// (device, inode, ctime and the rest of [`same_observation`]): an entry
+    /// renamed or linked in after the gate is refused, never read.
+    fn open_checked_read(&mut self, path: &str, shown: &str) -> Result<(Stat, u64)> {
+        let gate = self.gated_entry(path)?;
+        let (st, links) = self.inspect_with_links(path)?;
+        if st.kind != ObjKind::Absent && !self.is_trusted_owner(st.uid) {
+            return Err(SinterError::apply(format!(
+                "{} is not owned by {}; in a directory other accounts can write to it is not read",
+                shown,
+                self.trusted_owner_words()
+            )));
+        }
+        if st.kind == ObjKind::File && links != 1 {
+            return Err(SinterError::apply(format!(
+                "{} has {} hard links; in a directory other accounts can write to it is not read",
+                shown, links
+            )));
+        }
+        if !same_observation(&gate, &st) {
+            return Err(SinterError::apply(format!(
+                "{} changed after it was checked (in a directory other accounts can write to); \
+                 nothing is read",
+                shown
+            )));
+        }
+        Ok((st, links))
+    }
+
     /// LED-025: `stat` refused with exactly the coreutils "Permission denied"
     /// record. Still an observation error (fail closed, same kind), but said
     /// in words, with the privilege it ran with: a hint to use root only when
@@ -2000,16 +2068,30 @@ impl TargetFs {
         self.nofollow_dirs.contains(&dir)
     }
 
+    /// DESIGN §63.2: whether `path` lies directly in a directory other
+    /// accounts can write to that a walk of this run accepted (listed in
+    /// `allow_writable_parents`, or for audit). Another account can put any
+    /// file it can rename there — a root-only file included — so Sinter never
+    /// shows the existing content of such a path (plan diff, apply result,
+    /// audit detail), whatever the resource's sensitivity.
+    pub(crate) fn content_withheld(&self, path: &str) -> bool {
+        let (dir, _) = parent_and_name(path);
+        self.reads_without_following(path) || self.writable_parent.as_deref() == Some(dir.as_str())
+    }
+
     /// DESIGN §63.3: the whole content of the regular file at `path`, read
     /// without following anything, bracketed by two `lstat`s that must agree.
     ///
-    /// * `lstat` first: a regular file of at most
-    ///   [`crate::resources::PARTIAL_EDIT_MAX_BYTES`] bytes, else refused;
+    /// * `lstat` first, with the link count (`%h`): owned by a trusted
+    ///   principal, one link, and the very object the entry gate judged for
+    ///   this resource (see [`Self::open_checked_read`]); a regular file of at
+    ///   most [`crate::resources::PARTIAL_EDIT_MAX_BYTES`] bytes, else refused;
     /// * `dd if=<path> iflag=nofollow,nonblock bs=<limit+1> count=1
     ///   status=none` (fixed argv; a symbolic link fails with ELOOP and a FIFO
     ///   does not block);
     /// * `lstat` again: device, inode, size, mtime, ctime, mode, owner and
-    ///   group as before, and the number of bytes read equal to the size.
+    ///   group as before, still one link, and the number of bytes read equal
+    ///   to the size.
     ///
     /// Renaming, linking or unlinking a file changes its ctime, so an entry
     /// that another account took away and put back while it was read is seen.
@@ -2017,7 +2099,7 @@ impl TargetFs {
     pub(crate) fn read_nofollow_checked(&mut self, path: &str) -> Result<Vec<u8>> {
         let limit = crate::resources::PARTIAL_EDIT_MAX_BYTES;
         let shown = if self.redact { "the entry" } else { path }.to_string();
-        let before = self.inspect(path)?;
+        let (before, _) = self.open_checked_read(path, &shown)?;
         if before.kind != ObjKind::File {
             return Err(SinterError::apply(format!(
                 "{} is not a regular file; in a directory other accounts can write to it is not \
@@ -2065,8 +2147,11 @@ impl TargetFs {
                 )))
             }
         }
-        let after = self.inspect(path)?;
-        if !same_observation(&before, &after) || out.stdout.len() as u64 != before.size {
+        let (after, links) = self.inspect_with_links(path)?;
+        if !same_observation(&before, &after)
+            || links != 1
+            || out.stdout.len() as u64 != before.size
+        {
             return Err(SinterError::apply(format!(
                 "{} changed while it was read (in a directory other accounts can write to); \
                  nothing read is used",
@@ -2107,8 +2192,19 @@ impl TargetFs {
             return self.xattrs_inner(path);
         }
         // DESIGN §63: `getfattr` and `getfacl` follow a final link. The entry
-        // must be the same object (no link) before and after they ran.
-        let before = self.inspect(path)?;
+        // must be the object the entry gate judged (no link, one hard link
+        // for a file, a trusted owner) before and after they ran.
+        let shown = if self.redact { "the entry" } else { path }.to_string();
+        let before = match self.open_checked_read(path, &shown) {
+            Ok((st, _)) => st,
+            Err(e) if e.kind == crate::error::ErrorKind::Indeterminate => return Err(e),
+            Err(_) => {
+                return Ok(Xattrs {
+                    attrs: BTreeMap::new(),
+                    inspected: false,
+                })
+            }
+        };
         if !matches!(before.kind, ObjKind::File | ObjKind::Dir) {
             return Ok(Xattrs {
                 attrs: BTreeMap::new(),
@@ -2116,8 +2212,8 @@ impl TargetFs {
             });
         }
         let x = self.xattrs_inner(path)?;
-        let after = self.inspect(path)?;
-        if !same_observation(&before, &after) {
+        let (after, links) = self.inspect_with_links(path)?;
+        if !same_observation(&before, &after) || (after.kind == ObjKind::File && links != 1) {
             return Ok(Xattrs {
                 attrs: BTreeMap::new(),
                 inspected: false,
@@ -3159,7 +3255,22 @@ impl TargetFs {
     /// judged. An entry owned by a trusted principal cannot be removed, renamed
     /// or replaced by anyone else in a sticky directory, so what passes here
     /// stays the same object until the invocation changes it.
+    ///
+    /// A present entry that passes is recorded for the resource being handled
+    /// (see `IdentityMemo::gated`): a read of it in a directory others can
+    /// write to must see that very object.
     pub(crate) fn entry_gate(&mut self, path: &str) -> Result<Stat> {
+        self.identity_memo.gated.remove(path);
+        let st = self.entry_gate_inner(path)?;
+        if st.kind != ObjKind::Absent {
+            self.identity_memo
+                .gated
+                .insert(path.to_string(), st.clone());
+        }
+        Ok(st)
+    }
+
+    fn entry_gate_inner(&mut self, path: &str) -> Result<Stat> {
         let st = self.inspect(path)?;
         if st.kind == ObjKind::Absent {
             return Ok(st);
@@ -3693,6 +3804,44 @@ pub(crate) fn readlink_record(out: &Output, path: &str) -> Result<String> {
 /// and the record is never normalized (trimmed) before validation: the record
 /// boundary is part of the contract.
 pub(crate) fn interpret_stat(out: &Output, path: &str) -> Result<Stat> {
+    interpret_stat_record(out, path, parse_stat_line, absent_stat)
+}
+
+/// `stat -c` format of [`TargetFs::inspect_with_links`]: the nine fields of
+/// [`TargetFs::inspect`], then the hard link count.
+const STAT_WITH_LINKS_FORMAT: &str = "%F|%a|%u|%g|%s|%d|%i|%y|%z|%h";
+
+/// [`interpret_stat`] for [`STAT_WITH_LINKS_FORMAT`]: the same contract, one
+/// more field (decimal digits only). Absence is `(absent, 0)`.
+fn interpret_stat_with_links(out: &Output, path: &str) -> Result<(Stat, u64)> {
+    interpret_stat_record(out, path, parse_stat_links_line, || (absent_stat(), 0))
+}
+
+fn parse_stat_links_line(text: &str) -> std::result::Result<(Stat, u64), String> {
+    let line = text.strip_suffix('\n').ok_or_else(|| {
+        "stat output is not terminated by the expected record newline".to_string()
+    })?;
+    if line.contains('\n') || line.contains('\r') {
+        return Err("stat produced unexpected additional output".to_string());
+    }
+    let parts: Vec<&str> = line.split('|').collect();
+    if parts.len() != 10 {
+        return Err(format!("unexpected stat output: {:?}", line));
+    }
+    let links = parts[9];
+    if links.is_empty() || !links.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("unexpected hard link count: {:?}", links));
+    }
+    let links = links.parse::<u64>().map_err(|e| e.to_string())?;
+    Ok((parse_stat_fields(&parts[..9])?, links))
+}
+
+fn interpret_stat_record<T>(
+    out: &Output,
+    path: &str,
+    parse: impl FnOnce(&str) -> std::result::Result<T, String>,
+    absent: impl FnOnce() -> T,
+) -> Result<T> {
     match out.completion {
         Completion::Exited(0) => {
             require_complete(out, path)?;
@@ -3705,14 +3854,13 @@ pub(crate) fn interpret_stat(out: &Output, path: &str) -> Result<Stat> {
                 )));
             }
             let text = utf8_stream(&out.stdout, path)?;
-            parse_stat_line(text)
-                .map_err(|e| SinterError::apply(format!("cannot inspect {}: {}", path, e)))
+            parse(text).map_err(|e| SinterError::apply(format!("cannot inspect {}: {}", path, e)))
         }
         Completion::Exited(_) => {
             // Absence is a positive observation, not a fallback: only the
             // narrow, complete absence contract may become `Absent`.
             match classify_absence(out, path, "/usr/bin/stat") {
-                AbsenceVerdict::Absent => Ok(absent_stat()),
+                AbsenceVerdict::Absent => Ok(absent()),
                 AbsenceVerdict::Ambiguous => Err(SinterError::apply(format!(
                     "cannot inspect {}: {}",
                     path,

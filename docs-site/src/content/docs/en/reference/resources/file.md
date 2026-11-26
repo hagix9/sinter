@@ -224,7 +224,10 @@ parent chain Sinter has accepted, and it refuses rather than guessing.
   Run as root, it is then accepted as the direct parent for creating, replacing
   or removing the whole file only; a change of owner, group or mode alone and
   `validate` stay refused there, the existing file must be root's with one hard
-  link and at most 256 KiB, and every result notes the directory.
+  link and at most 256 KiB (and still the same file when it is read), and every
+  result notes the directory. Plan never shows the existing content of a file
+  there (only the sizes, with the note "content diff not shown: …"): another
+  account could have renamed any file into that name.
 - **Audit** observes a path whose only problem is a direct parent others can
   write (listed or not) without following links (`lstat`, and the content read
   with `dd iflag=nofollow` between two `lstat`s that must agree, up to 256 KiB),

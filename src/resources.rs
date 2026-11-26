@@ -44,6 +44,11 @@ pub(crate) struct MetaSpec {
 /// limit of one command.
 pub(crate) const PARTIAL_EDIT_MAX_BYTES: u64 = crate::diff::MAX_DIFF_LINE_BYTES as u64;
 
+/// DESIGN §63.2: the note of a plan whose content diff is withheld because
+/// the file lies directly in a directory other accounts can write to.
+pub(crate) const WITHHELD_DIFF_NOTE: &str = "content diff not shown: the file is in a directory \
+     other accounts can write to, where the existing file may be one another account put there";
+
 pub(crate) fn ev_str(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<Option<(String, bool)>> {
     match m.get(key) {
         None => Ok(None),
@@ -1267,6 +1272,18 @@ impl Engine {
         let desired_sha = effective.as_ref().map(|b| sha256_hex(b));
         let content_changed = match (&effective, stat.kind) {
             (Some(_), ObjKind::Absent) => true,
+            // DESIGN §63.2: in plan, below a directory others can write to,
+            // the digest of a partial edit is the digest of the one read the
+            // edit was computed from (no second read: nothing else depends on
+            // content there, since no diff is shown). Apply reads again: that
+            // read is the check that the file still holds those bytes.
+            (Some(_), ObjKind::File)
+                if self.opts.mode == Mode::Plan
+                    && read_sha.is_some()
+                    && self.fs.content_withheld(path) =>
+            {
+                read_sha != desired_sha.as_deref()
+            }
             (Some(_), ObjKind::File) => {
                 let remote = self.observe_sha256(res, path)?;
                 if let Some(read) = read_sha {
@@ -1343,14 +1360,26 @@ impl Engine {
                 // possible: non-sensitive and within the diff size bound.
                 let within = desired.len() <= crate::diff::MAX_DIFF_LINE_BYTES
                     && stat.size as usize <= crate::diff::MAX_DIFF_LINE_BYTES;
+                // DESIGN §63.2: directly in a directory other accounts can
+                // write to, the existing file may be any file another account
+                // renamed there (a root-only one included): its content is
+                // never shown, only the sizes.
+                let withheld = stat.kind == ObjKind::File && self.fs.content_withheld(path);
+                if withheld && !sensitive {
+                    r.notes.push(WITHHELD_DIFF_NOTE.to_string());
+                }
                 // Current bytes are read only through a parent path the
                 // check accepted.
-                let cur_bytes =
-                    if stat.kind == ObjKind::File && !sensitive && within && parents_trusted {
-                        Some(self.fs.read_file(path)?)
-                    } else {
-                        None
-                    };
+                let cur_bytes = if stat.kind == ObjKind::File
+                    && !sensitive
+                    && !withheld
+                    && within
+                    && parents_trusted
+                {
+                    Some(self.fs.read_file(path)?)
+                } else {
+                    None
+                };
                 if sensitive {
                     r.diff = Some(Diff {
                         body: DiffBody::Redacted,
@@ -1363,7 +1392,9 @@ impl Engine {
                         false,
                     ));
                 } else {
-                    let current = if stat.kind == ObjKind::File {
+                    let current = if withheld {
+                        format!("{} bytes, content differs (not shown)", stat.size)
+                    } else if stat.kind == ObjKind::File {
                         format!("{} bytes", stat.size)
                     } else {
                         "absent".to_string()

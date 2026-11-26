@@ -1250,3 +1250,394 @@ fn a_file_over_the_read_limit_in_a_listed_directory_is_refused_before_anything_i
     assert!(apply_failure(&applied, "f").contains("larger than"));
     assert!(mutations(&applied.commands).is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// D-1: a file another account renamed (or linked) into a listed directory
+// ---------------------------------------------------------------------------
+
+const CANARY: &str = "SYNTHETIC-ROOT-ONLY";
+const WITHHELD: &str =
+    "content diff not shown: the file is in a directory other accounts can write to";
+
+/// Another account renamed a root-only 0600 file into the managed name
+/// (`mv D/secret.conf D/x.conf`, or from another directory it can write on
+/// the same file system): to the entry gate it is a root file with one link.
+fn planted(t: FakeTarget, path: &str) -> FakeTarget {
+    with_file(t, path, SECRET.as_bytes(), 0o600, 0)
+}
+
+fn merge_res(id: &str, path: &str, extra: &str) -> String {
+    format!(
+        "  - id: {id}\n    type: file_merge\n    with:\n      path: {path}\n      merge: line\n      line: 'added = yes'\n{extra}"
+    )
+}
+
+#[test]
+fn a_file_planted_in_a_listed_directory_is_never_shown_by_plan_or_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir, "t.tmpl", "from a template\n");
+    let p = recipe(
+        &dir,
+        &[D],
+        &format!(
+            "{}  - id: t\n    type: template\n    with:\n      path: /opt/app/t.conf\n      source: t.tmpl\n{}",
+            file_res("/opt/app/x.conf", ""),
+            merge_res("m", "/opt/app/m.conf", "")
+        ),
+    );
+    let t = || {
+        let mut t = base();
+        for path in ["/opt/app/x.conf", "/opt/app/t.conf", "/opt/app/m.conf"] {
+            t = planted(t, path);
+        }
+        t
+    };
+    for sequential in [false, true] {
+        let mut t0 = t();
+        if sequential {
+            t0 = t0.with_executable("/usr/bin/getfacl");
+        }
+        let planned = run(&p, Mode::Plan, t0.clone());
+        assert_eq!(
+            planned.status,
+            AggregateStatus::Success,
+            "{:?}",
+            planned.resources
+        );
+        let shown = shown_apply(&planned);
+        assert!(
+            !shown.contains(CANARY),
+            "plan shows the planted file: {shown}"
+        );
+        for id in ["f", "t", "m"] {
+            let r = res(&planned, id);
+            assert_eq!(r.change, Change::Changed, "{id}");
+            assert!(
+                r.notes.iter().any(|n| n.starts_with(WITHHELD)),
+                "{id}: {:?}",
+                r.notes
+            );
+            match &r.diff.as_ref().expect("a diff").body {
+                sinter::result::DiffBody::Summary { current, .. } => {
+                    assert_eq!(
+                        current,
+                        &format!("{} bytes, content differs (not shown)", SECRET.len()),
+                        "{id}"
+                    )
+                }
+                other => panic!("{id}: not a summary: {other:?}"),
+            }
+        }
+        assert!(shown.contains("content differs (not shown)"), "{shown}");
+        assert!(mutations(&planned.commands).is_empty());
+
+        let applied = run(&p, Mode::Apply, t0);
+        assert_eq!(
+            applied.status,
+            AggregateStatus::Success,
+            "{:?}",
+            applied.resources
+        );
+        assert!(!shown_apply(&applied).contains(CANARY));
+        // file_merge keeps the planted content, readable by no more accounts
+        // than before: root's, 0600.
+        let fs = fs_of(&applied);
+        let n = &fs.nodes["/opt/app/m.conf"];
+        assert_eq!((n.uid, n.gid, n.mode & 0o7777), (0, 0, 0o600));
+        assert_eq!(
+            bytes(fs, "/opt/app/m.conf").unwrap(),
+            format!("{SECRET}added = yes\n").into_bytes()
+        );
+    }
+}
+
+#[test]
+fn file_merge_does_not_widen_the_readers_of_a_planted_file() {
+    // The audit's reproduction: root 0600 planted, `mode: "0644"` declared.
+    for (extra, want) in [
+        (
+            "      mode: \"0644\"\n",
+            "the declared mode 0644 adds read permission (0044) that the existing mode 0600 does not grant",
+        ),
+        (
+            "      mode: \"0640\"\n",
+            "the declared mode 0640 adds read permission (0040)",
+        ),
+        (
+            "      group: alice\n",
+            "the declared group (gid 1001) is not the existing group (gid 0)",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let p = recipe(&dir, &[D], &merge_res("m", "/opt/app/m.conf", extra));
+        let t = || planted(base(), "/opt/app/m.conf");
+        let e = plan_err(&p, t()).message;
+        assert!(e.contains(want), "{extra}: {e}");
+        assert!(e.contains("a directory other accounts can write to"), "{e}");
+        assert!(!e.contains(CANARY), "{e}");
+        let applied = run(&p, Mode::Apply, t());
+        let why = apply_failure(&applied, "m");
+        assert!(why.contains(want), "{extra}: {why}");
+        assert_eq!(publishes(&applied.commands, "replace"), 0, "{extra}");
+        let fs = fs_of(&applied);
+        assert_eq!(bytes(fs, "/opt/app/m.conf").unwrap(), SECRET.as_bytes());
+        assert_eq!(fs.nodes["/opt/app/m.conf"].mode & 0o7777, 0o600);
+    }
+    // Unchanged (or narrower) metadata is allowed and the result stays root's.
+    for (extra, mode) in [
+        ("", 0o600),
+        (
+            "      mode: \"0600\"\n      owner: root\n      group: root\n",
+            0o600,
+        ),
+        ("      mode: \"0400\"\n", 0o400),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let p = recipe(&dir, &[D], &merge_res("m", "/opt/app/m.conf", extra));
+        let applied = run(&p, Mode::Apply, planted(base(), "/opt/app/m.conf"));
+        assert_eq!(
+            applied.status,
+            AggregateStatus::Success,
+            "{extra}: {:?}",
+            applied.resources
+        );
+        let n = &fs_of(&applied).nodes["/opt/app/m.conf"];
+        assert_eq!((n.uid, n.gid, n.mode & 0o7777), (0, 0, mode), "{extra}");
+    }
+    // A file that does not exist: the declared metadata applies.
+    let dir = tempfile::tempdir().unwrap();
+    let p = recipe(
+        &dir,
+        &[D],
+        &merge_res(
+            "m",
+            "/opt/app/new.conf",
+            "      create: true\n      mode: \"0644\"\n",
+        ),
+    );
+    let applied = run(&p, Mode::Apply, base());
+    assert_eq!(
+        applied.status,
+        AggregateStatus::Success,
+        "{:?}",
+        applied.resources
+    );
+    let fs = fs_of(&applied);
+    assert_eq!(bytes(fs, "/opt/app/new.conf").unwrap(), b"added = yes\n");
+    assert_eq!(fs.nodes["/opt/app/new.conf"].mode & 0o7777, 0o644);
+}
+
+#[test]
+fn audit_of_a_file_merge_value_in_a_writable_parent_does_not_show_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = recipe(
+        &dir,
+        &[],
+        "  - id: m\n    type: file_merge\n    with:\n      path: /opt/app2/m.conf\n      merge: key_value\n      key: token\n      value: wanted\n",
+    );
+    let t = with_file(
+        base(),
+        "/opt/app2/m.conf",
+        format!("token = {CANARY}-CANARY\n").as_bytes(),
+        0o600,
+        0,
+    );
+    let r = audit(&p, t);
+    let a = ares(&r, "m");
+    assert_eq!(a.status, AuditResourceStatus::Drift, "{a:?}");
+    assert!(a.details.iter().any(|d| d.dimension == "value"), "{a:?}");
+    let (text, json) = shown_audit(&r);
+    assert!(!text.contains(CANARY), "{text}");
+    assert!(!json.contains(CANARY), "{json}");
+    assert!(text.contains("not shown"), "{text}");
+    audit_read_only(&r, "/opt/app2/m.conf");
+}
+
+/// The 0-based index, among the `stat` commands naming `path`, of the `lstat`
+/// that opens the first read of `path` (the `stat` right before the first
+/// `dd if=<path>`): an event there happens after every entry gate of that
+/// observation and before the read.
+fn stat_before_first_read(cmds: &[CommandRecord], path: &str) -> usize {
+    let mut seen = 0;
+    let mut last = None;
+    for c in cmds {
+        let prog = base_name(&c.program);
+        if prog == "dd" && c.args.iter().any(|a| a == &format!("if={path}")) {
+            return last.expect("a stat before the read");
+        }
+        if prog == "stat" && c.args.iter().any(|a| a == path) {
+            last = Some(seen);
+            seen += 1;
+        }
+    }
+    panic!("no read of {path}");
+}
+
+#[test]
+fn an_entry_swapped_in_after_the_entry_gate_is_never_read() {
+    let x = "/opt/app/x.conf";
+    let dir = tempfile::tempdir().unwrap();
+    let p = recipe(&dir, &[D], &file_res(x, ""));
+    let t = || with_file(base(), x, b"old\n", 0o644, 0);
+    let nth = stat_before_first_read(&run(&p, Mode::Plan, t()).commands, x);
+    let swap = |actions: Vec<FsEventAction>| t().with_fs_event("stat", x, nth, actions);
+    let cases: Vec<(&str, Vec<FsEventAction>, &str)> = vec![
+        (
+            "renamed in",
+            vec![
+                FsEventAction::Remove { path: x.into() },
+                FsEventAction::PutFile {
+                    path: x.into(),
+                    data: SECRET.as_bytes().to_vec(),
+                    mode: 0o600,
+                    uid: 0,
+                    gid: 0,
+                },
+            ],
+            "changed after it was checked",
+        ),
+        (
+            "hard link",
+            vec![
+                FsEventAction::Remove { path: x.into() },
+                FsEventAction::PutHardlink {
+                    src: "/root/secret".into(),
+                    dst: x.into(),
+                },
+            ],
+            "has 2 hard links",
+        ),
+        (
+            "owner not trusted",
+            vec![FsEventAction::Chown {
+                path: x.into(),
+                uid: ALICE,
+                gid: ALICE,
+            }],
+            "is not owned by root",
+        ),
+    ];
+    for (what, actions, want) in cases {
+        let r = engine(&p, Mode::Plan, false, swap(actions.clone())).run();
+        let e = r.err().unwrap_or_else(|| panic!("{what}: plan must fail"));
+        assert!(e.message.contains(want), "{what}: {}", e.message);
+        assert!(!e.message.contains(CANARY), "{what}");
+        // No read of the swapped entry ran.
+        let applied = run(&p, Mode::Apply, swap(actions));
+        let why = apply_failure(&applied, "f");
+        assert!(why.contains(want), "{what}: {why}");
+        assert!(!shown_apply(&applied).contains(CANARY), "{what}");
+        assert!(mutations(&applied.commands).is_empty(), "{what}");
+        assert_eq!(
+            bytes(fs_of(&applied), "/root/secret").unwrap(),
+            SECRET.as_bytes()
+        );
+    }
+}
+
+#[test]
+fn file_merge_never_republishes_an_entry_swapped_in_after_the_gate() {
+    let m = "/opt/app/m.conf";
+    let dir = tempfile::tempdir().unwrap();
+    let p = recipe(&dir, &[D], &merge_res("m", m, ""));
+    let t = || with_file(base(), m, b"kept = 1\n", 0o644, 0);
+    let nth = stat_before_first_read(&run(&p, Mode::Apply, t()).commands, m);
+    let applied = run(
+        &p,
+        Mode::Apply,
+        t().with_fs_event(
+            "stat",
+            m,
+            nth,
+            vec![
+                FsEventAction::Remove { path: m.into() },
+                FsEventAction::PutFile {
+                    path: m.into(),
+                    data: SECRET.as_bytes().to_vec(),
+                    mode: 0o600,
+                    uid: 0,
+                    gid: 0,
+                },
+            ],
+        ),
+    );
+    let why = apply_failure(&applied, "m");
+    assert!(why.contains("changed after it was checked"), "{why}");
+    assert_eq!(publishes(&applied.commands, "replace"), 0);
+    let fs = fs_of(&applied);
+    assert_eq!(bytes(fs, m).unwrap(), SECRET.as_bytes());
+    assert_eq!(fs.nodes[m].mode & 0o7777, 0o600);
+}
+
+// ---------------------------------------------------------------------------
+// NB-D1: what surviving mutants showed was untested
+// ---------------------------------------------------------------------------
+
+/// The walk memo is keyed by the operation scope too: a `file` accepted in
+/// a listed directory must not let a later `directory` or `link` of the same
+/// recipe in the same directory reuse that verdict in plan.
+#[test]
+fn a_directory_or_link_after_a_file_in_the_same_listed_directory_is_refused_in_plan() {
+    for (body, want) in [
+        (
+            "  - id: d\n    type: directory\n    with:\n      path: /opt/app/sub\n      mode: \"0755\"\n",
+            "a directory is not supported there",
+        ),
+        (
+            "  - id: l\n    type: link\n    with:\n      path: /opt/app/l\n      target: /etc/hostname\n",
+            "a link is not supported there",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let p = recipe(
+            &dir,
+            &[D],
+            &format!("{}{}", file_res("/opt/app/x.conf", ""), body),
+        );
+        let e = plan_err(&p, base()).message;
+        assert!(e.contains(want), "{body}: {e}");
+    }
+}
+
+/// `getfattr`/`getfacl` follow a final link: an entry swapped while they run
+/// makes the attribute inspection incomplete, so the replacement is refused.
+#[test]
+fn an_entry_swapped_while_its_attributes_are_read_is_refused() {
+    let x = "/opt/app/x.conf";
+    for sequential in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let p = recipe(&dir, &[D], &file_res(x, ""));
+        let t = || {
+            with_file(target(sequential), x, b"old\n", 0o644, 0).with_fs_event(
+                "getfattr",
+                x,
+                0,
+                vec![
+                    FsEventAction::Remove { path: x.into() },
+                    FsEventAction::PutSymlink {
+                        path: x.into(),
+                        target: "/root/secret".into(),
+                        uid: ALICE,
+                        gid: ALICE,
+                    },
+                ],
+            )
+        };
+        let e = plan_err(&p, t()).message;
+        assert!(
+            e.contains("cannot inspect security metadata"),
+            "{sequential}: {e}"
+        );
+        let applied = run(&p, Mode::Apply, t());
+        let why = apply_failure(&applied, "f");
+        assert!(
+            why.contains("cannot inspect security metadata"),
+            "{sequential}: {why}"
+        );
+        assert_eq!(publishes(&applied.commands, "replace"), 0);
+        assert_eq!(
+            bytes(fs_of(&applied), "/root/secret").unwrap(),
+            SECRET.as_bytes()
+        );
+    }
+}

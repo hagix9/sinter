@@ -103,6 +103,9 @@ impl Engine {
             )),
             _ => None,
         };
+        if outcome.new_content.is_some() {
+            self.writable_parent_reader_check(res, &path, &stat, &vals, sensitive)?;
+        }
         let mut r = self.partial_publish(
             res,
             &path,
@@ -121,6 +124,76 @@ impl Engine {
             }
         }
         Ok(r)
+    }
+
+    /// DESIGN §63.2, plan and apply alike: directly in a directory other
+    /// accounts can write to, the existing file may be any file another
+    /// account renamed there (a root-only one included), and `file_merge`
+    /// keeps its content. The result may therefore not be readable by more
+    /// principals than the existing file: a declared `mode` that adds a read
+    /// bit the existing mode lacks, or a declared `owner` or `group` other
+    /// than the existing one, is refused. An absent file is not affected (the
+    /// managed part is then the whole content).
+    fn writable_parent_reader_check(
+        &mut self,
+        res: &FrozenResource,
+        path: &str,
+        stat: &Stat,
+        vals: &BTreeMap<String, EvalVal>,
+        sensitive: bool,
+    ) -> Result<()> {
+        if stat.kind != ObjKind::File || !self.fs.content_withheld(path) {
+            return Ok(());
+        }
+        let meta = self.file_meta(res, vals, stat.kind, sensitive)?;
+        let mut why: Vec<String> = Vec::new();
+        if let (true, Some(mode)) = (meta.manage_mode, meta.mode) {
+            let added = mode & 0o444 & !(stat.mode & 0o444);
+            if added != 0 {
+                why.push(format!(
+                    "the declared mode {} adds read permission ({}) that the existing mode {} \
+                     does not grant",
+                    mode_to_string(mode),
+                    mode_to_string(added),
+                    mode_to_string(stat.mode & 0o7777)
+                ));
+            }
+        }
+        if let (true, Some(uid)) = (meta.manage_owner, meta.owner_uid) {
+            if uid != stat.uid {
+                why.push(format!(
+                    "the declared owner (uid {}) is not the existing owner (uid {})",
+                    uid, stat.uid
+                ));
+            }
+        }
+        if let (true, Some(gid)) = (meta.manage_group, meta.group_gid) {
+            if gid != stat.gid {
+                why.push(format!(
+                    "the declared group (gid {}) is not the existing group (gid {})",
+                    gid, stat.gid
+                ));
+            }
+        }
+        if why.is_empty() {
+            return Ok(());
+        }
+        let (dir, _) = crate::paths::parent_and_name(path);
+        Err(SinterError::apply(format!(
+            "{}: {} is in {}, a directory other accounts can write to, so the existing file may \
+             be one another account put there; file_merge keeps its content and does not make \
+             it readable by more accounts than the existing file: {}. Declare the existing \
+             owner, group and mode (or leave them unset), or manage the whole file with a \
+             `file` resource",
+            res.id,
+            if sensitive { "the file" } else { path },
+            dir,
+            if sensitive {
+                "details withheld: sensitive resource".to_string()
+            } else {
+                why.join("; ")
+            }
+        )))
     }
 }
 
@@ -243,7 +316,15 @@ pub(crate) fn audit_file_merge(
     };
     let mut details: Vec<AuditDriftDetail> = Vec::new();
     if let Some(d) = outcome.drift {
-        details.push(detail(d.dimension, d.observed, d.desired, sensitive));
+        // DESIGN §63.3: directly in a directory other accounts can write to,
+        // the file may be one another account put there; what it holds (the
+        // current value of a key) is never shown.
+        let observed = if engine.fs.content_withheld(&path) {
+            "[not shown: the file is in a directory other accounts can write to]".to_string()
+        } else {
+            d.observed
+        };
+        details.push(detail(d.dimension, observed, d.desired, sensitive));
     }
 
     // Declared metadata only: an undeclared dimension is never compared.

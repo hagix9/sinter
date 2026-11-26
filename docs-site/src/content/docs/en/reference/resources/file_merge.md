@@ -196,7 +196,16 @@ The parent directory must exist, exactly as for `file`, and passes the same
 trust boundary (a directory listed in
 [`allow_writable_parents`](/en/reference/recipe-format/#allow_writable_parents)
 is accepted for the whole-file publication `file_merge` makes; audit of a path
-whose direct parent others can write reads it without following links). If an earlier resource
+whose direct parent others can write reads it without following links). In
+such a directory the existing file may be one another account renamed there,
+and `file_merge` keeps its content, so: plan shows only the sizes (never the
+existing lines), audit does not show the current value of a key, and a
+publication that would make the existing file readable by more accounts is
+refused in plan and apply — a declared `mode` that adds a read bit the existing
+mode lacks (for example `0600` to `0644`), or a declared `owner` or `group`
+other than the existing one. Leave them unset or declare the existing values;
+a narrower mode is allowed. A file that does not exist yet gets the declared
+`owner`, `group` and `mode`. If an earlier resource
 of the same run creates the file, plan reports this resource as unknown
 (deferred to apply) instead of failing.
 

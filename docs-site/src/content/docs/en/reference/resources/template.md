@@ -86,7 +86,8 @@ boundary as [`file`](/en/reference/resources/file/#trust-boundary), including
 shared directories such as `/tmp` and the exclusive staging rules there, and
 directories listed in
 [`allow_writable_parents`](/en/reference/recipe-format/#allow_writable_parents)
-(whole publication or removal only; `validate` is refused there).
+(whole publication or removal only; `validate` is refused there, and plan
+shows only the sizes of an existing file there, never its content).
 
 ## Related
 

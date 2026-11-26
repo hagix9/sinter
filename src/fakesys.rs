@@ -1040,6 +1040,12 @@ impl FakeFs {
             {
                 self.stat_batch(paths)
             }
+            ("stat", ["-c", "%F|%a|%u|%g|%s|%d|%i|%y|%z|%h", "--", p]) => {
+                match (self.stat_record(p), self.nlink(p)) {
+                    (Some(rec), Some(n)) => exited(0, format!("{}|{}\n", rec, n), String::new()),
+                    _ => exited(1, String::new(), Self::stat_missing(p)),
+                }
+            }
             ("stat", ["-c", "%h", "--", p]) => match self.nlink(p) {
                 Some(n) => exited(0, format!("{}\n", n), String::new()),
                 None => exited(1, String::new(), Self::stat_missing(p)),
