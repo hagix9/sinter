@@ -1,8 +1,10 @@
 //! Scripted host tools for the in-process fake target (test support):
 //! `sysctl -n -- <name>` and `sysctl -w -- <name>=<value>` over a map of
 //! kernel parameters, `hostnamectl --static|--transient|set-hostname`
-//! over two names, and `tuned-adm profile|off|recommend|verify` over
-//! TuneD's state file on the scripted filesystem.
+//! over two names, `tuned-adm profile|off|recommend|verify` over
+//! TuneD's state file on the scripted filesystem, and
+//! `systemd-analyze cat-config sysctl.d` over the sysctl.d files of the
+//! scripted filesystem (or a scripted text).
 //!
 //! The model is deliberately small. It answers only the commands Sinter
 //! sends, refuses everything else with a non-zero exit so a test notices an
@@ -55,6 +57,14 @@ pub struct FakeHostTools {
     pub sysctl_stores: BTreeMap<String, String>,
     /// Every `sysctl` argv received, in order.
     pub sysctl_calls: Vec<Vec<String>>,
+    /// A fixed standard output of `systemd-analyze cat-config sysctl.d`
+    /// instead of the one built from the scripted filesystem.
+    pub cat_config_text: Option<String>,
+    /// Answers of the next `cat-config` calls, in order; `Normal` once
+    /// empty.
+    pub cat_config_reads: VecDeque<FakeRead>,
+    /// How many `cat-config sysctl.d` calls were served.
+    pub cat_config_calls: usize,
     /// The static host name (`/etc/hostname`); empty: not set.
     pub static_name: String,
     /// The transient (running) host name.
@@ -210,6 +220,67 @@ pub(crate) fn sysctl(el: &FakeElHandle, is_root: bool, args: &[String]) -> Outpu
         }
         _ => exited(2, "", "fake sysctl: unmodeled command\n"),
     }
+}
+
+/// The output `systemd-analyze cat-config sysctl.d` would print for the
+/// scripted filesystem: every `*.conf` directly inside the sysctl.d
+/// directories, a file name in `/etc` masking the same name in `/run`,
+/// `/usr/local/lib` and `/usr/lib`, sorted by file name, each after a
+/// `# <path>` line and separated by a blank line. A symlink is shown with
+/// its target's content; one to `/dev/null` (masked) or to nothing is
+/// left out. The real tool's exact layout is NOT confirmed beyond the
+/// header lines measured on one Rocky Linux 10.2 host.
+pub fn sysctl_cat_config_text(fs: &crate::fakesys::FakeFs) -> String {
+    use crate::fakesys::FakeKind;
+    let mut chosen: BTreeMap<String, String> = BTreeMap::new();
+    for dir in crate::sysctl::BOOT_DIRS {
+        let prefix = format!("{}/", dir);
+        for path in fs.nodes.keys() {
+            let Some(base) = path.strip_prefix(&prefix) else {
+                continue;
+            };
+            if base.contains('/') || !base.ends_with(".conf") {
+                continue;
+            }
+            chosen
+                .entry(base.to_string())
+                .or_insert_with(|| path.clone());
+        }
+    }
+    let mut out = String::new();
+    for path in chosen.values() {
+        let content = match fs.nodes.get(path).map(|n| &n.kind) {
+            Some(FakeKind::File(b)) => b.clone(),
+            Some(FakeKind::Symlink(t)) => match fs.file_bytes(t) {
+                Some(b) => b,
+                None => continue,
+            },
+            _ => continue,
+        };
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!("# {}\n", path));
+        out.push_str(&String::from_utf8_lossy(&content));
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Serve `systemd-analyze cat-config sysctl.d`.
+pub(crate) fn sysctl_cat_config(el: &FakeElHandle, fs: Option<&crate::fakesys::FakeFs>) -> Output {
+    let mut el = el.lock().unwrap_or_else(|e| e.into_inner());
+    let host = &mut el.host;
+    host.cat_config_calls += 1;
+    let mode = host.cat_config_reads.pop_front().unwrap_or_default();
+    let text = match (&host.cat_config_text, fs) {
+        (Some(t), _) => t.clone(),
+        (None, Some(fs)) => sysctl_cat_config_text(fs),
+        (None, None) => return exited(1, "", "fake systemd-analyze: no modeled filesystem\n"),
+    };
+    read(mode, "systemd-analyze", &text)
 }
 
 /// Serve `hostnamectl --static`, `hostnamectl --transient` and
@@ -415,6 +486,18 @@ impl FakeTarget {
             el.host.transient_name = transient.to_string();
         }
         self
+    }
+
+    /// A host whose `systemd-analyze cat-config sysctl.d` lists the
+    /// sysctl.d files of the scripted filesystem (see
+    /// [`sysctl_cat_config_text`]), or prints `text` when it is given.
+    pub fn with_sysctl_cat_config(self, text: Option<&str>) -> Self {
+        let t = self.with_systemd_analyze();
+        t.el.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .host
+            .cat_config_text = text.map(String::from);
+        t
     }
 
     /// A host with `/usr/sbin/sysctl`, the directory `/etc/sysctl.d` and

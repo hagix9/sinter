@@ -3967,7 +3967,7 @@ IMPLEMENTED, NOT RELEASED, NOT VERIFIED ON A REAL HOST. A built-in type for ever
 
 54.1 Scope
 
-One kernel parameter of one host, in two independent parts: the value the running kernel uses now, and a persistent setting read at boot. Out of scope: editing `/etc/sysctl.conf` or any file Sinter does not own, evaluating which file wins at boot, running `sysctl --system`, patterns (`*`), the `/` separator, loading kernel modules, resetting a running value, `sinter discover`.
+One kernel parameter of one host, in two independent parts: the value the running kernel uses now, and a persistent setting read at boot. Out of scope: editing `/etc/sysctl.conf` or any file Sinter does not own, re-applying other settings (running `sysctl --system`), declaring patterns (`*`) or the `/` separator, evaluating TuneD profile contents, loading kernel modules, resetting a running value, `sinter discover`. Which file wins at boot is observed read-only (54.4a) and reported; Sinter never edits another file to make its value win.
 
 54.2 Fields (`with`)
 
@@ -3981,13 +3981,29 @@ Unknown fields are refused. Two `sysctl` resources with the same `name` in one r
 
 54.3 The persistent setting
 
-Sinter owns one whole file per parameter: `/etc/sysctl.d/90-sinter-<name>.conf`, content exactly `# Managed by Sinter (sysctl). Local changes are replaced.\n<name> = <value>\n`, `root:root`, mode 0644. It is planned, written, removed and audited through a synthetic `file` resource (the construction of `systemd_timer`, §42): the parent walk of §23, the atomic staged publication with its compare-and-swap, the refusal of a symlink at the path, the diff and the redaction of a sensitive resource are those of `file`, unchanged. Sinter never edits `/etc/sysctl.conf` or another file. A file that sorts later in `/etc/sysctl.d`, or `/etc/sysctl.conf`, can override the value at boot; Sinter does not evaluate that, says so in a note on every result that changes the file, and the state after a reboot is NOT VERIFIED by the resource.
+Sinter owns one whole file per parameter: `/etc/sysctl.d/90-sinter-<name>.conf`, content exactly `# Managed by Sinter (sysctl). Local changes are replaced.\n<name> = <value>\n`, `root:root`, mode 0644. It is planned, written, removed and audited through a synthetic `file` resource (the construction of `systemd_timer`, §42): the parent walk of §23, the atomic staged publication with its compare-and-swap, the refusal of a symlink at the path, the diff and the redaction of a sensitive resource are those of `file`, unchanged. Sinter never edits `/etc/sysctl.conf` or another file. A file applied later at boot (one that sorts after Sinter's in the sysctl.d directories; on Rocky Linux 10.2 `/etc/sysctl.d/99-sysctl.conf` is a symlink to `/etc/sysctl.conf` and sorts after `90-sinter-*`) can set another value; 54.4a observes that order and reports it. The state after a reboot itself is NOT VERIFIED by the resource.
 
 54.4 Observation of the running value (read-only)
 
 - Tool presence: `/usr/bin/test -x /usr/sbin/sysctl` (`executable_present`). Absent: plan and apply fail with "sysctl cannot manage the running value on this host (/usr/sbin/sysctl was not found)"; audit reports Error. In plan only, when an earlier planned change may bring the tool, the resource is deferred/unknown and apply decides. No OS family is checked: like `file`, the type needs no platform backend.
 - Value: a new fixed-argv read-only target method runs `/usr/sbin/sysctl -n -- <name>` (it re-checks the name grammar itself). Accepted only: exit 0, no truncation of either stream, empty standard error, standard output exactly one line ending in a newline (an empty line is an empty value). The line is normalized as in 54.2. A non-zero exit is the error "unknown kernel parameter <name>" (the kernel does not have it, or the account cannot read it): never "absent", never drift. A signal, a timeout, no output, a second line, a control character or invalid UTF-8 is an observation error. This adds one shape to the read-only command shapes of §28.
 - With `runtime: false` and with `state: absent` the tool is not run and need not exist; the parameter is not checked against the running kernel.
+
+54.4a Observation of the boot-time order (read-only)
+
+With `persist: true` (and with `state: absent`), plan, apply (after the change) and audit read the boot-time configuration:
+
+- Tool presence: `test -x /usr/bin/systemd-analyze`. Then a new fixed-argv read-only target method runs `/usr/bin/systemd-analyze cat-config sysctl.d` (no recipe value in the argv, as the invocation itself, never as a tree account). Measured on Rocky Linux 10.2: exit 0, every file of `/usr/lib/sysctl.d`, `/run/sysctl.d` and `/etc/sysctl.d` in the order systemd-sysctl applies them, each after a line `# <path>` (191 lines there, including `# /usr/lib/sysctl.d/50-default.conf` and `# /etc/sysctl.d/99-sysctl.conf`).
+- Accepted only: exit 0, no truncation of either stream, empty standard error, valid UTF-8, nothing but blank lines before the first header. A header is exactly `# ` and an absolute path ending in `.conf` directly inside `/usr/lib/sysctl.d`, `/run/sysctl.d`, `/etc/sysctl.d` or `/usr/local/lib/sysctl.d`, with no space or comma and nothing else on the line; any other line starting with `# /` (measured: `# /usr/lib/sysctl.d/, /run/sysctl.d/, and /etc/sysctl.d/.`) is a comment of the current file.
+- Inside a file: blank lines and comments (`#`, `;`) are skipped; a setting is `key = value` or `key=value` (key and value trimmed, the value normalized as in 54.2), with an optional leading `-` on the key; a key whose first separator is `/` has `/` and `.` swapped (sysctl.d(5)); a key with `*`, `?` or `[` is a pattern setting (`*` and `?` are matched against the declared name, `[` is taken as matching). Any other line is skipped for other keys; if it contains the declared name (dotted or `/` form) the precedence cannot be decided (see below).
+- Sinter's file is placed where the output lists it or, when it is not listed yet (plan before the first apply), where its file name sorts; a file of the same name in another directory is masked by it. "Later" means after that place. Earlier files do not matter while Sinter's file exists (it wins over them).
+- The effective persistent value is the last plain setting of the declared key in the whole order (so a duplicate inside one file takes the last one), with the path of the file that sets it.
+- A missing tool, a failed, killed or interrupted run, standard error, truncation, invalid UTF-8 or text before the first header: the order is "not examined". Nothing is guessed: the resource works as without the observation, with a note that other files were not examined; audit says so in the reason, never as drift or error.
+- `sysctl --system` (or `-p`) is never run; no other setting is re-applied.
+
+Notes (plan and apply, `present` with `persist`): for the last later file that sets the key, "<path> also sets <name> and is applied after Sinter's file: at boot its value wins", with "it is the declared value" or "so after a reboot the value will be <v>, not the declared <d>; remove that setting or declare the value there" (the value withheld for a sensitive resource); each later pattern setting that matches is named with its pattern ("Sinter does not decide whether the pattern or an explicit setting wins at boot"); a later unreadable line that names the key says the boot value cannot be decided. A result that changes the file and finds nothing later says no later file sets the key. None of these fails the resource: the operator may own the other file. `absent`: a note names the file that still sets the key at boot once Sinter's file is removed (or says none does).
+
+TuneD: when `/etc/tuned/active_profile` exists and is non-empty (read with the partial-read helpers, no symlink followed; any read problem is simply no note), plan, apply and audit carry the note "a TuneD profile is selected on this host; TuneD may set kernel parameters after boot-time sysctl files (its reapply_sysctl option decides); Sinter does not evaluate profile contents". It never causes drift or an error.
 
 54.5 Change (apply)
 
@@ -4013,11 +4029,11 @@ A resource whose result changes notifies handlers as usual. Nothing is restarted
 
 Plan runs the observation and the read-only part of `file`, nothing else. It reports the file diff and, as a note, the running value (`"60" -> "10"`); with only the running value managed the diff is the summary current/desired. When the target user is not root, the usual "needs root" note is added.
 
-Audit: dimension `persistent` for every difference the `file` audit reports for Sinter's file (observed and desired are prefixed with the file dimension: `content`, `owner`, `group`, `mode`, `state`/`type`), and dimension `runtime` (observed -> desired) for the running value; each only when the resource manages it (`persist` / `runtime`; `absent` audits the file's absence only). A non-compliant, non-drift outcome of the file audit (error, not auditable) is the resource's outcome. An unknown parameter, a missing tool and every failed observation are Error, never drift. The compliant reason states that an override at boot is not evaluated.
+Audit: dimension `persistent` for every difference the `file` audit reports for Sinter's file (observed and desired are prefixed with the file dimension: `content`, `owner`, `group`, `mode`, `state`/`type`), dimension `runtime` (observed -> desired) for the running value, and dimension `boot` (observed `<value> (from <file>)`, or `not set by any boot-time configuration file`; desired the declared value) when the effective persistent value of 54.4a differs from the declared one: the host would not have the declared value after a reboot, so it is not reported compliant. Each only when the resource manages it (`persist` / `runtime`; `absent` audits the file's absence only, with the note of 54.4a). An equal value from a later file is compliant with a note. When the order was not examined, or a later unreadable line names the key, or a later matching pattern gives another value, the reason says `boot: not examined` and no `boot` dimension is reported (neither drift nor compliant-by-default for that dimension). A non-compliant, non-drift outcome of the file audit (error, not auditable) is the resource's outcome. An unknown parameter, a missing `sysctl` and every failed observation of the running value or of Sinter's file are Error, never drift. The compliant reason says whether the boot-time files were examined.
 
 54.7 Safety rules
 
-- Plan and audit dispatch only `test -x`, `sysctl -n -- <name>` and the read-only commands of `file`.
+- Plan and audit dispatch only `test -x`, `sysctl -n -- <name>`, `systemd-analyze cat-config sysctl.d`, the read-only commands of `file` and the partial read of `/etc/tuned/active_profile`. `sysctl --system` is never dispatched in plan, apply or audit (tested).
 - No shell, no option injection (`--` before the operand; the name grammar excludes `=` so the read operand cannot be an assignment).
 - The exit code of `sysctl -w` never decides success.
 - A sensitive resource (`sensitive: true`, or a value derived from a sensitive source) shows no value: the diff is redacted, the running-value note is omitted, the `-w` command is recorded redacted, failure reasons name no value. The parameter name and the file path are shown.
@@ -4028,7 +4044,9 @@ Audit: dimension `persistent` for every difference the `file` audit reports for 
 - The value must be declared as the kernel reports it; a parameter the kernel rounds, clamps or keeps read-only fails after `sysctl -w` on every run.
 - Parameters that print several lines, empty values, names with `/` or `*`, and interface names containing a dot are not supported.
 - A parameter that exists only after a module is loaded is "unknown" until then (use `runtime: false`).
-- With `persist: false`, a file Sinter wrote earlier stays (use `absent`).
+- With `persist: false`, a file Sinter wrote earlier stays (use `absent`), and the boot-time order is not observed.
+- A plan does not see files that earlier resources of the same plan would create; the order is the one on the host now.
+- Whether a pattern or an explicit setting wins is not decided; how TuneD's profile interacts with the files is not evaluated.
 
 54.9 Not verified on a real host
 
@@ -4040,6 +4058,10 @@ Everything above was exercised against the scripted target only. Assumed and to 
 - `sysctl -w -- vm.swappiness=10` accepts `--`, prints `vm.swappiness = 10`, exits 0; a read-only or refused parameter exits non-zero.
 - `sysctl -n` as a non-root user reads the parameters a plan needs.
 - `systemd-sysctl` reads `/etc/sysctl.d/90-sinter-<name>.conf` at boot and the lexical order relative to distribution files (`99-sysctl.conf` -> `/etc/sysctl.conf` on some systems sorts later).
+- The form of `systemd-analyze cat-config sysctl.d` on EL 9 and on Ubuntu 24.04/26.04 (measured only on Rocky Linux 10.2): exit code, header lines, the blank line between files, standard error, and how a masked file (`-> /dev/null`) or an unreadable file is shown.
+- Whether `/etc/sysctl.conf` is part of the boot-time order on every supported OS (on Rocky Linux 10.2 through the `99-sysctl.conf` symlink; elsewhere it may be absent or read differently).
+- How systemd-sysctl combines pattern settings with explicit settings, and TuneD's `reapply_sysctl` behaviour.
+- The real value after a reboot: only a reboot test on each OS can show it; the `boot` dimension is what the configuration files say, not an observation of a booted host.
 
 55. `hostname` resource (the static host name)
 

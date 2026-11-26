@@ -89,10 +89,53 @@ the same checks of the parent directories, with a diff in plan. A `file`,
 `template` or `file_merge` resource on the same path in the same recipe is a
 validation error.
 
-Sinter never edits `/etc/sysctl.conf` or any other file. A file that sorts
-later in `/etc/sysctl.d`, or `/etc/sysctl.conf`, can still set another value
-at boot. Sinter does not evaluate that order, and the value after a reboot
-is **not verified** by this resource.
+Sinter never edits `/etc/sysctl.conf` or any other file, and never runs
+`sysctl --system`: other settings are not applied again.
+
+## Which file wins at boot
+
+At boot, `systemd-sysctl` reads every `*.conf` file in `/usr/lib/sysctl.d`,
+`/usr/local/lib/sysctl.d`, `/run/sysctl.d` and `/etc/sysctl.d`, sorted by
+file name, and applies them in that order. When two files set the same key,
+the file applied **last** wins; inside one file, the last line wins. On
+Rocky Linux 10.2, for example, `/etc/sysctl.d/99-sysctl.conf` is a link to
+`/etc/sysctl.conf` and sorts after `90-sinter-<name>.conf`, so a value in
+`/etc/sysctl.conf` wins over Sinter's.
+
+When the persistent file is managed, Sinter reads that order with
+`/usr/bin/systemd-analyze cat-config sysctl.d` (it only prints the files):
+
+- **Plan and apply** add a note when a file applied after Sinter's also sets
+  the key, for example: "/etc/sysctl.d/99-sysctl.conf also sets vm.swappiness
+  and is applied after Sinter's file: at boot its value wins, so after a
+  reboot the value will be "30", not the declared "10"". A pattern setting
+  (such as `net.ipv4.conf.*.rp_filter`) later in the order that matches the
+  key is named too. This is a note, not a failure: you may own that file.
+- **Audit** reports the dimension `boot` when the value these files give is
+  not the declared one (observed: `30 (from /etc/sysctl.d/99-sysctl.conf)`).
+  The resource is then not compliant, because after a reboot the host would
+  not have the declared value. The same value from a later file is compliant,
+  with a note. Files applied before Sinter's do not matter.
+- With `state: absent`, a note names the file that still sets the key at
+  boot once Sinter's file is gone.
+- If `systemd-analyze` is not installed, fails, or prints something Sinter
+  cannot read, the other files are **not examined**: the resource works as
+  before and says so in a note (audit: `boot: not examined`). It is never
+  reported as drift or an error for that reason. The same happens when a
+  later file has a line about the key that Sinter cannot read, or a later
+  pattern gives another value.
+
+To make the declared value win at boot, either remove the other setting
+from that file, or declare the value there instead of in a `sysctl`
+resource. Sinter does not edit the other file for you.
+
+**TuneD.** If a TuneD profile is selected (`/etc/tuned/active_profile` is
+not empty), plan, apply and audit add a note: TuneD may set kernel
+parameters after the boot-time files (its `reapply_sysctl` option decides).
+Sinter does not read profile contents; declare each parameter in one place.
+
+The value after a real reboot is **not verified** by this resource: the
+`boot` dimension is what the configuration files say.
 
 ## Expected behavior
 
@@ -131,9 +174,10 @@ is **not verified** by this resource.
   current value until a reboot or another change. `sysctl` is not run.
 - **Audit** reports a difference of the file under the dimension
   `persistent` (content, owner, group, mode or presence, as the `file` audit
-  reports it) and a difference of the running value under `runtime`, each
-  only when the resource manages it. An unknown parameter and a failed
-  observation are errors, not drift.
+  reports it), a difference of the running value under `runtime`, and a
+  different value at boot under `boot` (see above), each only when the
+  resource manages it. An unknown parameter and a failed observation are
+  errors, not drift.
 
 A change notifies handlers like any other resource. Sinter restarts nothing.
 
@@ -158,8 +202,11 @@ root. A run that has nothing to change needs no root.
 - A parameter that exists only after a kernel module is loaded is an
   "unknown kernel parameter" while the module is not loaded. Use
   `runtime: false` to manage only the file.
-- Sinter does not evaluate which file wins at boot and does not run
-  `sysctl --system`.
+- Sinter does not run `sysctl --system` and does not edit other files to
+  make its value win. Whether a pattern setting or an explicit setting wins
+  at boot is not decided, and TuneD profile contents are not evaluated.
+- A plan reads the files that are on the host now, not files an earlier
+  resource of the same plan would create.
 - With `sensitive: true` on the resource, values are withheld from plan,
   apply and audit output. The parameter name and the file path are still
   shown.
@@ -171,3 +218,7 @@ Ubuntu 24.04 and 26.04, and Rocky Linux, RHEL and AlmaLinux 9 and 10.
 This resource is tested against Sinter's scripted target only. It is **not
 verified on real hosts**: the output and exit codes of `sysctl -n` and
 `sysctl -w`, how the kernel stores written values, and what is read at boot.
+The output of `systemd-analyze cat-config sysctl.d` was measured on Rocky
+Linux 10.2 only; its form on EL 9 and Ubuntu, and whether `/etc/sysctl.conf`
+is part of the boot-time order on every OS, are not verified. The value
+after a reboot can only be shown by a reboot test.

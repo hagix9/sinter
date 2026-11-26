@@ -2,8 +2,11 @@
 //! setting in a file of its own (`/etc/sysctl.d/90-sinter-<name>.conf`).
 //!
 //! Everything here is pure: the grammar of names and values, the file
-//! Sinter writes, the fixed argv of the two `sysctl` calls and the parser of
-//! `sysctl -n`. The engine part (`sysctl_engine`) observes and changes.
+//! Sinter writes, the fixed argv of the two `sysctl` calls, the parser of
+//! `sysctl -n` and the parser of `systemd-analyze cat-config sysctl.d` (the
+//! boot-time files in the order systemd-sysctl applies them) with the view
+//! of one key in that order. The engine part (`sysctl_engine`) observes and
+//! changes.
 
 use std::collections::BTreeMap;
 
@@ -32,8 +35,250 @@ pub const MAX_VALUE: usize = 1024;
 /// Seconds `sysctl -w` may take.
 pub const TIMEOUT_SECS: u64 = 60;
 
-/// Carried by a plan or apply result that changes the persistent file.
+/// Carried by a plan or apply result that changes the persistent file when
+/// the boot-time configuration could not be examined.
 pub const BOOT_NOTE: &str = "the persistent setting is Sinter's own file; a file that sorts later in /etc/sysctl.d, or /etc/sysctl.conf, can still set another value at boot: Sinter does not evaluate that order, and the value after a reboot is not verified";
+
+/// The program that lists the boot-time configuration (read-only).
+pub const ANALYZE: &str = "/usr/bin/systemd-analyze";
+
+/// Its fixed argv: every file of the sysctl.d directories, in the order
+/// systemd-sysctl applies them, each after a `# <path>` line.
+pub const CAT_CONFIG_ARGS: [&str; 2] = ["cat-config", "sysctl.d"];
+
+/// The directories a header of that output may name.
+pub const BOOT_DIRS: [&str; 4] = [
+    "/etc/sysctl.d",
+    "/run/sysctl.d",
+    "/usr/local/lib/sysctl.d",
+    "/usr/lib/sysctl.d",
+];
+
+/// TuneD's state file: a selected profile can set kernel parameters too.
+pub const TUNED_STATE: &str = "/etc/tuned/active_profile";
+
+/// Carried by plan, apply and audit when a TuneD profile is selected.
+pub const TUNED_NOTE: &str = "a TuneD profile is selected on this host; TuneD may set kernel parameters after boot-time sysctl files (its reapply_sysctl option decides); Sinter does not evaluate profile contents";
+
+/// One setting of a boot-time file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootSetting {
+    /// `key = value` for one key (dotted form), value normalized.
+    Plain { key: String, value: String },
+    /// A key with a glob character (`*`, `?`, `[`), value normalized.
+    Pattern { pattern: String, value: String },
+}
+
+/// One file of the boot-time configuration as `cat-config` printed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootFile {
+    pub path: String,
+    /// The settings in file order.
+    pub settings: Vec<BootSetting>,
+    /// Lines that are neither blank, a comment nor a setting.
+    pub unclassified: Vec<String>,
+}
+
+/// The whole boot-time configuration, in the order it is applied.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BootConfig {
+    pub files: Vec<BootFile>,
+}
+
+/// The path of a `cat-config` header line, or `None`: exactly `# ` and an
+/// absolute path ending in `.conf` directly inside one of [`BOOT_DIRS`],
+/// with nothing else on the line. A comment that merely starts with `# /`
+/// (`# /usr/lib/sysctl.d/, /run/sysctl.d/, and /etc/sysctl.d/.`) is not a
+/// header.
+pub fn header_path(line: &str) -> Option<&str> {
+    let path = line.strip_prefix("# ")?;
+    if !path.starts_with('/')
+        || !path.ends_with(".conf")
+        || path
+            .chars()
+            .any(|c| c == ' ' || c == ',' || c.is_whitespace() || c.is_control())
+    {
+        return None;
+    }
+    let (dir, base) = path.rsplit_once('/')?;
+    if base.len() <= ".conf".len() || !BOOT_DIRS.contains(&dir) {
+        return None;
+    }
+    Some(path)
+}
+
+/// The dotted form of a key: when the first separator is `/`, every `/`
+/// and `.` are swapped (the rule of sysctl.d(5)), so `net/ipv4/ip_forward`
+/// is `net.ipv4.ip_forward`.
+pub fn dotted_key(key: &str) -> String {
+    match key.find(['/', '.']) {
+        Some(i) if key.as_bytes()[i] == b'/' => key
+            .chars()
+            .map(|c| match c {
+                '/' => '.',
+                '.' => '/',
+                other => other,
+            })
+            .collect(),
+        _ => key.to_string(),
+    }
+}
+
+/// One line of a boot-time file: `Ok(None)` for a blank line or a comment,
+/// `Ok(Some(..))` for a setting, `Err(())` for anything else.
+fn parse_setting(line: &str) -> std::result::Result<Option<BootSetting>, ()> {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with('#') || t.starts_with(';') {
+        return Ok(None);
+    }
+    let (k, v) = t.split_once('=').ok_or(())?;
+    let k = k.trim();
+    let k = k.strip_prefix('-').unwrap_or(k);
+    if k.is_empty()
+        || k.starts_with('-')
+        || k.starts_with('!')
+        || k.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(());
+    }
+    let key = dotted_key(k);
+    let value = normalize_value(v);
+    Ok(Some(if key.contains(['*', '?', '[']) {
+        BootSetting::Pattern {
+            pattern: key,
+            value,
+        }
+    } else {
+        BootSetting::Plain { key, value }
+    }))
+}
+
+/// Parse the standard output of `systemd-analyze cat-config sysctl.d`.
+/// Before the first header only blank lines are accepted; output that is
+/// not UTF-8, or text before the first header, is refused.
+pub fn parse_cat_config(stdout: &[u8]) -> std::result::Result<BootConfig, String> {
+    let text = std::str::from_utf8(stdout).map_err(|_| "it is not valid UTF-8".to_string())?;
+    let mut cfg = BootConfig::default();
+    for line in text.lines() {
+        if let Some(path) = header_path(line) {
+            cfg.files.push(BootFile {
+                path: path.to_string(),
+                settings: Vec::new(),
+                unclassified: Vec::new(),
+            });
+            continue;
+        }
+        let Some(file) = cfg.files.last_mut() else {
+            if line.trim().is_empty() {
+                continue;
+            }
+            return Err("it does not start with a file header".to_string());
+        };
+        match parse_setting(line) {
+            Ok(Some(s)) => file.settings.push(s),
+            Ok(None) => {}
+            Err(()) => file.unclassified.push(line.to_string()),
+        }
+    }
+    Ok(cfg)
+}
+
+/// Whether a glob pattern of sysctl.d can match `key`: `*` any run, `?`
+/// one character; a pattern with `[` is taken as matching (not evaluated).
+pub fn pattern_may_match(pattern: &str, key: &str) -> bool {
+    if pattern.contains('[') {
+        return true;
+    }
+    fn go(p: &[u8], k: &[u8]) -> bool {
+        match p.split_first() {
+            None => k.is_empty(),
+            Some((b'*', rest)) => (0..=k.len()).any(|i| go(rest, &k[i..])),
+            Some((b'?', rest)) => !k.is_empty() && go(rest, &k[1..]),
+            Some((c, rest)) => k.first() == Some(c) && go(rest, &k[1..]),
+        }
+    }
+    go(pattern.as_bytes(), key.as_bytes())
+}
+
+fn base_name(path: &str) -> &str {
+    path.rsplit_once('/').map(|(_, b)| b).unwrap_or(path)
+}
+
+/// What the boot-time configuration says about one key.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BootView {
+    /// Files applied after Sinter's own that set the key: `(path, value)`,
+    /// the last setting in each file, in order.
+    pub later: Vec<(String, String)>,
+    /// Pattern settings after Sinter's file matching the key:
+    /// `(path, pattern, value)`.
+    pub later_patterns: Vec<(String, String, String)>,
+    /// The last plain setting of the key in the whole order.
+    pub effective: Option<(String, String)>,
+    /// The last plain setting of the key in a file other than Sinter's.
+    pub without_own: Option<(String, String)>,
+    /// A file after Sinter's own with a line that mentions the key and
+    /// could not be classified.
+    pub undecided_later: Option<String>,
+    /// The same for any file other than Sinter's own.
+    pub undecided_any: Option<String>,
+}
+
+impl BootView {
+    /// The view of `name` (dotted form) in `cfg`. Sinter's file is placed
+    /// where it is listed or, when it is not (yet) listed, where its file
+    /// name sorts; a file of the same name elsewhere is masked by it.
+    pub fn of(cfg: &BootConfig, name: &str) -> Self {
+        let own = conf_path(name);
+        let own_base = base_name(&own);
+        let slash = name.replace('.', "/");
+        let own_at = cfg.files.iter().position(|f| f.path == own);
+        let mut v = BootView::default();
+        for (i, f) in cfg.files.iter().enumerate() {
+            let is_own = f.path == own;
+            let base = base_name(&f.path);
+            let after = match own_at {
+                Some(at) => i > at,
+                None => base > own_base,
+            };
+            let mentions = f
+                .unclassified
+                .iter()
+                .any(|l| l.contains(name) || l.contains(&slash));
+            if mentions && !is_own {
+                v.undecided_any.get_or_insert_with(|| f.path.clone());
+                if after {
+                    v.undecided_later.get_or_insert_with(|| f.path.clone());
+                }
+            }
+            let mut last_here = None;
+            for s in &f.settings {
+                match s {
+                    BootSetting::Plain { key, value } if key == name => {
+                        last_here = Some(value.clone());
+                    }
+                    BootSetting::Pattern { pattern, value }
+                        if after && pattern_may_match(pattern, name) =>
+                    {
+                        v.later_patterns
+                            .push((f.path.clone(), pattern.clone(), value.clone()));
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(value) = last_here {
+                v.effective = Some((f.path.clone(), value.clone()));
+                if !is_own {
+                    v.without_own = Some((f.path.clone(), value.clone()));
+                }
+                if after && !is_own && base != own_base {
+                    v.later.push((f.path.clone(), value));
+                }
+            }
+        }
+        v
+    }
+}
 
 /// Carried by a result that changes the persistent file while the running
 /// value is not managed.
@@ -518,6 +763,136 @@ mod tests {
                 .contains("string or an integer")
         );
         assert!(e(&[("name", s("vm/swappiness")), ("value", s("1"))]).contains("dotted form"));
+    }
+
+    #[test]
+    fn cat_config_headers_are_matched_strictly() {
+        for ok in [
+            "# /usr/lib/sysctl.d/50-default.conf",
+            "# /etc/sysctl.d/99-sysctl.conf",
+            "# /run/sysctl.d/10-x.conf",
+            "# /usr/local/lib/sysctl.d/20-y.conf",
+        ] {
+            assert_eq!(header_path(ok), Some(&ok[2..]), "{ok}");
+        }
+        for bad in [
+            "# /usr/lib/sysctl.d/, /run/sysctl.d/, and /etc/sysctl.d/.",
+            "# /etc/sysctl.conf",
+            "# /etc/sysctl.d/sub/x.conf",
+            "# /etc/sysctl.d/.conf",
+            "# /etc/sysctl.d/x.conf trailing",
+            "#  /etc/sysctl.d/x.conf",
+            "# /etc/sysctl.d/x.conf.bak",
+            "# /etc/sysctl.d/a,b.conf",
+            "# /tmp/x.conf",
+            "/etc/sysctl.d/x.conf",
+            "# etc/sysctl.d/x.conf",
+        ] {
+            assert_eq!(header_path(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn cat_config_lines_are_classified() {
+        let out = b"\n# /usr/lib/sysctl.d/50-default.conf\n# comment\n; other comment\n\nkernel.sysrq = 16\n-net.ipv4.conf.*.rp_filter = 2\nnet/ipv4/conf/eth0.1/rp_filter=1\nvm.swappiness=30\nvm.swappiness = 40\nnot a setting vm.swappiness\n# /usr/lib/sysctl.d/, /run/sysctl.d/, and /etc/sysctl.d/.\n# /etc/sysctl.d/99-sysctl.conf\n  fs.file-max =  100\t200 \n";
+        let cfg = parse_cat_config(out).unwrap();
+        assert_eq!(cfg.files.len(), 2);
+        let f = &cfg.files[0];
+        assert_eq!(f.path, "/usr/lib/sysctl.d/50-default.conf");
+        let plain = |k: &str, v: &str| BootSetting::Plain {
+            key: k.into(),
+            value: v.into(),
+        };
+        assert_eq!(
+            f.settings,
+            vec![
+                plain("kernel.sysrq", "16"),
+                BootSetting::Pattern {
+                    pattern: "net.ipv4.conf.*.rp_filter".into(),
+                    value: "2".into()
+                },
+                plain("net.ipv4.conf.eth0/1.rp_filter", "1"),
+                plain("vm.swappiness", "30"),
+                plain("vm.swappiness", "40"),
+            ]
+        );
+        assert_eq!(f.unclassified, ["not a setting vm.swappiness"]);
+        assert_eq!(cfg.files[1].settings, vec![plain("fs.file-max", "100 200")]);
+
+        assert!(parse_cat_config(b"").unwrap().files.is_empty());
+        assert!(parse_cat_config(b"garbage\n# /etc/sysctl.d/a.conf\n").is_err());
+        assert!(parse_cat_config(b"# /etc/sysctl.d/a.conf\n\xff\n").is_err());
+    }
+
+    #[test]
+    fn the_last_setting_in_the_order_wins() {
+        let cfg = parse_cat_config(
+            b"# /usr/lib/sysctl.d/10-a.conf\nvm.swappiness = 1\n\
+              # /etc/sysctl.d/90-sinter-vm.swappiness.conf\nvm.swappiness = 10\n\
+              # /etc/sysctl.d/95-b.conf\nvm.swappiness = 20\nvm.swappiness = 21\nvm.* = 5\n\
+              # /etc/sysctl.d/99-sysctl.conf\nkernel.x = 1\n",
+        )
+        .unwrap();
+        let v = BootView::of(&cfg, "vm.swappiness");
+        assert_eq!(
+            v.later,
+            vec![("/etc/sysctl.d/95-b.conf".to_string(), "21".to_string())]
+        );
+        assert_eq!(
+            v.effective,
+            Some(("/etc/sysctl.d/95-b.conf".to_string(), "21".to_string()))
+        );
+        assert_eq!(v.later_patterns.len(), 1);
+        assert_eq!(v.undecided_later, None);
+
+        // Sinter's file not listed yet: placed by its file name.
+        let cfg = parse_cat_config(
+            b"# /usr/lib/sysctl.d/10-a.conf\nvm.swappiness = 1\n# /etc/sysctl.d/99-sysctl.conf\nvm/swappiness = 2\n",
+        )
+        .unwrap();
+        let v = BootView::of(&cfg, "vm.swappiness");
+        assert_eq!(
+            v.later,
+            vec![("/etc/sysctl.d/99-sysctl.conf".to_string(), "2".to_string())]
+        );
+        assert_eq!(
+            v.without_own,
+            Some(("/etc/sysctl.d/99-sysctl.conf".to_string(), "2".to_string()))
+        );
+
+        // Earlier files do not count as later; an unclassified mention later does.
+        let cfg = parse_cat_config(
+            b"# /usr/lib/sysctl.d/10-a.conf\nvm.swappiness 1\n# /etc/sysctl.d/99-z.conf\nvm/swappiness\n",
+        )
+        .unwrap();
+        let v = BootView::of(&cfg, "vm.swappiness");
+        assert!(v.later.is_empty());
+        assert_eq!(
+            v.undecided_any.as_deref(),
+            Some("/usr/lib/sysctl.d/10-a.conf")
+        );
+        assert_eq!(
+            v.undecided_later.as_deref(),
+            Some("/etc/sysctl.d/99-z.conf")
+        );
+    }
+
+    #[test]
+    fn patterns() {
+        assert!(pattern_may_match(
+            "net.ipv4.conf.*.rp_filter",
+            "net.ipv4.conf.all.rp_filter"
+        ));
+        assert!(pattern_may_match("vm.*", "vm.swappiness"));
+        assert!(pattern_may_match("vm.swappines?", "vm.swappiness"));
+        assert!(pattern_may_match("vm.[sx]wappiness", "vm.swappiness"));
+        assert!(!pattern_may_match("net.*", "vm.swappiness"));
+        assert!(!pattern_may_match("vm.?", "vm.swappiness"));
+        assert_eq!(
+            dotted_key("net/ipv4/conf/eth0.1/rp_filter"),
+            "net.ipv4.conf.eth0/1.rp_filter"
+        );
+        assert_eq!(dotted_key("vm.swappiness"), "vm.swappiness");
     }
 
     #[test]

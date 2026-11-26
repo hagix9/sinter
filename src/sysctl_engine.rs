@@ -10,6 +10,12 @@
 //! Order in apply: the running value is observed first (so an unknown
 //! parameter is refused before anything is written), then the file is
 //! written, then the running value is changed.
+//!
+//! With the persistent file managed, the boot-time configuration is read
+//! with `systemd-analyze cat-config sysctl.d` (read-only, fixed argv): a
+//! file applied after Sinter's own that sets the same key is named in a
+//! note, and audit compares the value that order gives (dimension `boot`).
+//! `sysctl --system` is never run. A selected TuneD profile is a note.
 
 use crate::engine::{Engine, Mode};
 use crate::error::{ErrorKind, MutationState, Result, SinterError};
@@ -18,8 +24,135 @@ use crate::expressions::EvalVal;
 use crate::model::FrozenResource;
 use crate::resources::{baseline_env, changed_result_sensitive, unchanged_result};
 use crate::result::{Change, Diff, DiffBody, Execution, ResourceResult, Verification};
-use crate::sysctl::{SysctlSpec, ABSENT_NOTE, BOOT_NOTE, NOT_RUNNING_NOTE, TIMEOUT_SECS, TOOL};
+use crate::sysctl::{
+    BootView, SysctlSpec, ABSENT_NOTE, ANALYZE, BOOT_NOTE, NOT_RUNNING_NOTE, TIMEOUT_SECS, TOOL,
+    TUNED_NOTE, TUNED_STATE,
+};
 use crate::timer_engine::{merge, plain_values};
+
+/// What the observation of the boot-time configuration found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BootObs {
+    /// `systemd-analyze cat-config sysctl.d` answered in the accepted form.
+    Seen(BootView),
+    /// It could not be used; why. Nothing is guessed.
+    NotExamined(String),
+}
+
+/// The note of a result when the boot-time order could not be examined.
+fn not_examined_note(why: &str) -> String {
+    format!(
+        "other sysctl configuration files were not examined ({}); {}",
+        why, BOOT_NOTE
+    )
+}
+
+/// What a value is for a note: shown, or withheld for a sensitive resource.
+fn value_or_withheld(value: &str, sensitive: bool) -> String {
+    if sensitive {
+        "(value withheld)".to_string()
+    } else {
+        shown(value)
+    }
+}
+
+/// The notes of a `present` resource with the persistent file, from the
+/// boot-time configuration. Values are withheld for a sensitive resource.
+fn present_notes(spec: &SysctlSpec, v: &BootView, sensitive: bool) -> Vec<String> {
+    let mut notes = Vec::new();
+    let name = &spec.name;
+    if let Some(path) = &v.undecided_later {
+        notes.push(format!(
+            "{} is applied after Sinter's file and has a line that mentions {} but is not a setting Sinter can read; which value {} has at boot cannot be decided",
+            path, name, name
+        ));
+    }
+    if let Some((path, value)) = v.later.last() {
+        let others: Vec<&str> = v.later[..v.later.len() - 1]
+            .iter()
+            .map(|(p, _)| p.as_str())
+            .collect();
+        let also = if others.is_empty() {
+            String::new()
+        } else {
+            format!(" (it is also set later by {})", others.join(", "))
+        };
+        notes.push(if *value == spec.value {
+            format!(
+                "{} also sets {} and is applied after Sinter's file: at boot its value wins; it is the declared value{}",
+                path, name, also
+            )
+        } else if sensitive {
+            format!(
+                "{} also sets {} and is applied after Sinter's file: at boot its value wins, so after a reboot the value will be that file's value, not the declared one; remove that setting or declare the value there{}",
+                path, name, also
+            )
+        } else {
+            format!(
+                "{} also sets {} and is applied after Sinter's file: at boot its value wins, so after a reboot the value will be {}, not the declared {}; remove that setting or declare the value there{}",
+                path,
+                name,
+                shown(value),
+                shown(&spec.value),
+                also
+            )
+        });
+    }
+    for (path, pattern, value) in &v.later_patterns {
+        let what = if *value == spec.value {
+            "it gives the declared value".to_string()
+        } else if sensitive {
+            "its value differs from the declared one".to_string()
+        } else {
+            format!("it gives {}", shown(value))
+        };
+        notes.push(format!(
+            "{} sets the pattern {}, which matches {}, and is applied after Sinter's file; {}; Sinter does not decide whether the pattern or an explicit setting wins at boot",
+            path, pattern, name, what
+        ));
+    }
+    notes
+}
+
+/// The notes of an `absent` resource: which file still sets the key at
+/// boot once Sinter's file is removed.
+fn absent_notes(spec: &SysctlSpec, v: &BootView, sensitive: bool) -> Vec<String> {
+    let mut notes = Vec::new();
+    if let Some(path) = &v.undecided_any {
+        notes.push(format!(
+            "{} has a line that mentions {} but is not a setting Sinter can read; what {} is at boot without Sinter's file cannot be decided",
+            path, spec.name, spec.name
+        ));
+    }
+    notes.push(match &v.without_own {
+        Some((path, value)) => format!(
+            "without Sinter's file, {} still sets {} at boot (to {})",
+            path,
+            spec.name,
+            value_or_withheld(value, sensitive)
+        ),
+        None => format!(
+            "without Sinter's file, no other boot-time file sets {} (the kernel default applies at boot)",
+            spec.name
+        ),
+    });
+    notes
+}
+
+/// What audit found for a `sysctl`, besides the file.
+#[derive(Debug, Clone)]
+pub(crate) struct SysctlAudit {
+    /// The synthetic file resource, when the persistent file is managed.
+    pub file: Option<FrozenResource>,
+    /// The running value `(observed, desired)` when it differs.
+    pub runtime: Option<(String, String)>,
+    /// The boot-time value `(observed, desired)` when it differs.
+    pub boot: Option<(String, String)>,
+    /// Notes for the reason, in every outcome.
+    pub notes: Vec<String>,
+    /// The reason of a compliant result.
+    pub compliant: String,
+}
 
 /// The first non-empty line of a tool's standard error, printable ASCII and
 /// capped, for a failure reason.
@@ -166,17 +299,84 @@ impl Engine {
         })
     }
 
-    /// Audit, the part that is not the file: the spec, the synthetic file
-    /// resource to audit when the persistent setting is managed, and the
-    /// drift of the running value (`observed`, `desired`) when that is
-    /// managed and differs. Read-only.
-    #[allow(clippy::type_complexity)]
+    /// The boot-time configuration in the order systemd-sysctl applies it,
+    /// as seen for `name`. Read-only: `test -x` and
+    /// `systemd-analyze cat-config sysctl.d` (never `sysctl --system`). A
+    /// missing tool, a failed or interrupted run, a non-empty standard
+    /// error, a truncated capture or output not in the accepted form is
+    /// "not examined", never a guess.
+    pub(crate) fn sysctl_boot_observe(&mut self, name: &str) -> BootObs {
+        // The tool runs as the invocation itself, never as a tree account.
+        self.fs.clear_identity();
+        match self.fs.executable_present(ANALYZE, false) {
+            Ok(true) => {}
+            Ok(false) => return BootObs::NotExamined(format!("{} was not found", ANALYZE)),
+            Err(_) => {
+                return BootObs::NotExamined(format!(
+                    "whether {} is present could not be determined",
+                    ANALYZE
+                ))
+            }
+        }
+        let what = "systemd-analyze cat-config sysctl.d";
+        let out = match self.fs.systemd_analyze_cat_config_sysctl() {
+            Ok(o) => o,
+            Err(_) => return BootObs::NotExamined(format!("{} could not be run", what)),
+        };
+        let why = match &out.completion {
+            Completion::Exited(0) if out.stdout_truncated || out.stderr_truncated => {
+                Some(format!("the output of {} was truncated", what))
+            }
+            Completion::Exited(0) if !out.stderr.is_empty() => {
+                Some(format!("{} wrote to standard error", what))
+            }
+            Completion::Exited(0) => None,
+            Completion::Exited(code) => Some(format!("{} exited {}", what, code)),
+            Completion::Signaled(s) => Some(format!("{} was terminated by signal {}", what, s)),
+            Completion::Indeterminate { .. } => Some(format!("{} did not complete", what)),
+        };
+        if let Some(why) = why {
+            return BootObs::NotExamined(why);
+        }
+        match crate::sysctl::parse_cat_config(&out.stdout) {
+            Ok(cfg) => BootObs::Seen(BootView::of(&cfg, name)),
+            Err(e) => BootObs::NotExamined(format!(
+                "the output of {} is not in the expected form: {}",
+                what, e
+            )),
+        }
+    }
+
+    /// [`TUNED_NOTE`] when TuneD's state file names a profile. Read-only;
+    /// any problem reading it is simply no note.
+    fn sysctl_tuned_note(&mut self, res: &FrozenResource, audit: bool) -> Option<String> {
+        let bytes = if audit {
+            crate::audit::audit_partial_read(self, TUNED_STATE)
+                .ok()
+                .flatten()
+        } else {
+            self.partial_observe(res, TUNED_STATE)
+                .ok()
+                .and_then(|(_, c)| c)
+        };
+        self.fs.clear_identity();
+        bytes
+            .filter(|b| b.iter().any(|c| !c.is_ascii_whitespace()))
+            .map(|_| TUNED_NOTE.to_string())
+    }
+
+    /// Audit, the part that is not the file: the synthetic file resource to
+    /// audit when the persistent setting is managed, the drift of the
+    /// running value when that is managed and differs, and the drift of the
+    /// boot-time value (dimension `boot`) when the persistent setting is
+    /// managed and the boot-time configuration gives another value.
+    /// Read-only.
     pub(crate) fn sysctl_audit(
         &mut self,
         res: &FrozenResource,
         item: Option<&EvalVal>,
         sensitive: bool,
-    ) -> Result<(Option<FrozenResource>, Option<(String, String)>)> {
+    ) -> Result<SysctlAudit> {
         let spec = self.sysctl_evaluate(res, item, sensitive)?;
         let file = spec.persist.then(|| spec.file_part(res));
         let mut runtime = None;
@@ -186,7 +386,60 @@ impl Engine {
                 runtime = Some((current, spec.value.clone()));
             }
         }
-        Ok((file, runtime))
+        let mut boot = None;
+        let mut notes = Vec::new();
+        let mut compliant = "matches the declared state; whether another file overrides the value at boot is not evaluated".to_string();
+        if spec.absent {
+            match self.sysctl_boot_observe(&spec.name) {
+                BootObs::Seen(v) => notes.extend(absent_notes(&spec, &v, sensitive)),
+                BootObs::NotExamined(why) => notes.push(not_examined_note(&why)),
+            }
+            compliant = "matches the declared state".to_string();
+        } else if spec.persist {
+            match self.sysctl_boot_observe(&spec.name) {
+                BootObs::Seen(v) => {
+                    notes.extend(present_notes(&spec, &v, sensitive));
+                    let pattern_differs = v.later_patterns.iter().any(|(_, _, x)| *x != spec.value);
+                    if v.undecided_later.is_some() || pattern_differs {
+                        notes.push(
+                            "boot: not examined (the boot-time value cannot be decided from the configuration files)"
+                                .to_string(),
+                        );
+                    } else {
+                        match &v.effective {
+                            Some((_, value)) if *value == spec.value => {
+                                compliant = "matches the declared state; the boot-time configuration files give the declared value (the value after a reboot itself is not verified)".to_string();
+                            }
+                            Some((path, value)) => {
+                                boot = Some((
+                                    format!("{} (from {})", value, path),
+                                    spec.value.clone(),
+                                ));
+                            }
+                            None => {
+                                boot = Some((
+                                    "not set by any boot-time configuration file".to_string(),
+                                    spec.value.clone(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                BootObs::NotExamined(why) => {
+                    notes.push(format!("boot: not examined; {}", not_examined_note(&why)))
+                }
+            }
+        }
+        if let Some(n) = self.sysctl_tuned_note(res, true) {
+            notes.push(n);
+        }
+        Ok(SysctlAudit {
+            file,
+            runtime,
+            boot,
+            notes,
+            compliant,
+        })
     }
 
     pub(crate) fn run_sysctl(
@@ -201,8 +454,17 @@ impl Engine {
 
         if spec.absent {
             let mut r = merge(res, vec![self.run_file(&file, None)?]);
-            if r.change != Change::None {
+            let changes = r.change != Change::None;
+            if changes {
                 r.notes.push(ABSENT_NOTE.to_string());
+            }
+            match self.sysctl_boot_observe(&spec.name) {
+                BootObs::Seen(v) => r.notes.extend(absent_notes(&spec, &v, sensitive)),
+                BootObs::NotExamined(why) if changes => r.notes.push(not_examined_note(&why)),
+                BootObs::NotExamined(_) => {}
+            }
+            if let Some(n) = self.sysctl_tuned_note(res, false) {
+                r.notes.push(n);
             }
             return Ok(r);
         }
@@ -259,11 +521,31 @@ impl Engine {
         }
 
         let mut r = merge(res, parts);
-        if file_planned {
-            r.notes.push(BOOT_NOTE.to_string());
-            if !spec.runtime {
-                r.notes.push(NOT_RUNNING_NOTE.to_string());
+        if spec.persist {
+            // Read-only, after the change: the order of the boot-time files
+            // with Sinter's file in its place. Never `sysctl --system`.
+            match self.sysctl_boot_observe(&spec.name) {
+                BootObs::Seen(v) => {
+                    let notes = present_notes(&spec, &v, sensitive);
+                    if notes.is_empty() && file_planned {
+                        r.notes.push(format!(
+                            "no boot-time configuration file applied after Sinter's file sets {} (the value after a reboot itself is not verified)",
+                            spec.name
+                        ));
+                    }
+                    r.notes.extend(notes);
+                }
+                BootObs::NotExamined(why) if file_planned => {
+                    r.notes.push(not_examined_note(&why));
+                }
+                BootObs::NotExamined(_) => {}
             }
+        }
+        if file_planned && !spec.runtime {
+            r.notes.push(NOT_RUNNING_NOTE.to_string());
+        }
+        if let Some(n) = self.sysctl_tuned_note(res, false) {
+            r.notes.push(n);
         }
         Ok(r)
     }

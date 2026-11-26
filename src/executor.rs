@@ -4911,6 +4911,9 @@ impl FakeExecutor {
                     Self::exited(0, format!("  Original form: {}\n", expr), String::new())
                 }
             }
+            [verb, unit] if verb == "cat-config" && unit == "sysctl.d" => {
+                crate::fake_host::sysctl_cat_config(&self.target.el, self.target.fs.as_ref())
+            }
             _ => Self::exited(
                 1,
                 String::new(),

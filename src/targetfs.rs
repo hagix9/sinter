@@ -1553,6 +1553,17 @@ impl TargetFs {
         )
     }
 
+    /// The boot-time sysctl configuration in the order systemd-sysctl
+    /// applies it (`sysctl`): `systemd-analyze cat-config sysctl.d` prints
+    /// the files and changes nothing (it never applies a setting). Read-only,
+    /// fixed argv without any recipe value; no mutation permit is needed.
+    pub fn systemd_analyze_cat_config_sysctl(&mut self) -> Result<Output> {
+        self.run_argv(
+            crate::sysctl::ANALYZE,
+            &crate::sysctl::CAT_CONFIG_ARGS.map(String::from),
+        )
+    }
+
     /// One host name the host reports (`hostname`): `hostnamectl --static`
     /// or `hostnamectl --transient` prints it and changes nothing.
     /// Read-only, fixed argv without any recipe value; no mutation permit

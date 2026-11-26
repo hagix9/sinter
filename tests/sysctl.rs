@@ -1177,3 +1177,587 @@ fn a_sensitive_resource_shows_no_value_in_any_output() {
     }
     leaks(texts, "audit");
 }
+
+// ---------------------------------------------------------------------------
+// the boot-time order (systemd-analyze cat-config sysctl.d)
+// ---------------------------------------------------------------------------
+
+const ANALYZE: &str = "/usr/bin/systemd-analyze";
+const LATER: &str = "/etc/sysctl.d/99-sysctl.conf";
+
+/// `t` with `systemd-analyze cat-config sysctl.d` built from its files.
+fn with_order(t: FakeTarget) -> FakeTarget {
+    t.with_sysctl_cat_config(None)
+}
+
+/// `/etc/sysctl.conf` with `content`, and `99-sysctl.conf` linking to it
+/// (the layout measured on Rocky Linux 10.2).
+fn with_sysctl_conf(mut t: FakeTarget, content: &str) -> FakeTarget {
+    let fs = t.fs.as_mut().unwrap();
+    fs.put_file("/etc/sysctl.conf", content.as_bytes(), 0o644, 0, 0);
+    fs.put_symlink(LATER, "/etc/sysctl.conf", 0, 0);
+    t
+}
+
+fn cat_config_calls(t: &FakeTarget) -> usize {
+    t.el().lock().unwrap().host.cat_config_calls
+}
+
+fn audit_reason(a: &AuditReport) -> String {
+    a.resources[0].reason.clone().unwrap_or_default()
+}
+
+fn dims(a: &AuditReport) -> Vec<(String, String, String)> {
+    a.resources[0]
+        .details
+        .iter()
+        .map(|d| (d.dimension.clone(), d.observed.clone(), d.desired.clone()))
+        .collect()
+}
+
+fn has_note(notes: &[String], text: &str) -> bool {
+    notes.iter().any(|n| n.contains(text))
+}
+
+/// No `sysctl --system` and no `sysctl` call but `-n`/`-w` of the declared
+/// parameter in what a run dispatched.
+fn assert_no_system_reload(commands: &[sinter::executor::CommandRecord], name: &str) {
+    for c in commands {
+        assert!(
+            !c.args
+                .iter()
+                .any(|a| a == "--system" || a == "-p" || a == "--load"),
+            "{c:?}"
+        );
+        if c.program == TOOL {
+            assert!(
+                c.args == ["-n", "--", name]
+                    || (c.args.len() == 3
+                        && c.args[0] == "-w"
+                        && c.args[2].starts_with(&format!("{name}="))),
+                "{c:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_later_file_with_another_value_is_named_in_plan_and_apply_and_is_boot_drift() {
+    let r = recipe("sy-b1", &swappiness(""));
+    let t = with_order(with_sysctl_conf(fake(), "vm.swappiness = 30\n"));
+    let before = nodes(&t);
+    let p = plan(&r, t.clone());
+    assert_eq!(p.status, AggregateStatus::Success);
+    let s = find(&p, "s");
+    let want = "/etc/sysctl.d/99-sysctl.conf also sets vm.swappiness and is applied after Sinter's file: at boot its value wins, so after a reboot the value will be \"30\", not the declared \"10\"";
+    assert!(has_note(&s.notes, want), "{:?}", s.notes);
+    assert!(
+        p.commands
+            .iter()
+            .any(|c| c.program == ANALYZE && c.args == ["cat-config", "sysctl.d"]),
+        "{:?}",
+        p.commands
+    );
+    assert_eq!(nodes_after(&p), before);
+    assert_eq!(mutation_command_count(&p), 0);
+    assert!(writes(&t).is_empty());
+    assert_no_system_reload(&p.commands, "vm.swappiness");
+
+    // Apply does not fail (the operator may own that file) and says the same.
+    let t = with_order(with_sysctl_conf(fake(), "vm.swappiness = 30\n"));
+    let rep = apply(&r, t.clone());
+    assert_success(&rep);
+    assert!(has_note(&find(&rep, "s").notes, want));
+    assert_eq!(file_text(&rep, CONF).as_deref(), Some(RENDERED));
+    assert_eq!(
+        file_text(&rep, "/etc/sysctl.conf").as_deref(),
+        Some("vm.swappiness = 30\n")
+    );
+    assert_no_system_reload(&rep.commands, "vm.swappiness");
+
+    // Audit: file and running value as declared, but not after a reboot.
+    let t = with_order(with_sysctl_conf(converged(), "vm.swappiness = 30\n"));
+    let before = nodes(&t);
+    let a = audit(&r, t.clone());
+    assert_eq!(a.resources[0].status, AuditResourceStatus::Drift);
+    assert_eq!(
+        dims(&a),
+        [(
+            "boot".to_string(),
+            "30 (from /etc/sysctl.d/99-sysctl.conf)".to_string(),
+            "10".to_string()
+        )]
+    );
+    assert_eq!(nodes(&t), before);
+    assert!(writes(&t).is_empty());
+    assert!(
+        !a.commands
+            .iter()
+            .any(|c| is_mutation_command(&c.program, &c.args)),
+        "{:?}",
+        a.commands
+    );
+    assert_no_system_reload(&a.commands, "vm.swappiness");
+}
+
+#[test]
+fn a_later_file_with_the_same_value_is_compliant_with_a_note() {
+    let r = recipe("sy-b2", &swappiness(""));
+    let t = with_order(with_sysctl_conf(converged(), "vm.swappiness = 10\n"));
+    let a = audit(&r, t);
+    assert_eq!(a.resources[0].status, AuditResourceStatus::Compliant);
+    let why = audit_reason(&a);
+    assert!(why.contains("it is the declared value"), "{why}");
+    assert!(why.contains("/etc/sysctl.d/99-sysctl.conf"), "{why}");
+
+    let p = plan(
+        &r,
+        with_order(with_sysctl_conf(fake(), "vm.swappiness = 10\n")),
+    );
+    assert!(has_note(
+        &find(&p, "s").notes,
+        "at boot its value wins; it is the declared value"
+    ));
+}
+
+#[test]
+fn an_earlier_file_does_not_matter_and_sinters_file_wins() {
+    let r = recipe("sy-b3", &swappiness(""));
+    let t = with_order(
+        converged().with_fs_file("/usr/lib/sysctl.d/50-default.conf", "vm.swappiness = 60\n"),
+    );
+    let a = audit(&r, t);
+    assert_eq!(a.resources[0].status, AuditResourceStatus::Compliant);
+    let why = audit_reason(&a);
+    assert!(
+        why.contains("the boot-time configuration files give the declared value"),
+        "{why}"
+    );
+    assert!(!why.contains("also sets"), "{why}");
+
+    let p = plan(
+        &r,
+        with_order(
+            fake().with_fs_file("/usr/lib/sysctl.d/50-default.conf", "vm.swappiness = 60\n"),
+        ),
+    );
+    let s = find(&p, "s");
+    assert!(
+        has_note(
+            &s.notes,
+            "no boot-time configuration file applied after Sinter's file sets vm.swappiness"
+        ),
+        "{:?}",
+        s.notes
+    );
+    assert!(!has_note(&s.notes, "also sets"), "{:?}", s.notes);
+
+    // Sinter's file missing: the file is drift, and so is the boot value
+    // the remaining earlier file gives.
+    let t = with_order(
+        fake().with_fs_file("/usr/lib/sysctl.d/50-default.conf", "vm.swappiness = 60\n"),
+    );
+    set_running(&t, "vm.swappiness", "10");
+    let a = audit(&r, t);
+    assert!(dims(&a).contains(&(
+        "boot".to_string(),
+        "60 (from /usr/lib/sysctl.d/50-default.conf)".to_string(),
+        "10".to_string()
+    )));
+    let t = with_order(fake());
+    set_running(&t, "vm.swappiness", "10");
+    let a = audit(&r, t);
+    assert!(dims(&a).contains(&(
+        "boot".to_string(),
+        "not set by any boot-time configuration file".to_string(),
+        "10".to_string()
+    )));
+}
+
+#[test]
+fn a_duplicate_key_inside_one_file_takes_the_last_one() {
+    let r = recipe("sy-b4", &swappiness(""));
+    let local = "/etc/sysctl.d/95-local.conf";
+    let t = with_order(converged().with_fs_file(local, "vm.swappiness = 10\nvm.swappiness=30\n"));
+    let a = audit(&r, t);
+    assert_eq!(
+        dims(&a),
+        [(
+            "boot".to_string(),
+            "30 (from /etc/sysctl.d/95-local.conf)".to_string(),
+            "10".to_string()
+        )]
+    );
+    let t =
+        with_order(converged().with_fs_file(local, "vm/swappiness = 30\n-vm.swappiness = 10\n"));
+    let a = audit(&r, t);
+    assert_eq!(a.resources[0].status, AuditResourceStatus::Compliant);
+}
+
+#[test]
+fn a_later_pattern_setting_is_named_and_is_not_decided() {
+    let r = recipe("sy-b5", &swappiness(""));
+    let t = with_order(converged().with_fs_file("/etc/sysctl.d/99-glob.conf", "vm.* = 30\n"));
+    let a = audit(&r, t);
+    assert_eq!(a.resources[0].status, AuditResourceStatus::Compliant);
+    assert!(dims(&a).is_empty());
+    let why = audit_reason(&a);
+    assert!(
+        why.contains("sets the pattern vm.*, which matches vm.swappiness"),
+        "{why}"
+    );
+    assert!(why.contains("boot: not examined"), "{why}");
+    assert!(!why.contains("give the declared value"), "{why}");
+
+    let p = plan(
+        &r,
+        with_order(fake().with_fs_file("/etc/sysctl.d/99-glob.conf", "vm.* = 30\n")),
+    );
+    assert!(has_note(
+        &find(&p, "s").notes,
+        "/etc/sysctl.d/99-glob.conf sets the pattern vm.*, which matches vm.swappiness, and is applied after Sinter's file; it gives \"30\""
+    ));
+
+    // A pattern with the declared value is only a note.
+    let t = with_order(converged().with_fs_file("/etc/sysctl.d/99-glob.conf", "vm.* = 10\n"));
+    let a = audit(&r, t);
+    assert_eq!(a.resources[0].status, AuditResourceStatus::Compliant);
+    assert!(audit_reason(&a).contains("give the declared value"));
+}
+
+#[test]
+fn a_line_that_cannot_be_read_but_names_the_key_is_not_decided() {
+    let r = recipe("sy-b6", &swappiness(""));
+    let t = with_order(converged().with_fs_file("/etc/sysctl.d/99-odd.conf", "vm.swappiness 30\n"));
+    let a = audit(&r, t);
+    assert_eq!(a.resources[0].status, AuditResourceStatus::Compliant);
+    assert!(dims(&a).is_empty());
+    let why = audit_reason(&a);
+    assert!(why.contains("boot: not examined"), "{why}");
+    assert!(why.contains("cannot be decided"), "{why}");
+
+    let p = plan(
+        &r,
+        with_order(fake().with_fs_file("/etc/sysctl.d/99-odd.conf", "vm.swappiness 30\n")),
+    );
+    assert!(has_note(&find(&p, "s").notes, "cannot be decided"));
+
+    // An unreadable line about another key changes nothing.
+    let t = with_order(converged().with_fs_file("/etc/sysctl.d/99-odd.conf", "kernel.other 1\n"));
+    let a = audit(&r, t);
+    assert!(audit_reason(&a).contains("give the declared value"));
+}
+
+#[test]
+fn a_comment_that_looks_like_a_header_is_not_a_file() {
+    let r = recipe("sy-b7", &swappiness(""));
+    let text = "# /usr/lib/sysctl.d/50-default.conf\nkernel.sysrq = 16\n\n# /etc/sysctl.d/90-sinter-vm.swappiness.conf\n# Managed by Sinter (sysctl). Local changes are replaced.\nvm.swappiness = 10\n\n# /etc/sysctl.d/99-x.conf\n# See sysctl.d(5): /usr/lib/sysctl.d/, /run/sysctl.d/, and /etc/sysctl.d/.\n# /usr/lib/sysctl.d/, /run/sysctl.d/, and /etc/sysctl.d/.\nvm.swappiness = 30\n";
+    let t = converged().with_sysctl_cat_config(Some(text));
+    let a = audit(&r, t);
+    assert_eq!(
+        dims(&a),
+        [(
+            "boot".to_string(),
+            "30 (from /etc/sysctl.d/99-x.conf)".to_string(),
+            "10".to_string()
+        )]
+    );
+}
+
+#[test]
+fn a_missing_or_failing_cat_config_is_a_note_never_drift_or_error() {
+    let r = recipe("sy-b8", &swappiness(""));
+    // Absent tool (the default fake has no systemd-analyze).
+    let p = plan(&r, fake());
+    assert!(has_note(
+        &find(&p, "s").notes,
+        "other sysctl configuration files were not examined (/usr/bin/systemd-analyze was not found)"
+    ));
+    let a = audit(&r, converged());
+    assert_eq!(a.resources[0].status, AuditResourceStatus::Compliant);
+    assert!(audit_reason(&a).contains("boot: not examined"));
+
+    let garbage =
+        "synthetic garbage before any header\n# /etc/sysctl.d/99-sysctl.conf\nvm.swappiness = 30\n";
+    let variants: Vec<(&str, FakeTarget)> = vec![
+        ("fails", {
+            let t = with_order(with_sysctl_conf(converged(), "vm.swappiness = 30\n"));
+            t.el()
+                .lock()
+                .unwrap()
+                .host
+                .cat_config_reads
+                .push_back(FakeRead::Fail);
+            t
+        }),
+        ("truncated", {
+            let t = with_order(with_sysctl_conf(converged(), "vm.swappiness = 30\n"));
+            t.el()
+                .lock()
+                .unwrap()
+                .host
+                .cat_config_reads
+                .push_back(FakeRead::Truncated);
+            t
+        }),
+        ("stderr", {
+            let t = with_order(with_sysctl_conf(converged(), "vm.swappiness = 30\n"));
+            t.el()
+                .lock()
+                .unwrap()
+                .host
+                .cat_config_reads
+                .push_back(FakeRead::WithStderr);
+            t
+        }),
+        ("killed", {
+            let t = with_order(with_sysctl_conf(converged(), "vm.swappiness = 30\n"));
+            t.el()
+                .lock()
+                .unwrap()
+                .host
+                .cat_config_reads
+                .push_back(FakeRead::Killed);
+            t
+        }),
+        ("timeout", {
+            let t = with_order(with_sysctl_conf(converged(), "vm.swappiness = 30\n"));
+            t.el()
+                .lock()
+                .unwrap()
+                .host
+                .cat_config_reads
+                .push_back(FakeRead::Indeterminate);
+            t
+        }),
+        ("garbage", converged().with_sysctl_cat_config(Some(garbage))),
+    ];
+    for (label, t) in variants {
+        let a = audit(&r, t.clone());
+        assert_eq!(
+            a.resources[0].status,
+            AuditResourceStatus::Compliant,
+            "{label}: {:?}",
+            a.resources[0]
+        );
+        assert!(dims(&a).is_empty(), "{label}");
+        let why = audit_reason(&a);
+        assert!(why.contains("boot: not examined"), "{label}: {why}");
+        assert_no_system_reload(&a.commands, "vm.swappiness");
+    }
+
+    // Plan with a failing tool still plans the change, with the note.
+    let t = with_order(fake());
+    t.el()
+        .lock()
+        .unwrap()
+        .host
+        .cat_config_reads
+        .push_back(FakeRead::Fail);
+    let p = plan(&r, t);
+    assert_eq!(p.status, AggregateStatus::Success);
+    let s = find(&p, "s");
+    assert_eq!(s.change, Change::Changed);
+    assert!(
+        has_note(&s.notes, "systemd-analyze cat-config sysctl.d exited 1"),
+        "{:?}",
+        s.notes
+    );
+}
+
+#[test]
+fn absent_names_the_file_that_still_sets_the_key_at_boot() {
+    let yaml = doc(&res(
+        "s",
+        "      name: vm.swappiness\n      state: absent\n",
+    ));
+    let r = recipe("sy-b9", &yaml);
+    let t = with_order(with_sysctl_conf(converged(), "vm.swappiness = 30\n"));
+    let p = plan(&r, t.clone());
+    let s = find(&p, "s");
+    assert!(
+        has_note(
+            &s.notes,
+            "without Sinter's file, /etc/sysctl.d/99-sysctl.conf still sets vm.swappiness at boot (to \"30\")"
+        ),
+        "{:?}",
+        s.notes
+    );
+    let rep = apply(&r, t.clone());
+    assert_success(&rep);
+    assert_eq!(file_text(&rep, CONF), None);
+    assert_eq!(
+        file_text(&rep, "/etc/sysctl.conf").as_deref(),
+        Some("vm.swappiness = 30\n")
+    );
+    assert_eq!(calls(&t), 0, "absent ran sysctl");
+    assert_no_system_reload(&rep.commands, "vm.swappiness");
+
+    let p = plan(&r, with_order(converged()));
+    assert!(has_note(
+        &find(&p, "s").notes,
+        "without Sinter's file, no other boot-time file sets vm.swappiness"
+    ));
+}
+
+#[test]
+fn persist_false_does_not_examine_the_boot_order() {
+    let r = recipe("sy-b10", &swappiness("      persist: false\n"));
+    let t = with_order(with_sysctl_conf(fake(), "vm.swappiness = 30\n"));
+    let rep = apply(&r, t.clone());
+    assert_success(&rep);
+    assert!(!has_note(&find(&rep, "s").notes, "99-sysctl.conf"));
+    let a = audit(&r, t.clone());
+    assert_eq!(a.resources[0].status, AuditResourceStatus::Compliant);
+    assert_eq!(cat_config_calls(&t), 0);
+}
+
+#[test]
+fn a_selected_tuned_profile_is_a_note_in_plan_apply_and_audit() {
+    let r = recipe("sy-b11", &swappiness(""));
+    let tuned = |content: &str, t: FakeTarget| {
+        let mut t = t;
+        let fs = t.fs.as_mut().unwrap();
+        if !fs.nodes.contains_key("/etc/tuned") {
+            fs.mkdir_node("/etc/tuned", 0o755, 0, 0);
+        }
+        fs.put_file("/etc/tuned/active_profile", content.as_bytes(), 0o644, 0, 0);
+        t
+    };
+    let note = "a TuneD profile is selected on this host";
+    let p = plan(&r, tuned("balanced\n", fake()));
+    assert_eq!(p.status, AggregateStatus::Success);
+    assert!(has_note(&find(&p, "s").notes, note));
+    let rep = apply(&r, tuned("balanced\n", fake()));
+    assert_success(&rep);
+    assert!(has_note(&find(&rep, "s").notes, note));
+    let a = audit(&r, tuned("balanced\n", converged()));
+    assert_eq!(a.resources[0].status, AuditResourceStatus::Compliant);
+    assert!(audit_reason(&a).contains(note));
+
+    // Empty (as after `tuned-adm off`) or missing: no note.
+    let p = plan(&r, tuned("\n", fake()));
+    assert!(!has_note(&find(&p, "s").notes, note));
+    let a = audit(&r, converged());
+    assert!(!audit_reason(&a).contains(note));
+    // A state file that cannot be read is simply no note, never an error.
+    let mut t = fake();
+    t.fs.as_mut().unwrap().mkdir_node("/etc/tuned", 0o755, 0, 0);
+    t.fs.as_mut()
+        .unwrap()
+        .put_symlink("/etc/tuned/active_profile", "/etc/elsewhere", 0, 0);
+    let p = plan(&r, t);
+    assert_eq!(p.status, AggregateStatus::Success);
+    assert!(!has_note(&find(&p, "s").notes, note));
+}
+
+#[test]
+fn applying_one_key_leaves_other_files_and_keys_untouched() {
+    let r = recipe("sy-b12", &swappiness(""));
+    let others = [
+        (
+            "/usr/lib/sysctl.d/50-default.conf",
+            "kernel.sysrq = 16\nvm.swappiness = 60\n",
+        ),
+        (
+            "/etc/sysctl.d/50-local.conf",
+            "net.ipv4.tcp_rmem = 4096 87380 6291456\n",
+        ),
+        ("/etc/sysctl.conf", "kernel.synthetic_ro = 1\n"),
+    ];
+    let mut t = fake();
+    for (p, c) in others {
+        t = t.with_fs_file(p, c);
+    }
+    let t = with_order(t);
+    let params_before = t.el().lock().unwrap().host.sysctl.clone();
+    let before = t.fs.as_ref().unwrap().nodes.clone();
+    let rep = apply(&r, t.clone());
+    assert_success(&rep);
+    let after = &rep.fake_fs.as_ref().unwrap().nodes;
+    // Exactly one new file, Sinter's own.
+    let new: Vec<&String> = after
+        .keys()
+        .filter(|k| {
+            !before.contains_key(*k) && matches!(after[*k].kind, sinter::fakesys::FakeKind::File(_))
+        })
+        .collect();
+    assert_eq!(new, [CONF]);
+    for (p, c) in others {
+        assert_eq!(file_text(&rep, p).as_deref(), Some(c), "{p}");
+    }
+    for (path, node) in &before {
+        if let sinter::fakesys::FakeKind::File(b) = &node.kind {
+            assert_eq!(
+                rep.fake_fs.as_ref().unwrap().file_bytes(path).as_ref(),
+                Some(b),
+                "{path} changed"
+            );
+        }
+    }
+    // `sysctl -w` only for the declared key; every other parameter as before.
+    assert_eq!(writes(&t), ["-- vm.swappiness=10"]);
+    let params_after = t.el().lock().unwrap().host.sysctl.clone();
+    for (k, v) in &params_before {
+        if k != "vm.swappiness" {
+            assert_eq!(params_after.get(k), Some(v), "{k}");
+        }
+    }
+    assert_no_system_reload(&rep.commands, "vm.swappiness");
+}
+
+#[test]
+fn a_sensitive_resource_shows_no_boot_value() {
+    let yaml = "version: 1\nresources:\n  - id: s\n    type: sysctl\n    sensitive: true\n    with:\n      name: kernel.synthetic_text\n      value: SYNTHVAL7\n";
+    let r = recipe("sy-b13", yaml);
+    let make = || {
+        with_order(with_sysctl_conf(
+            fake(),
+            "kernel.synthetic_text = SYNTHOTHER9\n",
+        ))
+    };
+    let leaks = |texts: Vec<String>, what: &str| {
+        for s in texts {
+            assert!(
+                !s.contains("SYNTHVAL7") && !s.contains("SYNTHOTHER9"),
+                "{what}: {s}"
+            );
+        }
+    };
+    let p = plan(&r, make());
+    assert!(has_note(
+        &find(&p, "s").notes,
+        "after a reboot the value will be that file's value, not the declared one"
+    ));
+    leaks(surfaces(&p, "plan"), "plan");
+    let a = apply(&r, make());
+    assert_success(&a);
+    leaks(surfaces(&a, "apply"), "apply");
+
+    let t = make();
+    let rendered = "# Managed by Sinter (sysctl). Local changes are replaced.\nkernel.synthetic_text = SYNTHVAL7\n";
+    let t = t.with_fs_file(
+        "/etc/sysctl.d/90-sinter-kernel.synthetic_text.conf",
+        rendered,
+    );
+    set_running(&t, "kernel.synthetic_text", "SYNTHVAL7");
+    let au = audit(&r, t);
+    assert_eq!(au.resources[0].status, AuditResourceStatus::Drift);
+    assert_eq!(au.resources[0].details[0].dimension, "boot");
+    let mut texts = vec![
+        au.render_text(),
+        format!("{:?}", au.resources),
+        format!("{:?}", au.commands),
+    ];
+    for fmt in [OutputFormat::Text, OutputFormat::Json] {
+        let ro = RenderOptions {
+            verbose: true,
+            format: fmt,
+            color: false,
+        };
+        let mut b = Vec::new();
+        sinter::output::render_audit(&au, &ro, &mut b).unwrap();
+        texts.push(String::from_utf8_lossy(&b).to_string());
+    }
+    leaks(texts, "audit");
+}

@@ -1461,20 +1461,22 @@ fn audit_crypto_policy(
 
 /// Audit a `sysctl`: Sinter's file as a `file` (every difference under the
 /// dimension `persistent`) and the running value (`runtime`), each only when
-/// the resource manages it. An unknown parameter and every observation
-/// failure are errors, never drift. Whether another file overrides the
-/// value at boot is not evaluated.
+/// the resource manages it, and the value the boot-time configuration files
+/// give (`boot`) when the persistent file is managed and that order could
+/// be examined. An unknown parameter and every observation failure are
+/// errors, never drift; a boot-time order that could not be examined is a
+/// note.
 fn audit_sysctl(
     engine: &mut Engine,
     res: &FrozenResource,
     item: Option<&EvalVal>,
     sensitive: bool,
 ) -> AuditResourceResult {
-    let (file, runtime) =
-        match obs_or_error(res, sensitive, engine.sysctl_audit(res, item, sensitive)) {
-            Ok(v) => v,
-            Err(r) => return *r,
-        };
+    let found = match obs_or_error(res, sensitive, engine.sysctl_audit(res, item, sensitive)) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let (file, runtime) = (found.file, found.runtime);
     let mut details = Vec::new();
     if let Some(file) = file {
         let p = audit_file(engine, &file, None, sensitive);
@@ -1500,12 +1502,18 @@ fn audit_sysctl(
             "runtime", observed, desired, sensitive,
         ));
     }
-    finish_drift(
-        res,
-        sensitive,
-        details,
-        "matches the declared state; whether another file overrides the value at boot is not evaluated",
-    )
+    if let Some((observed, desired)) = found.boot {
+        details.push(AuditDriftDetail::new("boot", observed, desired, sensitive));
+    }
+    let mut r = finish_drift(res, sensitive, details, &found.compliant);
+    if !found.notes.is_empty() {
+        let notes = found.notes.join("; ");
+        r.reason = Some(match r.reason.take() {
+            Some(why) => format!("{}; {}", why, notes),
+            None => notes,
+        });
+    }
+    r
 }
 
 /// Audit a `hostname`: the static name `hostnamectl --static` reports
