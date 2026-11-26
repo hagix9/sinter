@@ -529,6 +529,42 @@ fn gated_stat(engine: &mut Engine, path: &str) -> Result<crate::targetfs::Stat> 
     }
 }
 
+/// Read-only observation for the audit of a resource that manages part of a
+/// text file: `Ok(None)` when the path (or a parent) is absent, the whole
+/// content when it is a regular file within
+/// [`crate::resources::PARTIAL_EDIT_MAX_BYTES`]. A symlink, another object
+/// type, an oversized file, a refused parent or a failed read is an error
+/// (the caller reports it as an audit error, never as drift or absence).
+pub(crate) fn audit_partial_read(engine: &mut Engine, path: &str) -> Result<Option<Vec<u8>>> {
+    let stat = gated_stat(engine, path)?;
+    match stat.kind {
+        ObjKind::Absent => return Ok(None),
+        ObjKind::File => {}
+        other => {
+            return Err(SinterError::apply(format!(
+                "{} exists as {}; it is not read",
+                path,
+                other.describe()
+            )))
+        }
+    }
+    if stat.size > crate::resources::PARTIAL_EDIT_MAX_BYTES {
+        return Err(SinterError::apply(format!(
+            "{} is larger than {} bytes; it is not read",
+            path,
+            crate::resources::PARTIAL_EDIT_MAX_BYTES
+        )));
+    }
+    let bytes = gated_obs(engine, path, None, |fs| fs.read_file(path))?;
+    if bytes.len() as u64 != stat.size {
+        return Err(SinterError::apply(format!(
+            "{} changed while it was observed",
+            path
+        )));
+    }
+    Ok(Some(bytes))
+}
+
 /// Audit a `file` resource (and, via `audit_template`, the desired-state side
 /// of a `template`). `desired` is the resolved desired content: `Some(bytes)`
 /// when the recipe pins content, `None` when existing content is preserved.

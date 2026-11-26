@@ -39,6 +39,11 @@ pub(crate) struct MetaSpec {
     pub(crate) manage_mode: bool,
 }
 
+/// Largest file a partial edit reads and rewrites. It equals the diff limit,
+/// so every partial edit can show its change, and stays far below the capture
+/// limit of one command.
+pub(crate) const PARTIAL_EDIT_MAX_BYTES: u64 = crate::diff::MAX_DIFF_LINE_BYTES as u64;
+
 pub(crate) fn ev_str(m: &BTreeMap<String, EvalVal>, key: &str) -> Result<Option<(String, bool)>> {
     match m.get(key) {
         None => Ok(None),
@@ -410,6 +415,104 @@ impl Engine {
             meta,
             &input,
             validate.as_ref(),
+        )
+    }
+
+    /// Observation for a resource that manages only part of a text file
+    /// (`file_merge`, `dnf_repository`): the `lstat` of `path` and, when it is
+    /// a regular file, its whole content.
+    ///
+    /// The path is observed through the same parent gate as a `file`
+    /// resource. A symlink or any other object type is refused, never
+    /// followed. A file larger than [`PARTIAL_EDIT_MAX_BYTES`] is refused
+    /// before it is read, and a read whose length differs from the `lstat`
+    /// size means the file changed while it was observed. `None` content
+    /// means the path is absent; nothing is created or changed here.
+    pub(crate) fn partial_observe(
+        &mut self,
+        res: &FrozenResource,
+        path: &str,
+    ) -> Result<(Stat, Option<Vec<u8>>)> {
+        let stat = self.observe_stat(res, path)?;
+        match stat.kind {
+            ObjKind::Absent => return Ok((stat, None)),
+            ObjKind::File => {}
+            ObjKind::Symlink => {
+                return Err(SinterError::apply(format!(
+                    "{}: {} is a symlink; refusing to follow it",
+                    res.id, path
+                )))
+            }
+            other => {
+                return Err(SinterError::apply(format!(
+                    "{}: {} exists as {}; refusing to edit it",
+                    res.id,
+                    path,
+                    other.describe()
+                )))
+            }
+        }
+        if stat.size > PARTIAL_EDIT_MAX_BYTES {
+            return Err(SinterError::apply(format!(
+                "{}: {} is larger than {} bytes; a partial edit refuses it",
+                res.id, path, PARTIAL_EDIT_MAX_BYTES
+            )));
+        }
+        let bytes = match self.fs.observed(path, |fs| fs.read_file(path))? {
+            Observed::Value(b) => b,
+            Observed::ParentAbsent => {
+                return Err(SinterError::apply(format!(
+                    "{}: a parent of {} disappeared during observation",
+                    res.id, path
+                )))
+            }
+            Observed::Gone => return Err(self.vanished(res)),
+            Observed::Refused(e) => return Err(self.observation_refusal(res, path, e)),
+        };
+        if bytes.len() as u64 != stat.size {
+            return Err(SinterError::apply(format!(
+                "{}: {} changed while it was observed; refusing",
+                res.id, path
+            )));
+        }
+        Ok((stat, Some(bytes)))
+    }
+
+    /// Publish the result of a partial edit through the `file` resource's
+    /// own path: the same parent checks, staging, atomic replacement,
+    /// identity re-check against `stat` (the observation
+    /// [`Self::partial_observe`] returned, taken before the content was
+    /// read, so any later change of the file stops the replacement),
+    /// metadata rules and post-change verification.
+    ///
+    /// `new_content` is the whole new file, or `None` when the managed part
+    /// is already as desired. `owner`, `group` and `mode` are read from
+    /// `vals` exactly as for `file`: unset fields keep an existing file's
+    /// values. An absent path with nothing to write is left absent.
+    pub(crate) fn partial_publish(
+        &mut self,
+        res: &FrozenResource,
+        path: &str,
+        stat: Stat,
+        vals: &BTreeMap<String, EvalVal>,
+        new_content: Option<Vec<u8>>,
+        sensitive: bool,
+    ) -> Result<ResourceResult> {
+        if new_content.is_none() && stat.kind == ObjKind::Absent {
+            return Ok(unchanged_result(res, "path is absent"));
+        }
+        let input = self.classify_manager_input(res, path, false)?;
+        let sensitive = sensitive || res.sensitive;
+        let meta = self.file_meta(res, vals, stat.kind, sensitive)?;
+        self.file_present(
+            res,
+            path,
+            stat,
+            new_content.map(Zeroizing::new),
+            sensitive,
+            meta,
+            &input,
+            None,
         )
     }
 
@@ -7984,7 +8087,7 @@ pub(crate) struct ServiceObs {
     pub(crate) need_daemon_reload: bool,
 }
 
-fn unchanged_result(res: &FrozenResource, reason: &str) -> ResourceResult {
+pub(crate) fn unchanged_result(res: &FrozenResource, reason: &str) -> ResourceResult {
     ResourceResult {
         id: res.id.clone(),
         type_: res.type_.clone(),
@@ -8003,13 +8106,13 @@ fn unchanged_result(res: &FrozenResource, reason: &str) -> ResourceResult {
     }
 }
 
-fn changed_result(res: &FrozenResource) -> ResourceResult {
+pub(crate) fn changed_result(res: &FrozenResource) -> ResourceResult {
     changed_result_sensitive(res, res.sensitive)
 }
 
 /// Build a changed result carrying the effective (possibly derived) sensitivity
 /// so presentation paths can redact diff content and diagnostics.
-fn changed_result_sensitive(res: &FrozenResource, sensitive: bool) -> ResourceResult {
+pub(crate) fn changed_result_sensitive(res: &FrozenResource, sensitive: bool) -> ResourceResult {
     ResourceResult {
         id: res.id.clone(),
         type_: res.type_.clone(),
