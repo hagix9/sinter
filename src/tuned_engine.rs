@@ -426,13 +426,15 @@ impl Engine {
                             name, why
                         ))
                     }
-                    None => return Err(SinterError::apply(format!(
+                    None => {
+                        return Err(SinterError::apply(format!(
                         "{}: the profile {} is not defined on this host (no {}/tuned.conf in {})",
                         res.id,
                         name,
                         name,
                         PROFILE_DIRS.join(", ")
-                    ))),
+                    )))
+                    }
                 }
             }
         }
