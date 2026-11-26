@@ -258,7 +258,10 @@ Rules:
   directory's owner (root), random group and inode, which no other account can
   make. If another account renamed, filled or replaced it in the meantime, it is
   left and a note says where (the publication stands; remove it when
-  convenient). This removal has not yet been measured on a real host (GNU
+  convenient). If another account swaps an empty directory of its own into that
+  name in the instant between Sinter's check and the removal, that empty
+  directory is removed instead; that account could remove it itself, and a
+  directory with anything in it is never removed. This removal has not yet been measured on a real host (GNU
   `find -inum -empty -delete`, the link count of a removed directory).
 
 What you accept by listing a directory: any account that can write to it can
