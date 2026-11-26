@@ -22,7 +22,14 @@ use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The resource types that manage a whole path.
-const WHOLE_PATH_TYPES: &[&str] = &["file", "template", "directory", "link", "systemd_timer"];
+const WHOLE_PATH_TYPES: &[&str] = &[
+    "file",
+    "template",
+    "directory",
+    "link",
+    "systemd_timer",
+    "sysctl",
+];
 
 const META_FIELDS: [&str; 3] = ["owner", "group", "mode"];
 

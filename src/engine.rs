@@ -1090,6 +1090,7 @@ impl Engine {
             "dnf_repository" => self.run_dnf_repository(res, item),
             "dnf_module" => self.run_dnf_module(res, item),
             "crypto_policy" => self.run_crypto_policy(res, item),
+            "sysctl" => self.run_sysctl(res, item),
             "group" => self.run_group(res, item),
             "user" => self.run_user(res, item),
             "postgresql_role" => self.run_postgresql_role(res, item),
@@ -1120,6 +1121,7 @@ impl Engine {
                             | "nm_connection"
                             | "dnf_module"
                             | "crypto_policy"
+                            | "sysctl"
                     )
                     && !self.fs.runs_as_root()
                 {

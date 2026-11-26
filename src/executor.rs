@@ -3938,6 +3938,16 @@ impl FakeExecutor {
                     &req.args,
                 )
             }
+            "sysctl"
+                if req.program == crate::sysctl::TOOL
+                    && self.target.executables.contains(&req.program) =>
+            {
+                crate::fake_host::sysctl(
+                    &self.target.el,
+                    self.sudo || self.target.uid == 0,
+                    &req.args,
+                )
+            }
             "dnf" | "apt-get" => self.run_manager(&prog, &req.args),
             "systemctl" => self.run_systemctl(&req.args),
             "ss" if self.target.manager.net.ss_program() == Some(req.program.as_str()) => {

@@ -390,6 +390,7 @@ fn audit_resource(engine: &mut Engine, res: &FrozenResource) -> AuditResourceRes
         "dnf_repository" => audit_dnf_repository(engine, res, item.as_ref(), sensitive),
         "dnf_module" => audit_dnf_module(engine, res, item.as_ref(), sensitive),
         "crypto_policy" => audit_crypto_policy(engine, res, item.as_ref(), sensitive),
+        "sysctl" => audit_sysctl(engine, res, item.as_ref(), sensitive),
         "group" => audit_group(engine, res, item.as_ref(), sensitive),
         "user" => audit_user(engine, res, item.as_ref(), sensitive),
         "postgresql_role" => audit_postgresql_role(engine, res, item.as_ref(), sensitive),
@@ -1444,6 +1445,55 @@ fn audit_crypto_policy(
         .to_string(),
     );
     r
+}
+
+/// Audit a `sysctl`: Sinter's file as a `file` (every difference under the
+/// dimension `persistent`) and the running value (`runtime`), each only when
+/// the resource manages it. An unknown parameter and every observation
+/// failure are errors, never drift. Whether another file overrides the
+/// value at boot is not evaluated.
+fn audit_sysctl(
+    engine: &mut Engine,
+    res: &FrozenResource,
+    item: Option<&EvalVal>,
+    sensitive: bool,
+) -> AuditResourceResult {
+    let (file, runtime) =
+        match obs_or_error(res, sensitive, engine.sysctl_audit(res, item, sensitive)) {
+            Ok(v) => v,
+            Err(r) => return *r,
+        };
+    let mut details = Vec::new();
+    if let Some(file) = file {
+        let p = audit_file(engine, &file, None, sensitive);
+        match p.status {
+            AuditResourceStatus::Compliant => {}
+            AuditResourceStatus::Drift => details.extend(p.details.into_iter().map(|d| {
+                AuditDriftDetail::new(
+                    "persistent",
+                    format!("{}: {}", d.dimension, d.observed),
+                    format!("{}: {}", d.dimension, d.desired),
+                    sensitive,
+                )
+            })),
+            _ => {
+                let mut r = AuditResourceResult::base(res, p.status, sensitive);
+                r.reason = p.reason;
+                return r;
+            }
+        }
+    }
+    if let Some((observed, desired)) = runtime {
+        details.push(AuditDriftDetail::new(
+            "runtime", observed, desired, sensitive,
+        ));
+    }
+    finish_drift(
+        res,
+        sensitive,
+        details,
+        "matches the declared state; whether another file overrides the value at boot is not evaluated",
+    )
 }
 
 /// Audit a `systemd_timer` (DESIGN §42.5): the checks that would stop plan

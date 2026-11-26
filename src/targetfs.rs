@@ -1535,6 +1535,24 @@ impl TargetFs {
         self.run_argv(crate::cryptopol::TOOL, &["--show".to_string()])
     }
 
+    /// The running value of one kernel parameter (`sysctl`):
+    /// `sysctl -n -- <name>` prints it and changes nothing. Read-only, fixed
+    /// argv; `name` passed the type's name grammar (no `/`, no `*`, no
+    /// leading `-`, no `=`), so it cannot be read as an option or as an
+    /// assignment. No mutation permit is needed.
+    pub fn sysctl_read(&mut self, name: &str, sensitive: bool) -> Result<Output> {
+        if !crate::sysctl::valid_name(name) {
+            return Err(SinterError::apply(
+                "refusing to read a kernel parameter whose name is not in the accepted form",
+            ));
+        }
+        self.run_argv_sensitivity(
+            crate::sysctl::TOOL,
+            &crate::sysctl::SysctlSpec::read_args(name),
+            sensitive,
+        )
+    }
+
     /// Check one `OnCalendar` expression with the target's own systemd
     /// (`systemd_timer`, DESIGN §42.4). The expression was checked by Sinter
     /// first (printable ASCII, no leading `-`, no `\` or `%`), so it cannot

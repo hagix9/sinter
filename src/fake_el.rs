@@ -77,6 +77,9 @@ pub struct FakeEl {
     pub crypto_external_change: Option<(usize, String)>,
     /// Every `update-crypto-policies` argv received, in order.
     pub crypto_calls: Vec<Vec<String>>,
+    /// The scripted host tools that are not specific to the Red Hat family
+    /// (`sysctl`), kept here so they share this handle.
+    pub host: crate::fake_host::FakeHostTools,
 }
 
 /// The handle type stored in [`FakeTarget`].

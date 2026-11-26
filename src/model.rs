@@ -1389,6 +1389,11 @@ fn validate_declaration_shape(
             crate::cryptopol::PolicySpec::check_literals(&d.with, ctx, field_sensitive("policy"))?;
             require_static_string_field(&d.with, "policy", ctx, field_sensitive("policy"))?;
         }
+        "sysctl" => {
+            validate_with_fields(&d.with, crate::sysctl::FIELDS, ctx)?;
+            crate::sysctl::SysctlSpec::check_literals(&d.with, ctx, field_sensitive("value"))?;
+            require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
+        }
         "systemd_timer" => {
             validate_with_fields(&d.with, SYSTEMD_TIMER_FIELDS, ctx)?;
             require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
@@ -2622,6 +2627,50 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                         )));
                     }
                 }
+                "sysctl" => {
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(&r.with, crate::sysctl::FIELDS, &resource_ctx)?;
+                        crate::sysctl::SysctlSpec::check_literals(
+                            &r.with,
+                            &resource_ctx,
+                            field_sensitive("value"),
+                        )
+                    })?;
+                    // `name` is static: it names the parameter and Sinter's
+                    // file before any target is reached.
+                    let name = staged_field(&mut stage, &tol, "name", || {
+                        let name = static_string(
+                            &r.with,
+                            "name",
+                            &scope,
+                            &resource_ctx,
+                            true,
+                            field_sensitive("name"),
+                        )?;
+                        crate::sysctl::SysctlSpec::check_name(&name, &resource_ctx)?;
+                        Ok(name)
+                    })?;
+                    if let Some(name) = name {
+                        if crate::sysctl::SysctlSpec::manages_file(&r.with) {
+                            fr.path = Some(crate::sysctl::conf_path(&name));
+                        }
+                        // One resource per kernel parameter.
+                        if let Some(owner) = account_name_owner
+                            .insert(("sysctl".to_string(), name.clone()), r.id.clone())
+                        {
+                            if !ownership_may_depend_on_values(&tol, &peer_refs, "name", &owner) {
+                                stage = Stage::Ownership {
+                                    field: "name",
+                                    peer: owner.clone(),
+                                };
+                                return Err(SinterError::schema(format!(
+                                    "conflicting ownership of kernel parameter {} by resources {} and {}",
+                                    name, owner, r.id
+                                )));
+                            }
+                        }
+                    }
+                }
                 "nm_connection" => {
                     staged(&mut stage, Stage::ValueFree, || {
                         validate_with_fields(&r.with, crate::nm::NM_FIELDS, &resource_ctx)
@@ -2854,7 +2903,7 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
             // Ownership conflicts for filesystem resources.
             if matches!(
                 r.type_.as_str(),
-                "file" | "template" | "directory" | "link" | "systemd_timer"
+                "file" | "template" | "directory" | "link" | "systemd_timer" | "sysctl"
             ) {
                 if let Some(p) = &fr.path {
                     if let Some(prev) = path_owner.insert(p.clone(), r.id.clone()) {

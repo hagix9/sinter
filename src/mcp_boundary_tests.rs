@@ -404,6 +404,7 @@ fn refused_manifests() -> Vec<(&'static str, String)> {
         ("dnf_repository", r("dnf_repository", "name: crb, file: /etc/yum.repos.d/rocky.repo, enabled: true")),
         ("dnf_module", r("dnf_module", "name: nodejs, stream: \"20\", state: enabled")),
         ("crypto_policy", r("crypto_policy", "policy: FUTURE")),
+        ("sysctl", r("sysctl", "name: vm.swappiness, value: 10")),
         ("malformed", "version: 1\nresources: [\n".to_string()),
         ("not a mapping", "- just\n- a list\n".to_string()),
     ]
@@ -434,6 +435,7 @@ fn refused_manifests_never_reach_the_host() {
                 "dnf_repository" => "dnf_repository",
                 "dnf_module" => "dnf_module",
                 "crypto_policy" => "crypto_policy",
+                "sysctl" => "sysctl",
                 _ => "",
             };
             assert!(
