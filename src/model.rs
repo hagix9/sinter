@@ -1367,6 +1367,12 @@ fn validate_declaration_shape(
             crate::nm::NmSpec::check(&d.with, ctx, true)?;
         }
         "file_merge" => file_merge::check_shape(d, sensitive_var_names)?,
+        "dnf_repository" => {
+            validate_with_fields(&d.with, crate::dnf_repository::FIELDS, ctx)?;
+            require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
+            require_optional_static_string(&d.with, "file", ctx, field_sensitive("file"))?;
+            crate::dnf_repository::RepoSpec::check(&d.with, ctx, true)?;
+        }
         "systemd_timer" => {
             validate_with_fields(&d.with, SYSTEMD_TIMER_FIELDS, ctx)?;
             require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
@@ -1916,6 +1922,8 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
     let mut nm_owner: BTreeMap<String, String> = BTreeMap::new();
     // `file_merge` resources by path: they share a path, not a part of it.
     let mut merge_owners = file_merge::MergeOwners::default();
+    // `dnf_repository` ids and repository files claimed so far.
+    let mut dnf_repo_owner = crate::dnf_repository::Owners::default();
     let mut account_name_owner: BTreeMap<(String, String), String> = BTreeMap::new();
     // Recipe-wide default environment, applied to `package`/`command`
     // resources as a base their own `env` overrides (DESIGN §27.1).
@@ -2427,6 +2435,69 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                     staged(&mut stage, Stage::ValueFree, || {
                         crate::timer::TimerSpec::check(&r.with, &resource_ctx, true).map(|_| ())
                     })?;
+                }
+                "dnf_repository" => {
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(
+                            &r.with,
+                            crate::dnf_repository::FIELDS,
+                            &resource_ctx,
+                        )?;
+                        crate::dnf_repository::RepoSpec::check(&r.with, &resource_ctx, true)
+                            .map(|_| ())
+                    })?;
+                    // `name` and `file` are static: resolved and checked here.
+                    let mut ident = BTreeMap::new();
+                    for key in ["name", "file"] {
+                        if matches!(r.with.get(key), None | Some(Value::Null)) {
+                            continue;
+                        }
+                        let resolved = staged_field(&mut stage, &tol, key, || {
+                            let v = static_string(
+                                &r.with,
+                                key,
+                                &scope,
+                                &resource_ctx,
+                                true,
+                                field_sensitive(key),
+                            )?;
+                            crate::dnf_repository::check_identifier(key, &v, &resource_ctx)?;
+                            Ok(v)
+                        })?;
+                        if let Some(v) = resolved {
+                            ident.insert(key, v);
+                        }
+                    }
+                    if let Some(name) = ident.get("name") {
+                        let file = match ident.get("file") {
+                            Some(f) => Some(f.clone()),
+                            // Declared but left unjudged by the structure check.
+                            None if !matches!(r.with.get("file"), None | Some(Value::Null)) => None,
+                            None => Some(crate::dnf_repository::default_file(name)),
+                        };
+                        if let Some(file) = file {
+                            if let Some((field, peer, message)) = crate::dnf_repository::claim(
+                                &mut dnf_repo_owner,
+                                &mut path_owner,
+                                name,
+                                &file,
+                                &r.id,
+                            ) {
+                                if !ownership_may_depend_on_values(&tol, &peer_refs, field, &peer)
+                                    && !ownership_may_depend_on_values(
+                                        &tol, &peer_refs, "path", &peer,
+                                    )
+                                    && !ownership_may_depend_on_values(
+                                        &tol, &peer_refs, "name", &peer,
+                                    )
+                                {
+                                    stage = Stage::Ownership { field, peer };
+                                    return Err(SinterError::schema(message));
+                                }
+                            }
+                            fr.path = Some(file);
+                        }
+                    }
                 }
                 "nm_connection" => {
                     staged(&mut stage, Stage::ValueFree, || {

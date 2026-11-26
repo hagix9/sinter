@@ -1,0 +1,33 @@
+# Enable a repository that the distribution already defines, then install a
+# package that lives in it.
+#
+# `dnf_repository` edits only the keys you declare in only the named section
+# of the repository file; every other line of the file stays as it is. On
+# Rocky Linux, CRB (CodeReady Builder) is defined, disabled, in the
+# distribution's own file, so `file` names that file. Other distributions use
+# another file and sometimes another repository id: look in /etc/yum.repos.d/
+# and adjust `name` and `file` (and the package) to your host.
+#
+# Sinter enables a repository only when its section has gpgcheck=1, never
+# writes gpgcheck=0, and does not refresh metadata itself: the `package`
+# resource acquires what it needs when it installs.
+#
+# DNF 4 hosts only (Rocky Linux / RHEL / AlmaLinux 9 and 10).
+#
+#   sinter apply examples/quick/dnf-repository.yaml --host <host> --sudo
+version: 1
+
+resources:
+  - id: crb
+    type: dnf_repository
+    with:
+      name: crb
+      file: /etc/yum.repos.d/rocky.repo
+      enabled: true
+
+  - id: doxygen
+    type: package
+    depends_on: [crb]
+    with:
+      name: doxygen
+      state: present

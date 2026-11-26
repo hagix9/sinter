@@ -387,6 +387,7 @@ fn audit_resource(engine: &mut Engine, res: &FrozenResource) -> AuditResourceRes
             crate::filemerge_engine::audit_file_merge(engine, res, item.as_ref(), sensitive)
         }
         "nm_connection" => audit_nm_connection(engine, res, item.as_ref(), sensitive),
+        "dnf_repository" => audit_dnf_repository(engine, res, item.as_ref(), sensitive),
         "group" => audit_group(engine, res, item.as_ref(), sensitive),
         "user" => audit_user(engine, res, item.as_ref(), sensitive),
         "postgresql_role" => audit_postgresql_role(engine, res, item.as_ref(), sensitive),
@@ -1346,6 +1347,41 @@ fn audit_nm_connection(
         details,
         "NetworkManager profile matches the declared fields",
     )
+}
+
+/// Audit a `dnf_repository`: drift per declared key of the repository's
+/// section (`state` for a missing or unwanted section). An unsupported host
+/// and every observation or parse refusal are errors, never drift.
+/// Read-only: the repository file is read, nothing else.
+fn audit_dnf_repository(
+    engine: &mut Engine,
+    res: &FrozenResource,
+    item: Option<&EvalVal>,
+    sensitive: bool,
+) -> AuditResourceResult {
+    let found = match obs_or_error(res, sensitive, engine.dnf_repo_audit(res, item)) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let sensitive = sensitive || found.sensitive;
+    let details = found
+        .drift
+        .into_iter()
+        .map(|(f, o, d)| AuditDriftDetail::new(&f, o, d, sensitive))
+        .collect();
+    let mut r = finish_drift(
+        res,
+        sensitive,
+        details,
+        "repository matches the declared keys",
+    );
+    if let Some(note) = found.note {
+        r.reason = Some(match r.reason.take() {
+            Some(reason) => format!("{}; note: {}", reason, note),
+            None => format!("note: {}", note),
+        });
+    }
+    r
 }
 
 /// Audit a `systemd_timer` (DESIGN §42.5): the checks that would stop plan

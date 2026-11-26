@@ -584,6 +584,37 @@ fn nm_connection_is_refused_by_every_manifest_tool() {
 }
 
 #[test]
+fn dnf_repository_is_refused_by_every_manifest_tool() {
+    // The repository file handling is not measured on real hosts; MCP does
+    // not offer the type (and stays read-only either way).
+    let mut m = Mcp::start();
+    init(&mut m);
+    let manifest = "version: 1\nresources:\n  - id: r\n    type: dnf_repository\n    with: { name: crb, file: /etc/yum.repos.d/rocky.repo, enabled: true }\n";
+    let calls = [
+        ("sinter_validate_manifest", json!({"manifest": manifest})),
+        ("sinter_inspect_manifest", json!({"manifest": manifest})),
+        (
+            "sinter_plan",
+            json!({"manifest": manifest, "target": "rocky9"}),
+        ),
+        (
+            "sinter_plan_host",
+            json!({"manifest": manifest, "target": "web01"}),
+        ),
+        (
+            "sinter_audit_host",
+            json!({"manifest": manifest, "target": "web01"}),
+        ),
+    ];
+    for (i, (tool, args)) in calls.into_iter().enumerate() {
+        let (is_err, v) = Mcp::payload(&m.tool(10 + i as u64, tool, args));
+        assert!(is_err, "{tool} accepted a dnf_repository manifest: {v}");
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("dnf_repository"), "{tool}: {msg}");
+    }
+}
+
+#[test]
 fn plugins_are_refused_by_every_manifest_tool() {
     // Resource Plugins are not available over MCP (DESIGN §38.12): a manifest
     // that enables one is refused before anything is loaded, by every tool

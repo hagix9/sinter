@@ -182,9 +182,10 @@ impl PlannedEffects {
             }
         }
         match (res.type_.as_str(), &res.path) {
-            ("file" | "directory" | "link" | "template" | "file_merge", Some(p)) => {
-                self.paths.push((p.clone(), res.id.clone()))
-            }
+            (
+                "file" | "directory" | "link" | "template" | "file_merge" | "dnf_repository",
+                Some(p),
+            ) => self.paths.push((p.clone(), res.id.clone())),
             // Neither a group nor a database role changes any path.
             ("group" | "postgresql_role", _) => {}
             _ => {
@@ -1070,6 +1071,7 @@ impl Engine {
             "systemd_timer" => self.run_systemd_timer(res, item),
             "file_merge" => self.run_file_merge(res, item),
             "nm_connection" => self.run_nm_connection(res, item),
+            "dnf_repository" => self.run_dnf_repository(res, item),
             "group" => self.run_group(res, item),
             "user" => self.run_user(res, item),
             "postgresql_role" => self.run_postgresql_role(res, item),

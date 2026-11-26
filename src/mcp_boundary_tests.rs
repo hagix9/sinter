@@ -401,6 +401,7 @@ fn refused_manifests() -> Vec<(&'static str, String)> {
         ("systemd_timer", r("systemd_timer", "name: backup, on_calendar: daily")),
         ("nm_connection", r("nm_connection", "name: lan, ifname: eth1")),
         ("file_merge", r("file_merge", "path: /etc/x, merge: line, line: x")),
+        ("dnf_repository", r("dnf_repository", "name: crb, file: /etc/yum.repos.d/rocky.repo, enabled: true")),
         ("malformed", "version: 1\nresources: [\n".to_string()),
         ("not a mapping", "- just\n- a list\n".to_string()),
     ]
@@ -428,6 +429,7 @@ fn refused_manifests_never_reach_the_host() {
                 "systemd_timer" => "systemd_timer",
                 "nm_connection" => "nm_connection",
                 "file_merge" => "file_merge",
+                "dnf_repository" => "dnf_repository",
                 _ => "",
             };
             assert!(

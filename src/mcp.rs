@@ -394,6 +394,18 @@ fn check_mcp_manifest_authority(doc: &Document) -> Result<(), ToolError> {
                     .to_string(),
             });
         }
+        // `dnf_repository` decides from a repository file whose reading by
+        // DNF is not measured on real hosts yet; MCP does not offer it.
+        if r.type_ == "dnf_repository" {
+            return Err(ToolError {
+                category: "invalid_manifest",
+                kind: Some("schema"),
+                message: "MCP manifests may not use the dnf_repository resource type \
+                          yet — its repository file handling is not measured on real \
+                          hosts"
+                    .to_string(),
+            });
+        }
         if r.type_ == "systemd_timer" {
             return Err(ToolError {
                 category: "invalid_manifest",
