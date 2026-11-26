@@ -83,6 +83,9 @@ pub struct FakeEl {
     /// The scripted host tools that are not specific to the Red Hat family
     /// (`sysctl`, `hostnamectl`), kept here so they share this handle.
     pub host: crate::fake_host::FakeHostTools,
+    /// The scripted OS base-setting tools (`timedatectl`, `localectl`,
+    /// `locale`, `modprobe`).
+    pub osbase: crate::fake_osbase::FakeOsBase,
 }
 
 /// The handle type stored in [`FakeTarget`].

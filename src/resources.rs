@@ -883,7 +883,7 @@ impl Engine {
     }
 
     /// Target text of a symlink seen by [`Self::observe_stat`].
-    fn observe_readlink(&mut self, res: &FrozenResource, path: &str) -> Result<String> {
+    pub(crate) fn observe_readlink(&mut self, res: &FrozenResource, path: &str) -> Result<String> {
         match self.fs.observed(path, |fs| fs.readlink(path))? {
             Observed::Value(t) => Ok(t),
             Observed::ParentAbsent => Err(SinterError::apply(format!(

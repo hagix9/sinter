@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 mod file_merge;
+mod owned;
 
 #[derive(Debug, Clone)]
 pub struct VarDef {
@@ -1399,6 +1400,11 @@ fn validate_declaration_shape(
             crate::hostname::check_literals(&d.with, ctx, field_sensitive("name"))?;
             require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
         }
+        "timezone" => {
+            validate_with_fields(&d.with, crate::timezone::FIELDS, ctx)?;
+            crate::timezone::check_literals(&d.with, ctx, field_sensitive("name"))?;
+            require_static_string_field(&d.with, "name", ctx, field_sensitive("name"))?;
+        }
         "sysctl" => {
             validate_with_fields(&d.with, crate::sysctl::FIELDS, ctx)?;
             crate::sysctl::SysctlSpec::check_literals(&d.with, ctx, field_sensitive("value"))?;
@@ -2697,6 +2703,46 @@ fn freeze(state: LoadState, entry: &Path, overrides: &VarOverrides) -> Result<Mo
                             "conflicting ownership of the host name by resources {} and {} (a recipe may hold one hostname)",
                             owner, r.id
                         )));
+                    }
+                }
+                "timezone" => {
+                    let redact = field_sensitive("name");
+                    staged(&mut stage, Stage::ValueFree, || {
+                        validate_with_fields(&r.with, crate::timezone::FIELDS, &resource_ctx)?;
+                        crate::timezone::check_literals(&r.with, &resource_ctx, redact)
+                    })?;
+                    // `name` is static: resolved here and held to the zone
+                    // grammar before any target is reached.
+                    staged_field(&mut stage, &tol, "name", || {
+                        let name =
+                            static_string(&r.with, "name", &scope, &resource_ctx, true, redact)?;
+                        let mut resolved = BTreeMap::new();
+                        resolved.insert("name".to_string(), Value::Str(name));
+                        crate::timezone::name_from_values(&resolved, &resource_ctx, redact)
+                            .map(|_| ())
+                    })?;
+                    // One system time zone: one resource per recipe.
+                    if let Some(owner) = account_name_owner
+                        .insert(("timezone".to_string(), String::new()), r.id.clone())
+                    {
+                        stage = Stage::ValueFree;
+                        return Err(SinterError::schema(format!(
+                            "conflicting ownership of the system time zone by resources {} and {} (a recipe may hold one timezone)",
+                            owner, r.id
+                        )));
+                    }
+                    // The link it changes.
+                    let paths = [crate::timezone::LOCALTIME.to_string()];
+                    if let Some((peer, message)) =
+                        owned::claim(&mut path_owner, &merge_owners, &paths, &r.id, "timezone")
+                    {
+                        if !ownership_may_depend_on_values(&tol, &peer_refs, "path", &peer) {
+                            stage = Stage::Ownership {
+                                field: "path",
+                                peer,
+                            };
+                            return Err(SinterError::schema(message));
+                        }
                     }
                 }
                 "sysctl" => {

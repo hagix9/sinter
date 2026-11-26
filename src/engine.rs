@@ -1092,6 +1092,7 @@ impl Engine {
             "crypto_policy" => self.run_crypto_policy(res, item),
             "sysctl" => self.run_sysctl(res, item),
             "hostname" => self.run_hostname(res, item),
+            "timezone" => self.run_timezone(res, item),
             "tuned" => self.run_tuned(res, item),
             "group" => self.run_group(res, item),
             "user" => self.run_user(res, item),
@@ -1125,6 +1126,7 @@ impl Engine {
                             | "crypto_policy"
                             | "sysctl"
                             | "hostname"
+                            | "timezone"
                             | "tuned"
                     )
                     && !self.fs.runs_as_root()

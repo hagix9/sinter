@@ -156,6 +156,7 @@ pub const BUILTIN_RESOURCE_TYPES: &[&str] = &[
     "crypto_policy",
     "sysctl",
     "hostname",
+    "timezone",
     "tuned",
     "postgresql_role",
     "user",

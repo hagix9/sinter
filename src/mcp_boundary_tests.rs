@@ -407,6 +407,7 @@ fn refused_manifests() -> Vec<(&'static str, String)> {
         ("sysctl", r("sysctl", "name: vm.swappiness, value: 10")),
         ("hostname", r("hostname", "name: web01")),
         ("tuned", r("tuned", "profile: balanced")),
+        ("timezone", r("timezone", "name: Asia/Tokyo")),
         ("malformed", "version: 1\nresources: [\n".to_string()),
         ("not a mapping", "- just\n- a list\n".to_string()),
     ]
@@ -440,6 +441,7 @@ fn refused_manifests_never_reach_the_host() {
                 "sysctl" => "sysctl",
                 "hostname" => "hostname",
                 "tuned" => "tuned",
+                "timezone" => "timezone",
                 _ => "",
             };
             assert!(

@@ -238,6 +238,17 @@ pub(super) struct MergeOwners {
     by_path: BTreeMap<String, Vec<MergeOwner>>,
 }
 
+impl MergeOwners {
+    /// The first `file_merge` frozen so far on `path` (for the paths a
+    /// native type owns besides its `path`, `super::owned`).
+    pub(super) fn first_on(&self, path: &str) -> Option<&str> {
+        self.by_path
+            .get(path)
+            .and_then(|v| v.first())
+            .map(|o| o.id.as_str())
+    }
+}
+
 /// A field's value when it is known without evaluating anything that is not
 /// static (and is not sensitive).
 fn static_value(with: &BTreeMap<String, Value>, key: &str, scope: &Scope) -> Option<String> {

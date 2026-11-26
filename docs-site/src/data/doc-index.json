@@ -43,6 +43,7 @@
     {"title": "sysctl resource", "path": "reference/resources/sysctl", "description": "sysctl resource (unreleased): one kernel parameter, running value and persistent setting.", "keywords": "sysctl kernel parameter sysctl.d runtime persist ip_forward"},
     {"title": "hostname resource", "path": "reference/resources/hostname", "description": "hostname resource (unreleased): the static host name.", "keywords": "hostname hostnamectl static transient"},
     {"title": "tuned resource", "path": "reference/resources/tuned", "description": "tuned resource (unreleased): the selected TuneD profile.", "keywords": "tuned tuned-adm profile recommend verify active_profile performance tuning"},
+    {"title": "timezone resource", "path": "reference/resources/timezone", "description": "timezone resource (unreleased): the system time zone.", "keywords": "timezone time zone timedatectl localtime zoneinfo tz"},
     { "title": "group resource", "path": "reference/resources/group", "description": "group resource: local Linux group.", "keywords": "group gid groupadd groupdel local linux" },
     { "title": "user resource", "path": "reference/resources/user", "description": "user resource: local Linux user.", "keywords": "user uid shell home groups useradd userdel local linux password_hash chpasswd shadow" },
     { "title": "postgresql_role resource", "path": "reference/resources/postgresql_role", "description": "postgresql_role resource: a role of a local PostgreSQL server.", "keywords": "postgresql postgres role scram verifier password secret psql pg_authid" },
