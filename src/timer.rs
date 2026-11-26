@@ -404,6 +404,10 @@ impl TimerSpec {
         f.when = None;
         f.register = None;
         f.service_name = None;
+        // The rendered content is a literal: whether it came from a sensitive
+        // variable is known only from the declaring resource, so carry that
+        // into the file part, which decides redaction by `sensitive`.
+        f.sensitive = res.sensitive || res.derived_sensitive;
         let path = unit_path(&self.name);
         f.path = Some(path.clone());
         let mut with = BTreeMap::new();

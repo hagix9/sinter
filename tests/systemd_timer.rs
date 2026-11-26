@@ -852,3 +852,30 @@ fn stale_loaded_definition_is_deferred_in_plan_and_drift_in_audit() {
         trace(&a)
     );
 }
+
+fn rendered_text(rep: &RunReport) -> String {
+    let mut out = Vec::new();
+    sinter::output::render_plan(
+        rep,
+        &sinter::output::RenderOptions {
+            verbose: true,
+            format: sinter::output::OutputFormat::Text,
+            color: false,
+        },
+        &mut out,
+    )
+    .unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn a_calendar_from_a_sensitive_variable_is_not_shown_by_plan_when_the_unit_differs() {
+    // v1.15.0 behaviour fixed after release: the unit file part did not
+    // inherit the sensitivity a variable gives the timer.
+    let y = "version: 1\nvars:\n  cal:\n    value: \"*-*-* 04:17:00\"\n    sensitive: true\nresources:\n  - id: t\n    type: systemd_timer\n    with:\n      name: backup\n      description: Nightly backup\n      on_calendar: \"{{ vars.cal }}\"\n";
+    let rep = plan(&recipe("timer-sensitive-plan", y), converged());
+    let text = rendered_text(&rep);
+    assert!(!text.contains("04:17"), "{text}");
+    let json = serde_json::to_string(&sinter::output::run_report_json(&rep, "plan")).unwrap();
+    assert!(!json.contains("04:17"), "{json}");
+}

@@ -1761,3 +1761,33 @@ fn a_sensitive_resource_shows_no_boot_value() {
     }
     leaks(texts, "audit");
 }
+
+fn rendered_text(rep: &RunReport) -> String {
+    let mut out = Vec::new();
+    sinter::output::render_plan(
+        rep,
+        &sinter::output::RenderOptions {
+            verbose: true,
+            format: sinter::output::OutputFormat::Text,
+            color: false,
+        },
+        &mut out,
+    )
+    .unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn a_value_from_a_sensitive_variable_is_not_shown_by_plan_when_the_file_differs() {
+    let y = "version: 1\nvars:\n  v:\n    value: \"SYNTHSECRET42\"\n    sensitive: true\nresources:\n  - id: s\n    type: sysctl\n    with:\n      name: kernel.synthetic_text\n      value: \"{{ vars.v }}\"\n      runtime: false\n";
+    let conf = "/etc/sysctl.d/90-sinter-kernel.synthetic_text.conf";
+    let t = fake().with_fs_file(
+        conf,
+        "# Managed by Sinter (sysctl). Local changes are replaced.\nkernel.synthetic_text = OLDVALUE7\n",
+    );
+    let rep = plan(&recipe("sysctl-sensitive-plan", y), t);
+    let text = rendered_text(&rep);
+    assert!(!text.contains("SYNTHSECRET42"), "{text}");
+    let json = serde_json::to_string(&sinter::output::run_report_json(&rep, "plan")).unwrap();
+    assert!(!json.contains("SYNTHSECRET42"), "{json}");
+}

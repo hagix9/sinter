@@ -541,6 +541,10 @@ impl SysctlSpec {
         f.depends_on = Vec::new();
         f.when = None;
         f.register = None;
+        // The rendered content is a literal: whether it came from a sensitive
+        // variable is known only from the declaring resource, so carry that
+        // into the file part, which decides redaction by `sensitive`.
+        f.sensitive = res.sensitive || res.derived_sensitive;
         let path = conf_path(&self.name);
         f.path = Some(path.clone());
         let mut with = BTreeMap::new();
