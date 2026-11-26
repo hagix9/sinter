@@ -34,14 +34,23 @@ const WHOLE_PATH_TYPES: &[&str] = &[
     "dnf_repository",
 ];
 
-/// Refuse a `file_merge` on DNF's configuration: the repository files, the
-/// main configuration and everything under `/etc/dnf/` and `/etc/yum/`
-/// (module state, variables, plugin configuration). A partial edit there
+/// Refuse a `file_merge` on DNF's and RPM's configuration: the repository
+/// files (also `/etc/distro.repos.d`), the main configuration, everything
+/// under `/etc/dnf/` and `/etc/yum/` (module state, variables, plugin
+/// configuration), RPM's macros (`/etc/rpm`, which can change signature
+/// verification) and the signing keys (`/etc/pki/rpm-gpg`). A partial edit there
 /// could switch off package signature checking with one line, which no
 /// native resource may do. The path is absolute and has no `.`, `..` or
 /// repeated separator (`validate_path`), so the comparison is on text.
 pub(crate) fn check_not_dnf_configuration(path: &str, ctx: &str) -> Result<()> {
-    const TREES: [&str; 3] = ["/etc/yum.repos.d", "/etc/dnf", "/etc/yum"];
+    const TREES: [&str; 6] = [
+        "/etc/yum.repos.d",
+        "/etc/distro.repos.d",
+        "/etc/dnf",
+        "/etc/yum",
+        "/etc/rpm",
+        "/etc/pki/rpm-gpg",
+    ];
     let inside = |tree: &str| {
         path.strip_prefix(tree)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))

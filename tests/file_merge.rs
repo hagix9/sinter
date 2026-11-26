@@ -1817,6 +1817,9 @@ fn dnf_configuration_is_not_edited_by_file_merge() {
         "/etc/yum.conf",
         "/etc/yum/vars/releasever",
         "/etc/yum/pluginconf.d/x.conf",
+        "/etc/distro.repos.d/x.repo",
+        "/etc/rpm/macros.zz",
+        "/etc/pki/rpm-gpg/RPM-GPG-KEY-synthetic",
     ] {
         for with in [
             format!("      path: {path}\n      merge: line\n      line: 'gpgcheck=0'\n"),

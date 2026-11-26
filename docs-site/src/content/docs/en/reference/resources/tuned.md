@@ -330,6 +330,18 @@ RHEL, Rocky Linux and AlmaLinux 9 and 10, and Ubuntu 24.04 and 26.04 when
 the `tuned` package is installed. The type decides by the presence of
 `tuned-adm`, not by the OS name.
 
+## Limits
+
+- When `plan` cannot decide because an earlier resource may start TuneD or
+  write the profile, the result is reported as decided at apply (unknown).
+- Sinter checks that `tuned.service` is active right before it runs
+  `tuned-adm`. If the service stops in that short window, TuneD's own tool may
+  try to start it; Sinter itself never starts it.
+- The state file `/etc/tuned/active_profile` is refused if it has more than
+  one hard link.
+- One `tuned` per recipe. Two recipes of a bundle that select different
+  profiles for the same host are not detected: each apply would switch it.
+
 ## Not verified on a real host
 
 This resource is tested against Sinter's scripted target only. No host with

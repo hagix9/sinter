@@ -114,7 +114,7 @@ Sinter はブロックを次の形で書きます。
 
 ### 拒否するパス
 
-`file_merge` は DNF の設定を編集しません。`path` が `/etc/yum.conf` であるか、`/etc/yum.repos.d/`、`/etc/dnf/`（たとえば `dnf.conf`、`modules.d/`、`vars/`）、`/etc/yum/` の中にあると、レシピの読み込み時に検証のエラーになります。そこに 1 行足すだけで、パッケージの署名検査を無効にできてしまうためです（`gpgcheck=0`）。リポジトリは [`dnf_repository`](/ja/reference/resources/dnf_repository/)、モジュールストリームは [`dnf_module`](/ja/reference/resources/dnf_module/) で管理してください。どちらもパッケージの署名検査を保ちます。または [`file`](/ja/reference/resources/file/) でファイル全体を書いてください。
+`file_merge` は DNF の設定を編集しません。`path` が `/etc/yum.conf` であるか、`/etc/yum.repos.d/`、`/etc/distro.repos.d/`、`/etc/dnf/`（たとえば `dnf.conf`、`modules.d/`、`vars/`）、`/etc/yum/`、`/etc/rpm/`（RPM のマクロ）、`/etc/pki/rpm-gpg/`（署名鍵）の中にあると、レシピの読み込み時に検証のエラーになります。そこに 1 行足すだけで、パッケージの署名検査を無効にできてしまうためです（`gpgcheck=0`）。リポジトリは [`dnf_repository`](/ja/reference/resources/dnf_repository/)、モジュールストリームは [`dnf_module`](/ja/reference/resources/dnf_module/) で管理してください。どちらもパッケージの署名検査を保ちます。または [`file`](/ja/reference/resources/file/) でファイル全体を書いてください。
 
 ### ファイルが無いとき
 

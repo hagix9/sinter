@@ -174,8 +174,9 @@ whose key differs from the declared key only in letter case.
 ### Paths that are refused
 
 `file_merge` does not edit DNF configuration. A `path` that is
-`/etc/yum.conf`, or is inside `/etc/yum.repos.d/`, `/etc/dnf/` (for example
-`dnf.conf`, `modules.d/`, `vars/`) or `/etc/yum/`, is a validation error
+`/etc/yum.conf`, or is inside `/etc/yum.repos.d/`, `/etc/distro.repos.d/`,
+`/etc/dnf/` (for example `dnf.conf`, `modules.d/`, `vars/`), `/etc/yum/`,
+`/etc/rpm/` (RPM macros) or `/etc/pki/rpm-gpg/` (signing keys), is a validation error
 when the recipe is loaded. One added line there could switch off package
 signature checking (`gpgcheck=0`). Manage repositories with
 [`dnf_repository`](/en/reference/resources/dnf_repository/) and module

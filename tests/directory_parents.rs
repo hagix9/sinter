@@ -379,3 +379,35 @@ fn in_another_accounts_tree_an_owner_it_cannot_have_is_refused_before_anything_i
         AggregateStatus::Success
     );
 }
+
+#[test]
+fn an_existing_parent_in_a_shared_directory_is_judged_the_same_with_parents_set() {
+    // /tmp (1777) holds /tmp/adir, a directory of uid 1500. A directory below
+    // it owned by that account is accepted without `parents`; setting the
+    // option must not change that (the parent exists, nothing is missing).
+    let t = || {
+        let mut t = host();
+        let fs = t.fs.as_mut().unwrap();
+        fs.mkdir_node("/tmp", 0o1777, 0, 0);
+        fs.mkdir_node("/tmp/adir", 0o755, 1500, 1500);
+        t
+    };
+    for parents in ["", "      parents: true\n"] {
+        let body = format!(
+            "version: 1\nresources:\n  - id: y\n    type: directory\n    with:\n      path: /tmp/adir/y\n      owner: app\n      group: app\n{parents}"
+        );
+        let p = recipe("dp-shared-acct", &body);
+        assert_eq!(
+            run_recipe_fake(&p, Mode::Plan, true, t()).status,
+            AggregateStatus::Success,
+            "plan (parents: {})",
+            !parents.is_empty()
+        );
+        assert_eq!(
+            run_recipe_fake(&p, Mode::Apply, true, t()).status,
+            AggregateStatus::Success,
+            "apply (parents: {})",
+            !parents.is_empty()
+        );
+    }
+}

@@ -742,7 +742,8 @@ fn a_stopped_service_is_a_plan_note_after_an_earlier_service_resource_and_apply_
     let p = plan(&r, target.clone());
     assert_eq!(p.status, AggregateStatus::Success, "{:?}", p.resources);
     let c = find(&p, "t");
-    assert_eq!(c.change, Change::Changed, "{c:?}");
+    // Deferred: the outcome is decided at apply.
+    assert!(c.unknown, "{c:?}");
     assert!(
         notes(&p).contains("tuned.service is not active (inactive) now")
             && notes(&p).contains("checked again at apply")
@@ -768,7 +769,7 @@ fn a_custom_profile_an_earlier_file_writes_is_a_plan_note_and_selected_at_apply(
     let p = plan(&r, target.clone());
     assert_eq!(p.status, AggregateStatus::Success, "{:?}", p.resources);
     let c = find(&p, "t");
-    assert_eq!(c.change, Change::Changed, "{c:?}");
+    assert!(c.unknown, "{c:?}");
     assert!(
         notes(&p).contains("the profile site-db is not defined on this host now")
             && notes(&p).contains("checked again at apply"),

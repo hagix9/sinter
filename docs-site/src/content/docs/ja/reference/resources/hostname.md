@@ -46,7 +46,8 @@ name = "web01.example.invalid"
 
 - `/etc/hosts` は編集しない。ホスト自身の名前のエントリが必要なら、[`file_merge`](/ja/reference/resources/file_merge/) で宣言する。
 - 何も再起動しない。起動時にホスト名を読むプログラムは、再起動するまで以前の名前を使い続ける。名前を変更する plan と apply の結果には、必ずこの注記が付く。
-- pretty 名、transient 名だけの設定、そのほかの `hostnamectl` のプロパティは設定しない。
+- pretty 名、transient 名だけの設定、そのほかの `hostnamectl` のプロパティは管理しない。なお、オプションなしの `hostnamectl set-hostname` は static 名と transient 名を設定し、systemd のバージョンによっては設定済みの pretty 名も消すことがある（実ホストでは未検証）。Sinter はそれを報告しない。
+- 1 つのレシピに `hostname` は 1 つだけ。バンドルの 2 つのレシピが同じホストに別の名前を宣言しても検出しない。apply のたびに名前が入れ替わる。
 - 同じ実行の中の `facts.hostname` は、Sinter が接続したときに観測した名前のままである。新しい名前は次の実行から見える。
 
 変更があれば、ほかのリソースと同じようにハンドラへ通知する。そのため、レシピで `service` ハンドラを使ってサービスを再起動できる。

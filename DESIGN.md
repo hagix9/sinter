@@ -4286,10 +4286,10 @@ An approved budget for disposable hosts of every supported OS in BIOS and UEFI v
 
 59. How the OS base-setting types relate to each other
 
-Types added after v1.15.0 (not released): `sysctl` (§54), `hostname` (§55), `tuned` (§57), `crypto_policy` (§53), `timezone`, `locale`, `kernel_module` (§60 to §62); designed only: `kernel_args`, `grub` (§58).
+Types added after v1.15.0 (not released): `sysctl` (§54), `hostname` (§55), `tuned` (§57), `crypto_policy` (§53); in development at the time of writing: `timezone`, `locale`, `kernel_module` (their sections are added when they are integrated); designed only: `kernel_args`, `grub` (§58). One instance per host is checked within one recipe only: two recipes of a bundle that declare different values of a host-wide setting (`hostname`, `tuned`, `timezone`, `locale`, `crypto_policy`, the same `sysctl` key) are not detected and would switch it on every apply.
 
 - One owner per setting. Each type owns either a whole file of its own (`sysctl`: `/etc/sysctl.d/90-sinter-<name>.conf`; `kernel_module`: its files in `/etc/modules-load.d` and `/etc/modprobe.d`) or one named setting behind the OS's own tool (`hostname`, `timezone`, `locale`, `crypto_policy`, `tuned`). A `file`, `template` or `file_merge` on a path a type owns in the same recipe is a load-time error. Sinter never edits files it does not own to make its value win.
-- `sysctl` and other sysctl files: Sinter observes the boot-time order and reports when another file sets the key after its own (§54); it never re-applies unrelated settings (`sysctl --system` is not run).
+- `sysctl` and other sysctl files: Sinter observes the boot-time order (`systemd-analyze cat-config sysctl.d`, §54.4a) and reports when another file sets the key after its own; audit reports the value the files give at boot as the dimension `boot`; it never re-applies unrelated settings (`sysctl --system` is not run).
 - `tuned` and `sysctl`: a TuneD profile can set kernel parameters after boot-time sysctl files. Both types say so in a note when a profile is selected; Sinter does not read profile contents. Declare a parameter in one place.
 - `tuned` and `kernel_args`: profiles with a `[bootloader]` section change kernel arguments themselves. Until `kernel_args` exists Sinter neither observes nor manages that; §58 must treat TuneD-managed arguments as unmanaged and refuse to remove them.
 - `kernel_module` and `kernel_args`: `modprobe.blacklist=` and `module.parameter=` on the command line are outside `kernel_module`, which manages only its own files and loading now.

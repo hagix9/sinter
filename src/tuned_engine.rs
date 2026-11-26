@@ -404,6 +404,11 @@ impl Engine {
         // A change is needed. Everything that would stop it is found before
         // anything is sent.
         let mut notes: Vec<String> = Vec::new();
+        // Plan defers a refusal to apply (an earlier planned change may
+        // provide the profile or start the service): the outcome is then not
+        // known, and the result says so (`unknown`), like every other
+        // deferral.
+        let mut deferred = false;
         if let Some(name) = &desired {
             if !self.tuned_profile_exists(res, name)? {
                 let later = if plan {
@@ -414,19 +419,20 @@ impl Engine {
                     None
                 };
                 match later {
-                    Some(why) => notes.push(format!(
-                        "the profile {} is not defined on this host now; checked again at apply ({})",
-                        name, why
-                    )),
-                    None => {
-                        return Err(SinterError::apply(format!(
-                            "{}: the profile {} is not defined on this host (no {}/tuned.conf in {})",
-                            res.id,
-                            name,
-                            name,
-                            PROFILE_DIRS.join(", ")
-                        )))
+                    Some(why) => {
+                        deferred = true;
+                        notes.push(format!(
+                            "the profile {} is not defined on this host now; checked again at apply ({})",
+                            name, why
+                        ))
                     }
+                    None => return Err(SinterError::apply(format!(
+                        "{}: the profile {} is not defined on this host (no {}/tuned.conf in {})",
+                        res.id,
+                        name,
+                        name,
+                        PROFILE_DIRS.join(", ")
+                    ))),
                 }
             }
         }
@@ -434,11 +440,14 @@ impl Engine {
             // Plan: an earlier planned change (a service resource that
             // starts TuneD, a package) may bring the service up.
             match self.planned.opaque.clone().filter(|_| plan) {
-                Some(earlier) => notes.push(format!(
-                    "{} now; checked again at apply ({} runs earlier and may start it): nothing is changed unless the service is active then",
-                    daemon.describe(),
-                    earlier
-                )),
+                Some(earlier) => {
+                    deferred = true;
+                    notes.push(format!(
+                        "{} now; checked again at apply ({} runs earlier and may start it): nothing is changed unless the service is active then",
+                        daemon.describe(),
+                        earlier
+                    ))
+                }
                 None => {
                     return Err(SinterError::apply(format!(
                         "{}: {}",
@@ -467,6 +476,15 @@ impl Engine {
         if plan {
             if spec.verify {
                 r.notes.push(VERIFY_PLAN_NOTE.to_string());
+            }
+            if deferred {
+                r.unknown = true;
+                r.reason = Some(if sensitive {
+                    "deferred/unknown until apply (details withheld: sensitive resource)"
+                        .to_string()
+                } else {
+                    "deferred/unknown until apply: an earlier planned change may provide what is missing now".to_string()
+                });
             }
             if !sensitive {
                 r.notes.extend(notes);

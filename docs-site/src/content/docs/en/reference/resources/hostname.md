@@ -68,8 +68,13 @@ name = "web01.example.invalid"
 - It restarts nothing. Programs that read the host name when they start keep
   the previous name until they are restarted. Every plan and apply result
   that changes the name says so.
-- It does not set the pretty name, the transient name alone, or any other
-  `hostnamectl` property.
+- It does not manage the pretty name, the transient name alone, or any other
+  `hostnamectl` property. Note: `hostnamectl set-hostname` without an option
+  sets the static and the transient name, and depending on the systemd version
+  may also clear a pretty name that was set (not verified on a real host);
+  Sinter does not report that.
+- One `hostname` per recipe. Two recipes of a bundle that declare different
+  names for the same host are not detected: each apply would switch the name.
 - `facts.hostname` in the same run stays the name Sinter observed when it
   connected; a later run sees the new name.
 
