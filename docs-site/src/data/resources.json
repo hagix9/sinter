@@ -27,7 +27,8 @@
         { "name": "state", "required": false, "type": "string", "default": "present", "description": "present or absent." },
         { "name": "owner", "required": false, "type": "string", "default": null, "description": "Directory owner name." },
         { "name": "group", "required": false, "type": "string", "default": null, "description": "Directory group name." },
-        { "name": "mode", "required": false, "type": "string", "default": null, "description": "Quoted four-digit octal string, e.g. \"0755\"." }
+        { "name": "mode", "required": false, "type": "string", "default": null, "description": "Quoted four-digit octal string, e.g. \"0755\"." },
+        { "name": "parents", "required": false, "type": "boolean (literal)", "default": "false", "description": "Also create the missing parent directories (mode 0755, owned by the account the change runs as); existing directories are never changed. Not in a release yet." }
       ],
       "platforms": ["ubuntu", "rocky", "rhel", "almalinux"],
       "example": "resources:\n  - id: appdir\n    type: directory\n    with:\n      path: /opt/myapp\n      mode: \"0755\"\n      owner: root\n      group: root"
@@ -87,7 +88,8 @@
       "parameters": [
         { "name": "name", "required": true, "type": "string", "default": null, "description": "Package name." },
         { "name": "state", "required": true, "type": "string", "default": null, "description": "present or absent. Required." },
-        { "name": "env", "required": false, "type": "map of strings", "default": "{}", "description": "Environment variables for this package operation; not persistent host configuration." }
+        { "name": "env", "required": false, "type": "map of strings", "default": "{}", "description": "Environment variables for this package operation; not persistent host configuration." },
+        { "name": "creates_accounts", "required": false, "type": "map", "default": "{}", "description": "Accounts that installing this package creates: { users: [...], groups: [...] }. Lets plan defer what is owned by them while the package is planned to be installed. Not in a release yet." }
       ],
       "platforms": ["ubuntu", "rocky", "rhel", "almalinux"],
       "example": "resources:\n  - id: install-tools\n    type: package\n    with:\n      name: curl\n      state: present\n      env:\n        HTTP_PROXY: \"http://proxy.example.com:3128\"\n        HTTPS_PROXY: \"http://proxy.example.com:3128\"\n        NO_PROXY: \"localhost,127.0.0.1,.example.internal\""
