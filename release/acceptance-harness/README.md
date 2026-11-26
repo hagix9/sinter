@@ -136,29 +136,35 @@ label's stand-in log after `sanitize.py`).
 
 ### Time budget (v1.16.0)
 
-The `v1160-checks` section's checks share `V6_BUDGET=840` s from its start:
+The `v1160-checks` section's checks share `V6_BUDGET=1200` s from its start:
 every command of the section runs under `timeout` with min(its own cap, the
 budget left) and nothing new starts once the budget is spent (its checks
 fail; caps: `sinter` 300 s, the PostgreSQL apply 900 s and re-apply 600 s, the
 TuneD install 600 s, `dnf module list` 120/180 s, other `dnf`/`apt` reads
-60-120 s, local tools 30-60 s). The PostgreSQL block starts only with at least
-540 s left. Restore steps have their own caps (30-120 s) and run also after
-the budget.
+60-120 s, local tools 30-60 s). The PostgreSQL block, the last one, starts
+only with at least 540 s left, so the blocks before it have 660 s. Restore
+steps have their own caps (30-120 s) and run also after the budget.
 
-Worst case of the section: the budget 840 s + the restore of the one block in
+The budget is above the expected section time on a healthy target (Ubuntu
+4-7 min, EL 9 9-15 min, EL 10 7-13 min; estimates, not measured) with a
+5 min margin over the EL 9 upper value: 840 s (audit G re-check, B-3) was
+below it and could fail the PostgreSQL checks of a healthy host.
+
+Worst case of the section: the budget 1200 s + the restore of the one block in
 progress (largest: TuneD or PostgreSQL, 420 s) + the reads that also run after
 the budget, because restores and the final comparison need the original
 state (hostname 45 s, TuneD 30 s, locale manager environment 60 s, crypto
-policy 30 s: 165 s) + the final residue reads (about 90 s) = 1515 s, about
-25.3 min. Expected on a healthy target: Ubuntu 4-7 min, EL 9 9-15 min, EL 10 7-13 min.
+policy 30 s: 165 s) + the final residue reads (about 90 s) = 1875 s, about
+31.3 min.
 
 Per target (worst): the base checks 23 min (v1.15.0 p5 measured 12-23 min,
-rhel10 the longest) + 25.3 min = 48.3 min on the target. The runner waits
-`POLL_TRIES=175` polls of `POLL_INT=15` s plus a 4-5 s ssh each, about
-57 min (8.6 min margin; it was 160, about 52 min). The R8 kit's
-`TMO_TARGET=3600` s covers start, upload, preparation (measured 3-4 min),
-the 48.3 min and fetch and stop (about 2 min): about 53.8 min, 6.2 min
-margin. Not covered: a preparation that waits its full
+rhel10 the longest) + 31.3 min = 54.3 min on the target. The runner waits
+`POLL_TRIES=200` polls of `POLL_INT=15` s plus a 4-5 s ssh each, about
+65 min (10.7 min margin; it was 175, about 57 min). The R8 kit's
+`TMO_TARGET` must cover start, upload, preparation (measured 3-4 min),
+the 54.3 min and fetch and stop (about 2 min): about 60.3 min; the kit for
+v1.16.0 sets 4200 s (70 min, 9.7 min margin; 3600 s would be too short).
+Not covered: a preparation that waits its full
 `SINTER_PREP_QUIET_SECONDS` for a running package manager together with the
 worst case above; such a run ends as `TIMEOUT` (non-PASS, no change to the
 host beyond the disposable VM), as before. Each block records what it changes first and

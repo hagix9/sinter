@@ -1363,7 +1363,7 @@ def run_section(label, defect="", table=TABLE_PATH, keep=None, grab="", budget=N
         assert body.count('V6ROOT=""   #') == 1
         body = body.replace('V6ROOT=""   #', "V6ROOT='%s'   #" % root)
         if budget is not None:
-            body = body.replace("V6_BUDGET=840   #", "V6_BUDGET=%d   #" % budget)
+            body = body.replace("V6_BUDGET=1200   #", "V6_BUDGET=%d   #" % budget)
         env = dict(os.environ, FAKE_ROOT=root, FAKE_STATE=sp, FAKE_DEFECT=defect, FAKE_GRAB=grab, PATH=b + os.pathsep + os.environ["PATH"])
         p = subprocess.run(["bash", "-c", prelude + body + '\necho "== section end passed=$PASS failed=$FAIL na=$NA"\n'],
                            capture_output=True, text=True, env=env, timeout=900, cwd=d)
@@ -1557,7 +1557,7 @@ class ExistingStateIsKept(unittest.TestCase):
 class TimeBudget(unittest.TestCase):
     def run_budget(self, budget, **over):
         text = open(TARGET, encoding="utf-8").read()
-        assert text.count("V6_BUDGET=840   #") == 1
+        assert text.count("V6_BUDGET=1200   #") == 1
         return run_section("rocky9", budget=budget, **over)
 
     def test_a_spent_budget_fails_the_rest_and_still_restores(self):
@@ -1573,7 +1573,7 @@ class TimeBudget(unittest.TestCase):
     def test_the_postgresql_block_needs_its_share_of_the_budget(self):
         text = section()
         self.assertIn('[ "$PGLEFT" -ge 540 ]', text)
-        self.assertIn("V6_BUDGET=840   #", text)
+        self.assertIn("V6_BUDGET=1200   #", text)
 
     def test_every_command_of_the_section_is_bounded(self):
         code = "\n".join(l for l in section().splitlines() if not l.lstrip().startswith("#"))

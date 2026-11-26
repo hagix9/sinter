@@ -1044,7 +1044,7 @@ V6B=/opt/sinter-acc-v116; V6W=/opt/sinter-acc-writable; V6E=/etc/sinter-acc
 # here. v6t gives one command min(its cap, what is left) and runs nothing once
 # the budget is spent (exit 124, the check fails); v6r is a restore step with
 # its own cap, run also after the budget so that what was changed is put back.
-V6_BUDGET=840   # seconds; the stand-in tests replace this line only
+V6_BUDGET=1200   # seconds; the stand-in tests replace this line only
 V6_T0=$(date +%s)
 v6left() { echo $(( V6_T0 + V6_BUDGET - $(date +%s) )); }
 v6t() { local c=$1 l; shift; l=$(v6left); [ "$l" -gt 0 ] || return 124; [ "$l" -lt "$c" ] && c=$l; timeout -k 5 "$c" "$@"; }
