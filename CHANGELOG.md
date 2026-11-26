@@ -2,6 +2,69 @@
 
 All notable changes to Sinter are documented in this file.
 
+## [Unreleased]
+
+Development after v1.15.0. Not released; nothing below has been run on real
+Linux hosts except where it says so.
+
+### Added
+
+- **Planning a bundle on a host nothing is applied to.** `plan` treats a
+  bundle as one sequence per host: what an earlier recipe plans to change is
+  taken into account when a later recipe is planned for the same host. A
+  parent directory, an account or a service unit that an earlier recipe
+  creates is reported as decided at apply instead of failing the plan. It
+  applies only when the earlier resource is planned to change and the missing
+  thing is confirmed missing; nothing is carried between hosts, into `apply`
+  or into `audit`.
+- **`creates_accounts` on `package`**: `{ users: [...], groups: [...] }` names
+  the accounts installing the package creates. While the package is planned
+  to be installed, a later `owner`, `group` or supplementary group that names
+  one is deferred in `plan`. A declaration, never an inference; `apply` still
+  looks the account up.
+- **`parents: true` on `directory`** creates the missing parent directories
+  (mode `0755`, owned by the account the change runs as), one checked `mkdir`
+  at a time. Existing directories are never changed. `file`, `template` and
+  `link` still never create a parent.
+- **`file_merge` resource**: manages one declared part of an existing text
+  file and keeps the rest byte for byte: an exact `line`, a marked `block`, or
+  a `key_value` setting. For `authorized_keys`, `/etc/hosts` and simple
+  configuration files.
+- **`dnf_repository` resource**: one `[id]` section of a file in
+  `/etc/yum.repos.d` (enable or disable an existing repository, define or
+  remove one). Never writes `gpgcheck=0`, and refuses to enable a repository
+  without an explicit `gpgcheck=1`. DNF 4 only.
+- **`dnf_module` resource**: `enabled` (with a stream), `disabled` or `reset`
+  for a DNF 4 module, observed from DNF's own state file and re-observed after
+  every change. Refuses to switch an enabled stream. No profiles.
+- **`crypto_policy` resource**: the system-wide cryptographic policy
+  (`update-crypto-policies`) on the RHEL family, with rules against silently
+  weakening it (`allow_weaker`). Never restarts a service.
+- **Backups declared for resources**: a `backup.paths` entry may say
+  `resources: [id, ...]`.
+- `examples/bundles/postgresql-pgdg17`: PostgreSQL 17 as a bundle of seven
+  recipes that plans and audits on a fresh host.
+
+### Changed
+
+- **`--skip-resource` and declared backups.** In a recipe with excluded
+  resources, a declared backup that nothing that runs can need is no longer
+  taken, checked or prepared for; it is reported as `skipped`
+  (`SKIPPED_BY_USER`). A run without exclusions takes every declared backup as
+  before, and a backup that is still needed and fails still stops the apply.
+- **Audit**: an existing file or directory whose declared `owner` or `group`
+  names an account that does not exist is drift (exit 7) on that dimension,
+  not an audit error (exit 6). A lookup that fails is still an error.
+- **Templates**: a `{{ vars.<name> }}` the recipe does not declare, or a
+  `{{ template.<name> }}` the resource's `vars` does not define, is refused by
+  `validate` (exit 2) instead of when the template is rendered.
+- A `directory` refused for a missing parent says how to have it created.
+
+### Fixed
+
+- `release/verify_approval_set.py` reads the acceptance end line of the
+  v1.15.0 harness (`... skipped=0 not_applicable=<n>`) in every check.
+
 ## [1.15.0] - 2026-11-21
 
 ### Added
