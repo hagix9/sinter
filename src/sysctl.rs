@@ -153,20 +153,72 @@ fn parse_setting(line: &str) -> std::result::Result<Option<BootSetting>, ()> {
     }))
 }
 
+/// Whether `line` has the shape of a `cat-config` header for one of
+/// [`BOOT_DIRS`] — `# ` and a path with no blank, comma or control character
+/// directly inside one of them — whatever its file name. A line of that
+/// shape that [`header_path`] does not accept (a name not ending in `.conf`)
+/// cannot be told apart from a header of a file systemd-sysctl does not read,
+/// or from a comment, so the whole output is refused.
+fn header_shaped(line: &str) -> bool {
+    let Some(path) = line.strip_prefix("# ") else {
+        return false;
+    };
+    if path
+        .chars()
+        .any(|c| c == ',' || c.is_whitespace() || c.is_control())
+    {
+        return false;
+    }
+    match path.rsplit_once('/') {
+        Some((dir, base)) => !base.is_empty() && BOOT_DIRS.contains(&dir),
+        None => false,
+    }
+}
+
 /// Parse the standard output of `systemd-analyze cat-config sysctl.d`.
 /// Before the first header only blank lines are accepted; output that is
 /// not UTF-8, or text before the first header, is refused.
+///
+/// A comment inside a file can look exactly like a header. systemd-sysctl
+/// applies the files sorted by file name across the directories, each name
+/// once (a file of the same name in a later directory is masked), so the
+/// headers it prints are strictly increasing by file name. Output whose
+/// headers are not (a header naming a file again, or out of that order), or
+/// with a header-shaped line whose name does not end in `.conf`, is refused:
+/// the caller then reports the boot-time configuration as not examined. A
+/// header-shaped comment that happens to keep the order is still taken as a
+/// header (it cannot be told apart without reading each file).
 pub fn parse_cat_config(stdout: &[u8]) -> std::result::Result<BootConfig, String> {
     let text = std::str::from_utf8(stdout).map_err(|_| "it is not valid UTF-8".to_string())?;
     let mut cfg = BootConfig::default();
     for line in text.lines() {
         if let Some(path) = header_path(line) {
+            if let Some(prev) = cfg.files.last() {
+                if base_name(path) <= base_name(&prev.path) {
+                    return Err(if cfg.files.iter().any(|f| f.path == path) {
+                        format!("the file header {} appears more than once", path)
+                    } else {
+                        format!(
+                            "the file header {} is not in the order systemd-sysctl applies \
+                             the files (by file name, after {})",
+                            path, prev.path
+                        )
+                    });
+                }
+            }
             cfg.files.push(BootFile {
                 path: path.to_string(),
                 settings: Vec::new(),
                 unclassified: Vec::new(),
             });
             continue;
+        }
+        if header_shaped(line) {
+            return Err(
+                "a line has the form of a file header of a sysctl.d directory but names a file \
+                 whose name does not end in .conf"
+                    .to_string(),
+            );
         }
         let Some(file) = cfg.files.last_mut() else {
             if line.trim().is_empty() {
@@ -826,6 +878,63 @@ mod tests {
         assert!(parse_cat_config(b"").unwrap().files.is_empty());
         assert!(parse_cat_config(b"garbage\n# /etc/sysctl.d/a.conf\n").is_err());
         assert!(parse_cat_config(b"# /etc/sysctl.d/a.conf\n\xff\n").is_err());
+    }
+
+    /// NB-D4: a comment in a later file that has exactly the form of the
+    /// header of Sinter's own file would make the override after it look like
+    /// a line of Sinter's file. Out of order, repeated or not naming a
+    /// `.conf` file, the whole output is refused (the caller: not examined).
+    #[test]
+    fn a_header_shaped_comment_out_of_order_refuses_the_whole_output() {
+        let own = "# /etc/sysctl.d/90-sinter-vm.swappiness.conf\nvm.swappiness = 10\n";
+        // Without the fake header the override is seen.
+        let honest = format!("# /usr/lib/sysctl.d/10-a.conf\nkernel.x = 1\n{own}# /etc/sysctl.d/95-b.conf\nvm.swappiness = 20\n");
+        let v = BootView::of(
+            &parse_cat_config(honest.as_bytes()).unwrap(),
+            "vm.swappiness",
+        );
+        assert_eq!(
+            v.effective,
+            Some(("/etc/sysctl.d/95-b.conf".to_string(), "20".to_string()))
+        );
+        for (label, text) in [
+            (
+                "own header repeated later",
+                format!(
+                    "# /usr/lib/sysctl.d/10-a.conf\nkernel.x = 1\n{own}# /etc/sysctl.d/95-b.conf\n# /etc/sysctl.d/90-sinter-vm.swappiness.conf\nvm.swappiness = 20\n"
+                ),
+            ),
+            (
+                // Sinter's file not written yet: the fake header comes after
+                // a file that sorts later.
+                "own header out of order",
+                "# /usr/lib/sysctl.d/10-a.conf\nkernel.x = 1\n# /etc/sysctl.d/95-b.conf\n# /etc/sysctl.d/90-sinter-vm.swappiness.conf\nvm.swappiness = 20\n".to_string(),
+            ),
+            (
+                "same name in another directory",
+                format!(
+                    "{own}# /etc/sysctl.d/95-b.conf\n# /usr/lib/sysctl.d/90-sinter-vm.swappiness.conf\nvm.swappiness = 20\n"
+                ),
+            ),
+            (
+                "header-shaped line not naming a .conf file",
+                format!("{own}# /etc/sysctl.d/95-b.conf\n# /etc/sysctl.d/zz.conf.disabled\nvm.swappiness = 20\n"),
+            ),
+        ] {
+            let e = parse_cat_config(text.as_bytes()).expect_err(label);
+            assert!(!e.is_empty(), "{label}");
+        }
+        // A file name that sorts later in a directory listed earlier is in
+        // order (the order is by file name across the directories).
+        assert!(parse_cat_config(
+            b"# /etc/sysctl.d/10-a.conf\n# /usr/lib/sysctl.d/50-b.conf\n# /run/sysctl.d/60-c.conf\n"
+        )
+        .is_ok());
+        // An ordinary comment naming a directory is still a comment.
+        assert!(parse_cat_config(
+            b"# /etc/sysctl.d/10-a.conf\n# See /etc/sysctl.d/ for more\n# /etc/sysctl.d/\n"
+        )
+        .is_ok());
     }
 
     #[test]

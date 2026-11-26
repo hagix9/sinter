@@ -124,6 +124,14 @@ When the persistent file is managed, Sinter reads that order with
   reported as drift or an error for that reason. The same happens when a
   later file has a line about the key that Sinter cannot read, or a later
   pattern gives another value.
+- Each file in that output starts with a line `# <path>`. A comment inside
+  a file can look exactly like such a line. Because systemd-sysctl applies
+  each file name once, sorted by file name, Sinter treats the output as
+  unreadable (**not examined**) when these lines name a file twice, are not
+  in that order, or name a file that does not end in `.conf`. A comment of
+  that form that happens to keep the order cannot be told apart from a real
+  file header without reading each file; avoid comments that consist of a
+  single sysctl.d path.
 
 To make the declared value win at boot, either remove the other setting
 from that file, or declare the value there instead of in a `sysctl`

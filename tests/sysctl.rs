@@ -1464,6 +1464,31 @@ fn a_comment_that_looks_like_a_header_is_not_a_file() {
     );
 }
 
+/// NB-D4: a comment in a later file with exactly the form of the header of
+/// Sinter's own file would otherwise make the override after it look like a
+/// line of Sinter's file (and hide it). Headers out of systemd-sysctl's
+/// order, or one named twice, make the boot dimension "not examined".
+#[test]
+fn a_header_shaped_comment_out_of_order_is_not_examined() {
+    let r = recipe("sy-b7b", &swappiness(""));
+    let fake_header = "# /usr/lib/sysctl.d/50-default.conf\nkernel.sysrq = 16\n\n# /etc/sysctl.d/90-sinter-vm.swappiness.conf\n# Managed by Sinter (sysctl). Local changes are replaced.\nvm.swappiness = 10\n\n# /etc/sysctl.d/99-x.conf\n# /etc/sysctl.d/90-sinter-vm.swappiness.conf\nvm.swappiness = 30\n";
+    let not_conf = "# /usr/lib/sysctl.d/50-default.conf\nkernel.sysrq = 16\n\n# /etc/sysctl.d/90-sinter-vm.swappiness.conf\nvm.swappiness = 10\n\n# /etc/sysctl.d/99-x.conf\n# /etc/sysctl.d/zz.disabled\nvm.swappiness = 30\n";
+    for (label, text) in [("repeated", fake_header), ("not .conf", not_conf)] {
+        let t = converged().with_sysctl_cat_config(Some(text));
+        let a = audit(&r, t);
+        assert_eq!(
+            a.resources[0].status,
+            AuditResourceStatus::Compliant,
+            "{label}: {:?}",
+            a.resources[0]
+        );
+        assert!(dims(&a).is_empty(), "{label}");
+        let why = audit_reason(&a);
+        assert!(why.contains("boot: not examined"), "{label}: {why}");
+        assert!(why.contains("not in the expected form"), "{label}: {why}");
+    }
+}
+
 #[test]
 fn a_missing_or_failing_cat_config_is_a_note_never_drift_or_error() {
     let r = recipe("sy-b8", &swappiness(""));
