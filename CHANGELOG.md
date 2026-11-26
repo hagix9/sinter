@@ -40,6 +40,12 @@ Linux hosts except where it says so.
 - **`crypto_policy` resource**: the system-wide cryptographic policy
   (`update-crypto-policies`) on the RHEL family, with rules against silently
   weakening it (`allow_weaker`). Never restarts a service.
+- **`sysctl` resource**: one kernel parameter, as a running value and as a
+  file of its own in `/etc/sysctl.d`.
+- **`hostname` resource**: the static host name (`hostnamectl`).
+- **`tuned` resource**: the selected TuneD profile (a named one, the
+  recommended one, or off), with the selection and its application reported
+  separately. Never installs TuneD or starts its service.
 - **Backups declared for resources**: a `backup.paths` entry may say
   `resources: [id, ...]`.
 - `examples/bundles/postgresql-pgdg17`: PostgreSQL 17 as a bundle of seven

@@ -137,6 +137,7 @@ export default defineConfig({
                 { slug: 'reference/resources/crypto_policy' },
                 { slug: 'reference/resources/sysctl' },
                 { slug: 'reference/resources/hostname' },
+                { slug: 'reference/resources/tuned' },
                 { slug: 'reference/resources/group' },
                 { slug: 'reference/resources/user' },
                 { slug: 'reference/resources/postgresql_role' },

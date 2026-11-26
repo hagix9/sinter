@@ -4117,7 +4117,7 @@ Status: record of a development decision (2026-11-26). Nothing here is released.
 
 56.1 Taken
 
-Bundle planning and the audit of a host nothing is applied to (§49.1, §49.4), `creates_accounts` (§49.2), `parents: true` (§49.3), undefined variables in a template body (§49.5), declared backups in a partial run (§49.6), `file_merge` (§50), `dnf_repository` (§51), `dnf_module` (§52), `crypto_policy` (§53), `sysctl` (§54), `hostname` (§55), and the permanent fix of the release verifier's end-line parsing. All are built-in types or Core changes: a data-only Resource Plugin cannot write file content, cannot compare a free-form observed value with a wanted one, and has no operand class for `name:stream` (§38.6, §38.10, §48). Each new type keeps its logic in its own modules and reuses the `file` resource's publication path (parent checks, staging, atomic replacement, identity and content re-check, metadata rules) or a fixed-argv command with re-observation; the plugin boundary, the trust file and the MCP boundary are unchanged (every new type is refused over MCP).
+Bundle planning and the audit of a host nothing is applied to (§49.1, §49.4), `creates_accounts` (§49.2), `parents: true` (§49.3), undefined variables in a template body (§49.5), declared backups in a partial run (§49.6), `file_merge` (§50), `dnf_repository` (§51), `dnf_module` (§52), `crypto_policy` (§53), `sysctl` (§54), `hostname` (§55), `tuned` (§57), and the permanent fix of the release verifier's end-line parsing. All are built-in types or Core changes: a data-only Resource Plugin cannot write file content, cannot compare a free-form observed value with a wanted one, and has no operand class for `name:stream` (§38.6, §38.10, §48). Each new type keeps its logic in its own modules and reuses the `file` resource's publication path (parent checks, staging, atomic replacement, identity and content re-check, metadata rules) or a fixed-argv command with re-observation; the plugin boundary, the trust file and the MCP boundary are unchanged (every new type is refused over MCP).
 
 56.2 Not taken, with the condition for resuming
 
@@ -4132,4 +4132,101 @@ Bundle planning and the audit of a host nothing is applied to (§49.1, §49.4), 
 
 56.3 Real-host acceptance needed before a release
 
-Measured so far: read-only observations on one Rocky Linux 10.2 host (the DNF 4 link, `update-crypto-policies --show` and the policy files, `hostnamectl`, `sysctl -n`, and the distribution's repository files through the section parser). Not measured: every change command and every other supported OS. A release needs, on disposable hosts of the supported list: the PostgreSQL bundle of `examples/bundles/postgresql-pgdg17` planned, audited (drift), applied, re-applied (no change) and audited (compliant) on EL 9 and EL 10; `dnf_repository` files read back by DNF and a package installed from a new repository; `dnf_module` enable, disable and reset with the state file DNF writes (EL 9; EL 10 has no streams); `crypto_policy` set and re-observed on EL 9 and EL 10; `file_merge` on `authorized_keys` as root in a user's tree and as the user; `sysctl` and `hostname` on Ubuntu and the RHEL family; `parents: true` and the partial-run backups on one host of each family. These join the existing acceptance run of the release; they are not run per feature.
+Measured so far: read-only observations on one Rocky Linux 10.2 host (the DNF 4 link, `update-crypto-policies --show` and the policy files, `hostnamectl`, `sysctl -n`, and the distribution's repository files through the section parser). Not measured: every change command and every other supported OS. A release needs, on disposable hosts of the supported list: the PostgreSQL bundle of `examples/bundles/postgresql-pgdg17` planned, audited (drift), applied, re-applied (no change) and audited (compliant) on EL 9 and EL 10; `dnf_repository` files read back by DNF and a package installed from a new repository; `dnf_module` enable, disable and reset with the state file DNF writes (EL 9; EL 10 has no streams); `crypto_policy` set and re-observed on EL 9 and EL 10; `file_merge` on `authorized_keys` as root in a user's tree and as the user; `sysctl` and `hostname` on Ubuntu and the RHEL family; `tuned` on a host with TuneD installed and running (none of its `tuned-adm` forms or state files is measured: profile selection, `off`, `recommend`, `verify`, EL 9, EL 10 and Ubuntu); `parents: true` and the partial-run backups on one host of each family. These join the existing acceptance run of the release; they are not run per feature.
+
+57. `tuned` resource (the selected TuneD profile)
+
+IMPLEMENTED, NOT RELEASED, NOT VERIFIED ON A REAL HOST. A built-in type on top of `/usr/sbin/tuned-adm`. TuneD was not installed on the only Linux host available for measurement, so no `tuned-adm` output form is measured: the type observes TuneD's own state file with a closed parser wherever a file exists, uses a command answer only where there is no file, accepts each answer in one exact form only, and lists every assumption in 57.9.
+
+Why a native type: a data-only Resource Plugin cannot compare a free-form observed value with a wanted one (§38.10). Its observation is matched against fixed forms the plugin author wrote; "the profile name in the state file equals the declared name", for a name the recipe chooses, is not expressible. The same holds for `recommended: true`, where the wanted value is itself observed.
+
+57.1 Scope
+
+Which TuneD profile is selected on one host, or that none is. Out of scope: installing the `tuned` package (a `package` resource), starting, restarting, enabling or stopping `tuned.service` (a `service` resource), writing profile definitions (a `file` or `template` resource), `/etc/tuned/tuned-main.conf`, TuneD's automatic profile mode, several profiles selected at once (merged profiles), resolving conflicts between a profile and `sysctl` settings, `sinter discover`.
+
+"Selected" and "applied" are two facts and are reported separately everywhere. The selection is what TuneD records in `/etc/tuned/active_profile`. The profile's settings are applied only while `tuned.service` runs. The selection is the managed state; the service state is observed and reported; whether the settings are in effect is checked only on request (`verify`).
+
+57.2 Fields (`with`)
+
+- `profile` (static string): `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`. Variables may be used; facts, registers and sensitive values may not. Resolved and checked at load.
+- `recommended` (literal boolean, default false): `true` means the desired profile is the one TuneD recommends for this host.
+- `state` (literal `active` or `off`, default `active`): `off` means no profile is selected.
+- `verify` (literal boolean, default false): also check that the selected profile is applied (57.5).
+
+Exactly one of the three intents `profile`, `recommended: true`, `state: off` must be written; none or more than one is a load error. `verify: true` with `state: off` is a load error (nothing to verify). Unknown fields are refused. A recipe may hold one `tuned` resource; a second one is a load-time ownership conflict (whatever its `when`). The profile grammar excludes a leading `-`, whitespace, `/` and every shell or glob character, so the name cannot become an option or a path; this is why the change needs no `--`.
+
+57.3 Observation (read-only)
+
+- Tool: `/usr/bin/test -x /usr/sbin/tuned-adm` (`executable_present`). Absent means TuneD is not installed: plan and apply fail with "tuned is not supported on this host (tuned-adm was not found); install it with a package resource"; audit reports Error (the convention `package` uses on an unsupported host). In plan only, when an earlier planned change may provide the tool (`PlannedEffects::affecting`, which includes the effects carried from an earlier recipe of a bundle), the resource is deferred/unknown and apply decides. No OS family is checked.
+- Selected profile: `/etc/tuned/active_profile` through the partial-read helpers (`Engine::partial_observe`, `audit::audit_partial_read`: parent path check, `lstat`, no symlink followed, size cap, read length equal to the `lstat` size). Absent, empty or only blanks and newlines: no profile is selected. Exactly one line (a final newline allowed) matching the profile grammar: that profile. Anything else — several names on one line, a second line, a leading or trailing blank, `\r`, a comment, invalid UTF-8, a symlink, a directory, an oversized file — is an observation error, never a state.
+- Service: `tuned.service` through the observation the `service` resource uses (`systemctl show --property=LoadState,ActiveState,UnitFileState,NeedDaemonReload -- tuned.service`, parsed by the existing closed parser). `LoadState=not-found`: the unit was not found. `ActiveState=active`: active. Every other `ActiveState`: not active, with the state named. A failed observation is an error, never "not active". No new systemctl form is added.
+- Profile existence (only when a change is needed): a profile `<name>` exists when `<dir>/<name>/tuned.conf` is a regular file (`lstat` through the parent path check) in one of `/etc/tuned/profiles`, `/etc/tuned`, `/usr/lib/tuned/profiles`, `/usr/lib/tuned` (local and vendor tree, newer and older layout). An entry of another type is an error. Missing: plan and apply fail, naming the profile and the four directories. In plan only, when an earlier planned change may create it (a `file` or `template` at one of the four candidate paths, or an opaque change such as a package), a note says it is checked again at apply.
+- `recommended: true`: a new fixed-argv read-only target method runs `/usr/sbin/tuned-adm recommend` (no recipe value in the argv). Accepted only: exit 0, no truncation of either stream, standard output exactly one line matching the profile grammar. Anything else is an observation error. The recommended name then goes through the same existence check. This adds one shape to the read-only command shapes of §28.
+- An observation that does not complete is a failure, not "indeterminate": nothing was sent that could change the host.
+
+The three "cannot" states of the daemon are distinguishable in every message: not installed (no tool), unit not found, unit not active. A missing profile is a fourth, separate message.
+
+57.4 Change (apply)
+
+- Already as desired (the selected profile equals the desired one, or nothing is selected for `state: off`): no command at all, whatever the service does. When a profile is desired and `tuned.service` is not active, the unchanged result carries a NOTE: the profile is selected but not applied while the service is stopped.
+- Otherwise nothing is changed unless `tuned.service` is observed active: "TuneD is installed but its service is not running (tuned.service is <state>); start it with a service resource (Sinter does not start it)", or the unit-not-found message. In plan only, when an earlier planned change is opaque (a `service` resource that starts TuneD, a package), this is a note instead and apply checks again. Sinter never installs the package and never starts, restarts or enables the service.
+- Needs root (the connection is root, or `--sudo`): otherwise the resource fails with "needs root" before anything is sent.
+- The selection is read again immediately before the command; if it differs from the first observation, the resource fails and nothing is sent.
+- `/usr/sbin/tuned-adm profile <name>` or `/usr/sbin/tuned-adm off` through `exec` with a mutation permit; fixed absolute program, fixed argv, no shell, baseline environment, 300 s timeout.
+- The exit code never decides success:
+  - timeout / lost connection, or a signal: execution indeterminate, change possible, verification unknown; nothing else is sent for the resource;
+  - non-zero exit: failed, change possible, with the first line of standard error (withheld for a sensitive resource);
+  - exit 0: `/etc/tuned/active_profile` is read again. Equal to the desired selection: changed, verified. Different: failed, verification failed (change `possible` when it still is the old selection, `changed` otherwise). Unreadable: failed, change possible.
+- Every plan and apply result that selects a profile carries the NOTE: a profile sets kernel parameters and other tunables; a value that a `sysctl` resource or a file in `/etc/sysctl.d` sets can be overridden by the profile and the other way round (TuneD's `reapply_sysctl` decides the order); Sinter does not resolve that; declare each setting in one place.
+
+A resource whose result changes notifies handlers as usual. `PlannedEffects` treats a planned `tuned` change as opaque (the conservative default). The plan "needs root" note applies.
+
+57.5 `verify`
+
+A new fixed-argv target method runs `/usr/sbin/tuned-adm verify` (no recipe value in the argv). Exit 0: applied. Exit 1: not applied (the system differs from the selected profile). Any other exit, a signal, a timeout or a truncated capture is an observation error, never "applied" and never "not applied".
+
+It is run ONLY in audit and after a successful, verified change of the selection in apply. It is never run in plan and not for an unchanged selection in apply: whether `tuned-adm verify` is free of side effects is not measured, and plan must not mutate. That is also why the field is opt-in. A plan result with `verify: true` says so in a note.
+
+In apply: applied adds a note; not applied makes the resource FAILED while it reports the change (execution failed, change changed, verification failed: the selection changed, the tuning did not verify); no answer makes it failed with change changed and verification unknown.
+
+57.6 Audit
+
+Dimensions, each reported on its own:
+
+- `profile`: the observed selection against the desired one. For `recommended: true` the desired value is the recommendation observed during the audit.
+- `service`: a profile is desired and `tuned.service` is not active (or the unit was not found): "the selected profile is not applied". This is a difference from the desired state "profile X is active", not an error. Not reported for `state: off`.
+- `applied` (only with `verify: true`): `tuned-adm verify` exited 1. Asked only when `profile` and `service` show no difference: verify judges the profile TuneD has selected and needs the running service, so with either difference present the answer would not be about the declared profile.
+
+Tool absent, an unreadable or malformed state file, a failed service observation, a failed `recommend` or a `verify` without an answer are Error, never drift. Audit sends no change command.
+
+57.7 Safety rules
+
+- Plan and audit never mutate: file reads, `lstat`, `test -x`, the existing `systemctl show` form and `tuned-adm recommend`; plan never runs `tuned-adm verify`.
+- Fail closed: every observation outside its one accepted form is an error; nothing is guessed, and a failed observation is never "absent", "off" or drift.
+- No symlink is followed for the state file or a profile definition.
+- No shell; fixed absolute program; the only recipe value in an argv is the profile name, which passed the grammar.
+- The change is never reported as success on the exit code alone.
+- A sensitive resource names neither the declared nor the observed profile in plan, apply, audit, errors or the command record.
+- MCP refuses the type (the MCP boundary does not widen).
+
+57.8 Limits
+
+- A host whose state file names several profiles (TuneD's merged profiles) cannot be observed by this type: plan, apply and audit report an observation error.
+- `tuned-adm profile` is assumed to switch TuneD to its manual profile mode; the type neither reads nor manages `/etc/tuned/profile_mode`. With `recommended: true` the recommendation is selected as a named profile; TuneD's own automatic mode is not used.
+- `state: off` only clears the selection; whether TuneD reverts settings it had applied is TuneD's behaviour and is not checked.
+- `verify` is not run when the selection is already as declared in apply; only audit checks an unchanged selection.
+- In plan, a stopped service is accepted as "an earlier change may start it" whenever any earlier planned change is opaque, not only a `service` resource for `tuned.service`; apply decides.
+- Supported: RHEL, Rocky Linux, AlmaLinux 9 and 10, and Ubuntu 24.04/26.04 when the `tuned` package is installed. The type decides by the tool's presence, not by the OS name.
+- The full order in a recipe is package -> service -> (directory, file) -> tuned; across a bundle, the recipe that installs and starts TuneD comes before the one that holds the `tuned` resource.
+
+57.9 NOT VERIFIED (no host with TuneD was available; tested against the scripted target only)
+
+- That TuneD records the selection in `/etc/tuned/active_profile` as one line holding one profile name, and that the file is empty (or absent) after `tuned-adm off`.
+- The path `/usr/sbin/tuned-adm` on every supported OS (Ubuntu in particular).
+- The four profile directories and the file name `tuned.conf` for each TuneD release; that no vendor profile directory or `tuned.conf` is a symlink (a symlink is refused).
+- `tuned-adm recommend`: that its standard output is exactly the profile name on one line with exit 0, and that it answers while the service is stopped.
+- `tuned-adm verify`: exit 0 for "applied" and exit 1 for "differs"; that exit 1 is not also used for "cannot talk to the daemon"; what it writes or changes on the host; how long it takes (the default command timeout applies).
+- `tuned-adm profile <name>` and `tuned-adm off`: exit codes, behaviour without the daemon, duration (300 s allowed), and that the state file is updated before the command returns.
+- That `tuned-adm profile` sets the manual profile mode.
+- The unit name `tuned.service` on Ubuntu, and that `ActiveState=active` is the right test for "TuneD applies the profile".
+- Real-host behaviour of the deferral in plan (a package that brings `tuned-adm`, a `service` that starts TuneD) followed by apply in the same run.
