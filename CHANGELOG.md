@@ -95,7 +95,12 @@ Linux hosts except where it says so.
 
 - `systemd_timer` (released in v1.15.0) showed a value that came from a
   sensitive variable in the text diff of `plan` when the unit file differed;
-  it is now redacted. The same applied to the new `sysctl`.
+  it is now redacted. The same applied to the new `sysctl`. JSON output,
+  apply and audit were not affected. If you keep `plan` output of such a
+  recipe (CI logs, saved terminal output) and a real secret was used there,
+  treat it as exposed and replace it.
+- `docs-site`: astro 7.4.13 (GHSA-mh32-jxcr-mh9f, GHSA-r3h5-4585-7x3w); the
+  docs build needs Node.js 22.23.4 or later and CI uses Node.js 26.
 
 - `release/verify_approval_set.py` reads the acceptance end line of the
   v1.15.0 harness (`... skipped=0 not_applicable=<n>`) in every check.
