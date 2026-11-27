@@ -2107,7 +2107,8 @@ KLEAK=no; KSEC=$(grep '^AGE-SECRET-KEY-1' "$KG/id.txt" 2> /dev/null | head -1)
 if [ -z "$KSEC" ]; then KLEAK=unknown
 else for f in k1 k2 k3 k4 k5; do grep -qF -- "$KSEC" "$KG/$f.out" "$KG/$f.err" 2> /dev/null && KLEAK=yes; done; fi
 KSEC=""
-KS="keygen=$K1 mode=$KMODE form=$KFORM pub=$(case "$KPUB" in age1?*) echo age1 ;; *) echo none ;; esac) y=$K2:$KY enc=$K3 dec=$K4:$KD again=$KAGAIN leak=$KLEAK"
+KPF=none; case "$KPUB" in age1?*) KPF=age1 ;; esac
+KS="keygen=$K1 mode=$KMODE form=$KFORM pub=$KPF y=$K2:$KY enc=$K3 dec=$K4:$KD again=$KAGAIN leak=$KLEAK"
 echo "V116_KEYGEN $KS"
 if [ "$KS" = "keygen=0 mode=600 form=1/1 pub=age1 y=0:same enc=0 dec=0:same again=refused-unchanged leak=no" ]; then
   check v116-secrets-keygen ok "an age identity created by sinter alone: 0600, -y gives its public key, encrypt -r / decrypt -i round trip, never replaced, no secret in any output"
