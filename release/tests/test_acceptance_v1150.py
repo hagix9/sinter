@@ -250,7 +250,7 @@ class HarnessStatic(unittest.TestCase):
                                 os.path.join(HARNESS, "acceptance-target.sh"), out], capture_output=True, text=True)
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertEqual(rd(out), rd(IDS_PATH))
-        self.assertEqual(len(IDS), 104)  # 76 of v1.15.0 and the 28 v116-* checks of v1.16.0 (test_acceptance_v1160.py)
+        self.assertEqual(len(IDS), 105)  # 76 of v1.15.0 and the 29 v116-* checks of v1.16.0 (test_acceptance_v1160.py)
         for c in NEW_CHECKS + FW03_CHECKS:
             self.assertIn(c, IDS)
 

@@ -259,7 +259,10 @@ profile = "site-db"
   Sinter says that it does not know whether the profile is applied.
   Verify is not run in plan and not for an unchanged selection: it is not
   measured whether `tuned-adm verify` is free of side effects, which is also
-  why it is opt-in.
+  why it is opt-in. Whether a profile verifies depends on TuneD, the profile
+  and the machine: on a GCE virtual machine with Ubuntu 24.04, `balanced`
+  did not verify (v1.16.0 RC 2 acceptance), so the resource failed as
+  described. Use `verify: true` only where the profile is expected to verify.
 - **Audit** reports up to three dimensions:
   - `profile`: the selection differs from the declaration (with
     `recommended: true`, from the recommendation observed during the audit);

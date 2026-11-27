@@ -1069,7 +1069,15 @@ except Exception as e:
     print("ERR:%s" % type(e).__name__)' "$1" "$2"; }
 v6x() { # v6x <tag> <plan|apply|audit> <recipe> [args]: the frozen sinter as root, JSON in $V6/<tag>.json, stderr in .err
   local t=$1 c=$2 f=$3; shift 3
-  v6t 300 "$EXE" "$c" "$f" --sudo --format json "$@" > "$V6/$t.json" 2> "$V6/$t.err"; }
+  v6t 300 "$EXE" "$c" "$f" --sudo --format json "$@" > "$V6/$t.json" 2> "$V6/$t.err"
+  local rc=$?; printf '%s %s rc=%s\n' "$c" "${f##*/}" "$rc" > "$V6/$t.rc"; return $rc; }
+v6diag() { # v6diag <tag>...: on a FAIL, what each run of the check said (command, exit code, JSON results or the start of a non-JSON stdout, stderr)
+  local t; for t in "$@"; do
+    echo "   DIAG $t $(cat "$V6/$t.rc" 2> /dev/null || echo 'not run')"
+    echo "   DIAG $t results=$(v6j "$V6/$t.json" '[(r.get("id"), r.get("status"), r.get("change"), r.get("unknown"), TXT(r)[:300]) for r in R(d)]' | cut -c1-1500)"
+    [ "$(v6j "$V6/$t.json" '1')" = 1 ] || echo "   DIAG $t stdout=$(head -c 600 "$V6/$t.json" 2> /dev/null | tr '\n' ' ')"
+    echo "   DIAG $t stderr=$(head -c 600 "$V6/$t.err" 2> /dev/null | tr '\n' ' ')"
+  done; }
 v6in() { cat "$V6/$1.json" "$V6/$1.err" 2> /dev/null | grep -qF -- "$2" && echo yes || echo no; }   # v6in <tag> <text>: is it in that run's output
 v6e() { head -c 300 "$V6/$1.err" 2> /dev/null | tr '\n' ' '; }
 v6st() { sudo stat -c "$2" "$(v6h "$1")" 2> /dev/null || echo missing; }
@@ -1120,7 +1128,11 @@ echo "V116_BASE $V6B=$V6B_ST"
 # ---- v116-audit-fresh-drift, v116-bundle-nested: a top bundle -> os -> os/net
 # (two levels below it, DESIGN §19.3); the audit of the fresh paths first
 # (§49.4: drift, exit 7, nothing created), then validate, plan (the later
-# recipes' paths are decided at apply, §49.1), apply, re-apply and audit
+# recipes' parent path checks are deferred to apply, §49.1), apply, re-apply
+# and audit. The files below os/10_base's directory are decided changes (the
+# file is absent, its content declared): unknown=False, with the note
+# "parent path check deferred to apply ... (recipe os/10_base)" (DESIGN §29,
+# §49.1; RC 3: RC 2 wrongly expected unknown=True)
 N6="$V6/nest"; mkdir -p "$N6/os/net"
 printf 'version: 1\nname: v116site\nrecipes:\n  - os\n  - 30_top.yaml\n' > "$N6/site.yaml"
 printf 'version: 1\nname: os\nrecipes:\n  - 10_base.yaml\n  - net\n' > "$N6/os/bundle.yaml"
@@ -1138,16 +1150,16 @@ if [ "$V6B_ST" = created ] && [ "$NS1" = "rc=7 statuses=['drift'] resources=3 cr
 else check v116-audit-fresh-drift FAIL "base=$V6B_ST $NS1 $(v6e n1)"; fi
 v6t 60 "$EXE" validate "$N6/site.yaml" > "$V6/n0.out" 2>&1; NR0=$?
 v6x n2 plan "$N6/site.yaml"; NR2=$?
-NP2="labels=$(v6j "$V6/n2.json" '[r["recipe"] for r in d["bundle"]["recipes"]]') unknown=$(v6j "$V6/n2.json" '[(r["id"], r["unknown"]) for r in R(d)]') carried=$(v6j "$V6/n2.json" '"(recipe os/10_base)" in TXT(by(d, "nest_net")) and "(recipe os/10_base)" in TXT(by(d, "nest_top"))')"
+NP2="labels=$(v6j "$V6/n2.json" '[r["recipe"] for r in d["bundle"]["recipes"]]') unknown=$(v6j "$V6/n2.json" '[(r["id"], r["unknown"]) for r in R(d)]') carried=$(v6j "$V6/n2.json" 'all("(recipe os/10_base)" in TXT(by(d, i)) and "parent path check deferred to apply" in TXT(by(d, i)) for i in ("nest_net", "nest_top"))')"
 v6x n3 apply "$N6/site.yaml"; NR3=$?
 NB3="$(v6body "$V6B/nest/net.conf" | tr '\n' '|')$(v6body "$V6B/nest/top.conf" | tr '\n' '|')"
 v6x n4 apply "$N6/site.yaml"; NR4=$?
 v6x n5 audit "$N6/site.yaml"; NR5=$?
 NS="validate=$NR0/$(grep -qF '3 recipe(s) from 2 nested bundle(s)' "$V6/n0.out" && echo yes || echo no) plan=$NR2 $NP2 apply=$NR3:$(v6j "$V6/n3.json" 'C(d)') bodies=$NB3 reapply=$NR4:$(v6j "$V6/n4.json" 'C(d)') audit=$NR5:$(v6j "$V6/n5.json" 'ST(d)')"
 echo "V116_NEST $NS"
-if [ "$V6B_ST" = created ] && [ "$NS" = "validate=0/yes plan=0 labels=['os/10_base', 'os/net/20_net', '30_top'] unknown=[('nest_dir', False), ('nest_net', True), ('nest_top', True)] carried=True apply=0:['changed'] bodies=v116 nested level 2|v116 top level| reapply=0:['none'] audit=0:['compliant']" ]; then
+if [ "$V6B_ST" = created ] && [ "$NS" = "validate=0/yes plan=0 labels=['os/10_base', 'os/net/20_net', '30_top'] unknown=[('nest_dir', False), ('nest_net', False), ('nest_top', False)] carried=True apply=0:['changed'] bodies=v116 nested level 2|v116 top level| reapply=0:['none'] audit=0:['compliant']" ]; then
   check v116-bundle-nested ok "nested bundle two levels deep: labels, plan carry across sub-bundles, apply, no change on re-apply, audit compliant"
-else check v116-bundle-nested FAIL "$NS $(v6e n2)"; fi
+else check v116-bundle-nested FAIL "$NS $(v6e n2)"; v6diag n2 n3 n4 n5; fi
 
 # ---- v116-bundle-carry: a later recipe's directory owned by an account an
 # earlier recipe creates (§49.1 accounts). A group and a user resource, not a
@@ -1592,6 +1604,10 @@ else check v116-timezone FAIL "$ZS now=$(v6_now /etc/localtime)"; fi
 # C.UTF-8) in the family's file; the file's bytes as before afterwards
 case "$V6FAM" in debian) LF=/etc/default/locale ;; *) LF=/etc/locale.conf ;; esac
 v6_save locale "$LF"
+# Ubuntu 24.04 and later: /etc/default/locale is the OS's link ../locale.conf
+# and localectl writes /etc/locale.conf (RC 3, DESIGN §61): keep both, put
+# both back, and require the link itself unchanged after the apply
+v6_save localeconf /etc/locale.conf
 LANG0=$(v6body "$LF" | sed -n 's/^LANG=//p' | tr -d '"' | head -1)
 case "$LANG0" in C.UTF-8) LW=C.utf8 ;; *) LW=C.UTF-8 ;; esac
 echo "V116_LOCALE_BEFORE file=$LF $(cat "$V6/orig.locale.state")<<"; v6body "$LF"; echo ">>"
@@ -1599,15 +1615,16 @@ v6menv() { v6r 15 systemctl show-environment 2> /dev/null | sed -n 's/^LANG=//p'
 LME0=$(v6menv); LMES0=$(v6r 15 systemctl show-environment > /dev/null 2>&1 && echo read || echo unreadable)
 LA=$(v6t 30 locale -a 2> /dev/null); LAR=$?
 echo "== observe v116-locale-a rc=$LAR lines=$(printf '%s\n' "$LA" | grep -c .) c_utf8=$(printf '%s\n' "$LA" | grep -qixE 'c\.utf-?8' && echo listed || echo absent)"
-v6r_locale() { v6_put_back locale "$LF"
+v6r_locale() { v6_put_back locale "$LF"; v6_put_back localeconf /etc/locale.conf
   # localectl may also set the service manager's LANG: put that back too
   if [ "$LMES0" = read ] && [ "$(v6menv)" != "$LME0" ]; then
     if [ -n "$LME0" ]; then v6r 30 sudo systemctl set-environment "LANG=$LME0" > /dev/null 2>&1; else v6r 30 sudo systemctl unset-environment LANG > /dev/null 2>&1; fi; fi
-  echo "V116_LOCALE_RESTORE $(v6_same locale "$LF" && echo same-bytes || echo DIFFERENT) manager_lang=$([ "$(v6menv)" = "$LME0" ] && echo same || echo DIFFERENT)"; }
+  echo "V116_LOCALE_RESTORE $(v6_same locale "$LF" && v6_same localeconf /etc/locale.conf && echo same-bytes || echo DIFFERENT) manager_lang=$([ "$(v6menv)" = "$LME0" ] && echo same || echo DIFFERENT)"; }
 v6_arm v6r_locale
 printf 'version: 1\nresources:\n  - id: acc_locale\n    type: locale\n    with:\n      lang: %s\n' "$LW" > "$V6/lc1.yaml"
 v6x lc1 plan "$V6/lc1.yaml"; L1=$?
-v6x lc2 apply "$V6/lc1.yaml"; L2=$?; LB2=$(v6body "$LF")
+v6x lc2 apply "$V6/lc1.yaml"; L2=$?; LB2=$(v6body "$LF"); LL2=$(v6_now "$LF")
+echo "== observe v116-locale-layout before=$(cut -c1-20 "$V6/orig.locale.state") after_apply=$(printf '%s' "$LL2" | cut -c1-20) locale_conf_before=$(cut -c1-20 "$V6/orig.localeconf.state")"
 echo "V116_LOCALE_AFTER<<"; printf '%s\n' "$LB2"; echo ">>"
 echo "== observe v116-locale-manager before=${LME0:-unset} after_apply=$(v6menv | sed 's/^$/unset/') readable=$LMES0"
 echo "== observe v116-locale file=$LF keys_before=$(sed -n 's/=.*//p' "$V6/orig.locale" 2> /dev/null | sort | tr '\n' ',') keys_after=$(printf '%s\n' "$LB2" | sed -n 's/=.*//p' | sort | tr '\n' ',') comments_after=$(printf '%s\n' "$LB2" | grep -c '^#')"
@@ -1616,9 +1633,11 @@ v6x lc4 audit "$V6/lc1.yaml"; L4=$?
 LS="plan=$L1:$(v6j "$V6/lc1.json" 'C(d)') apply=$L2:$(printf '%s\n' "$LB2" | sed -n 's/^LANG=//p' | tr -d '"') reapply=$L3:$(v6j "$V6/lc3.json" 'C(d)') audit=$L4:$(v6j "$V6/lc4.json" 'ST(d)')"
 v6_restore v6r_locale
 echo "V116_LOCALE $LS"
-if [ "$LS" = "plan=0:['changed'] apply=0:$LW reapply=0:['none'] audit=0:['compliant']" ] && v6_same locale "$LF" && [ "$(v6menv)" = "$LME0" ]; then
+LKEPT=yes; case "$(cat "$V6/orig.locale.state")" in link:*) [ "$LL2" = "$(cat "$V6/orig.locale.state")" ] || LKEPT=no ;; esac
+LS="$LS link_kept=$LKEPT"
+if [ "$LS" = "plan=0:['changed'] apply=0:$LW reapply=0:['none'] audit=0:['compliant'] link_kept=yes" ] && v6_same locale "$LF" && v6_same localeconf /etc/locale.conf && [ "$(v6menv)" = "$LME0" ]; then
   check v116-locale ok "LANG=$LW through localectl, unchanged, compliant; $LF restored byte for byte"
-else check v116-locale FAIL "$LS restored=$(v6_same locale "$LF" && echo yes || echo no)"; fi
+else check v116-locale FAIL "$LS restored=$(v6_same locale "$LF" && v6_same localeconf /etc/locale.conf && echo yes || echo no)"; v6diag lc1 lc2 lc3 lc4; fi
 
 # ---- kernel_module (§62): dummy loaded and persisted, re-apply unchanged,
 # compliant, absent removes Sinter's file. Sinter never unloads, so the module
@@ -1705,11 +1724,23 @@ else
   v6x tu4 audit "$V6/tu1.yaml"; U4=$?
   US1="plan=$U1 apply=$U2:$UP2 reapply=$U3:$(v6j "$V6/tu3.json" 'C(d)') audit=$U4:$(v6j "$V6/tu4.json" 'ST(d)')"
   v6x tu5 apply "$V6/tu2.yaml"; U5=$?; UP5=$(tu_prof)
+  # the harness's own answer of tuned-adm verify (DESIGN §57.5: 0 applied, 1
+  # not applied, anything else no answer), asked right after the apply and
+  # again after the audit; whether the profile verifies on a VM is TuneD's
+  # and the image's business, so both answers are accepted when the product
+  # reports the same one (RC 3: RC 2 assumed that it always verifies)
+  tu_verify() { v6t 120 sudo tuned-adm verify > /dev/null 2>&1; echo $?; }
+  TV1=$(tu_verify)
   tu_files() { echo "$(v6_now /etc/tuned/active_profile | cut -c1-20)/$(v6_now /etc/tuned/profile_mode | cut -c1-20)"; }
   TF0=$(tu_files); TRC=$(v6t 120 sudo tuned-adm recommend 2> /dev/null | head -1); TRR=$?; TF1=$(tu_files)
-  v6x tu6 audit "$V6/tu2.yaml"; U6=$?; TF2=$(tu_files)
+  v6x tu6 audit "$V6/tu2.yaml"; U6=$?; TF2=$(tu_files); TV2=$(tu_verify)
+  echo "== observe v116-tuned-verify-independent after_apply=$TV1 after_audit=$TV2 profile=$TP2"
   echo "== observe v116-tuned-readonly recommend=${TRC:-none} recommend_rc=$TRR recommend_changed=$([ "$TF0" = "$TF1" ] && echo no || echo yes) verify_audit_changed=$([ "$TF1" = "$TF2" ] && echo no || echo yes)"
   US2="apply=$U5:$UP5:$(v6in tu5 'verify: tuned-adm verify reports the selected profile as applied') audit=$U6:$(v6j "$V6/tu6.json" 'ST(d)'):$(v6in tu6 'tuned-adm verify reports the profile as applied')"
+  # not applied: the resource FAILED with the change reported (execution
+  # failed, change changed, verification failed), the selection is TP2, and
+  # audit reports exactly the `applied` dimension as drift
+  US2N="apply=$U5:$UP5:$(v6j "$V6/tu5.json" '(lambda r: (r.get("execution"), r.get("change"), r.get("verification"), "tuned-adm verify reports that the system differs" in TXT(r)))(by(d, "acc_tuned"))') audit=$U6:$(v6j "$V6/tu6.json" '(lambda r: (r.get("status"), DIM(r)))(by(d, "acc_tuned"))')"
   v6x tu7 apply "$V6/tu3.yaml"; U7=$?; UP7=$(tu_prof)
   echo "== observe v116-tuned-after-off active_profile_file=$(v6_now /etc/tuned/active_profile | cut -c1-12) bytes=$(v6body /etc/tuned/active_profile | wc -c | tr -d ' ')"
   v6x tu8 apply "$V6/tu3.yaml"; U8=$?
@@ -1719,8 +1750,9 @@ else
   v6_restore v6r_tuned
   if [ "$US1" = "plan=0 apply=0:$TP1 reapply=0:['none'] audit=0:['compliant']" ]; then check v116-tuned-profile ok "tuned installed and started in the recipe, $TP1 selected, unchanged, compliant"
   else check v116-tuned-profile FAIL "$US1 $(v6e tu2)"; fi
-  if [ "$US2" = "apply=0:$TP2:yes audit=0:['compliant']:yes" ]; then check v116-tuned-verify ok "$TP2 selected with verify: applied after the change and in audit"
-  else check v116-tuned-verify FAIL "$US2 $(v6e tu5)"; fi
+  if [ "$TV1/$TV2" = 0/0 ] && [ "$US2" = "apply=0:$TP2:yes audit=0:['compliant']:yes" ]; then check v116-tuned-verify ok "$TP2 selected with verify: applied after the change and in audit (tuned-adm verify, asked by the harness: 0 twice)"
+  elif [ "$TV1/$TV2" = 1/1 ] && [ "$US2N" = "apply=5:$TP2:('failed', 'changed', 'failed', True) audit=7:('drift', ['applied'])" ]; then check v116-tuned-verify ok "$TP2 selected with verify: TuneD reports it not applied on this host (tuned-adm verify, asked by the harness: 1 twice); the resource failed with the change reported and audit reports the applied dimension as drift"
+  else check v116-tuned-verify FAIL "independent=$TV1/$TV2 $US2 | $US2N $(v6e tu5)"; v6diag tu5 tu6; fi
   if [ "$US3" = "apply=0:[] reapply=0:['none'] audit=0:['compliant']" ]; then check v116-tuned-off ok "state off clears the selection, unchanged, compliant"
   else check v116-tuned-off FAIL "$US3 $(v6e tu7)"; fi
 fi
@@ -2012,16 +2044,21 @@ if [ "$V6RH" = yes ]; then
   PGLEFT=$(v6left)
   if [ "$PGPRE" = absent/absent/none ] && [ "$PGD0" = absent ] && [ "$PGLEFT" -ge 540 ]; then
     v6_arm v6r_pg
-    v6t 300 "$EXE" plan "$PG/bundle.yaml" --sudo --format json > "$V6/pg1.json" 2> "$V6/pg1.err"; G1=$?
+    v6t 300 "$EXE" plan "$PG/bundle.yaml" --sudo --format json > "$V6/pg1.json" 2> "$V6/pg1.err"; G1=$?; echo "plan bundle.yaml rc=$G1" > "$V6/pg1.rc"
     GD=$(v6j "$V6/pg1.json" '[(r["id"], r["unknown"]) for r in R(d) if r["id"] in ("pgdg_key", "pgdg_common", "pg_pkg", "pg_confd", "pg_conf", "pg_hba", "pg_service")]')
     GM=$(v6j "$V6/pg1.json" '(by(d, "pg_module_off").get("change"), by(d, "pg_module_off").get("disposition"))')
-    v6t 300 "$EXE" audit "$PG/bundle.yaml" --sudo --format json > "$V6/pg2.json" 2> "$V6/pg2.err"; G2=$?
+    v6t 300 "$EXE" audit "$PG/bundle.yaml" --sudo --format json > "$V6/pg2.json" 2> "$V6/pg2.err"; G2=$?; echo "audit bundle.yaml rc=$G2" > "$V6/pg2.rc"
     case "$V6MAJ" in 9) GMW="('changed', 'normal')" ;; *) GMW="('none', 'skipped_by_condition')" ;; esac
     GS1="plan=$G1 deferred=$GD module=$GM audit_fresh=$G2"
     echo "V116_PG_PLAN $GS1"
-    if [ "$GS1" = "plan=0 deferred=[('pgdg_key', False), ('pgdg_common', False), ('pg_pkg', False), ('pg_confd', True), ('pg_conf', True), ('pg_hba', True), ('pg_service', True)] module=$GMW audit_fresh=7" ]; then
+    # unknown: the postgres account (owner and group of conf.d, the config and
+    # pg_hba) is deferred while it is missing (creates_accounts, §49.2); when it
+    # exists already only their parent path check waits for the package (a
+    # note, not unknown, §29 / §49.1; RC 3); the unit waits for the package
+    GDA=False; [ "$PGU0" = absent ] || [ "$PGG0" = absent ] && GDA=True
+    if [ "$GS1" = "plan=0 deferred=[('pgdg_key', False), ('pgdg_common', False), ('pg_pkg', False), ('pg_confd', $GDA), ('pg_conf', $GDA), ('pg_hba', $GDA), ('pg_service', True)] module=$GMW audit_fresh=7" ]; then
       check v116-pg-plan ok "on a fresh system plan exits 0 with the account, cluster and unit deferred to apply; audit drift (7)"
-    else check v116-pg-plan FAIL "$GS1 $(v6e pg1)"; fi
+    else check v116-pg-plan FAIL "$GS1 accounts_absent=$GDA $(v6e pg1)"; v6diag pg1 pg2; fi
     v6t 900 "$EXE" apply "$PG/bundle.yaml" --sudo --format json > "$V6/pg3.json" 2> "$V6/pg3.err"; G3=$?
     GA="apply=$G3:$(v6j "$V6/pg3.json" '[e["exit_code"] for e in d["executions"]]') rpm=$(rpm -q postgresql17-server > /dev/null 2>&1 && echo installed || echo missing) service=$(v6t 15 systemctl is-active postgresql-17 2> /dev/null) confd=$(v6st /var/lib/pgsql/17/data/conf.d '%U:%G:%a')"
     echo "== observe v116-pg-dnf repolist=$(v6t 120 sudo dnf -q repolist --enabled 2> /dev/null | awk '{print $1}' | grep -E '^pgdg(-common|17)$' | sort | tr '\n' ',') pgdg_key_imported=$(rpm -q gpg-pubkey --qf '%{SUMMARY}\n' 2> /dev/null | grep -ci postgresql) module=$(v6body /etc/dnf/modules.d/postgresql.module | sed -n 's/^state=//p' | head -1)"
@@ -2045,13 +2082,46 @@ elif [ "$V6FAM" = debian ] && [ "$V6DNF" = absent ] && na_allowed v116-pg-plan N
   for id in $PGIDS; do not_applicable "$id" NOT_DNF_HOST "the bundle installs PGDG RPMs; $LABEL is not a DNF host"; done
 else for id in $PGIDS; do check "$id" FAIL "not a DNF 4 host of the RHEL family and not listed as not applicable (family=$V6FAM dnf=$V6DNF)"; done; fi
 
+# ---- v116-secrets-keygen (DESIGN §65, RC 3): the frozen sinter creates an
+# age identity on the target, without a terminal and without age-keygen; the
+# file is 0600, -y prints the same public key, a file encrypted to it with -r
+# decrypts with -i, an existing identity is never replaced, and the private
+# key appears in no output. Synthetic key in the harness's private directory,
+# removed afterwards; nothing of it is printed.
+KG="$V6/keygen"; mkdir -m 700 "$KG"
+kg() { local t=$1; shift; v6t 60 "$EXE" secrets "$@" > "$KG/$t.out" 2> "$KG/$t.err" < /dev/null; local rc=$?; printf 'secrets %s rc=%s\n' "$1" "$rc" > "$KG/$t.rc"; return $rc; }
+kg k1 keygen -o "$KG/id.txt"; K1=$?
+KMODE=$(stat -c %a "$KG/id.txt" 2> /dev/null || echo missing)
+KPUB=$(sed -n 's/^Public key: //p' "$KG/k1.err" | head -1)
+KSHA=$(sha256sum "$KG/id.txt" 2> /dev/null | cut -d' ' -f1)
+KFORM=$(grep -c '^AGE-SECRET-KEY-1[0-9A-Z]*$' "$KG/id.txt" 2> /dev/null)/$(grep -c "^# public key: $KPUB\$" "$KG/id.txt" 2> /dev/null)
+kg k2 keygen -y "$KG/id.txt"; K2=$?
+KY=$([ -n "$KPUB" ] && [ "$(cat "$KG/k2.out")" = "$KPUB" ] && echo same || echo DIFFERENT)
+printf 'v116 keygen synthetic payload\n' > "$KG/plain.txt"
+kg k3 encrypt -r "$KPUB" -o "$KG/plain.txt.age" "$KG/plain.txt"; K3=$?
+kg k4 decrypt -i "$KG/id.txt" "$KG/plain.txt.age"; K4=$?
+KD=$(cmp -s "$KG/k4.out" "$KG/plain.txt" && echo same || echo DIFFERENT)
+kg k5 keygen -o "$KG/id.txt"; K5=$?
+KAGAIN=$([ "$K5" -ne 0 ] && [ "$(sha256sum "$KG/id.txt" 2> /dev/null | cut -d' ' -f1)" = "$KSHA" ] && echo refused-unchanged || echo REPLACED)
+KLEAK=no; KSEC=$(grep '^AGE-SECRET-KEY-1' "$KG/id.txt" 2> /dev/null | head -1)
+if [ -z "$KSEC" ]; then KLEAK=unknown
+else for f in k1 k2 k3 k4 k5; do grep -qF -- "$KSEC" "$KG/$f.out" "$KG/$f.err" 2> /dev/null && KLEAK=yes; done; fi
+KSEC=""
+KS="keygen=$K1 mode=$KMODE form=$KFORM pub=$(case "$KPUB" in age1?*) echo age1 ;; *) echo none ;; esac) y=$K2:$KY enc=$K3 dec=$K4:$KD again=$KAGAIN leak=$KLEAK"
+echo "V116_KEYGEN $KS"
+if [ "$KS" = "keygen=0 mode=600 form=1/1 pub=age1 y=0:same enc=0 dec=0:same again=refused-unchanged leak=no" ]; then
+  check v116-secrets-keygen ok "an age identity created by sinter alone: 0600, -y gives its public key, encrypt -r / decrypt -i round trip, never replaced, no secret in any output"
+else check v116-secrets-keygen FAIL "$KS"
+  for f in k1 k2 k3 k4 k5; do echo "   DIAG $f $(cat "$KG/$f.rc" 2> /dev/null) stderr=$(sed -E 's/AGE-SECRET-KEY-1[0-9A-Za-z]*/<withheld>/g' "$KG/$f.err" 2> /dev/null | head -c 400 | tr '\n' ' ')"; done; fi
+rm -rf "$KG"
+
 # ---- v116-no-residue: every restore ran, and what this section changed is as
 # it was before (files, names, values, the disposable directories, accounts)
 v6_restore_all
 NRS="base=$(v6ex "$V6B" && echo left || echo gone) writable=$(v6ex "$V6W" && echo left || echo gone) etc=$(v6ex "$V6E" && echo left || echo gone)"
 NRS="$NRS repo=$([ "$DR_PRE" = absent ] && v6ex "$DRF" && echo left || echo ok) sysctl=$([ -z "$SV0" ] || [ "$(sysctl -n "$SK" 2> /dev/null)" = "$SV0" ] && echo ok || echo DIFF)/$(v6ex "$SL" && echo left || echo ok)"
 NRS="$NRS names=$([ "$(v6r 15 hostnamectl --static 2> /dev/null)" = "$HS0" ] && v6_same hostname /etc/hostname && v6_same hosts /etc/hosts && v6_same machineinfo /etc/machine-info && echo ok || echo DIFF)"
-NRS="$NRS timezone=$(v6_same localtime /etc/localtime && echo ok || echo DIFF) locale=$(v6_same locale "$LF" && [ "$(v6menv)" = "$LME0" ] && echo ok || echo DIFF)"
+NRS="$NRS timezone=$(v6_same localtime /etc/localtime && echo ok || echo DIFF) locale=$(v6_same locale "$LF" && v6_same localeconf /etc/locale.conf && [ "$(v6menv)" = "$LME0" ] && echo ok || echo DIFF)"
 NRS="$NRS accounts=$([ "$CU0" = absent ] && getent passwd "$V6U" > /dev/null 2>&1 && echo left || echo ok) kmod_file=$([ "$KPRE" = absent ] && v6ex "$KMF" && echo left || echo ok)"
 [ -x "$CPT" ] && NRS="$NRS crypto=$([ "$(cp_show)" = "$CP0" ] && echo ok || echo DIFF)"
 [ "$DMDO" = yes ] && NRS="$NRS nodejs_module=$([ -z "$(dm_state)" ] && echo ok || echo DIFF)"

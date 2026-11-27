@@ -273,12 +273,21 @@ def carry_covers(carry, p):
     return carry["opaque"] or any(p == q or p.startswith(q + "/") for q in carry["paths"])
 
 
+NOTES = [[]]   # the notes of the resource being handled (set per resource)
+
+
 def parent_ok(p, carry, mode_):
+    # DESIGN §29 / §49.1: a parent an earlier planned change creates defers
+    # only the parent path check; the change itself is decided (a note, not
+    # unknown). DEFECT nested-unknown restores the RC 2 harness's wrong model.
     d = os.path.dirname(p)
     if os.path.isdir(hp(d)):
         return True
     if mode_ == "plan" and DEFECT != "no-carry" and carry_covers(carry, d):
-        raise Unknown("its parent is created by an earlier change: %s" % carry_name(carry, d))
+        if DEFECT == "nested-unknown":
+            raise Unknown("its parent is created by an earlier change: %s" % carry_name(carry, d))
+        NOTES[0].append("parent path check deferred to apply: parent directory %s does not exist (%s)" % (d, carry_name(carry, d)))
+        return True
     raise Fail("parent directory %s does not exist" % d)
 
 
@@ -647,6 +656,17 @@ def t_timezone(r, w, mode_, carry, run):
 
 def t_locale(r, w, mode_, carry, run):
     f = "/etc/default/locale" if facts()["family"] == "debian" else "/etc/locale.conf"
+    link = None
+    if os.path.islink(hp(f)):
+        # DESIGN §61 (RC 3): only the Debian family's link to /etc/locale.conf
+        # is followed; DEFECT locale-symlink-refused is RC 2's behaviour
+        link = os.readlink(hp(f))
+        if f != "/etc/default/locale" or link not in ("../locale.conf", "/etc/locale.conf") or DEFECT == "locale-symlink-refused":
+            raise Fail("%s: the default locale could not be observed: %s is a symlink to another target" % (r["id"], f))
+        if DEFECT == "locale-replace-link" and run:
+            os.remove(hp(f))
+        else:
+            f = "/etc/locale.conf"
     t = read(f) or ""
     m = re.search(r"^LANG=\"?([^\"\n]*)\"?$", t, re.M)
     if m and m.group(1) == w["lang"]:
@@ -739,8 +759,12 @@ def t_tuned(r, w, mode_, carry, run, ctx):
     cur = (read("/etc/tuned/active_profile") or "").strip()
     want = "" if w.get("state") == "off" else w["profile"]
     s = load_state()
+    # the host's answer of tuned-adm verify (FAKE_STATE tuned_verify, default applied); DESIGN §57.5 / §57.6
+    applied = s.get("tuned_verify", "applied") == "applied" or DEFECT == "tuned-verify-claims-applied"
     if cur == want:
         if mode_ == "audit" and want and w.get("verify") and DEFECT != "tuned-noverify":
+            if not applied:
+                return [("applied", "tuned-adm verify reports that the system differs from the selected profile (exit 1)", "the selected profile is applied")]
             ctx["reason"] = "the selected profile matches, tuned.service is active and tuned-adm verify reports the profile as applied"
         return []
     if mode_ == "audit":
@@ -752,7 +776,10 @@ def t_tuned(r, w, mode_, carry, run, ctx):
     if not (DEFECT == "tuned-off-noop" and not want):
         open(hp("/etc/tuned/active_profile"), "w").write(want + "\n" if want else "")
     if want and w.get("verify") and DEFECT != "tuned-noverify":
-        ctx["notes"].append("verify: tuned-adm verify reports the selected profile as applied")
+        if applied:
+            ctx["notes"].append("verify: tuned-adm verify reports the selected profile as applied")
+        elif DEFECT != "tuned-verify-no-fail":
+            ctx["verify_failed"] = "the profile was selected, but tuned-adm verify reports that the system differs from it (exit 1): the selection changed, the tuning did not verify"
     return [("profile", cur, want)]
 
 
@@ -816,6 +843,7 @@ def run_recipe(path, phase, label, carry, skip=()):
         carry["me"] = "%s (recipe %s)" % (r["id"], label) if label else r["id"]
         w = r.get("with") or {}
         ctx = {"notes": [], "awp": awp, "diff": None, "reason": None}
+        NOTES[0] = ctx["notes"]
         out = {"id": r["id"], "type": r["type"], "change": "none", "unknown": False, "execution": "not_run",
                "verification": "not_performed", "disposition": "normal", "reason": None, "notes": ctx["notes"], "diff": None,
                "status": "compliant", "details": []}
@@ -849,6 +877,8 @@ def run_recipe(path, phase, label, carry, skip=()):
                 out["reason"] = ctx["reason"]
             if t == "package" and diffs and DEFECT == "pg-noidem" and r["id"] == "pg_pkg" and phase == "apply":
                 pass
+            if ctx.get("verify_failed") and run:
+                out["execution"] = "failed"; out["verification"] = "failed"; out["reason"] = ctx["verify_failed"]; failed = True
         except Unknown as e:
             out["unknown"] = True; out["change"] = "changed"; out["reason"] = "decided at apply: %s" % e
             carry["opaque"] = carry["opaque"] or (carry["me"] if t in ("command", "package") else carry["opaque"])
@@ -894,7 +924,52 @@ def new_carry():
     return {"paths": {}, "accounts": {}, "opaque": None, "install": None, "me": None}
 
 
+def secrets_main():
+    # DESIGN §65 stand-in: a synthetic "identity" (never a real age key) and a
+    # reversible "encryption" good enough to prove the harness's checks.
+    # Defects: keygen-mode (0644), keygen-leak (the key on stderr),
+    # keygen-overwrite (an existing identity replaced), keygen-y-wrong.
+    import base64, hashlib
+    sub = A[1]; args = A[2:]
+    def opt(f):
+        return args[args.index(f) + 1] if f in args else None
+    def pub_of(sec):
+        return "age1" + hashlib.sha256(sec.encode()).hexdigest()[:40]
+    if sub == "keygen" and "-y" not in args:
+        out = opt("-o")
+        if not out:
+            sys.stderr.write("sinter: give the new identity file with -o\n"); return 2
+        if os.path.lexists(out) and DEFECT != "keygen-overwrite":
+            sys.stderr.write("sinter: %s already exists; an identity is never replaced\n" % out); return 2
+        sec = "AGE-SECRET-KEY-1" + hashlib.sha256(os.urandom(16)).hexdigest().upper()
+        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644 if DEFECT == "keygen-mode" else 0o600)
+        os.write(fd, ("# created: 2026-11-27T00:00:00Z\n# public key: %s\n%s\n" % (pub_of(sec), sec)).encode()); os.close(fd)
+        if DEFECT == "keygen-mode":
+            os.chmod(out, 0o644)
+        sys.stderr.write("Public key: %s\n" % pub_of(sec))
+        if DEFECT == "keygen-leak":
+            sys.stderr.write("debug: %s\n" % sec)
+        sys.stderr.write("sinter: created the private key %s (mode 600)\n" % out); return 0
+    if sub == "keygen":
+        secs = [l for l in open(opt("-y")).read().splitlines() if l.startswith("AGE-SECRET-KEY-1")]
+        for x in secs:
+            print(pub_of(x) + ("0" if DEFECT == "keygen-y-wrong" else ""))
+        return 0 if secs else 1
+    if sub == "encrypt":
+        data = open(args[-1], "rb").read()
+        open(opt("-o"), "w").write("age-encryption.org/v1\nTO %s\n%s\n" % (opt("-r"), base64.b64encode(data).decode())); return 0
+    if sub == "decrypt":
+        lines = open(args[-1]).read().splitlines()
+        secs = [l for l in open(opt("-i")).read().splitlines() if l.startswith("AGE-SECRET-KEY-1")]
+        if not any("TO " + pub_of(x) == lines[1] for x in secs):
+            sys.stderr.write("sinter: no identity matches\n"); return 1
+        sys.stdout.buffer.write(base64.b64decode(lines[2])); return 0
+    return 99
+
+
 def main():
+    if A[0] == "secrets":
+        return secrets_main()
     cmd, path = A[0], A[1]
     grab = os.environ.get("FAKE_GRAB")
     if grab:  # keep a copy of the recipe's directory for the real-binary test
@@ -1026,6 +1101,9 @@ if me == "update-crypto-policies":
 if me == "tuned-adm":
     if a[0] == "recommend":
         print("virtual-guest"); sys.exit(0)
+    if a[0] == "verify":
+        v = S().get("tuned_verify", "applied")
+        sys.exit({"applied": 0, "not_applied": 1}.get(v, 3))
     if a[0] == "profile":
         open(hp("/etc/tuned/active_profile"), "w").write(a[1] + "\n")
     elif a[0] == "off":
@@ -1305,6 +1383,11 @@ def world(label, root, **over):
     if over.pop("hosts_no_newline", False):
         with open(root + "/etc/hosts", "w") as f:
             f.write("127.0.0.1 localhost")
+    if over.pop("locale_link", False):   # Ubuntu 24.04 and later: /etc/default/locale -> ../locale.conf
+        os.remove(root + "/etc/default/locale")
+        with open(root + "/etc/locale.conf", "w") as f:
+            f.write("LANG=C.UTF-8\n")
+        os.symlink("../locale.conf", root + "/etc/default/locale")
     if over.pop("machine_info", False):
         with open(root + "/etc/machine-info", "w") as f:
             f.write('PRETTY_HOSTNAME="Fixture VM"\n')
@@ -1485,6 +1568,11 @@ class EachDefectFailsItsCheck(unittest.TestCase):
         "kmod-noload": ("rocky9", ["v116-kernel-module"]),
         "tuned-nostart": ("ubuntu2404", ["v116-tuned-profile"]),
         "tuned-noverify": ("rocky9", ["v116-tuned-verify"]),
+        "nested-unknown": ("ubuntu2404", ["v116-bundle-nested"]),
+        "keygen-mode": ("rocky9", ["v116-secrets-keygen"]),
+        "keygen-leak": ("ubuntu2404", ["v116-secrets-keygen"]),
+        "keygen-overwrite": ("rocky9", ["v116-secrets-keygen"]),
+        "keygen-y-wrong": ("ubuntu2404", ["v116-secrets-keygen"]),
         "tuned-off-noop": ("rocky9", ["v116-tuned-off"]),
         "pg-apply-fail": ("rocky9", ["v116-pg-apply"]),
         "pg-noidem": ("rocky10", ["v116-pg-reapply"]),
@@ -1514,6 +1602,54 @@ class EachDefectFailsItsCheck(unittest.TestCase):
                 covered.update(ids)
         # every new check has at least one defect that fails it
         self.assertEqual(sorted(set(V116) - covered), [])
+
+
+class RC3Expectations(unittest.TestCase):
+    """RC 3 (P-5 round 1 of RC 2 failed on ubuntu2404): the expectations that were wrong, both answers of tuned-adm verify."""
+
+    def test_tuned_not_applied_is_accepted_only_with_the_failed_result_and_drift(self):
+        r = run_section("rocky9", tuned_verify="not_applied")
+        self.assertIn("v116-tuned-verify", r.ok, r.out)
+        self.assertIn("after_apply=1 after_audit=1", r.out)
+        self.assertEqual(r.bad, [], r.out)
+
+    def test_tuned_not_applied_but_reported_applied_fails(self):
+        r = run_section("rocky9", "tuned-verify-claims-applied", tuned_verify="not_applied")
+        self.assertIn("v116-tuned-verify", r.bad, r.out)
+        self.assertIn("DIAG tu5", r.out)
+
+    def test_tuned_not_applied_but_apply_succeeds_fails(self):
+        r = run_section("rocky9", "tuned-verify-no-fail", tuned_verify="not_applied")
+        self.assertIn("v116-tuned-verify", r.bad, r.out)
+
+    def test_tuned_verify_without_an_answer_fails(self):
+        r = run_section("rocky9", tuned_verify="no_answer")
+        self.assertIn("v116-tuned-verify", r.bad, r.out)
+
+    def test_ubuntu_os_locale_link_is_followed_kept_and_restored(self):
+        r = run_section("ubuntu2404", tuned_installed=False, locale_link=True)
+        self.assertIn("v116-locale", r.ok, r.out)
+        self.assertIn("v116-no-residue", r.ok, r.out)
+
+    def test_ubuntu_locale_link_refused_or_replaced_fails(self):
+        for defect in ("locale-symlink-refused", "locale-replace-link"):
+            r = run_section("ubuntu2404", defect, tuned_installed=False, locale_link=True)
+            self.assertIn("v116-locale", r.bad, defect + r.out)
+            self.assertIn("DIAG lc", r.out, defect)
+
+    def test_keygen_round_trip_and_its_defects(self):
+        r = run_section("rocky9")
+        self.assertIn("v116-secrets-keygen", r.ok, r.out)
+        self.assertNotIn("AGE-SECRET-KEY-1", r.out)
+        for defect in ("keygen-mode", "keygen-leak", "keygen-overwrite", "keygen-y-wrong"):
+            r = run_section("rocky9", defect)
+            self.assertIn("v116-secrets-keygen", r.bad, defect + r.out)
+            self.assertNotIn("AGE-SECRET-KEY-1", r.out, defect)
+
+    def test_nested_bundle_files_are_decided_changes_with_the_deferral_note(self):
+        r = run_section("ubuntu2404", tuned_installed=False)
+        self.assertIn("v116-bundle-nested", r.ok, r.out)
+        self.assertIn("('nest_net', False), ('nest_top', False)", r.out)
 
 
 class ExistingStateIsKept(unittest.TestCase):
@@ -1793,8 +1929,8 @@ class Static(unittest.TestCase):
     def test_expected_ids_once_and_table_entries(self):
         ids = [l.strip() for l in open(IDS_PATH) if l.strip()]
         self.assertEqual(len(ids), len(set(ids)))
-        self.assertEqual(len(ids), 104)
-        self.assertEqual(len(V116), 28)
+        self.assertEqual(len(ids), 105)
+        self.assertEqual(len(V116), 29)  # 28 of RC 2 and v116-secrets-keygen (RC 3)
         text = section()
         for c in V116:
             self.assertEqual(ids.count(c), 1, c)

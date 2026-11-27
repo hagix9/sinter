@@ -90,6 +90,7 @@ v116-pg-apply
 v116-pg-audit
 v116-pg-plan
 v116-pg-reapply
+v116-secrets-keygen
 v116-skip-resource-backup
 v116-sysctl
 v116-template-undefined-var

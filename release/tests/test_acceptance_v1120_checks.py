@@ -380,9 +380,9 @@ class V1120Checks(unittest.TestCase):
                  # P7-R1: the fw03-checks section (test_acceptance_fw03_checks.py)
                  "fw03-zone", "fw03-interface", "fw03-source", "fw03-reload", "risk-approved-apply",
                  "fw03-no-residue"]
-        # v1.16.0 adds the v1160-checks section, 28 v116-* checks (test_acceptance_v1160.py)
+        # v1.16.0 adds the v1160-checks section, 29 v116-* checks (test_acceptance_v1160.py)
         v1150 += [i for i in ids if i.startswith("v116-")]
-        self.assertEqual(len([i for i in ids if i.startswith("v116-")]), 28)
+        self.assertEqual(len([i for i in ids if i.startswith("v116-")]), 29)
         self.assertEqual(set(ids) - set(ORIGINAL_39), set(new) | set(v1150))
         self.assertEqual(len(ids), 39 + len(new) + len(v1150))
         for new_id in new:

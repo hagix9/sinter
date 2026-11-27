@@ -66,7 +66,10 @@ if any of the run's identifiers would remain.
 
 `acceptance-target.sh` defines the checks; `derive-expected-checks.sh`
 writes their ids to `expected-check-ids.txt` (60 from v1.12.0, 76 from
-v1.15.0, 104 from v1.16.0). Each prints one `== check <id> ok|FAIL` line, or
+v1.15.0, 104 from v1.16.0 RC 2, 105 from RC 3 with `v116-secrets-keygen`). From RC 3 the
+changed v1.16.0 checks (`v116-bundle-nested`, `v116-locale`, `v116-tuned-verify`, `v116-pg-plan`,
+`v116-secrets-keygen`) add `   DIAG` lines on a FAIL: the command, its exit code, the JSON results
+(or the start of a non-JSON stdout) and stderr, each capped; a private key is never printed. Each prints one `== check <id> ok|FAIL` line, or
 `== check <id> NOT_APPLICABLE <reason>` (below). From v1.12.0 two sections cover the plugin
 commands (`plugin-checks`: list, verify, install, remove and the partial mutate
 permission, against a plugin root inside the run's private directory, never the
