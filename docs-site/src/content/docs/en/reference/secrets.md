@@ -22,6 +22,8 @@ files: they can be recovered without Sinter by any age-compatible tool.
 sinter secrets encrypt [--passphrase | -r, --recipient RECIPIENT ...] [-o, --output OUT] [-f, --force] <FILE | ->
 sinter secrets decrypt [-i, --identity IDENTITY] <FILE>
 sinter secrets list [--format text|json] [--recipe FILE ...] [PATH ...]
+sinter secrets keygen -o, --output OUT [--passphrase]
+sinter secrets keygen -y IDENTITY
 ```
 
 These are the complete flag sets; the short and long forms shown are the only
@@ -82,6 +84,30 @@ file. `--recipe` is repeatable and belongs to `list` only.
     conclusion. `--recipe` does not change which paths are listed, and it
     never decrypts, prompts, or looks for an identity. Without `--recipe` the
     output is unchanged.
+- **keygen** creates a new age identity (private key) without the external
+  `age-keygen`: `mkdir -p -m 700 ~/.config/sinter && sinter secrets keygen -o ~/.config/sinter/identity`
+  (the directory is not created for you). The file
+  has age-keygen's format (`# created:`, `# public key: age1…`,
+  `AGE-SECRET-KEY-1…`), is created with mode `0600` from the start, and only
+  `Public key: age1…` is printed (on stderr). `--passphrase` protects the file
+  with a passphrase typed twice on the terminal (the format `decrypt` reads as
+  a protected identity, for example a repository `identity.age`).
+  - `-o` is **required**: unlike `age-keygen`, a private key is never written
+    to stdout (a shell redirection would create the file with your umask's
+    mode, usually readable by others, and could truncate an existing key).
+  - An existing file is **never** replaced and there is no `--force`
+    (replacing a key loses every secret encrypted to it); a symbolic link
+    (even a dangling one) is refused. The directory must exist, be yours (or
+    root's) and not be writable by group or others. A plaintext key inside a
+    git repository, or named `*.age`, gets a warning.
+  - **`-y IDENTITY`** prints the recipient of each identity in the file, one
+    per line, on stdout, for `encrypt -r` or a `recipients.txt`:
+    `sinter secrets keygen -y ~/.config/sinter/identity >> recipients.txt`.
+    The file is read as `decrypt -i` reads it (a plaintext identity must be
+    `chmod 600` and yours; a passphrase-protected one asks for its passphrase
+    on the terminal). `-` reads stdin (not a terminal). Comments and blank
+    lines are skipped; any malformed line refuses the whole file without
+    echoing it. `-y` cannot be combined with `-o` or `--passphrase`.
 
 ## `list` output
 
@@ -233,8 +259,8 @@ a passphrase, and:
 the passphrase becomes the only remaining protection, and one passphrase then
 protects *every* secret. Choose a long passphrase (or a generated one), and use
 Model A when that trade-off is not acceptable. A plain unprotected identity for
-automation is created with the standard `age-keygen`; Sinter does not generate
-unprotected identities.
+automation is created with `sinter secrets keygen -o PATH` (or the standard
+`age-keygen`); keep it outside the repository.
 
 ## Using a secret in a recipe
 

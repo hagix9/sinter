@@ -21,6 +21,8 @@ age 互換ツールで復元できます。
 sinter secrets encrypt [--passphrase | -r, --recipient RECIPIENT ...] [-o, --output OUT] [-f, --force] <FILE | ->
 sinter secrets decrypt [-i, --identity IDENTITY] <FILE>
 sinter secrets list [--format text|json] [--recipe FILE ...] [PATH ...]
+sinter secrets keygen -o, --output OUT [--passphrase]
+sinter secrets keygen -y IDENTITY
 ```
 
 これらがフラグのすべてで、ここに示した短い形と長い形以外の別名はありません。
@@ -74,6 +76,30 @@ sinter secrets list [--format text|json] [--recipe FILE ...] [PATH ...]
     標準エラーに示し、一覧も結論も**一切出力しません**。`--recipe` は一覧対象の
     パスを変えず、復号・パスフレーズ入力・ID ファイルの探索も行いません。
     `--recipe` なしの出力は従来どおりです。
+- **keygen** は外部の `age-keygen` なしで新しい age identity（秘密鍵）を作ります:
+  `mkdir -p -m 700 ~/.config/sinter && sinter secrets keygen -o ~/.config/sinter/identity`
+  （ディレクトリは自動では作りません）。ファイルは age-keygen と
+  同じ形式（`# created:`、`# public key: age1…`、`AGE-SECRET-KEY-1…`）で、作成時
+  からモード `0600` です。表示されるのは `Public key: age1…`（標準エラー）だけです。
+  `--passphrase` を付けると、端末で 2 回入力するパスフレーズでファイルを保護します
+  （`decrypt` が保護された identity として読む形式で、リポジトリの `identity.age`
+  などに使えます）。
+  - `-o` は**必須**です。`age-keygen` と異なり、秘密鍵を標準出力には決して書きません
+    （シェルのリダイレクトは umask のモード、通常は他人も読めるモードでファイルを作り、
+    既存の鍵を切り詰めることもあるため）。
+  - 既存のファイルは**決して**置き換えず、`--force` はありません（鍵を置き換えると、
+    その鍵宛てに暗号化したシークレットがすべて復号できなくなるため）。シンボリック
+    リンク（リンク切れでも）は拒否します。出力先ディレクトリは存在し、自分（または
+    root）が所有し、グループや他者が書き込めないことが必要です。リポジトリ内や
+    `*.age` という名前の無保護の鍵には警告を出します。
+  - **`-y IDENTITY`** はファイル内の各 identity の受信者を 1 行に 1 つ標準出力に
+    表示します（`encrypt -r` や `recipients.txt` 用）:
+    `sinter secrets keygen -y ~/.config/sinter/identity >> recipients.txt`。
+    ファイルは `decrypt -i` と同じ規則で読みます（無保護の identity は `chmod 600`
+    で自分の所有であること。パスフレーズ保護されたものは端末でパスフレーズを
+    尋ねます）。`-` は標準入力（端末以外）を読みます。コメントと空行は読み飛ばし、
+    不正な行が 1 つでもあればその行を表示せずにファイル全体を拒否します。`-y` は
+    `-o` や `--passphrase` と併用できません。
 
 ## `list` の出力
 
@@ -222,7 +248,7 @@ identity は自分だけが読めて（`chmod 600`）自分の所有である必
 パスフレーズが唯一の防御となり、1 つのパスフレーズが*すべての*シークレットを
 守ることになります。長いパスフレーズ（または生成したもの）を使い、このトレード
 オフが許容できない場合はモデル A を使ってください。自動化用の無保護 identity は
-標準の `age-keygen` で作成します。Sinter は無保護の identity を生成しません。
+`sinter secrets keygen -o PATH`（または標準の `age-keygen`）で作成し、リポジトリ外に置きます。
 
 ## レシピでシークレットを使う
 

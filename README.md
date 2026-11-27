@@ -311,7 +311,9 @@ plans, applies or overwrites anything.
 
 Also since v1.2.0: `sinter secrets encrypt | decrypt | list`
 encrypts secret files in the standard age format (recipients or a terminal-only
-passphrase; identities outside the repository by default). A `file` resource can
+passphrase; identities outside the repository by default). `sinter secrets
+keygen -o FILE` (not released yet) creates the age identity itself, so no
+separate `age-keygen` is needed. A `file` resource can
 take its content from such a secret with `content: { secret: <path> }`, and a
 `user` can take its password hash from one with `password_hash: { secret: <path> }`
 (`validate` never decrypts; `plan`, `apply` and `audit` do; the hash needs `--sudo`).

@@ -207,11 +207,15 @@ compliant または drift です。そこにあるシンボリックリンクや
 sinter secrets encrypt [--passphrase | -r, --recipient <RECIPIENT>...] [-o, --output <OUT>] [-f, --force] <FILE | ->
 sinter secrets decrypt [-i, --identity <PATH>] <FILE>
 sinter secrets list    [--format text|json] [--recipe <FILE>...] [<PATH>...]
+sinter secrets keygen  -o, --output <OUT> [--passphrase]
+sinter secrets keygen  -y <IDENTITY | ->
 ```
 
 これらのフラグがインターフェースのすべてで、ほかの別名はありません。`secrets` は
 下の[ターゲットオプション](#ターゲットオプション)を受け付けず、その `--identity` は
-**age** の identity です（`decrypt` のみ）。動作、identity の探索、`list` の出力契約、
+**age** の identity です（`decrypt` のみ）。`keygen` は age の identity ファイルを
+作り（`-o` 必須。標準出力には書かず、既存ファイルは置き換えない）、`keygen -y` は
+その受信者を表示します。動作、identity の探索、`list` の出力契約、
 終了コードは [sinter secrets](/ja/reference/secrets/) に記載しています。
 
 上記のコマンドとの関係が 2 点あります。

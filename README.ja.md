@@ -295,7 +295,8 @@ v1.2.0以降、ローカルアカウント用の`group`と`user`の2種類があ
 
 また、v1.2.0以降は`sinter secrets encrypt | decrypt | list`があり、
 標準のage形式でシークレットファイルを暗号化します（受信者、または端末からのみ入力する
-パスフレーズ。identityは既定でリポジトリ外）。`file`リソースは
+パスフレーズ。identityは既定でリポジトリ外）。`sinter secrets keygen -o FILE`
+（未リリース）でageのidentity自体も作れるため、別途`age-keygen`は不要です。`file`リソースは
 `content: { secret: <path> }`でそのシークレットから内容を取れ、`user`は
 `password_hash: { secret: <path> }`でパスワードハッシュを取れます
 （`validate`は復号せず、`plan` / `apply` / `audit`が復号します。ハッシュには`--sudo`が必要です）。

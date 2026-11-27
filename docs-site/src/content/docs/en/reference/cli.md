@@ -240,11 +240,15 @@ candidate is not applied anywhere. Review it, then run `validate`, `plan` and
 sinter secrets encrypt [--passphrase | -r, --recipient <RECIPIENT>...] [-o, --output <OUT>] [-f, --force] <FILE | ->
 sinter secrets decrypt [-i, --identity <PATH>] <FILE>
 sinter secrets list    [--format text|json] [--recipe <FILE>...] [<PATH>...]
+sinter secrets keygen  -o, --output <OUT> [--passphrase]
+sinter secrets keygen  -y <IDENTITY | ->
 ```
 
 These flags are the whole interface; there are no other aliases. `secrets`
 does not take the [target options](#target-options) below, and its `--identity`
-is an **age** identity (`decrypt` only). Behavior, identity discovery, the
+is an **age** identity (`decrypt` only). `keygen` creates an age identity
+file (`-o` is required; never stdout, never replaced) and `keygen -y` prints
+its recipients. Behavior, identity discovery, the
 `list` output contract and exit codes are documented on
 [sinter secrets](/en/reference/secrets/).
 

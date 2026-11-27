@@ -1,4 +1,4 @@
-//! `sinter secrets encrypt | decrypt | list` (Phase B).
+//! `sinter secrets encrypt | decrypt | list | keygen` (Phase B; keygen §65).
 //!
 //! Operator-facing commands over the Phase A secret core ([`crate::secrets`]).
 //! These commands work on files; recipes use secrets through
@@ -11,7 +11,7 @@
 //!
 //! * `decrypt` writes plaintext to **stdout only**, and refuses a terminal.
 //!   No other command ever prints decrypted bytes, a passphrase or a private
-//!   identity.
+//!   identity; `keygen` writes a new private key only to a new 0600 file.
 //! * Passphrases come only from the controlling terminal (`/dev/tty`), with
 //!   echo off; never argv, environment or stdin.
 //! * Identities live outside the repository by default. A passphrase-protected
@@ -1029,35 +1029,7 @@ pub(crate) fn load_identity(
         Follow::Yes
     };
     let (bytes, md) = read_regular(path, follow, MAX_KEY_FILE_BYTES)?;
-    if is_age_prefix(&bytes) {
-        // Protected identity: must be a passphrase file, never a recipient file.
-        match secrets::inspect(&bytes) {
-            Ok(h) if h.method == Method::Passphrase => {}
-            _ => {
-                return Err(usage(format!(
-                    "{}: an encrypted identity must be protected by a passphrase",
-                    shown
-                )))
-            }
-        }
-        if !io.prompter.interactive() {
-            return Err(usage(format!(
-                "{} is passphrase-protected and there is no terminal to ask for the passphrase; \
-                 automation needs an unprotected identity kept outside the repository",
-                shown
-            )));
-        }
-        io.harden();
-        let pass = io
-            .prompter
-            .read_secret(&format!("Passphrase for {}: ", shown))
-            .map_err(|_| failure("could not read the passphrase from the terminal"))?;
-        let pass = Passphrase::for_decryption(pass.as_str().to_string());
-        keys.add_protected_identity(&bytes, &pass).map_err(|_| {
-            failure("could not unlock the identity (wrong passphrase, or the file is damaged)")
-        })?;
-        Ok(())
-    } else {
+    if !is_age_prefix(&bytes) {
         if origin == IdentityOrigin::Repository {
             return Err(usage(format!(
                 "{}: a plaintext identity inside a repository is never used automatically; \
@@ -1084,8 +1056,46 @@ pub(crate) fn load_identity(
                 shown
             )));
         }
-        keys.add_identity_file(&bytes)
-            .map_err(|e| secret_error(&shown, e))
+    }
+    load_identity_bytes(&bytes, &shown, keys, io)
+}
+
+/// Add the identities of identity text already read (`shown` names it in
+/// messages): a passphrase-protected identity is unlocked with a terminal
+/// passphrase, a plaintext one is parsed. Source checks (location, mode,
+/// owner) are the caller's.
+fn load_identity_bytes(bytes: &[u8], shown: &str, keys: &mut Keys, io: &mut Io<'_>) -> Result<()> {
+    if is_age_prefix(bytes) {
+        // Protected identity: must be a passphrase file, never a recipient file.
+        match secrets::inspect(bytes) {
+            Ok(h) if h.method == Method::Passphrase => {}
+            _ => {
+                return Err(usage(format!(
+                    "{}: an encrypted identity must be protected by a passphrase",
+                    shown
+                )))
+            }
+        }
+        if !io.prompter.interactive() {
+            return Err(usage(format!(
+                "{} is passphrase-protected and there is no terminal to ask for the passphrase; \
+                 automation needs an unprotected identity kept outside the repository",
+                shown
+            )));
+        }
+        io.harden();
+        let pass = io
+            .prompter
+            .read_secret(&format!("Passphrase for {}: ", shown))
+            .map_err(|_| failure("could not read the passphrase from the terminal"))?;
+        let pass = Passphrase::for_decryption(pass.as_str().to_string());
+        keys.add_protected_identity(bytes, &pass).map_err(|_| {
+            failure("could not unlock the identity (wrong passphrase, or the file is damaged)")
+        })?;
+        Ok(())
+    } else {
+        keys.add_identity_file(bytes)
+            .map_err(|e| secret_error(shown, e))
     }
 }
 
@@ -1143,6 +1153,200 @@ pub fn decrypt(args: &DecryptArgs, io: &mut Io<'_>) -> Result<u8> {
         secrets::decrypt(&ciphertext, &keys).map_err(|e| secret_error("cannot decrypt", e))?;
     io.stdout
         .write_all(plain.expose())
+        .and_then(|_| io.stdout.flush())
+        .map_err(|e| failure(format!("cannot write the output: {}", e.kind())))?;
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// keygen
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default)]
+pub struct KeygenArgs {
+    /// `-o OUT`: the new identity file. Required: a private key is never
+    /// written to stdout or a terminal.
+    pub output: Option<PathBuf>,
+    /// Protect the new identity with a terminal passphrase.
+    pub passphrase: bool,
+    /// `-y IDENTITY`: print the recipient of each identity in this file
+    /// (`-` reads a non-terminal stdin) instead of generating a key.
+    pub public: Option<PathBuf>,
+}
+
+/// A directory a private key may be created in: an existing directory owned
+/// by the effective user (or root) and not writable by group or others, so no
+/// other user can rename, remove or replace the new key (the rule of
+/// `sinter serve init`). Symbolic links in the path are resolved first.
+fn check_private_dir(dir: &Path, euid: u32) -> Result<()> {
+    let shown = show(dir);
+    let real = std::fs::canonicalize(dir)
+        .map_err(|_| usage(format!("{}: the output directory does not exist", shown)))?;
+    let md = std::fs::metadata(&real)
+        .map_err(|e| failure(format!("cannot inspect {}: {}", shown, e.kind())))?;
+    if !md.is_dir() {
+        return Err(usage(format!("{}: not a directory", shown)));
+    }
+    if md.uid() != euid && md.uid() != 0 {
+        return Err(usage(format!(
+            "{} is owned by another user; create the private key in a directory owned by you",
+            shown
+        )));
+    }
+    if md.mode() & 0o022 != 0 {
+        return Err(usage(format!(
+            "{} is writable by group or others; create the private key in a private directory",
+            shown
+        )));
+    }
+    Ok(())
+}
+
+/// Whether `dir` is inside a git work tree (a `.git` in it or above).
+fn inside_repository(dir: &Path) -> bool {
+    search_chain(dir)
+        .last()
+        .is_some_and(|d| d.join(".git").exists())
+}
+
+/// `sinter secrets keygen`: create a new age X25519 identity file (the
+/// age-keygen format: `# created:`, `# public key:` and the
+/// `AGE-SECRET-KEY-1…` line), plaintext or passphrase-protected, or with
+/// `-y` print the recipients of an existing one. The private key is written
+/// only to the new file (0600, exclusive create, never replacing anything);
+/// only public keys are printed.
+pub fn keygen(args: &KeygenArgs, io: &mut Io<'_>) -> Result<u8> {
+    if let Some(input) = &args.public {
+        if args.output.is_some() || args.passphrase {
+            return Err(usage("-y cannot be combined with -o or --passphrase"));
+        }
+        return keygen_public(input, io);
+    }
+    let out = match &args.output {
+        Some(o) if o.as_os_str() != "-" => o.clone(),
+        _ => {
+            return Err(usage(
+                "give the new identity file with -o; a private key is never written \
+                 to stdout or the terminal",
+            ))
+        }
+    };
+    let shown = show(&out);
+    if out.file_name().is_none() {
+        return Err(usage(format!("{}: not a file path", shown)));
+    }
+    // Fail early on an unusable output, before prompting or generating.
+    match std::fs::symlink_metadata(&out) {
+        Ok(md) if md.file_type().is_symlink() => {
+            return Err(usage(format!(
+                "{}: refusing to write through a symbolic link",
+                shown
+            )))
+        }
+        Ok(_) => {
+            return Err(usage(format!(
+                "{} already exists; an identity is never replaced (another key \
+                 there may still be needed to decrypt secrets)",
+                shown
+            )))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(failure(format!("cannot inspect {}: {}", shown, e.kind()))),
+    }
+    let dir = parent_dir(&out);
+    check_private_dir(&dir, io.env.euid)?;
+    if !args.passphrase {
+        if out.extension().is_some_and(|x| x == "age") {
+            io.note(&format!(
+                "warning: {} has the .age extension but will hold an unprotected private key",
+                shown
+            ));
+        }
+        if inside_repository(&dir) {
+            io.note(&format!(
+                "warning: {} is inside a git repository; never commit an unprotected private key \
+                 (use --passphrase, or keep it outside the repository)",
+                shown
+            ));
+        }
+    }
+    let passphrase = if args.passphrase {
+        Some(prompt_new_passphrase(io, "the private key")?)
+    } else {
+        None
+    };
+
+    io.harden();
+    let g = secrets::generate_identity();
+    let created = crate::discover::rfc3339(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    );
+    // Pre-sized so it never reallocates (no unzeroized partial copy).
+    let head = format!("# created: {}\n", created);
+    let mut text = Zeroizing::new(Vec::with_capacity(
+        head.len() + g.identity_file.expose().len(),
+    ));
+    text.extend_from_slice(head.as_bytes());
+    text.extend_from_slice(g.identity_file.expose());
+    drop(g.identity_file);
+    let text = secrets::Secret::new(std::mem::take(&mut *text));
+    let data: Zeroizing<Vec<u8>> = match &passphrase {
+        Some(p) => Zeroizing::new(
+            secrets::protect_identity(&text, p)
+                .map_err(|e| secret_error("cannot protect the identity", e))?,
+        ),
+        None => Zeroizing::new(text.expose().to_vec()),
+    };
+    drop(text);
+    drop(passphrase);
+    write_atomic(&out, &data, 0o600, false)?;
+    drop(data);
+    // The age-keygen line, on stderr like age-keygen with -o.
+    let _ = writeln!(io.stderr, "Public key: {}", g.recipient.to_text());
+    io.note(&format!(
+        "created the {}private key {} (mode 600); keep it secret and backed up -- \
+         a lost key cannot decrypt its secrets",
+        if args.passphrase {
+            "passphrase-protected "
+        } else {
+            ""
+        },
+        shown
+    ));
+    Ok(0)
+}
+
+/// `keygen -y`: the recipient of each identity, one per line on stdout.
+fn keygen_public(input: &Path, io: &mut Io<'_>) -> Result<u8> {
+    let mut keys = Keys::new();
+    if input.as_os_str() == "-" {
+        if io.stdin_is_tty {
+            return Err(usage(
+                "stdin is a terminal; pipe the identity in or name the identity file",
+            ));
+        }
+        io.harden();
+        let bytes = read_stream(io.stdin, MAX_KEY_FILE_BYTES, "the identity")?;
+        load_identity_bytes(&bytes, "the identity on stdin", &mut keys, io)?;
+    } else {
+        if looks_like_key_material(input.as_os_str()) {
+            return Err(usage(
+                "-y must be the path of an identity file, not the key itself",
+            ));
+        }
+        io.harden();
+        load_identity(input, IdentityOrigin::Flag, &mut keys, io)?;
+    }
+    let mut text = String::new();
+    for r in keys.recipients() {
+        text.push_str(&r.to_text());
+        text.push('\n');
+    }
+    io.stdout
+        .write_all(text.as_bytes())
         .and_then(|_| io.stdout.flush())
         .map_err(|e| failure(format!("cannot write the output: {}", e.kind())))?;
     Ok(0)

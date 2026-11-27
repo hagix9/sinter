@@ -345,6 +345,15 @@ impl Keys {
         Ok(())
     }
 
+    /// The recipient (public key) of each identity, in the order they were
+    /// added (`sinter secrets keygen -y`). Public data only.
+    pub fn recipients(&self) -> Vec<Recipient> {
+        self.identities
+            .iter()
+            .map(|id| Recipient(id.to_public()))
+            .collect()
+    }
+
     pub fn set_passphrase(&mut self, passphrase: Passphrase) {
         self.passphrase = Some(passphrase);
     }
@@ -1074,6 +1083,29 @@ mod tests {
             parse_recipients(&many).unwrap_err(),
             SecretError::TooManyRecipients
         );
+    }
+
+    #[test]
+    fn recipients_are_derived_from_each_identity_in_order() {
+        let a = generate_identity();
+        let b = generate_identity();
+        let mut k = Keys::new();
+        let mut both = a.identity_file.expose().to_vec();
+        both.extend_from_slice(b"\n# another key\n\n");
+        both.extend_from_slice(b.identity_file.expose());
+        k.add_identity_file(&both).unwrap();
+        let got: Vec<String> = k.recipients().iter().map(Recipient::to_text).collect();
+        assert_eq!(got, vec![a.recipient.to_text(), b.recipient.to_text()]);
+        // The library's own parser reads the generated text (format interop).
+        let line = std::str::from_utf8(a.identity_file.expose())
+            .unwrap()
+            .lines()
+            .find(|l| l.starts_with("AGE-SECRET-KEY-1"))
+            .unwrap()
+            .to_string();
+        let parsed = x25519::Identity::from_str(&line).unwrap();
+        assert_eq!(parsed.to_public().to_string(), a.recipient.to_text());
+        assert!(Keys::new().recipients().is_empty());
     }
 
     #[test]

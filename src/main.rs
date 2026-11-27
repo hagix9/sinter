@@ -314,6 +314,30 @@ enum SecretsCommand {
     Decrypt(SecretsDecryptArgs),
     /// List age files (derived from the files; nothing is decrypted).
     List(SecretsListArgs),
+    /// Generate a new age identity (private key) file, like age-keygen.
+    ///
+    /// The key goes only to the new file given with -o (mode 600, never
+    /// replacing an existing file); "Public key: age1..." is printed on
+    /// stderr. With --passphrase the file is protected by a passphrase typed
+    /// on the terminal. With -y, print the public key (recipient) of each
+    /// identity in an existing identity file instead.
+    Keygen(SecretsKeygenArgs),
+}
+
+#[derive(Args, Debug)]
+struct SecretsKeygenArgs {
+    /// New identity file (required; never stdout, never replaced).
+    #[arg(short = 'o', long, value_name = "OUT", conflicts_with = "public")]
+    output: Option<PathBuf>,
+    /// Protect the new identity with a passphrase typed on the terminal
+    /// (never argv, env or stdin).
+    #[arg(long, conflicts_with = "public")]
+    passphrase: bool,
+    /// Print the recipient of each identity in IDENTITY (`-` for stdin), one
+    /// per line, and generate nothing. A protected identity asks for its
+    /// passphrase on the terminal.
+    #[arg(short = 'y', value_name = "IDENTITY")]
+    public: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -1652,6 +1676,14 @@ fn secrets_command(a: SecretsArgs) -> Result<u8, SinterError> {
             &sc::DecryptArgs {
                 file: d.file,
                 identity: d.identity,
+            },
+            &mut io,
+        ),
+        SecretsCommand::Keygen(k) => sc::keygen(
+            &sc::KeygenArgs {
+                output: k.output,
+                passphrase: k.passphrase,
+                public: k.public,
             },
             &mut io,
         ),
@@ -7986,6 +8018,28 @@ mod tests {
         // `secrets decrypt -i` and `encrypt -f` keep their own meaning.
         assert!(Cli::try_parse_from(["sinter", "secrets", "decrypt", "f", "-i", "k"]).is_ok());
         assert!(Cli::try_parse_from(["sinter", "secrets", "encrypt", "f", "-f"]).is_ok());
+        // `secrets keygen`: -o / --passphrase / -y, no --force, -y excludes the others.
+        for ok in [
+            &["-o", "k"][..],
+            &["--passphrase", "-o", "k"],
+            &["-y", "k"],
+            &["-y", "-"],
+            &[],
+        ] {
+            let mut v = vec!["sinter", "secrets", "keygen"];
+            v.extend_from_slice(ok);
+            assert!(Cli::try_parse_from(&v).is_ok(), "{v:?}");
+        }
+        for bad in [
+            &["-o", "k", "-f"][..],
+            &["-o", "k", "--force"],
+            &["-y", "k", "-o", "x"],
+            &["-y", "k", "--passphrase"],
+        ] {
+            let mut v = vec!["sinter", "secrets", "keygen"];
+            v.extend_from_slice(bad);
+            assert!(Cli::try_parse_from(&v).is_err(), "{v:?}");
+        }
     }
 
     #[test]

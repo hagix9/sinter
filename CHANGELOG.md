@@ -70,6 +70,13 @@ Linux hosts except where it says so.
   `resources: [id, ...]`.
 - `examples/bundles/postgresql-pgdg17`: PostgreSQL 17 as a bundle of seven
   recipes that plans and audits on a fresh host.
+- **`sinter secrets keygen`**: creates an age X25519 identity in the
+  age-keygen format (`-o OUT`, mode `0600`, never replacing an existing file;
+  `--passphrase` protects it with a terminal passphrase) and prints only
+  `Public key: age1...` on stderr. `-y IDENTITY` (or `-y -`) prints the
+  recipient of each identity in a file, plaintext or passphrase-protected.
+  A private key is never written to stdout; no `age-keygen` is needed. Not an
+  MCP tool.
 
 ### Changed
 
