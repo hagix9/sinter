@@ -4703,3 +4703,22 @@ Changes proposed through the tunnel and the execution of approved changes are AD
 65.7 MCP. Not an MCP tool, not reachable through `sinter serve` or the tunnel; the read-only MCP boundary (§41) is unchanged (tested: no tool name mentions a key or secret).
 
 65.8 Verification. Library and binary tests (`tests/secrets_keygen.rs`) with synthetic keys only: format, mode, `-y` = printed key, encrypt/decrypt round trip (also through a `recipients.txt` made from `-y`), the passphrase variant on a real pseudo-terminal, every refusal above. Format interop is checked with the age crate's own parser (`age::x25519::Identity::from_str`); a cross-check against the `age`/`age-keygen` binaries was NOT performed (not installed on the development machine).
+
+66. Future: strengthening the Resource Plugin platform (recorded 2026-11-27, Owner direction; NOT DESIGNED FOR IMPLEMENTATION)
+
+A direction, not a design: nothing here is scheduled, specified or implemented, no version number is fixed, and no recipe, CLI, output, plugin or MCP contract changes. It sits beside the other recorded futures (§1.4 Resource Plugin candidates and FR-025/FR-067, §58 `kernel_args`/`grub`, §64 tunnel W1/W2 and MCP Skills in ADR 0002 §19), which stay as recorded.
+
+66.1 Division of work. Basic OS configuration stays with built-in (native) resources. Middleware-specific configuration is to be served by Resource Plugins first, so that Core does not accumulate product-specific code.
+
+66.2 Proving products. Four products are to drive a general plugin platform: Samba, Apache HTTP Server, Nginx and MariaDB. Through them the following common capabilities are to be examined (each one a question for a later design, not a promise):
+
+- INI-style configuration (sections, keys, repeated keys); hierarchical configuration blocks (Apache `<Directory>`/`<VirtualHost>`, Nginx `server`/`location`);
+- keeping unmanaged settings, partial update of a declared part, syntax validation by the product's own checker before publication, atomic update;
+- observing state and turning it into structured data; comparing state; typed change operations;
+- state management through SQL or similar interfaces only in a safe, typed form (MariaDB users, grants, databases);
+- handler integration (reload/restart after a validated change), backup and recovery, secret protection, absorbing OS differences (paths, unit names, package names);
+- tools to develop and verify a plugin.
+
+66.3 Generality target. A fifth product (for example Squid) is to be added as a plugin without changing Sinter's Rust code; that is the measure of whether the platform is general.
+
+66.4 Constraints that any later design must keep. The safety of the existing plugin platform (§38: data-only plugins, fixed observation and mutation forms, the trust file) and the read-only MCP boundary (§41) are not weakened. The platform must not become a general execution mechanism: no arbitrary shell, no arbitrary SQL, no privilege escalation, no unrestricted file access. Product-specific logic is not to be embedded in Core in bulk. Any design needs its own Owner approval, independent audit and real-host acceptance.
