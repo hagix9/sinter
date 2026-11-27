@@ -3586,6 +3586,15 @@ The rule. In plan, what the recipes of a bundle planned so far for one host is c
 
 What it is not. A resource merely existing in an earlier recipe defers nothing: the earlier resource must be planned to change (or be undecidable), and an account or unit must be confirmed missing. An already installed package, an unchanged file or a `state: absent` producer carries nothing. Nothing is carried between hosts: the carry is keyed by host, and a host is planned only against its own earlier recipes. Nothing is carried into a recipe planned on its own, into apply, or into audit. Apply is unchanged: every recipe re-observes the host and runs every check, so a deferral that turns out wrong is an apply failure of that resource, never a skipped check. A recipe whose plan did not complete for a host has unknown changes: later recipes on that host are planned as after an unknown change, and the run still ends with that recipe's plan error (exit 4). `--skip-recipe` and `--limit` are respected: a recipe that is not planned for a host carries nothing for it. Variables (`recipe_vars`, variables files, inventory layers) are frozen per (recipe, host) before any connection as before (§19.5); the carry holds no variable and no value of any field, only resource ids, recipe labels, paths and account names.
 
+What a carried deferral looks like (clarified for v1.16.0 RC 3; the behaviour is unchanged). The plan result keeps the four cases apart, the same way inside one recipe and across recipes:
+
+- Decided change: plan observed the resource and knows what apply will do (for example a file that is absent, with declared content): `change` is the planned change, `unknown: false`.
+- Decided change whose pre-check waits: as above, but a read-only check apply repeats before the mutation (the parent path check of §23, an emptiness or replacement check) would refuse now, and an earlier planned change may alter what it saw (for example the parent directory an earlier recipe creates). The change stands with `unknown: false` and the note "parent path check deferred to apply: … (<resource> (recipe <label>))"; apply runs the check.
+- Undecided: plan could not observe or decide the resource (an observation refused for a reason an earlier change may remove, an account or unit still to be created, a tool an earlier change may install, an earlier opaque change): `unknown: true`, with the reason, and apply decides.
+- The carry note alone (which earlier resource and recipe) is not a state: it is attached to the result of either of the two deferring cases.
+
+So a file below a directory an earlier recipe plans to create is a decided change with a note, while a resource whose owner account an earlier recipe creates is `unknown` (§14). RC 2's acceptance check `v116-bundle-nested` expected `unknown: true` for the first case; the harness expectation was wrong and is corrected (the product and its unit tests were already consistent with §29).
+
 Limits. An approval requested from the plan of a bundle (§43.4) is compared with a re-plan made at apply after the earlier recipes ran; a resource the bundle plan deferred may then be decided, and the digests differ. That is the existing behaviour for anything that changes between plan and apply; approvals for a bundle are best requested per recipe once the earlier recipes are applied. The carry is not available over MCP (MCP plans one recipe).
 
 49.2 `creates_accounts` on `package`
@@ -4307,6 +4316,11 @@ Tool absent, an unreadable or malformed state file, a failed service observation
 - The unit name `tuned.service` on Ubuntu, and that `ActiveState=active` is the right test for "TuneD applies the profile".
 - Real-host behaviour of the deferral in plan (a package that brings `tuned-adm`, a `service` that starts TuneD) followed by apply in the same run.
 
+57.10 Measured in the v1.16.0 RC 2 acceptance (Ubuntu 24.04, GCE, 2026-11-27) and the RC 3 acceptance check
+
+- The product behaved as 57.5/57.6 say: after selecting `balanced` with `verify: true`, `tuned-adm verify` reported "differs"; apply failed with the change reported (exit 5) and audit reported drift (exit 7). Whether a profile verifies depends on TuneD, the profile and the virtual machine; it is not a property Sinter can promise, and RC 2's acceptance check wrongly assumed that it always verifies.
+- From RC 3 the acceptance check `v116-tuned-verify` asks `tuned-adm verify` itself, right after the apply and again after the audit, and accepts exactly two outcomes: both answers 0 and the product reports applied (apply exit 0 with the verify note, audit compliant with the verify reason), or both answers 1 and the product reports not applied (apply exit 5 with execution failed, change changed, verification failed and the "differs" reason; audit exit 7 with exactly the `applied` dimension as drift). Different answers, any other exit code (no answer, timeout) or a product report that does not match the independent answer fail the check. Which outcome a host gives is recorded in the evidence. The outcome a real host does not give stays covered by the scripted tests only (`tests/tuned.rs`: verify after a change, not applied, no answer, audit's `applied` dimension).
+
 58. Boot configuration: `kernel_args` and `grub` (DESIGN ONLY; NOT IMPLEMENTED)
 
 Status: PROPOSED design, recorded 2026-11-26 on the Owner's request for dedicated OS base-setting resources. Nothing of this section is implemented. It is not implemented in this development round because a wrong change can leave a host unable to boot, and the verification it needs (a change, a regeneration of the boot configuration and a reboot, on disposable hosts of every supported OS, BIOS and UEFI) is outside what this round may do (no cloud hosts, no reboot of a real host). The only measurement so far is read-only, on one Rocky Linux 10.2 UEFI host: `/proc/cmdline`; `grubby --default-kernel` and `grubby --info=DEFAULT` (root needed; an `args="…"` line and a separate `root="…"` line); `/etc/default/grub` with `GRUB_ENABLE_BLSCFG=true`, `GRUB_TIMEOUT=1` and the arguments in `GRUB_CMDLINE_LINUX_DEFAULT`; no `/etc/kernel/cmdline`; `/boot/loader/entries` readable by root only.
@@ -4443,11 +4457,22 @@ Unknown fields are refused. A recipe may hold one `locale` resource (load-time o
 
 61.3 Where the default lives
 
-By `Facts::os_family` (the family Sinter already derives from `/etc/os-release`): `redhat` -> `/etc/locale.conf` (measured on Rocky Linux 10.2: `LANG=en_US.UTF-8\n`; `/etc/default/locale` absent); `debian` -> `/etc/default/locale` (NOT measured). Any other family: plan, apply and audit refuse with "locale is not supported on this host: Sinter knows where the default locale is kept only on the Red Hat family … and the Debian family …".
+By `Facts::os_family` (the family Sinter already derives from `/etc/os-release`): `redhat` -> `/etc/locale.conf` (measured on Rocky Linux 10.2: `LANG=en_US.UTF-8\n`; `/etc/default/locale` absent); `debian` -> `/etc/default/locale`. Measured on Ubuntu 24.04 (GCE image, v1.16.0 RC 2 acceptance, 2026-11-27): `/etc/default/locale` is the link `../locale.conf` and the values live in `/etc/locale.conf` (61.4a). Any other family: plan, apply and audit refuse with "locale is not supported on this host: Sinter knows where the default locale is kept only on the Red Hat family … and the Debian family …".
 
 61.4 Observation (read-only)
 
-- The file through `Engine::partial_observe` (plan, apply) or `audit::audit_partial_read` (audit): parent gate of §23, `lstat` never followed (a symlink is refused), at most 256 KiB, length and hard-link re-checks. Absent: no key is set.
+- The file through `Engine::partial_observe` (plan, apply) or `audit::audit_partial_read` (audit): parent gate of §23, `lstat` never followed (a symlink is refused, except the one link of 61.4a), at most 256 KiB, length and hard-link re-checks. Absent: no key is set.
+
+61.4a The Debian family's link (v1.16.0 RC 3)
+
+RC 2's acceptance on Ubuntu 24.04 failed because `/etc/default/locale` is a symbolic link there and 61.4 refused every link. The general refusal stays; exactly one OS layout is accepted:
+
+- Only on the Debian family, only for `/etc/default/locale`, and only when `lstat` shows a symbolic link owned by root whose text is exactly `../locale.conf` or `/etc/locale.conf` (`locale::DEBIAN_LINKS`; both name `/etc/locale.conf` from `/etc/default`). The text is compared as a string: no resolution, no canonicalisation, so `locale.conf`, `/etc/./locale.conf`, `../../etc/locale.conf` or any other text is refused ("… is a symlink to another target; Sinter follows it only when it is the OS's own link …"), and so is the known text owned by another account. The parent gate of §23 applies to `/etc/default` as to every observation.
+- Then `/etc/locale.conf` is observed exactly as in 61.4: a regular file with one name, or absent (a dangling link: no key is set). A link there is refused, so there is never a chain; another object type is refused.
+- The link is observed again (`lstat`, `readlink`) after the read; a link replaced, retargeted or re-owned meanwhile is an error ("… changed while it was read"), never a value.
+- The same rules hold in plan, apply and audit (audit through `audit::audit_link_observe`). Ownership (§59) is unchanged: the type owns both paths on every OS, so no `file`, `link` or partial-edit resource can manage either beside it; `file` and the partial-edit types still refuse every symbolic link.
+- Apply: after `localectl`, the layout is observed again. When it is not the one observed before (the link was replaced by a file, removed, retargeted, or a link appeared), the default may now be kept in two places: the resource fails (execution failed, change changed, verification failed: "localectl changed how /etc/default/locale is kept: before …, now …; Sinter does not restore it"). Sinter never writes either file. With the layout unchanged, the values are checked in the file that was read (`/etc/locale.conf` through the link).
+- A sensitive resource names neither the link text nor a value (the existing withholding).
 - A closed parser: lines `KEY=value` or `KEY="value"` (`KEY` `[A-Z_][A-Z0-9_]*`; the value printable ASCII without `"`, `'`, `\`, `$`, backtick, `#`, `;`, `&`, `|`, and without spaces unless quoted), blank lines, lines whose first non-blank character is `#`. A duplicate key, single quotes, `export`, a trailing comment, a carriage return, invalid UTF-8 or anything else is an observation error ("… is not understood"): never "not set", never drift. Keys outside the declared ones are read (to keep the parse closed) but never compared.
 - Values are compared exactly (`en_US.utf8` in the file differs from a declared `en_US.UTF-8`, and the change writes the declared spelling).
 
@@ -4495,7 +4520,7 @@ Audit: one dimension per declared key that differs (`LANG`, `LC_TIME`, …; obse
 
 Exercised against the scripted target only, plus the read-only measurement of 61.3/61.5 on Rocky Linux 10.2. Assumed and to be measured on Ubuntu 24.04/26.04 and Rocky Linux / RHEL / AlmaLinux 9/10:
 
-- Ubuntu keeps the default in `/etc/default/locale`, and `localectl set-locale` (systemd-localed with the Debian patch) writes there, in a form inside the closed grammar.
+- Ubuntu 24.04/26.04: that `localectl set-locale` writes `/etc/locale.conf` and keeps the link `/etc/default/locale -> ../locale.conf` (61.4a; if it replaces the link, the resource fails as described there), in a form inside the closed grammar. Ubuntu 26.04 and Debian are assumed to use either the same link or a regular `/etc/default/locale`; both are handled, nothing else is.
 - `localectl set-locale LANG=… LC_TIME=…` exits 0 and writes exactly the given keys; whether it keeps keys it is not given, and comments, on each OS; its exit code and message for an unknown locale and as a non-root user.
 - `locale -a` exits 0 with one name per line on every OS; codesets are printed as `utf8` (measured on Rocky 10.2 only).
 - Behaviour in containers without `systemd-localed`.

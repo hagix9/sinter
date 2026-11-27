@@ -4776,6 +4776,38 @@ mod tests {
         );
     }
 
+    /// The same bundle when the accounts exist already (RC 3, acceptance
+    /// v116-pg-plan): nothing is deferred for an account, so the directory
+    /// and the file below the package's data directory are decided changes
+    /// whose parent path check waits for apply (a note, not unknown). The
+    /// unit still waits for the package.
+    #[test]
+    fn with_existing_accounts_only_the_parent_check_waits_for_the_package() {
+        let dir = fixture();
+        let bundle = pg_bundle(&dir, PG_PACKAGE);
+        let host = || {
+            fresh_el9().with_group("postgres", 26).with_user(
+                "postgres",
+                26,
+                26,
+                "/var/lib/pgsql",
+                "/bin/bash",
+            )
+        };
+        let (code, rows) = drive_results(
+            Phase::Plan,
+            &[&bundle, "--format", "json"],
+            vec![host(), host(), host(), host()],
+        );
+        assert_eq!(code.unwrap(), 0, "{rows:?}");
+        for id in ["04_directory@localhost:conf_d", "05_config@localhost:site"] {
+            let r = result(&rows, id);
+            assert!(!r.1, "{r:?}");
+            assert!(r.2.contains("parent path check deferred to apply"), "{r:?}");
+        }
+        assert!(result(&rows, "07_service@localhost:db").1);
+    }
+
     #[test]
     fn without_creates_accounts_a_package_created_account_is_still_a_plan_error() {
         // DESIGN §14: an account is never guessed from a package. The error
@@ -4912,6 +4944,42 @@ mod tests {
         assert_eq!(code.unwrap(), 0, "{rows:?}");
         let f = result(&rows, "02_file@localhost:f");
         assert!(f.2.contains("d (recipe 01_dir)"), "{f:?}");
+    }
+
+    /// DESIGN §29 / §49.1 (v1.16.0 RC 3, acceptance v116-bundle-nested): a
+    /// file whose parent directory an earlier recipe plans to create is a
+    /// planned change whose content is decided (the file is absent, the
+    /// declared content is known); only the parent path check waits for
+    /// apply. That is a change with a note, not `unknown`. `unknown` is kept
+    /// for a resource plan could not observe or decide (a refused
+    /// observation, an account or unit still to be created, an opaque
+    /// earlier change).
+    #[test]
+    fn a_file_below_a_directory_an_earlier_recipe_creates_is_a_known_change_with_a_note() {
+        let dir = fixture();
+        write(&dir, "01_dir.yaml", "version: 1\nresources:\n  - id: d\n    type: directory\n    with:\n      path: /srv/nest\n");
+        write(&dir, "02_file.yaml", "version: 1\nresources:\n  - id: f\n    type: file\n    with:\n      path: /srv/nest/a.conf\n      content: x\n");
+        write(&dir, "03_file.yaml", "version: 1\nresources:\n  - id: g\n    type: file\n    with:\n      path: /srv/nest/b.conf\n      content: y\n");
+        let bundle = write(
+            &dir,
+            "site.yaml",
+            "version: 1\nrecipes: [01_dir.yaml, 02_file.yaml, 03_file.yaml]\n",
+        );
+        let host = || fresh_el9().with_fs_dir("/srv");
+        let (code, rows) = drive_results(
+            Phase::Plan,
+            &[&bundle, "--format", "json"],
+            vec![host(), host(), host()],
+        );
+        assert_eq!(code.unwrap(), 0, "{rows:?}");
+        let d = result(&rows, "01_dir@localhost:d");
+        assert!(!d.1, "{d:?}");
+        for id in ["02_file@localhost:f", "03_file@localhost:g"] {
+            let f = result(&rows, id);
+            assert!(!f.1, "a decided change is not unknown: {f:?}");
+            assert!(f.2.contains("parent path check deferred to apply"), "{f:?}");
+            assert!(f.2.contains("d (recipe 01_dir)"), "{f:?}");
+        }
     }
 
     #[test]
