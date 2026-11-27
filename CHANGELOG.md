@@ -93,6 +93,15 @@ Linux hosts except where it says so.
 
 ### Fixed
 
+- **`locale` on Ubuntu 24.04 and later.** These releases ship
+  `/etc/default/locale` as a link to `../locale.conf`, and `locale` refused
+  every link, so plan, apply and audit failed there (found by the v1.16.0
+  RC 2 acceptance). Sinter now follows exactly that link: owned by root, text
+  `../locale.conf` or `/etc/locale.conf`, to a regular (or absent)
+  `/etc/locale.conf`; it checks the link again after reading and fails the
+  apply if `localectl` replaces it. Every other link is still refused, and
+  `file` and the partial-edit types are unchanged.
+
 - `systemd_timer` (released in v1.15.0) showed a value that came from a
   sensitive variable in the text diff of `plan` when the unit file differed;
   it is now redacted. The same applied to the new `sysctl`. JSON output,

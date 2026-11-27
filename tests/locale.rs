@@ -14,7 +14,7 @@ mod common;
 use common::*;
 use sinter::audit::{AuditReport, AuditResourceStatus};
 use sinter::engine::{AggregateStatus, Mode, RunReport};
-use sinter::executor::FakeTarget;
+use sinter::executor::{FakeTarget, FsEventAction};
 use sinter::fake_el::FakeChange;
 use sinter::fake_host::FakeRead;
 use sinter::output::{OutputFormat, RenderOptions};
@@ -787,4 +787,223 @@ fn a_sensitive_resource_names_no_value_in_any_output() {
         texts.push(String::from_utf8_lossy(&b).to_string());
     }
     leaks(texts, "audit");
+}
+
+// ---------------------------------------------------------------------------
+// the Debian family's link to /etc/locale.conf (DESIGN §61, v1.16.0 RC 3:
+// Ubuntu 24.04 ships /etc/default/locale -> ../locale.conf)
+// ---------------------------------------------------------------------------
+
+fn ubuntu_linked(content: Option<&str>, link: &str, writes: &str) -> FakeTarget {
+    FakeTarget::ubuntu2404()
+        .with_fake_fs()
+        .as_root()
+        .with_locales_linked(LOCALES, content, link, writes)
+}
+
+fn link_after(rep: &RunReport) -> Option<String> {
+    match rep
+        .fake_fs
+        .as_ref()
+        .unwrap()
+        .nodes
+        .get(DEB)
+        .map(|n| &n.kind)
+    {
+        Some(sinter::fakesys::FakeKind::Symlink(t)) => Some(t.clone()),
+        _ => None,
+    }
+}
+
+#[test]
+fn the_os_link_to_etc_locale_conf_is_followed_and_kept() {
+    let r = recipe("lo-link", &lang("ja_JP.UTF-8"));
+    for link in ["../locale.conf", "/etc/locale.conf"] {
+        let t = ubuntu_linked(Some("LANG=C.UTF-8\n"), link, RHEL);
+        let p = plan(&r, t.clone());
+        assert_success(&p);
+        assert_eq!(find(&p, "l").change, Change::Changed, "{link}");
+        assert!(sets(&t).is_empty(), "plan ran localectl");
+        let rep = apply(&r, t.clone());
+        assert_success(&rep);
+        let l = find(&rep, "l");
+        assert_eq!(l.verification, Verification::Verified, "{link} {:?}", l);
+        assert_eq!(link_after(&rep).as_deref(), Some(link), "the link is kept");
+        assert!(file_after(&rep, RHEL).unwrap().contains("LANG=ja_JP.UTF-8"));
+        // Already set through the link: unchanged, compliant.
+        let t2 = ubuntu_linked(Some("LANG=ja_JP.UTF-8\n"), link, RHEL);
+        let rep = apply(&r, t2.clone());
+        assert_eq!(find(&rep, "l").change, Change::None, "{link}");
+        let a = audit(&r, t2);
+        assert_eq!(
+            a.resources[0].status,
+            AuditResourceStatus::Compliant,
+            "{link}"
+        );
+        let a = audit(&r, ubuntu_linked(Some("LANG=C.UTF-8\n"), link, RHEL));
+        assert_eq!(a.resources[0].status, AuditResourceStatus::Drift, "{link}");
+    }
+}
+
+#[test]
+fn a_dangling_os_link_sets_no_key_and_the_tool_creates_the_file() {
+    let r = recipe("lo-link-dangling", &lang("ja_JP.UTF-8"));
+    let t = ubuntu_linked(None, "../locale.conf", RHEL);
+    let rep = apply(&r, t);
+    assert_success(&rep);
+    assert_eq!(link_after(&rep).as_deref(), Some("../locale.conf"));
+    assert!(file_after(&rep, RHEL).unwrap().contains("LANG=ja_JP.UTF-8"));
+}
+
+#[test]
+fn any_other_link_is_refused_in_plan_apply_and_audit() {
+    let r = recipe("lo-link-other", &lang("ja_JP.UTF-8"));
+    // another target, also one that names the same file another way
+    for link in [
+        "/etc/locale.real",
+        "locale.conf",
+        "../../etc/locale.conf",
+        "/etc/./locale.conf",
+        "../default/locale",
+    ] {
+        let mut t = ubuntu_linked(Some("LANG=C.UTF-8\n"), link, RHEL);
+        t.fs.as_mut()
+            .unwrap()
+            .put_file("/etc/locale.real", b"LANG=C.UTF-8\n", 0o644, 0, 0);
+        for mode in [Mode::Plan, Mode::Apply] {
+            let why = refused(&r, mode, t.clone());
+            assert!(why.contains("to another target"), "{link} {mode:?}: {why}");
+        }
+        let a = audit(&r, t);
+        assert_eq!(a.resources[0].status, AuditResourceStatus::Error, "{link}");
+    }
+    // the known text, owned by another account
+    let mut t = ubuntu_linked(Some("LANG=C.UTF-8\n"), "../locale.conf", RHEL);
+    t.fs.as_mut()
+        .unwrap()
+        .put_symlink(DEB, "../locale.conf", 1000, 1000);
+    let why = refused(&r, Mode::Apply, t.clone());
+    assert!(why.contains("not owned by root"), "{why}");
+    assert_eq!(audit(&r, t).resources[0].status, AuditResourceStatus::Error);
+    // a chain: /etc/locale.conf is itself a link
+    let mut t = ubuntu_linked(None, "../locale.conf", RHEL);
+    t.fs.as_mut()
+        .unwrap()
+        .put_file("/etc/locale.real", b"LANG=C.UTF-8\n", 0o644, 0, 0);
+    t.fs.as_mut()
+        .unwrap()
+        .put_symlink(RHEL, "/etc/locale.real", 0, 0);
+    let why = refused(&r, Mode::Apply, t.clone());
+    assert!(why.contains("symlink"), "{why}");
+    assert_eq!(audit(&r, t).resources[0].status, AuditResourceStatus::Error);
+    // /etc/locale.conf is another object type
+    let mut t = ubuntu_linked(None, "../locale.conf", RHEL);
+    t.fs.as_mut().unwrap().mkdir_node(RHEL, 0o755, 0, 0);
+    let why = refused(&r, Mode::Plan, t);
+    assert!(why.contains(RHEL), "{why}");
+    // a parent another account controls is not looked into
+    let mut t = ubuntu_linked(Some("LANG=C.UTF-8\n"), "../locale.conf", RHEL);
+    t.fs.as_mut()
+        .unwrap()
+        .mkdir_node("/etc/default", 0o777, 1000, 1000);
+    let why = refused(&r, Mode::Plan, t);
+    assert!(why.contains("/etc/default"), "{why}");
+}
+
+#[test]
+fn a_link_retargeted_while_it_is_read_is_refused() {
+    let r = recipe("lo-link-race", &lang("ja_JP.UTF-8"));
+    let t = ubuntu_linked(Some("LANG=C.UTF-8\n"), "../locale.conf", RHEL).with_fs_event(
+        "readlink",
+        DEB,
+        1,
+        vec![FsEventAction::PutSymlink {
+            path: DEB.into(),
+            target: "/etc/locale.real".into(),
+            uid: 0,
+            gid: 0,
+        }],
+    );
+    // (the event itself changes the filesystem, so `refused` is not used)
+    let rep = try_run_recipe_fake(&r, Mode::Apply, false, t.clone()).unwrap();
+    assert_ne!(rep.status, AggregateStatus::Success);
+    assert_eq!(find(&rep, "l").change, Change::None);
+    assert!(sets(&t).is_empty(), "localectl ran");
+    let why = reason(&rep);
+    assert!(why.contains("changed while it was read"), "{why}");
+}
+
+#[test]
+fn a_tool_that_replaces_the_os_link_is_a_failure_not_success() {
+    let r = recipe("lo-link-replaced", &lang("ja_JP.UTF-8"));
+    let t = ubuntu_linked(Some("LANG=C.UTF-8\n"), "../locale.conf", DEB);
+    let rep = apply(&r, t);
+    let l = find(&rep, "l");
+    assert_eq!(l.execution, Execution::Failed, "{l:?}");
+    assert_eq!(l.change, Change::Changed);
+    assert_eq!(l.verification, Verification::Failed);
+    let why = l.reason.clone().unwrap_or_default();
+    assert!(
+        why.contains("localectl changed how /etc/default/locale is kept"),
+        "{why}"
+    );
+    assert!(link_after(&rep).is_none());
+}
+
+#[test]
+fn a_sensitive_resource_names_no_link_and_no_value() {
+    let r = recipe(
+        "lo-link-sens",
+        "version: 1\nresources:\n  - id: l\n    type: locale\n    sensitive: true\n    with:\n      lang: ja_JP.UTF-8\n",
+    );
+    let mut t = ubuntu_linked(Some("LANG=C.UTF-8\n"), "/etc/locale.real", RHEL);
+    t.fs.as_mut()
+        .unwrap()
+        .put_file("/etc/locale.real", b"LANG=C.UTF-8\n", 0o644, 0, 0);
+    let why = refused(&r, Mode::Apply, t);
+    assert!(why.contains("details withheld"), "{why}");
+    assert!(
+        !why.contains("locale.real") && !why.contains("ja_JP"),
+        "{why}"
+    );
+}
+
+#[test]
+fn a_replaced_link_of_a_sensitive_resource_names_no_link() {
+    let r = recipe(
+        "lo-link-sens-replaced",
+        "version: 1\nresources:\n  - id: l\n    type: locale\n    sensitive: true\n    with:\n      lang: ja_JP.UTF-8\n",
+    );
+    let rep = apply(
+        &r,
+        ubuntu_linked(Some("LANG=C.UTF-8\n"), "../locale.conf", DEB),
+    );
+    let l = find(&rep, "l");
+    assert_eq!(l.verification, Verification::Failed);
+    let why = l.reason.clone().unwrap_or_default();
+    assert!(why.contains("details withheld"), "{why}");
+    assert!(
+        !why.contains("../locale.conf") && !why.contains("ja_JP"),
+        "{why}"
+    );
+}
+
+#[test]
+fn a_linked_locale_conf_with_a_second_hard_link_is_refused() {
+    let r = recipe("lo-link-hard", &lang("ja_JP.UTF-8"));
+    let mk = || {
+        let mut t = ubuntu_linked(Some("LANG=C.UTF-8\n"), "../locale.conf", RHEL);
+        t.fs.as_mut()
+            .unwrap()
+            .put_hardlink(RHEL, "/etc/locale.other");
+        t
+    };
+    for mode in [Mode::Plan, Mode::Apply] {
+        let why = refused(&r, mode, mk());
+        assert!(why.contains("2 hard links"), "{mode:?}: {why}");
+    }
+    assert_eq!(
+        audit(&r, mk()).resources[0].status,
+        AuditResourceStatus::Error
+    );
 }

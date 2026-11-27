@@ -4,7 +4,12 @@
 //! (`/etc/locale.conf` on the Red Hat family, `/etc/default/locale` on the
 //! Debian family); an unknown family is refused. Observation reads that file
 //! (read-only, the partial-edit observation: never followed, size-capped,
-//! re-checked) with a closed parser. Whether a declared locale exists is
+//! re-checked) with a closed parser. One link is known: on the Debian family
+//! `/etc/default/locale` may be the OS's own link to `/etc/locale.conf`
+//! (`../locale.conf` or `/etc/locale.conf`, owned by root; Ubuntu 24.04 and
+//! later). Then `/etc/locale.conf` is read as above (a regular file or
+//! absent; a link there is refused, so there is no chain), and the link is
+//! observed again afterwards; any other link is refused (DESIGN §61). Whether a declared locale exists is
 //! asked with `locale -a` (read-only, fixed argv). The change is `localectl
 //! set-locale KEY=value ...`; its exit code never decides success: the file
 //! is read again and every declared key must have its value. Sinter never
@@ -22,7 +27,26 @@ use crate::model::FrozenResource;
 use crate::osbase::{before_any_change, reobservation_failed, shown, stderr_excerpt};
 use crate::resources::{changed_result_sensitive, unchanged_result};
 use crate::result::{Change, Diff, DiffBody, Execution, ResourceResult, Verification};
+use crate::targetfs::ObjKind;
 use crate::timer_engine::plain_values;
+
+/// Where the default is read from: the file itself, or `/etc/locale.conf`
+/// through the Debian family's known link (its text kept to observe it
+/// again).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocaleSource {
+    pub read: &'static str,
+    pub link: Option<String>,
+}
+
+impl LocaleSource {
+    fn describe(&self, conf: &str) -> String {
+        match &self.link {
+            Some(t) => format!("{} (through the link {} -> {})", self.read, conf, t),
+            None => self.read.to_string(),
+        }
+    }
+}
 
 const WHAT: &str = "localectl set-locale";
 const SUBJECT: &str = "the default locale";
@@ -65,30 +89,106 @@ impl Engine {
         })
     }
 
-    /// The keys the locale file sets (empty when the file is absent).
-    /// Read-only. A symlink, another object type, an oversized file, a
-    /// refused parent, a failed read or content outside the closed grammar
-    /// is an error, never "not set".
-    fn locale_read(
+    /// `lstat` of `path` and, for a link, its text. Read-only.
+    fn locale_link(
         &mut self,
         res: &FrozenResource,
         path: &str,
         audit: bool,
-    ) -> Result<BTreeMap<String, String>> {
+    ) -> Result<(ObjKind, u32, Option<String>)> {
+        if audit {
+            return crate::audit::audit_link_observe(self, path);
+        }
+        let st = self.observe_stat(res, path)?;
+        if st.kind != ObjKind::Symlink {
+            return Ok((st.kind, st.uid, None));
+        }
+        let text = self.observe_readlink(res, path)?;
+        Ok((st.kind, st.uid, Some(text)))
+    }
+
+    /// Where the default is read from (see [`LocaleSource`]). Only the
+    /// Debian family's file may be a link, only one of
+    /// [`crate::locale::DEBIAN_LINKS`] and only owned by root; any other link
+    /// is refused and nothing is read through it.
+    fn locale_source(
+        &mut self,
+        res: &FrozenResource,
+        conf: &'static str,
+        audit: bool,
+    ) -> Result<LocaleSource> {
+        if conf != crate::locale::DEBIAN_CONF {
+            return Ok(LocaleSource {
+                read: conf,
+                link: None,
+            });
+        }
+        let (kind, uid, text) = self.locale_link(res, conf, audit)?;
+        let Some(text) = text else {
+            debug_assert!(kind != ObjKind::Symlink);
+            return Ok(LocaleSource {
+                read: conf,
+                link: None,
+            });
+        };
+        if uid != 0 || !crate::locale::DEBIAN_LINKS.contains(&text.as_str()) {
+            return Err(SinterError::apply(format!(
+                "{}: the default locale could not be observed: {} is a symlink{}; Sinter follows it only when it is the OS's own link to {} ({}) owned by root, and refuses any other link",
+                res.id,
+                conf,
+                if uid != 0 { " not owned by root" } else { " to another target" },
+                crate::locale::RHEL_CONF,
+                crate::locale::DEBIAN_LINKS.join(" or ")
+            )));
+        }
+        Ok(LocaleSource {
+            read: crate::locale::RHEL_CONF,
+            link: Some(text),
+        })
+    }
+
+    /// The keys the locale file sets (empty when the file is absent; through
+    /// the known link, also when the link dangles) and where they were read.
+    /// Read-only. Another link, a link at the file that is read, another
+    /// object type, an oversized file or a second hard link, a refused
+    /// parent, a failed read, content outside the closed grammar or a link
+    /// that changed while it was read is an error, never "not set".
+    fn locale_read(
+        &mut self,
+        res: &FrozenResource,
+        conf: &'static str,
+        audit: bool,
+    ) -> Result<(BTreeMap<String, String>, LocaleSource)> {
+        let src = self.locale_source(res, conf, audit)?;
         let bytes = if audit {
-            crate::audit::audit_partial_read(self, path)?
+            crate::audit::audit_partial_read(self, src.read)?
         } else {
-            self.partial_observe(res, path)?.1
+            self.partial_observe(res, src.read)?.1
         };
+        if src.link.is_some() {
+            // The link is observed again after the read: a link replaced or
+            // retargeted meanwhile means the read is not about this host's
+            // default.
+            let again = self.locale_link(res, conf, audit)?;
+            if again.0 != ObjKind::Symlink || again.1 != 0 || again.2 != src.link {
+                return Err(SinterError::apply(format!(
+                    "{}: the default locale could not be observed: {} changed while it was read; refusing",
+                    res.id, conf
+                )));
+            }
+        }
         let Some(bytes) = bytes else {
-            return Ok(BTreeMap::new());
+            return Ok((BTreeMap::new(), src));
         };
-        crate::locale::parse_conf(&bytes).map_err(|why| {
+        let map = crate::locale::parse_conf(&bytes).map_err(|why| {
             SinterError::apply(format!(
                 "{}: the default locale could not be observed: {} is not understood ({}); Sinter does not guess what it sets",
-                res.id, path, why
+                res.id,
+                src.describe(conf),
+                why
             ))
-        })
+        })?;
+        Ok((map, src))
     }
 
     /// Every declared locale other than `C`/`POSIX` must be one `locale -a`
@@ -196,7 +296,7 @@ impl Engine {
     ) -> Result<Vec<(String, String, String)>> {
         let spec = self.locale_evaluate(res, item, sensitive)?;
         let path = self.locale_conf(res)?;
-        let current = self.locale_read(res, path, true)?;
+        let (current, _) = self.locale_read(res, path, true)?;
         Ok(spec
             .differing(&current)
             .into_iter()
@@ -229,7 +329,7 @@ impl Engine {
             }
         };
         let path = self.locale_conf(res).map_err(hide)?;
-        let current = self
+        let (current, src) = self
             .locale_read(res, path, false)
             .map_err(before_any_change)
             .map_err(hide)?;
@@ -284,7 +384,29 @@ impl Engine {
         // Exit 0 is only the tool's claim. The file decides, for the
         // declared keys only.
         match self.locale_read(res, path, false) {
-            Ok(after) => {
+            Ok((_, after_src)) if after_src != src => {
+                // localectl replaced or removed the OS's link (or made one):
+                // the default may now be kept in two places. Sinter does not
+                // write either file, so it says so and does not claim success.
+                r.execution = Execution::Failed;
+                r.change = Change::Changed;
+                r.verification = Verification::Failed;
+                r.reason = Some(if sensitive {
+                    format!(
+                        "localectl changed how {} is kept; Sinter does not restore it (details withheld for a sensitive resource)",
+                        path
+                    )
+                } else {
+                    format!(
+                        "localectl changed how {} is kept: before {}, now {}; Sinter does not restore it",
+                        path,
+                        src.describe(path),
+                        after_src.describe(path)
+                    )
+                });
+            }
+            Ok((after, after_src)) => {
+                let path = after_src.read;
                 let wrong = spec.differing(&after);
                 if wrong.is_empty() {
                     r.change = Change::Changed;

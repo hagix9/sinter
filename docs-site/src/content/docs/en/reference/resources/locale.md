@@ -58,8 +58,16 @@ LC_TIME = "en_GB.UTF-8"
   `/etc/locale.conf`. On Ubuntu: `/etc/default/locale`. On a host whose OS
   family Sinter does not recognize, the resource is refused: "locale is not
   supported on this host".
-- **Observation (read-only).** Sinter reads that file without following a
-  symbolic link and accepts only lines `KEY=value` or `KEY="value"`, blank
+- **The Ubuntu link.** Ubuntu 24.04 and later ship `/etc/default/locale` as
+  the link `../locale.conf`, and the values live in `/etc/locale.conf`.
+  Sinter follows exactly this link: owned by root, with the text
+  `../locale.conf` or `/etc/locale.conf`, to a `/etc/locale.conf` that is a
+  regular file (or absent). Any other link, a link owned by another account,
+  or a link at `/etc/locale.conf` itself is refused. The link is checked
+  again after the read. If `localectl` replaces or removes the link, the
+  apply fails with the change reported: Sinter does not restore it.
+- **Observation (read-only).** Sinter reads that file without following any
+  other symbolic link and accepts only lines `KEY=value` or `KEY="value"`, blank
   lines and `#` comments. A key set twice, single quotes, `export`, `$`,
   backticks, a carriage return and anything else is an error: Sinter does
   not guess what a shell would make of it. A missing file means that no key
@@ -120,11 +128,12 @@ no root.
 
 Ubuntu 24.04 and 26.04, and Rocky Linux, RHEL and AlmaLinux 9 and 10.
 
-This resource is tested against Sinter's scripted target only. A read-only
+This resource is tested against Sinter's scripted target. The v1.16.0 RC 2
+acceptance found the link above on Ubuntu 24.04 (RC 2 refused it). A read-only
 look at Rocky Linux 10.2 showed `/etc/locale.conf` as `LANG=en_US.UTF-8`,
 no `/etc/default/locale`, and `locale -a` listing names such as `C`,
 `C.utf8`, `en_US` and `en_US.utf8`. **Not verified on real hosts:** how
 `localectl set-locale` rewrites the file on each OS, and whether it keeps
-keys and comments it is not given; that Ubuntu keeps the default in
-`/etc/default/locale` and that `localectl` writes there; the exit codes and
+keys and comments it is not given; that `localectl` on Ubuntu writes
+`/etc/locale.conf` and keeps the link; the exit codes and
 messages of `localectl`; `locale -a` on Ubuntu, EL 9, RHEL and AlmaLinux.

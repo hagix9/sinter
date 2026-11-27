@@ -26,6 +26,13 @@ pub const RHEL_CONF: &str = "/etc/locale.conf";
 /// Where the default lives on the Debian family.
 pub const DEBIAN_CONF: &str = "/etc/default/locale";
 
+/// The link texts the Debian family's OS uses for [`DEBIAN_CONF`] when it
+/// keeps the default in [`RHEL_CONF`] (Ubuntu 24.04 and later ship
+/// `/etc/default/locale -> ../locale.conf`). Only these, owned by root, are
+/// followed, and only to [`RHEL_CONF`], which must itself be a regular file
+/// (or absent): no other target, no chain (DESIGN §61, v1.16.0 RC 3).
+pub const DEBIAN_LINKS: &[&str] = &["../locale.conf", "/etc/locale.conf"];
+
 /// Where compiled locales live (glibc); a planned change below it may
 /// provide a locale.
 pub const LOCALE_DIR: &str = "/usr/lib/locale";

@@ -389,6 +389,34 @@ impl FakeTarget {
         self
     }
 
+    /// A Debian-family host whose `/etc/default/locale` is the link `link`
+    /// (Ubuntu 24.04 and later: `../locale.conf`), with `/etc/locale.conf`
+    /// holding `content` (`None`: absent, a dangling link). `localectl`
+    /// writes `writes` (`/etc/locale.conf`: through the link as the OS does;
+    /// `/etc/default/locale`: it replaces the link with a file). Needs
+    /// `with_fake_fs` first.
+    pub fn with_locales_linked(
+        self,
+        locales: &[&str],
+        content: Option<&str>,
+        link: &str,
+        writes: &str,
+    ) -> Self {
+        let mut t = self.with_locales(locales, None);
+        {
+            let mut el = t.el.lock().unwrap_or_else(|e| e.into_inner());
+            el.osbase.locale_conf = writes.to_string();
+        }
+        let fs =
+            t.fs.as_mut()
+                .expect("with_locales_linked needs with_fake_fs first");
+        if let Some(c) = content {
+            fs.put_file(crate::locale::RHEL_CONF, c.as_bytes(), 0o644, 0, 0);
+        }
+        fs.put_symlink(crate::locale::DEBIAN_CONF, link, 0, 0);
+        t
+    }
+
     /// A host with `/usr/bin/timedatectl`, these zone files below
     /// `/usr/share/zoneinfo` and `/etc/localtime` as the link
     /// `../usr/share/zoneinfo/<current>` (`None`: no link). Needs

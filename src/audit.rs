@@ -613,6 +613,22 @@ fn gated_stat(engine: &mut Engine, path: &str) -> Result<crate::targetfs::Stat> 
     }
 }
 
+/// Read-only `lstat` and, for a symbolic link, its target text, for the
+/// audit of `locale`'s Debian-family link (DESIGN §61). `(kind, uid, Some(text))`
+/// for a link, `(kind, uid, None)` otherwise; an absent path or parent is
+/// `ObjKind::Absent`.
+pub(crate) fn audit_link_observe(
+    engine: &mut Engine,
+    path: &str,
+) -> Result<(ObjKind, u32, Option<String>)> {
+    let stat = gated_stat(engine, path)?;
+    if stat.kind != ObjKind::Symlink {
+        return Ok((stat.kind, stat.uid, None));
+    }
+    let text = gated_obs(engine, path, None, |fs| fs.readlink(path))?;
+    Ok((stat.kind, stat.uid, Some(text)))
+}
+
 /// Read-only observation for the audit of a resource that manages part of a
 /// text file: `Ok(None)` when the path (or a parent) is absent, the whole
 /// content when it is a regular file within
