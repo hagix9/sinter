@@ -428,8 +428,12 @@ fn audit_drift_exits_seven() {
 #[test]
 fn audit_observation_error_exits_six_and_dominates_drift() {
     // A drifted file plus a template that fails to render: error dominates.
+    // An undeclared `vars.*` is a validate refusal (exit 2) since v1.16.0, so
+    // the render failure comes from an unknown fact: facts are only known on
+    // the target, so it stays a runtime (audit) error (DESIGN.md "Static
+    // gate": template rendering over facts remains per execution).
     let dir = trusted_root("cli-audit-err");
-    write_recipe(&dir, "t.tmpl", "value={{ vars.nope }}\n");
+    write_recipe(&dir, "t.tmpl", "value={{ facts.nope }}\n");
     let target = dir.join("f");
     std::fs::write(&target, "other").unwrap();
     let recipe = write_recipe(
