@@ -1270,13 +1270,15 @@ pub fn keygen(args: &KeygenArgs, io: &mut Io<'_>) -> Result<u8> {
             ));
         }
     }
+    // Hardened before the passphrase is read (as `encrypt` does): no core
+    // dump or debugger sees it (audit RC 3 NB-1).
+    io.harden();
     let passphrase = if args.passphrase {
         Some(prompt_new_passphrase(io, "the private key")?)
     } else {
         None
     };
 
-    io.harden();
     let g = secrets::generate_identity();
     let created = crate::discover::rfc3339(
         std::time::SystemTime::now()
@@ -1302,7 +1304,19 @@ pub fn keygen(args: &KeygenArgs, io: &mut Io<'_>) -> Result<u8> {
     };
     drop(text);
     drop(passphrase);
-    write_atomic(&out, &data, 0o600, false)?;
+    // A name that appeared after the early check: the keygen message, not
+    // encrypt's `--force` hint (keygen never replaces a key).
+    write_atomic(&out, &data, 0o600, false).map_err(|e| {
+        if e.message.contains("already exists") {
+            usage(format!(
+                "{} already exists; an identity is never replaced (another key \
+                 there may still be needed to decrypt secrets)",
+                shown
+            ))
+        } else {
+            e
+        }
+    })?;
     drop(data);
     // The age-keygen line, on stderr like age-keygen with -o.
     let _ = writeln!(io.stderr, "Public key: {}", g.recipient.to_text());

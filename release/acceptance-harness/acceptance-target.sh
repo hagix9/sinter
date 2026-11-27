@@ -2089,6 +2089,7 @@ else for id in $PGIDS; do check "$id" FAIL "not a DNF 4 host of the RHEL family 
 # key appears in no output. Synthetic key in the harness's private directory,
 # removed afterwards; nothing of it is printed.
 KG="$V6/keygen"; mkdir -m 700 "$KG"
+v6r_keygen() { rm -rf "$KG"; }; v6_arm v6r_keygen   # also on an interrupted run
 kg() { local t=$1; shift; v6t 60 "$EXE" secrets "$@" > "$KG/$t.out" 2> "$KG/$t.err" < /dev/null; local rc=$?; printf 'secrets %s rc=%s\n' "$1" "$rc" > "$KG/$t.rc"; return $rc; }
 kg k1 keygen -o "$KG/id.txt"; K1=$?
 KMODE=$(stat -c %a "$KG/id.txt" 2> /dev/null || echo missing)
@@ -2103,10 +2104,11 @@ kg k4 decrypt -i "$KG/id.txt" "$KG/plain.txt.age"; K4=$?
 KD=$(cmp -s "$KG/k4.out" "$KG/plain.txt" && echo same || echo DIFFERENT)
 kg k5 keygen -o "$KG/id.txt"; K5=$?
 KAGAIN=$([ "$K5" -ne 0 ] && [ "$(sha256sum "$KG/id.txt" 2> /dev/null | cut -d' ' -f1)" = "$KSHA" ] && echo refused-unchanged || echo REPLACED)
-KLEAK=no; KSEC=$(grep '^AGE-SECRET-KEY-1' "$KG/id.txt" 2> /dev/null | head -1)
-if [ -z "$KSEC" ]; then KLEAK=unknown
-else for f in k1 k2 k3 k4 k5; do grep -qF -- "$KSEC" "$KG/$f.out" "$KG/$f.err" 2> /dev/null && KLEAK=yes; done; fi
-KSEC=""
+# the key line goes to grep as a pattern file in the 0700 directory, never as an argument
+KLEAK=no; grep '^AGE-SECRET-KEY-1' "$KG/id.txt" 2> /dev/null | head -1 > "$KG/pattern"
+if [ ! -s "$KG/pattern" ]; then KLEAK=unknown
+else for f in k1 k2 k3 k4 k5; do grep -qF -f "$KG/pattern" "$KG/$f.out" "$KG/$f.err" 2> /dev/null && KLEAK=yes; done; fi
+rm -f "$KG/pattern"
 KPF=none; case "$KPUB" in age1?*) KPF=age1 ;; esac
 KS="keygen=$K1 mode=$KMODE form=$KFORM pub=$KPF y=$K2:$KY enc=$K3 dec=$K4:$KD again=$KAGAIN leak=$KLEAK"
 echo "V116_KEYGEN $KS"
@@ -2114,7 +2116,7 @@ if [ "$KS" = "keygen=0 mode=600 form=1/1 pub=age1 y=0:same enc=0 dec=0:same agai
   check v116-secrets-keygen ok "an age identity created by sinter alone: 0600, -y gives its public key, encrypt -r / decrypt -i round trip, never replaced, no secret in any output"
 else check v116-secrets-keygen FAIL "$KS"
   for f in k1 k2 k3 k4 k5; do echo "   DIAG $f $(cat "$KG/$f.rc" 2> /dev/null) stderr=$(sed -E 's/AGE-SECRET-KEY-1[0-9A-Za-z]*/<withheld>/g' "$KG/$f.err" 2> /dev/null | head -c 400 | tr '\n' ' ')"; done; fi
-rm -rf "$KG"
+v6_restore v6r_keygen
 
 # ---- v116-no-residue: every restore ran, and what this section changed is as
 # it was before (files, names, values, the disposable directories, accounts)
